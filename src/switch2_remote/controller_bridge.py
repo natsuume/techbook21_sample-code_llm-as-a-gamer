@@ -90,6 +90,8 @@ class Bridge:
             self.broken = True
             raise UnconfirmedInputError("no ack from bridge in time") from e
         if ack is None:
+            # 出力の終了は一度しか届かないため、以降の tap がプロセスの回収前でも止まったブリッジに書き込まないようにする
+            self.broken = True
             raise RuntimeError("controller bridge exited before ack")
         if not ack.startswith(f"ack {button} "):
             self.broken = True

@@ -58,8 +58,13 @@ def main() -> int:
         if peer_uid(conn) != os.getuid():
             print("error daemon is owned by another user", file=sys.stderr)
             return 1
-        conn.sendall(request.encode())
-        reply = conn.makefile(encoding="utf-8", errors="replace").readline().strip()
+        try:
+            conn.sendall(request.encode())
+            reply = conn.makefile(encoding="utf-8", errors="replace").readline().strip()
+        except OSError as e:
+            # 応答を待つ間にデーモンが終了した場合も error 行で終える
+            print(f"error lost connection to daemon: {e}", file=sys.stderr)
+            return 1
     if not reply:
         print("error no reply from daemon", file=sys.stderr)
         return 1
