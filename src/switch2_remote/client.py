@@ -3,7 +3,7 @@
 shot は `shot PATH [TIMEOUT]` で受け付け、PATH をこのクライアントの作業ディレクトリ基準で絶対パスに直して
 デーモンの形式 `shot TIMEOUT PATH` に並べ替えて送る。
 接続先が自分と同じユーザーのプロセスでなければ中断する (抽象名前空間のソケット名は誰でも先に取れるため)。
-応答が error で始まる場合と、応答が無いまま接続が閉じた場合は終了コード 1 で終了する。
+デーモンに接続できない場合、応答が error で始まる場合、応答が無いまま接続が閉じた場合は終了コード 1 で終了する。
 
 使い方:
     uv run switch2-remote tap RIGHT RIGHT A
@@ -49,7 +49,12 @@ def main() -> int:
         print(f"error {e}", file=sys.stderr)
         return 1
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-        conn.connect(SOCKET_ADDRESS)
+        try:
+            conn.connect(SOCKET_ADDRESS)
+        except OSError as e:
+            # デーモン未起動のときも、呼び出し側が error 行で失敗を判定できるようにする
+            print(f"error cannot connect to daemon: {e}", file=sys.stderr)
+            return 1
         if peer_uid(conn) != os.getuid():
             print("error daemon is owned by another user", file=sys.stderr)
             return 1

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from switch2_remote import client
@@ -52,3 +54,13 @@ def test_main_without_arguments_prints_usage_and_returns_2(monkeypatch, capsys):
     monkeypatch.setattr(client.sys, "argv", ["switch2-remote"])
     assert client.main() == 2
     assert "使い方" in capsys.readouterr().err
+
+
+def test_main_reports_error_when_daemon_is_not_running(monkeypatch, capsys):
+    # 誰も待ち受けていない抽象名前空間のソケット名に向ける
+    monkeypatch.setattr(
+        client, "SOCKET_ADDRESS", f"\0switch2-remote-test-absent-{os.getpid()}"
+    )
+    monkeypatch.setattr(client.sys, "argv", ["switch2-remote", "status"])
+    assert client.main() == 1
+    assert capsys.readouterr().err.startswith("error cannot connect to daemon")
