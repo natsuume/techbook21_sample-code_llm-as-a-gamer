@@ -69,10 +69,12 @@ class Capture:
 
     def shot(self, path: str, timeout: float) -> str:
         start = time.monotonic()
-        time.sleep(SHOT_MIN_DELAY)
-        # 待ちの間に届いたフレームを静止の数に含めないよう、起点は待ちの後に取る
         with self.lock:
-            start_frame = self.frame_no
+            request_frame = self.frame_no
+        time.sleep(SHOT_MIN_DELAY)
+        # 待ちの間に届いたフレームを静止の数に含めないよう、静止を数える起点は待ちの後に取る
+        with self.lock:
+            still_start_frame = self.frame_no
         settled = False
         nv12 = None
         while time.monotonic() - start < timeout:
@@ -80,7 +82,7 @@ class Capture:
                 if self.ended:
                     return "error capture ended"
                 settled = (
-                    self.frame_no - start_frame >= STABLE_FRAMES
+                    self.frame_no - still_start_frame >= STABLE_FRAMES
                     and self.still_count >= STABLE_FRAMES
                 )
                 if settled:
@@ -94,7 +96,7 @@ class Capture:
                 if self.ended:
                     return "error capture ended"
                 # キャプチャが止まっている場合に要求前の古い画面を返さない
-                if self.frame_no == start_frame:
+                if self.frame_no == request_frame:
                     return "error no new frame since request"
                 nv12 = self.latest
         if not cv2.imwrite(path, cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)):
