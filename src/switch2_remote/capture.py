@@ -69,9 +69,10 @@ class Capture:
 
     def shot(self, path: str, timeout: float) -> str:
         start = time.monotonic()
+        time.sleep(SHOT_MIN_DELAY)
+        # 待ちの間に届いたフレームを静止の数に含めないよう、起点は待ちの後に取る
         with self.lock:
             start_frame = self.frame_no
-        time.sleep(SHOT_MIN_DELAY)
         settled = False
         nv12 = None
         while time.monotonic() - start < timeout:
