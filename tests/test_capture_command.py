@@ -1,6 +1,6 @@
 import pytest
 
-from switch2_remote.capture_command import DEVICE_NAME, build_command
+from switch2_remote.capture_command import DEVICE_NAME, build_command, select_filter
 
 
 def command_for(
@@ -48,19 +48,34 @@ def test_build_command_reads_device_with_dshow_input_options(
 
 
 @pytest.mark.parametrize(
-    "output_fps, output_width, output_height, expected",
+    "output_fps, expected",
     [
-        (30, 1280, 720, "fps=30,scale=1280:720"),
-        (12, 1280, 720, "fps=12,scale=1280:720"),
-        (60, 640, 360, "fps=60,scale=640:360"),
-        (10, 2, 2, "fps=10,scale=2:2"),
+        (
+            30,
+            "select='isnan(prev_selected_t)+gt(floor(t*30+0.5)\\,floor(prev_selected_t*30+0.5))'",
+        ),
+        (
+            7,
+            "select='isnan(prev_selected_t)+gt(floor(t*7+0.5)\\,floor(prev_selected_t*7+0.5))'",
+        ),
     ],
 )
+def test_select_filter_keeps_first_frame_of_each_interval(output_fps, expected):
+    assert select_filter(output_fps) == expected
+
+
+@pytest.mark.parametrize(
+    "output_fps, output_width, output_height",
+    [(30, 1280, 720), (12, 1280, 720), (60, 640, 360), (10, 2, 2)],
+)
 def test_build_command_reduces_frame_rate_and_size_with_output_filter(
-    output_fps, output_width, output_height, expected
+    output_fps, output_width, output_height
 ):
     cmd, _ = command_for(output_fps, output_width, output_height)
-    assert option_value(cmd, "-vf") == expected
+    assert (
+        option_value(cmd, "-vf")
+        == f"{select_filter(output_fps)},scale={output_width}:{output_height}"
+    )
     # 間引きと縮小は出力側のフィルターで行うため -i より後に置く
     assert cmd.index("-vf") > cmd.index("-i")
 
@@ -71,11 +86,17 @@ def test_build_command_encodes_nv12_rawvideo():
     assert option_value(cmd, "-pix_fmt") == "nv12"
 
 
-def test_build_command_does_not_copy_stream_or_pass_through_timestamps():
+def test_build_command_does_not_copy_stream():
     # フィルターと -c:v copy は併用できない
     cmd, _ = command_for()
     assert "copy" not in cmd
-    assert "-fps_mode" not in cmd
+
+
+def test_build_command_passes_selected_frames_through():
+    # 出力側でフレームを複製・間引きせず、select が残したフレームをそのまま書く
+    cmd, _ = command_for()
+    assert option_value(cmd, "-fps_mode") == "passthrough"
+    assert cmd.index("-fps_mode") > cmd.index("-i")
 
 
 @pytest.mark.parametrize(
