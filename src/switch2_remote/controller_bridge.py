@@ -1,8 +1,14 @@
-"""Windows 側の controller_bridge.ps1 を常駐させ、Pico 2 W 経由で Switch 2 にボタン入力を送る。
+"""Windows 側の controller_bridge.ps1 を常駐させ、Pico 2 W 経由で Switch 2 にゲームパッドのレポートを送る。
 
 controller_bridge.ps1 はこのパッケージに同梱しており、このファイルと同じディレクトリから探す。
-ブリッジは 1 行 1 コマンドで `tap BUTTON MS` を受け取り、押下の送信開始直前に `ack`、
-ニュートラルの送信完了後に `done` を返す。
+ブリッジとは標準入出力の 1 行ずつでやり取りする:
+    起動時         ブリッジが COM ポートを開き、中立を 200ms 送ってから `ready <PORT> <epoch_ms>` を出力する
+    set <HEX>      HEX (8 バイトのレポートを表す 16 桁の小文字 16 進) を現在のレポートにする。
+                   ブリッジの送信スレッドが新しいレポートを 1 回書き込んだ後に `ack <HEX> <epoch_ms>` を出力する。
+                   不正な行には `error <理由>` を出力する
+    quit           送信スレッドを止め、中立を 200ms 送り、ポートを閉じて `closed` を出力する (標準入力の EOF でも同じ)
+ブリッジは中立以外のレポートを 10ms ごとに書き込み続け、中立に変わったら中立を 100ms 書き込んでから止まる。
+書き込みに失敗したブリッジは `fatal <メッセージ>` を出力して終了する。
 """
 
 import os
@@ -16,16 +22,18 @@ BRIDGE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "controller_bridge.ps1"
 )
 BRIDGE_READY_TIMEOUT = 30.0  # PowerShell の起動と COM ポートを開くまでの上限 (秒)
-BRIDGE_ACK_TIMEOUT = 2.0  # tap を書き込んでから ack が返るまでの上限 (秒)
-BRIDGE_DONE_MARGIN = 2.0  # ack 後、押下時間に加えて done を待つ余裕 (秒)
+BRIDGE_ACK_TIMEOUT = 2.0  # set を書き込んでから ack が返るまでの上限 (秒)
 
 
 class UnconfirmedInputError(RuntimeError):
-    """ブリッジが ack (押下の送信開始) を返した後に完了を確認できなかった。入力は届いている可能性がある。"""
+    """set を書き込んだ後に ack を確認できなかった。レポートは Switch 2 に届いている可能性がある。"""
 
 
 class Bridge:
-    """controller_bridge.ps1 を常駐させ、tap コマンドを送って ack / done を待つ。"""
+    """controller_bridge.ps1 を常駐させ、set コマンドでレポートを差し替えて ack を待つ。
+
+    set_report は書き込みと ack 待ちを 1 つのロックで囲むため、複数のスレッドから呼んでよい。
+    """
 
     def __init__(self):
         bridge_win_path = subprocess.run(
@@ -78,33 +86,16 @@ class Bridge:
     def is_alive(self) -> bool:
         return self.proc.poll() is None and not self.broken
 
-    def tap(self, button: str, hold_ms: int = 120) -> str:
-        if not self.is_alive():
-            raise RuntimeError("controller bridge is not usable; restart the daemon")
-        self.proc.stdin.write(f"tap {button} {hold_ms}\n")
-        self.proc.stdin.flush()
-        # 書き込んだ後は、応答が無くてもブリッジが遅れて押下を送る可能性があるため未確認として扱う
-        try:
-            ack = self._next_line(BRIDGE_ACK_TIMEOUT)
-        except queue.Empty as e:
-            self.broken = True
-            raise UnconfirmedInputError("no ack from bridge in time") from e
-        if ack is None:
-            # 出力の終了は一度しか届かないため、以降の tap がプロセスの回収前でも止まったブリッジに書き込まないようにする
-            self.broken = True
-            raise RuntimeError("controller bridge exited before ack")
-        if not ack.startswith(f"ack {button} "):
-            self.broken = True
-            raise UnconfirmedInputError(f"unexpected bridge reply: {ack}")
-        try:
-            done = self._next_line(hold_ms / 1000 + BRIDGE_DONE_MARGIN)
-        except queue.Empty as e:
-            self.broken = True
-            raise UnconfirmedInputError("no completion reply after ack in time") from e
-        if done is None or not done.startswith(f"done {button} "):
-            self.broken = True
-            raise UnconfirmedInputError(f"bridge did not confirm completion: {done}")
-        return f"{ack} / {done}"
+    def set_report(self, report: bytes) -> str:
+        """8 バイトのレポートを `set <16 桁の小文字 16 進>` で送り、ブリッジの ack の行を返す。
+
+        書き込みと ack 待ちを 1 つのロックで囲み、スレッドから呼ばれても応答の対応がずれないようにする。
+        - broken または終了済みのブリッジでは、書き込まずに RuntimeError にする
+        - ack が BRIDGE_ACK_TIMEOUT 秒以内に来なければ UnconfirmedInputError にする (broken にする)
+        - ack の前に出力が終われば (EOF) RuntimeError にする (broken にする)
+        - `ack <同じ16進> ` で始まらない応答は UnconfirmedInputError にする (broken にする)
+        """
+        raise NotImplementedError
 
     def close(self):
         try:

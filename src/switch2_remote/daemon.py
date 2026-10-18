@@ -1,15 +1,19 @@
 """Switch 2 を 1 コマンドずつ操作するための常駐デーモン。
 
 キャプチャ (ffmpeg.exe, 720p NV12) と controller_bridge.ps1 を起動したまま保持し、
+ブリッジから作った Controller で押下状態を保持する。
 Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを受け付けて 1 行で応答する。
 クライアントは switch2-remote を使う。
+終了時は Controller、ブリッジ、キャプチャの順に閉じる。
 
-コマンド:
-    tap BTN [BTN ...]      各ボタンを順に押す (押下 120ms、ボタン間 150ms)。BTN は controller_bridge.ps1 と同じ名前
-    hold BTN MS            BTN を MS ミリ秒押す
+コマンド (CHORD は SPEC を + でつないだもの。詳しくは commands を参照):
+    tap CHORD [CHORD ...]  CHORD を順に押す (押下 120ms、離して 100ms、CHORD 間にさらに 150ms)。送り終えてから応答する
+    hold CHORD MS          CHORD を MS ミリ秒 (1〜60000) 押す。押したらすぐ応答し、MS 経過後にバックグラウンドで離す
+    down CHORD [CHORD ...] CHORD を押したままにする
+    up TARGET [TARGET ...] TARGET (ボタン名か LS / RS) を離す。up ALL ですべて離す
     shot TIMEOUT PATH      コマンド受信後のフレームで画面が STABLE_FRAMES 枚静止するまで待ち (最大 TIMEOUT 秒, 0〜60)、PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
-    status                 受信フレーム数、ffmpeg のフレーム落ち回数、ブリッジの生存を返す
-    quit                   ブリッジとキャプチャを止めて終了する
+    status                 受信フレーム数、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
+    quit                   コントローラー、ブリッジ、キャプチャを止めて終了する
 
 使い方:
     uv run switch2-remote-daemon

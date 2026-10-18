@@ -1,8 +1,18 @@
-# Pico 2 W (PlayAbility Receiver) へ Switch 用ゲームパッドレポートを送る常駐ブリッジ。
-# 標準入力から 1 行 1 コマンドを受け取り、標準出力へ応答を返す。
-#   tap <BUTTON> [押下ms]   BUTTON: A B X Y L R ZL ZR PLUS MINUS HOME UP RIGHT DOWN LEFT LR
-#   quit
-# 応答: "ack <BUTTON> <epoch_ms>" (送信開始直前) / "done <BUTTON> <epoch_ms>" (ニュートラル送信完了後)
+# Pico 2 W (PlayAbility Receiver) へ Switch 用の 8 バイトのゲームパッドレポートを SLIP + CRC32 で送る常駐ブリッジ (Windows PowerShell 5.1)
+# このファイルは BOM なし UTF-8 で、PowerShell 5.1 は CP932 として読むため、日本語を含む行は ASCII の文字で終える (改行がコメントに取り込まれるのを防ぐ)
+# 標準入力から 1 行 1 コマンドを受け取り、標準出力へ 1 行で応答する (stdin / stdout)
+# 起動時: COM ポート (既定 COM3, 115200bps) を開き、中立を 200ms 送ってから出力: "ready <PORT> <epoch_ms>"
+#   set <HEX>   HEX は 8 バイトのレポートを表す 16 桁の小文字 16 進 (例: A の押下は 04000f8080808000)
+#               現在のレポートを差し替え、送信スレッドが新しいレポートを 1 回書き込んだ後に出力: "ack <HEX> <epoch_ms>"
+#               不正な行への出力: "error <reason>"
+#   quit        送信スレッドを止め、中立を 200ms 送り、ポートを閉じてから出力: "closed" (標準入力の EOF でも同じ)
+# 送信スレッド (Add-Type の C# クラス内の Thread):
+#   現在のレポートが中立以外なら、10ms ごとに書き込み続ける (SEND_INTERVAL_MS)
+#   中立に変わったら中立を 100ms 書き込み、次の set まで書き込みを止める (NEUTRAL_TAIL_MS)
+#   $KeepSendingNeutral = $true にすると、中立も書き込み続ける (既定は $false)
+#   書き込みが例外になったら出力: "fatal <message>" (プロセスは終了コード 1 で終える)
+#   C# クラスが受け取る書き込み先: System.IO.Stream (実機では $port.BaseStream、偽の Stream でも動く)
+#   C# のスレッドからは PowerShell のスクリプトブロックを呼ばない (スレッドに Runspace が無いため)
 param([string]$PortName = "COM3")
 $ErrorActionPreference = "Stop"
 

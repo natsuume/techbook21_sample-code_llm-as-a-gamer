@@ -16,6 +16,12 @@ def test_build_request_passes_other_commands_through():
     assert build_request(["quit"]) == "quit\n"
 
 
+def test_build_request_passes_chords_and_sticks_through():
+    assert build_request(["tap", "L+R", "a+b"]) == "tap L+R a+b\n"
+    assert build_request(["hold", "B+RIGHT", "2000"]) == "hold B+RIGHT 2000\n"
+    assert build_request(["down", "LS:0.5,-1+A"]) == "down LS:0.5,-1+A\n"
+
+
 def test_build_request_reorders_shot_with_default_timeout():
     assert build_request(["shot", "/tmp/screen.png"]) == "shot 5.0 /tmp/screen.png\n"
 
