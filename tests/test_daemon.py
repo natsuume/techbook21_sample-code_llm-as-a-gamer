@@ -35,10 +35,13 @@ def recorder(monkeypatch):
             rec.events.append("controller closed")
 
     class FakeCapture:
-        def __init__(self, ffmpeg_fps, process_fps, buffer_seconds):
+        def __init__(
+            self, ffmpeg_fps, process_fps, buffer_seconds, output_width, output_height
+        ):
             rec.events.append("capture created")
             rec.capture = self
             self.rates = (ffmpeg_fps, process_fps, buffer_seconds)
+            self.output_size = (output_width, output_height)
 
         def close(self):
             rec.events.append("capture closed")
@@ -98,7 +101,9 @@ def test_main_closes_controller_bridge_capture_in_order(recorder):
 
 
 def test_main_closes_only_created_objects_when_capture_fails(recorder, monkeypatch):
-    def failing_capture(ffmpeg_fps, process_fps, buffer_seconds):
+    def failing_capture(
+        ffmpeg_fps, process_fps, buffer_seconds, output_width, output_height
+    ):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(daemon, "Capture", failing_capture)
@@ -122,6 +127,12 @@ def test_main_closes_bridge_when_controller_fails(recorder, monkeypatch):
 def test_main_passes_default_rates_to_capture(recorder):
     daemon.main([])
     assert recorder.capture.rates == (30, 10, 5)
+    assert recorder.capture.output_size == (1280, 720)
+
+
+def test_main_passes_given_output_size_to_capture(recorder):
+    daemon.main(["--output-size", "640x360"])
+    assert recorder.capture.output_size == (640, 360)
 
 
 def test_main_passes_given_rates_to_capture(recorder):
@@ -144,6 +155,49 @@ def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
 def test_parse_args_uses_defaults():
     args = daemon.parse_args([])
     assert (args.ffmpeg_fps, args.process_fps, args.buffer_seconds) == (30, 10, 5)
+    assert args.output_size == (1280, 720)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("1280x720", (1280, 720)),
+        ("640x360", (640, 360)),
+        ("2x2", (2, 2)),
+        ("1280x2", (1280, 2)),
+    ],
+)
+def test_parse_args_accepts_output_size(text, expected):
+    assert daemon.parse_args(["--output-size", text]).output_size == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "641x360",
+        "640x361",
+        "0x360",
+        "640x0",
+        "1282x720",
+        "1280x722",
+        "1920x1080",
+        "640",
+        "640x",
+        "x360",
+        "640*360",
+        "640X360",
+        "-640x360",
+        "640x360x2",
+        " 640x360",
+        "640.0x360",
+        "６４０x360",
+    ],
+)
+def test_parse_args_rejects_invalid_output_size(text, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(["--output-size", text])
+    assert excinfo.value.code == 2
+    assert "--output-size" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

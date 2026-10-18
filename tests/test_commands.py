@@ -70,7 +70,7 @@ class FakeCapture:
 
     def status(self) -> str:
         return (
-            "ok frames=10 buffered=5 ffmpeg_fps=30 process_fps=10 "
+            "ok frames=10 buffered=5 latest_age=0.05s ffmpeg_fps=30 process_fps=10 "
             "ffmpeg_drops=0 ended=False"
         )
 
@@ -246,7 +246,7 @@ def test_handle_command_fps_rejects_invalid_value_before_changing(request_line):
 def test_handle_command_status_includes_bridge_and_controller_state():
     reply = handle_command("status\n", FakeCapture(), FakeController())
     assert reply == (
-        "ok frames=10 buffered=5 ffmpeg_fps=30 process_fps=10 "
+        "ok frames=10 buffered=5 latest_age=0.05s ffmpeg_fps=30 process_fps=10 "
         "ffmpeg_drops=0 ended=False bridge_alive=True "
         "held=A holds=B+RIGHT:1200ms last_error=none"
     )

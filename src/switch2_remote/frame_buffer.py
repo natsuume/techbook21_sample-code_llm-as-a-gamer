@@ -7,6 +7,7 @@
 
 FrameBuffer は (時刻, フレーム) の並びを持ち、追加のたびに保持時間より古い要素を先頭から捨てる。
 時刻は呼び出し側から受け取り、このモジュールでは時計を読まない。
+format_latest_age は、最新フレームの時刻から現在までの経過秒を status 用の文字列にする。
 """
 
 from collections import deque
@@ -49,5 +50,21 @@ class FrameBuffer[T]:
             return None
         return self.items[-1][1]
 
+    def latest_time(self) -> float | None:
+        """最後に追加したフレームの時刻を返す。空なら None を返す。"""
+        if not self.items:
+            return None
+        return self.items[-1][0]
+
     def __len__(self) -> int:
         return len(self.items)
+
+
+def format_latest_age(latest_time: float | None, now: float) -> str:
+    """最新フレームの時刻 latest_time から now までの経過秒を `0.05s` の形 (小数第 2 位まで) で返す。
+
+    latest_time が None (バッファーが空) なら `none` を返す。
+    """
+    if latest_time is None:
+        return "none"
+    return f"{now - latest_time:.2f}s"

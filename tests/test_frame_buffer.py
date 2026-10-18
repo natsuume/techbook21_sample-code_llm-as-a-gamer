@@ -1,6 +1,11 @@
 import pytest
 
-from switch2_remote.frame_buffer import FrameBuffer, initial_accumulator, next_keep
+from switch2_remote.frame_buffer import (
+    FrameBuffer,
+    format_latest_age,
+    initial_accumulator,
+    next_keep,
+)
 
 
 def kept_indexes(ffmpeg_fps: int, process_fps: int, frame_count: int) -> list[int]:
@@ -129,3 +134,34 @@ def test_frame_buffer_holds_frames_for_seconds_regardless_of_rate():
         buffer.append(i * 0.25, i)
     assert len(buffer) == 5
     assert buffer.latest() == 19
+
+
+def test_frame_buffer_latest_time_is_none_when_empty():
+    assert FrameBuffer(5).latest_time() is None
+
+
+def test_frame_buffer_latest_time_returns_time_of_last_appended_frame():
+    buffer = FrameBuffer(5)
+    buffer.append(1.0, "a")
+    buffer.append(1.5, "b")
+    assert buffer.latest_time() == 1.5
+
+
+# --- 最新フレームの経過時間 ---
+
+
+def test_format_latest_age_is_none_without_frame():
+    assert format_latest_age(None, 10.0) == "none"
+
+
+@pytest.mark.parametrize(
+    "latest_time, now, expected",
+    [
+        (10.0, 10.05, "0.05s"),
+        (10.0, 10.0, "0.00s"),
+        (3.0, 15.5, "12.50s"),
+        (1.0, 1.006, "0.01s"),
+    ],
+)
+def test_format_latest_age_shows_seconds_with_two_decimals(latest_time, now, expected):
+    assert format_latest_age(latest_time, now) == expected

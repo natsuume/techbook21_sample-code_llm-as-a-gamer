@@ -13,28 +13,30 @@ Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを
     up TARGET [TARGET ...] TARGET (ボタン名か LS / RS) を離す。up ALL ですべて離す
     shot PATH              バッファーの最新フレームを待たずに PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
     fps N                  処理レートを N (整数 1〜ffmpeg_fps) に変える
-    status                 受信フレーム数、バッファー内の枚数、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
+    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
     quit                   コントローラー、ブリッジ、キャプチャを止めて終了する
 
 起動引数:
     --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜60、既定 30)。起動後は変えられない
     --process-fps N     バッファーに残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
     --buffer-seconds N  バッファーに保持する秒数 (整数 1〜60、既定 5)
+    --output-size WxH   ffmpeg の出力の解像度 (幅・高さとも 2 以上の偶数で 1280x720 以下、既定 1280x720)。起動後は変えられない
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方:
     uv run switch2-remote-daemon
-    uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5
+    uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5 --output-size 640x360
 """
 
 import argparse
 import os
+import re
 import socket
 import struct
 
 import cv2
 
-from switch2_remote.capture import DEVICE_FPS, Capture
+from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH, Capture
 from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge
@@ -48,6 +50,8 @@ DEFAULT_FFMPEG_FPS = 30
 DEFAULT_PROCESS_FPS = 10
 BUFFER_SECONDS_MIN, BUFFER_SECONDS_MAX = 1, 60
 DEFAULT_BUFFER_SECONDS = 5
+DEFAULT_OUTPUT_SIZE = f"{DEVICE_WIDTH}x{DEVICE_HEIGHT}"
+OUTPUT_SIZE_PATTERN = re.compile(r"([0-9]+)x([0-9]+)")  # <幅>x<高さ> (10 進整数)
 
 
 def peer_uid(conn: socket.socket) -> int:
@@ -89,11 +93,30 @@ def serve_connection(
     return False
 
 
-def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """起動引数を解釈し、ffmpeg_fps・process_fps・buffer_seconds を持つ Namespace を返す。
+def parse_output_size(text: str) -> tuple[int, int]:
+    """`<幅>x<高さ>` を (幅, 高さ) にする。
 
-    argv が None なら sys.argv[1:] を使う。範囲外の値と、process_fps が ffmpeg_fps より大きい組み合わせは
-    parser.error で使い方とともに表示して終了する (SystemExit)。
+    幅・高さは 2 以上の偶数で、デバイスの解像度 (DEVICE_WIDTH x DEVICE_HEIGHT) 以下でなければならない
+    (NV12 は色差を縦横半分で持つため、奇数の幅・高さは扱えない)。満たさなければ ValueError にする。
+    """
+    match = OUTPUT_SIZE_PATTERN.fullmatch(text)
+    if match is None:
+        raise ValueError(f"--output-size must be WIDTHxHEIGHT: {text}")
+    width, height = int(match[1]), int(match[2])
+    for value, limit in ((width, DEVICE_WIDTH), (height, DEVICE_HEIGHT)):
+        if value < 2 or value % 2 != 0 or value > limit:
+            raise ValueError(
+                f"--output-size width and height must be even numbers from 2 up to "
+                f"{DEVICE_WIDTH}x{DEVICE_HEIGHT}: {text}"
+            )
+    return width, height
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """起動引数を解釈し、ffmpeg_fps・process_fps・buffer_seconds・output_size ((幅, 高さ)) を持つ Namespace を返す。
+
+    argv が None なら sys.argv[1:] を使う。範囲外の値、process_fps が ffmpeg_fps より大きい組み合わせ、
+    parse_output_size で解釈できない output_size は、parser.error で使い方とともに表示して終了する (SystemExit)。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-remote-daemon",
@@ -117,6 +140,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_BUFFER_SECONDS,
         help=f"バッファーに保持する秒数 ({BUFFER_SECONDS_MIN}〜{BUFFER_SECONDS_MAX}、既定 {DEFAULT_BUFFER_SECONDS})",
     )
+    parser.add_argument(
+        "--output-size",
+        default=DEFAULT_OUTPUT_SIZE,
+        metavar="WxH",
+        help=f"ffmpeg の出力の解像度 (幅・高さとも 2 以上の偶数で {DEFAULT_OUTPUT_SIZE} 以下、既定 {DEFAULT_OUTPUT_SIZE})",
+    )
     args = parser.parse_args(argv)
     if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
         parser.error(
@@ -139,6 +168,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error(
             f"--buffer-seconds must be {BUFFER_SECONDS_MIN}..{BUFFER_SECONDS_MAX}: {args.buffer_seconds}"
         )
+    try:
+        args.output_size = parse_output_size(args.output_size)
+    except ValueError as e:
+        parser.error(str(e))
     return args
 
 
@@ -151,7 +184,14 @@ def main(argv: list[str] | None = None):
     server = None
     try:
         controller = Controller(bridge)
-        capture = Capture(args.ffmpeg_fps, args.process_fps, args.buffer_seconds)
+        output_width, output_height = args.output_size
+        capture = Capture(
+            args.ffmpeg_fps,
+            args.process_fps,
+            args.buffer_seconds,
+            output_width,
+            output_height,
+        )
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_ADDRESS)
         server.listen(1)

@@ -1,6 +1,7 @@
 """ffmpeg.exe を起動したまま保持し、処理レートに間引いたフレームを直近の一定時間分保持して撮影する。
 
-デバイスから DEVICE_FPS で受け取った映像を ffmpeg の出力側で ffmpeg_fps に間引き、
+デバイスから DEVICE_WIDTH x DEVICE_HEIGHT、DEVICE_FPS で受け取った映像を、ffmpeg の出力側で
+ffmpeg_fps に間引いて出力の解像度 (output_width x output_height) に縮小する。
 受信したフレームをさらに process_fps に間引いて (frame_buffer.next_keep)、
 直近 buffer_seconds 秒分を FrameBuffer に保持する。ffmpeg_fps は起動後に変えない。
 shot はバッファーの最新フレームを待たずに PNG 保存する。
@@ -15,10 +16,16 @@ import numpy as np
 
 from switch2_remote.capture_command import build_command, iter_raw_frames
 from switch2_remote.ffmpeg_locator import find_ffmpeg
-from switch2_remote.frame_buffer import FrameBuffer, initial_accumulator, next_keep
+from switch2_remote.frame_buffer import (
+    FrameBuffer,
+    format_latest_age,
+    initial_accumulator,
+    next_keep,
+)
 
 DEVICE_FPS = 60  # デバイスから受け取るフレームレート (dshow の -framerate)
-WIDTH, HEIGHT = 1280, 720
+# デバイスから受け取る解像度 (dshow の -video_size)
+DEVICE_WIDTH, DEVICE_HEIGHT = 1280, 720
 
 
 class Capture:
@@ -30,15 +37,29 @@ class Capture:
     主な属性:
         ffmpeg_fps    ffmpeg の出力のフレームレート。起動後は変えない (commands.parse_fps の上限に使う)
         process_fps   バッファーに残すフレームレート。set_process_fps で変える
+        output_width, output_height  ffmpeg の出力の解像度。起動後は変えない
     """
 
-    def __init__(self, ffmpeg_fps: int, process_fps: int, buffer_seconds: int):
+    def __init__(
+        self,
+        ffmpeg_fps: int,
+        process_fps: int,
+        buffer_seconds: int,
+        output_width: int,
+        output_height: int,
+    ):
         """ffmpeg.exe を起動し、フレームの読み取りと stderr の読み捨てのスレッドを始める。
 
         バッファーの時刻には time.monotonic() を使う。
         """
         cmd, frame_bytes = build_command(
-            find_ffmpeg(), WIDTH, HEIGHT, DEVICE_FPS, ffmpeg_fps
+            find_ffmpeg(),
+            DEVICE_WIDTH,
+            DEVICE_HEIGHT,
+            DEVICE_FPS,
+            output_width,
+            output_height,
+            ffmpeg_fps,
         )
         self.proc = subprocess.Popen(
             cmd,
@@ -48,6 +69,8 @@ class Capture:
             cwd="/mnt/c",
         )
         self.frame_bytes = frame_bytes
+        self.output_width = output_width
+        self.output_height = output_height
         self.ffmpeg_fps = ffmpeg_fps
         self.process_fps = process_fps
         self.lock = threading.Lock()
@@ -71,7 +94,9 @@ class Capture:
                     self.accumulator, self.ffmpeg_fps, self.process_fps
                 )
                 if keep:
-                    nv12 = np.frombuffer(raw, np.uint8).reshape(HEIGHT * 3 // 2, WIDTH)
+                    nv12 = np.frombuffer(raw, np.uint8).reshape(
+                        self.output_height * 3 // 2, self.output_width
+                    )
                     self.buffer.append(time.monotonic(), nv12)
         with self.lock:
             self.ended = True
@@ -115,12 +140,15 @@ class Capture:
     def status(self) -> str:
         """受信状況を 1 行で返す。
 
-        応答: ok frames=<受信フレーム数> buffered=<バッファー内の枚数> ffmpeg_fps=<N> process_fps=<N>
-        ffmpeg_drops=<N> ended=<bool>
+        応答: ok frames=<受信フレーム数> buffered=<バッファー内の枚数> latest_age=<秒>s ffmpeg_fps=<N>
+        process_fps=<N> ffmpeg_drops=<N> ended=<bool>
+        latest_age は最新フレームを追加してからの経過秒 (小数第 2 位まで)。バッファーが空なら none
         """
         with self.lock:
+            latest_age = format_latest_age(self.buffer.latest_time(), time.monotonic())
             return (
                 f"ok frames={self.frame_no} buffered={len(self.buffer)} "
+                f"latest_age={latest_age} "
                 f"ffmpeg_fps={self.ffmpeg_fps} process_fps={self.process_fps} "
                 f"ffmpeg_drops={self.ffmpeg_drops} ended={self.ended}"
             )
