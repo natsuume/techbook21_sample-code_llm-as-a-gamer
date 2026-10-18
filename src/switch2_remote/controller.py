@@ -105,8 +105,8 @@ class Controller:
 
         応答: `ok tap RIGHT RIGHT A+B` (各 CHORD の正規化表記を空白区切り)。
         途中で bridge の送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
-        `error <例外の repr> (already sent: <押して離すまで送り終えた CHORD を空白区切り。無ければ none>; unconfirmed: <例外が UnconfirmedInputError なら失敗した CHORD、それ以外は none>)`
-        を返す。
+        `error <例外の repr> (already sent: <押して離すまで送り終えた CHORD を空白区切り。無ければ none>; unconfirmed: <押下の ack の後に失敗したか、例外が UnconfirmedInputError なら失敗した CHORD、それ以外は none>)`
+        を返す。失敗したときは tapping を空に戻す。
         """
         with self.lock:
             pressed = merge_all([self.held, *self._hold_chords(self.holds)])
@@ -114,20 +114,24 @@ class Controller:
                 merge(pressed, chord)
         sent: list[str] = []
         for index, chord in enumerate(chords):
+            press_acked = False
             try:
                 with self.lock:
                     self._send(self.held, self.holds, chord)
                     self.tapping = chord
+                press_acked = True
                 self.sleep(TAP_PRESS_MS / 1000)
                 with self.lock:
                     self._send(self.held, self.holds, PadState())
                     self.tapping = PadState()
             except (RuntimeError, OSError) as e:
+                with self.lock:
+                    self.tapping = PadState()
                 already_sent = " ".join(sent) if sent else "none"
-                # ack を確認できなかった CHORD は、届いた可能性があるため未送信と区別して報告する
+                # 押したまま離せていないか、ack を確認できなかった CHORD は、未送信と区別して報告する
                 unconfirmed = (
                     format_state(chord)
-                    if isinstance(e, UnconfirmedInputError)
+                    if press_acked or isinstance(e, UnconfirmedInputError)
                     else "none"
                 )
                 return (
@@ -203,7 +207,7 @@ class Controller:
         return "ok held=none"
 
     def status_text(self) -> str:
-        """`held=<held の表記> holds=<holds の表記> last_error=<最後のバックグラウンド送信の失敗の repr。無ければ none>` を返す。
+        """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の repr。無ければ none>` を返す。
 
         holds の表記は controller_state.format_holds の形式で、残り時間は (release_at - clock()) を ms にして切り捨てた整数。
         """
@@ -225,7 +229,7 @@ class Controller:
 
         解放スレッドから RELEASE_CHECK_INTERVAL ごとに呼ぶ。テストから直接呼べるよう公開している。
         期限切れの hold が無ければ何も送らない。送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
-        その repr を last_error に記録して holds を変えない。
+        最初の失敗の repr を last_error に記録して holds を変えない。
         """
         with self.lock:
             now = self.clock()
@@ -235,8 +239,10 @@ class Controller:
             try:
                 self._send(self.held, remaining, self.tapping)
             except (RuntimeError, OSError) as e:
-                # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する
-                self.last_error = repr(e)
+                # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
+                # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
+                if self.last_error is None:
+                    self.last_error = repr(e)
                 return
             self.holds = remaining
 

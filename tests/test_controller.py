@@ -149,6 +149,23 @@ def test_tap_treats_chord_as_unconfirmed_when_release_fails():
     )
 
 
+def test_tap_treats_chord_as_unconfirmed_when_release_fails_after_press_ack():
+    # 押下の ack は受け取ったが、離すレポートを送る前にブリッジが終了した
+    bridge = FakeBridge(fail_at=1, fail_with=RuntimeError("bridge exited"))
+    controller, _, _, _ = make_controller(bridge)
+    reply = controller.tap([pad("A"), pad("B")])
+    assert reply == (
+        "error RuntimeError('bridge exited') (already sent: none; unconfirmed: A)"
+    )
+
+
+def test_tap_clears_tapping_when_it_fails():
+    bridge = FakeBridge(fail_at=1, fail_with=RuntimeError("bridge exited"))
+    controller, _, _, _ = make_controller(bridge)
+    controller.tap([pad("A")])
+    assert controller.tapping.is_empty()
+
+
 # --- hold ---
 
 
@@ -349,6 +366,19 @@ def test_release_failure_is_recorded_in_last_error():
     controller, _, clock, _ = make_controller(bridge)
     controller.hold(pad("A"), 1000)
     clock.now = 1.0
+    controller.release_expired()
+    assert controller.status_text() == (
+        "held=none holds=A:0ms last_error=RuntimeError('bridge exited')"
+    )
+
+
+def test_last_error_keeps_first_release_failure():
+    bridge = FakeBridge(fail_at=1, fail_with=RuntimeError("bridge exited"))
+    controller, _, clock, _ = make_controller(bridge)
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    controller.release_expired()
+    bridge.fail_with = RuntimeError("controller bridge is not usable")
     controller.release_expired()
     assert controller.status_text() == (
         "held=none holds=A:0ms last_error=RuntimeError('bridge exited')"
