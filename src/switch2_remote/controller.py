@@ -109,6 +109,7 @@ class Controller:
         を返す。失敗したときは tapping を空に戻す。
         """
         with self.lock:
+            self._release_expired_locked()
             pressed = merge_all([self.held, *self._hold_chords(self.holds)])
             for chord in chords:
                 merge(pressed, chord)
@@ -152,6 +153,7 @@ class Controller:
         衝突の検証は tap と同じで、衝突すれば何も送らずに ValueError にする。
         """
         with self.lock:
+            self._release_expired_locked()
             pressed = merge_all([self.held, *self._hold_chords(self.holds)])
             merge(pressed, chord)
             # 送るレポートは CHORD だけで決まるため、期限は送れた後に決める
@@ -169,6 +171,7 @@ class Controller:
         応答: `ok held=<held の正規化表記>`
         """
         with self.lock:
+            self._release_expired_locked()
             holds_state = merge_all(self._hold_chords(self.holds))
             new_held = add_to_held(self.held, holds_state, join_chords(chords))
             self._send(new_held, self.holds, self.tapping)
@@ -183,6 +186,7 @@ class Controller:
         応答: `ok held=<held の正規化表記>`
         """
         with self.lock:
+            self._release_expired_locked()
             pressed = self.held.names()
             for hold in self.holds:
                 pressed |= hold.chord.names()
@@ -235,19 +239,27 @@ class Controller:
         最初の失敗の repr を last_error に記録して holds を変えない。
         """
         with self.lock:
-            now = self.clock()
-            remaining = [hold for hold in self.holds if hold.release_at > now]
-            if len(remaining) == len(self.holds):
-                return
-            try:
-                self._send(self.held, remaining, self.tapping)
-            except (RuntimeError, OSError) as e:
-                # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
-                # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
-                if self.last_error is None:
-                    self.last_error = repr(e)
-                return
-            self.holds = remaining
+            self._release_expired_locked()
+
+    def _release_expired_locked(self) -> None:
+        """release_expired の本体。呼び出し側がロックを持つ。
+
+        tap / hold / down / up も衝突の検証の前に呼び、期限を過ぎた hold が解放スレッドの次の確認まで
+        押されたままとして扱われないようにする。
+        """
+        now = self.clock()
+        remaining = [hold for hold in self.holds if hold.release_at > now]
+        if len(remaining) == len(self.holds):
+            return
+        try:
+            self._send(self.held, remaining, self.tapping)
+        except (RuntimeError, OSError) as e:
+            # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
+            # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
+            if self.last_error is None:
+                self.last_error = repr(e)
+            return
+        self.holds = remaining
 
     def close(self) -> None:
         """解放スレッドを止める。押下状態の中立化は、ブリッジの終了処理 (中立を 200ms 送る) に任せる。"""

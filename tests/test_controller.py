@@ -169,6 +169,15 @@ def test_tap_clears_tapping_when_it_fails():
 # --- hold ---
 
 
+def test_hold_can_press_again_right_after_previous_hold_expires():
+    # 解放スレッドが期限切れの hold を離す前に、同じボタンを押し直す
+    controller, bridge, clock, _ = make_controller()
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    assert controller.hold(pad("A"), 500) == "ok hold A 500ms"
+    assert bridge.reports == [A, NEUTRAL, A]
+
+
 def test_hold_counts_duration_from_press_ack():
     # 押下のレポートの ack までに 0.6 秒かかるブリッジ
     clock = FakeClock()
