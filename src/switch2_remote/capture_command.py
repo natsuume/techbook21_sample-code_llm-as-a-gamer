@@ -20,7 +20,35 @@ def build_command(
     出力側は -vf fps=output_fps で間引いて -c:v rawvideo -pix_fmt nv12 で標準出力に書く。
     1 フレームのバイト数は NV12 の width * height * 3 // 2 で、output_fps によらない。
     """
-    raise NotImplementedError
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "repeat+warning",
+        "-f",
+        "dshow",
+        "-video_size",
+        f"{width}x{height}",
+        "-framerate",
+        str(device_fps),
+        "-pixel_format",
+        "nv12",
+        "-i",
+        f"video={DEVICE_NAME}",
+        # フィルターはデコード済みのフレームにかかるため、-c:v copy ではなく rawvideo で出力する
+        "-vf",
+        f"fps={output_fps}",
+        "-c:v",
+        "rawvideo",
+        "-pix_fmt",
+        "nv12",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    # NV12 は輝度 (width x height) の後に、縦横半分の色差が 2 成分並ぶ
+    frame_bytes = width * height * 3 // 2
+    return cmd, frame_bytes
 
 
 def iter_raw_frames(stream: IO[bytes], frame_bytes: int) -> Iterator[bytes]:

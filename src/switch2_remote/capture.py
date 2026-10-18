@@ -6,6 +6,17 @@
 shot はバッファーの最新フレームを待たずに PNG 保存する。
 """
 
+import subprocess
+import threading
+import time
+
+import cv2
+import numpy as np
+
+from switch2_remote.capture_command import build_command, iter_raw_frames
+from switch2_remote.ffmpeg_locator import find_ffmpeg
+from switch2_remote.frame_buffer import FrameBuffer, initial_accumulator, next_keep
+
 DEVICE_FPS = 60  # デバイスから受け取るフレームレート (dshow の -framerate)
 WIDTH, HEIGHT = 1280, 720
 
@@ -26,14 +37,44 @@ class Capture:
 
         バッファーの時刻には time.monotonic() を使う。
         """
-        raise NotImplementedError
+        cmd, frame_bytes = build_command(
+            find_ffmpeg(), WIDTH, HEIGHT, DEVICE_FPS, ffmpeg_fps
+        )
+        self.proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=8 << 20,
+            cwd="/mnt/c",
+        )
+        self.frame_bytes = frame_bytes
+        self.ffmpeg_fps = ffmpeg_fps
+        self.process_fps = process_fps
+        self.lock = threading.Lock()
+        self.buffer: FrameBuffer[np.ndarray] = FrameBuffer(buffer_seconds)
+        self.accumulator = initial_accumulator(ffmpeg_fps, process_fps)
+        self.frame_no = 0
+        self.ffmpeg_drops = 0
+        self.ended = False
+        threading.Thread(target=self._read_frames, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
 
     def _read_frames(self):
         """フレームを受信するたびに受信数を数え、間引きで残すフレームだけを NV12 の配列としてバッファーに追加する。
 
         出力が終わったら ended を True にする。
         """
-        raise NotImplementedError
+        for raw in iter_raw_frames(self.proc.stdout, self.frame_bytes):
+            with self.lock:
+                self.frame_no += 1
+                self.accumulator, keep = next_keep(
+                    self.accumulator, self.ffmpeg_fps, self.process_fps
+                )
+                if keep:
+                    nv12 = np.frombuffer(raw, np.uint8).reshape(HEIGHT * 3 // 2, WIDTH)
+                    self.buffer.append(time.monotonic(), nv12)
+        with self.lock:
+            self.ended = True
 
     def _read_stderr(self):
         # 読み捨てないとパイプが詰まり ffmpeg が止まる。フレーム落ちの警告だけ数える
@@ -48,7 +89,10 @@ class Capture:
         fps の範囲 (1〜ffmpeg_fps) は呼び出し側 (commands.parse_fps) で確かめる。
         応答: ok fps=<fps>
         """
-        raise NotImplementedError
+        with self.lock:
+            self.process_fps = fps
+            self.accumulator = initial_accumulator(self.ffmpeg_fps, fps)
+        return f"ok fps={fps}"
 
     def shot(self, path: str) -> str:
         """バッファーの最新フレームを待たずに path へ PNG 保存する。
@@ -56,7 +100,17 @@ class Capture:
         応答: 成功時は `ok <path>`。ffmpeg が終了していれば `error capture ended`、
         バッファーが空なら `error no frame yet`、書き込みに失敗したら `error failed to write <path>`
         """
-        raise NotImplementedError
+        with self.lock:
+            ended = self.ended
+            nv12 = self.buffer.latest()
+        if ended:
+            return "error capture ended"
+        if nv12 is None:
+            return "error no frame yet"
+        # 色変換と書き込みはロックの外で行い、その間もフレームの読み取りを止めない
+        if not cv2.imwrite(path, cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)):
+            return f"error failed to write {path}"
+        return f"ok {path}"
 
     def status(self) -> str:
         """受信状況を 1 行で返す。
@@ -64,7 +118,12 @@ class Capture:
         応答: ok frames=<受信フレーム数> buffered=<バッファー内の枚数> ffmpeg_fps=<N> process_fps=<N>
         ffmpeg_drops=<N> ended=<bool>
         """
-        raise NotImplementedError
+        with self.lock:
+            return (
+                f"ok frames={self.frame_no} buffered={len(self.buffer)} "
+                f"ffmpeg_fps={self.ffmpeg_fps} process_fps={self.process_fps} "
+                f"ffmpeg_drops={self.ffmpeg_drops} ended={self.ended}"
+            )
 
     def close(self):
         self.proc.kill()

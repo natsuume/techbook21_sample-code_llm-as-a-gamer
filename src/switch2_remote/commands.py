@@ -29,6 +29,8 @@ tap・hold・down は、既に押している入力と重なる CHORD (同じボ
 quit は接続の処理 (daemon.serve_connection) で扱う。
 """
 
+import os
+
 from switch2_remote.capture import Capture
 from switch2_remote.controller import Controller
 from switch2_remote.controller_state import parse_chord, parse_up_targets
@@ -49,7 +51,13 @@ def parse_shot(request: str) -> str:
 
     PATH が無い場合と、絶対パスでない場合は ValueError にする。
     """
-    raise NotImplementedError
+    parts = request.rstrip("\r\n").split(maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError("usage: shot ABSOLUTE_PATH")
+    path = parts[1]
+    if not os.path.isabs(path):
+        raise ValueError(f"shot path must be absolute: {path}")
+    return path
 
 
 def parse_fps(text: str, max_fps: int) -> int:
@@ -57,7 +65,14 @@ def parse_fps(text: str, max_fps: int) -> int:
 
     範囲外と整数でない N は、現在の範囲を含むメッセージ (例: `fps must be 1..30: 45`) の ValueError にする。
     """
-    raise NotImplementedError
+    error = ValueError(f"fps must be {PROCESS_FPS_MIN}..{max_fps}: {text}")
+    try:
+        fps = int(text)
+    except ValueError:
+        raise error from None
+    if not PROCESS_FPS_MIN <= fps <= max_fps:
+        raise error
+    return fps
 
 
 def handle_command(request: str, capture: Capture, controller: Controller) -> str:

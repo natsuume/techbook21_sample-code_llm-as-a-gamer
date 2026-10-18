@@ -220,3 +220,11 @@ def test_serve_connection_returns_true_on_quit():
         client_side.sendall(b"quit\n")
         assert daemon.serve_connection(server_side, object(), object()) is True
         assert client_side.makefile("r", encoding="utf-8").readline() == "bye\n"
+
+
+def test_parse_args_explains_default_process_fps_above_ffmpeg_fps(capsys):
+    with pytest.raises(SystemExit):
+        daemon.parse_args(["--ffmpeg-fps", "5"])
+    err = capsys.readouterr().err
+    assert "--process-fps (10) must not exceed --ffmpeg-fps (5)" in err
+    assert "--process-fps defaults to 10" in err

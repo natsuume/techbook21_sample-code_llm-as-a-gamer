@@ -10,7 +10,7 @@
 ```text
 Nintendo Switch 2
   ├─ HDMI → Elgato 4K X → USB → Windows PC
-  │                               └─ ffmpeg.exe (DirectShow, 720p NV12)
+  │                               └─ ffmpeg.exe (DirectShow, 720p NV12, 60fps を --ffmpeg-fps の値に間引く)
   │                                    │ 標準出力パイプ
   │                                    ▼
   │                             WSL2: switch2-remote-daemon ◀── Unix ソケット ── switch2-remote
@@ -95,6 +95,22 @@ uv run switch2-remote-daemon
 
 ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動が終わると、`daemon ready` と表示されます。デーモンは同時に 1 つだけ起動します。
 
+起動引数で、フレームレートと保持する時間を指定できます。値はすべて整数です。
+
+| 引数 | 内容 | 既定値 | 範囲 |
+|---|---|---|---|
+| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 60fps で受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜60 |
+| `--process-fps N` | デーモンが保持するフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
+| `--buffer-seconds N` | フレームを保持する時間 (秒)。直近 N 秒分を保持します | 5 | 1〜60 |
+
+```bash
+uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5
+```
+
+範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+
+保持するフレームの枚数は `--process-fps` × `--buffer-seconds` で、720p NV12 のフレームは 1 枚約 1.38MB です。既定値では 50 枚、約 69MB を保持します。
+
 ## 6. クライアントの使い方
 
 デーモンを起動したまま、別の端末からコマンドを送ります。
@@ -106,7 +122,8 @@ uv run switch2-remote tap L+R                 # L と R を同時に押す
 uv run switch2-remote hold B+RIGHT 2000       # B と RIGHT を同時に 2000 ミリ秒押す
 uv run switch2-remote down LS:0,1             # 左スティックを上に倒したままにする
 uv run switch2-remote up ALL                  # 押したままの入力をすべて離す
-uv run switch2-remote shot /tmp/screen.png 5  # 画面が止まるまで最大 5 秒待ち、PNG で保存する
+uv run switch2-remote shot /tmp/screen.png    # 最新のフレームを PNG で保存する
+uv run switch2-remote fps 12                  # 保持するフレームレートを 12fps に変える
 uv run switch2-remote quit                    # ブリッジとキャプチャーを止めてデーモンを終了する
 ```
 
@@ -122,8 +139,9 @@ uv run switch2-remote quit                    # ブリッジとキャプチャ�
 | `hold CHORD MS` | CHORD を MS ミリ秒 (1〜60000) 押します。押し始めた時点で応答し、MS ミリ秒たつとデーモンが離します。押している間も他のコマンドを送れます |
 | `down CHORD [CHORD ...]` | `up` で離すまで押したままにします。押したままのスティックを `down` で指定し直すと、新しい値に変わります |
 | `up TARGET [TARGET ...]` | 指定したボタン、または `LS` / `RS` を離します。`down` と `hold` のどちらで押したものも離れます。`up ALL` はすべてを離します |
-| `shot PATH [TIMEOUT]` | コマンドを受け取った後のフレームで、画面が 10 フレーム続けて止まるまで最大 TIMEOUT 秒 (省略時 5 秒、0 より大きく 60 以下) 待ち、PATH に PNG で保存します。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
-| `status` | 受信フレーム数、ffmpeg のフレーム落ち回数、キャプチャーの終了、ブリッジの生存、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
+| `shot PATH` | 保持している最新のフレームを、新しいフレームを待たずに PATH に PNG で保存します。引数は PATH 1 つだけです。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
+| `fps N` | デーモンが保持するフレームレートを N fps (1〜`--ffmpeg-fps` の値の整数) に変えます。応答は `ok fps=N` です |
+| `status` | 受信フレーム数、保持しているフレームの枚数、ffmpeg.exe が出力するフレームレート、保持するフレームレート、ffmpeg.exe のフレーム落ち回数、キャプチャーの終了、ブリッジの生存、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
 | `quit` | ブリッジとキャプチャーを止めてデーモンを終了します |
 
 送るレポートは、`down` で押したままの入力、`hold` で押している入力、`tap` で押している入力を重ねたものです。`tap` と `hold` が終わると、`down` で押したままの状態に戻ります。たとえば `down LS:0,1` の後に `tap X` を送ると、左スティックを上に倒したまま X を押せます。すでに押されているボタンやスティックを `tap` / `hold` で押そうとした場合や、十字キーの相反する方向が重なる場合は、何も送らずにエラーを返します。
@@ -136,12 +154,12 @@ ok held=LS:0,1
 $ uv run switch2-remote hold B 3000
 ok hold B 3000ms
 $ uv run switch2-remote status
-ok frames=1234 ffmpeg_drops=0 ended=False bridge_alive=True held=LS:0,1 holds=B:2480ms last_error=none
-$ uv run switch2-remote shot /tmp/screen.png 5
-ok /tmp/screen.png settled=True waited=0.25s
+ok frames=1234 buffered=50 ffmpeg_fps=30 process_fps=10 ffmpeg_drops=0 ended=False bridge_alive=True held=LS:0,1 holds=B:2480ms last_error=none
+$ uv run switch2-remote shot /tmp/screen.png
+ok /tmp/screen.png
 ```
 
-`shot` の `settled=False` は、TIMEOUT までに画面が止まらなかったことを示します。その場合も、その時点の最新フレームを保存します。
+`shot` は、デーモンの起動直後でまだフレームを保持していないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
 
 応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。ブリッジとの通信が途切れると、デーモンはブリッジに終了を指示し (ブリッジは中立のレポートを送ってから終了します。3 秒以内に終わらなければプロセスを止めます)、`status` の `bridge_alive` が `False` になります。以後の入力は受け付けないので、デーモンを起動し直してください。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。
 
@@ -172,11 +190,6 @@ uv run switch2-remote tap A
 
 このとき RIGHT を 400 ミリ秒長押しすると、カーソルが 3 つ進みました。HOME メニューのキーリピートによるものかは確認できていませんが、カーソル移動には長押し (`hold` と `down`) を使わず、短押し (`tap`) を使ってください。また、HOME メニューのソフト一覧では、左端で LEFT を押すとカーソルが右端の「もっとみる」へ回り込みます。
 
-### 静止判定が画面遷移の途中で成立することがある
+### 入力の直後に撮ると、反映前や遷移の途中の画面になることがある
 
-`shot` は画面が止まったことだけを確かめます。次の画面では途中のフレームで静止と判定され、目的の画面より前の画面が保存されました。
-
-- メニューを開いた直後の、無地の画面が一瞬止まる箇所
-- ラウンド開始時にカードを配るアニメーションの途中
-
-どちらも 1〜4 秒待って撮り直すと、目的の画面を撮れました。撮った画像が目的の画面かどうかは、見出しの文字などの目印で確かめてください。
+`shot` は撮影した時点の最新のフレームを保存します。入力の直後に撮ると、入力が画面に反映される前の画面や、画面遷移の途中の画面 (メニューを開いた直後の無地の画面、ラウンド開始時にカードを配るアニメーションの途中など) が保存されることがあります。撮った画像が目的の画面かどうかは見出しの文字などの目印で確かめ、目的の画面でなければ撮り直してください。

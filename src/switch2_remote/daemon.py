@@ -35,7 +35,7 @@ import struct
 import cv2
 
 from switch2_remote.capture import DEVICE_FPS, Capture
-from switch2_remote.commands import handle_command
+from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge
 
@@ -95,7 +95,51 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv が None なら sys.argv[1:] を使う。範囲外の値と、process_fps が ffmpeg_fps より大きい組み合わせは
     parser.error で使い方とともに表示して終了する (SystemExit)。
     """
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(
+        prog="switch2-remote-daemon",
+        description="Switch 2 を 1 コマンドずつ操作するための常駐デーモン",
+    )
+    parser.add_argument(
+        "--ffmpeg-fps",
+        type=int,
+        default=DEFAULT_FFMPEG_FPS,
+        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜{FFMPEG_FPS_MAX}、既定 {DEFAULT_FFMPEG_FPS})",
+    )
+    parser.add_argument(
+        "--process-fps",
+        type=int,
+        default=DEFAULT_PROCESS_FPS,
+        help=f"バッファーに残すフレームレート ({PROCESS_FPS_MIN}〜ffmpeg_fps、既定 {DEFAULT_PROCESS_FPS})",
+    )
+    parser.add_argument(
+        "--buffer-seconds",
+        type=int,
+        default=DEFAULT_BUFFER_SECONDS,
+        help=f"バッファーに保持する秒数 ({BUFFER_SECONDS_MIN}〜{BUFFER_SECONDS_MAX}、既定 {DEFAULT_BUFFER_SECONDS})",
+    )
+    args = parser.parse_args(argv)
+    if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
+        parser.error(
+            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN}..{FFMPEG_FPS_MAX}: {args.ffmpeg_fps}"
+        )
+    if args.process_fps < PROCESS_FPS_MIN:
+        parser.error(
+            f"--process-fps must be {PROCESS_FPS_MIN} or more: {args.process_fps}"
+        )
+    if args.process_fps > args.ffmpeg_fps:
+        message = (
+            f"--process-fps ({args.process_fps}) must not exceed "
+            f"--ffmpeg-fps ({args.ffmpeg_fps})"
+        )
+        # --process-fps を省略した場合も、既定値が --ffmpeg-fps を超えていればここで止める
+        if args.process_fps == DEFAULT_PROCESS_FPS:
+            message += f". --process-fps defaults to {DEFAULT_PROCESS_FPS}"
+        parser.error(message)
+    if not BUFFER_SECONDS_MIN <= args.buffer_seconds <= BUFFER_SECONDS_MAX:
+        parser.error(
+            f"--buffer-seconds must be {BUFFER_SECONDS_MIN}..{BUFFER_SECONDS_MAX}: {args.buffer_seconds}"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None):

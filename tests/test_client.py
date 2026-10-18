@@ -39,6 +39,27 @@ def test_build_request_keeps_spaces_in_shot_path():
     )
 
 
+@pytest.mark.parametrize(
+    "args", [["shot"], ["shot", "/tmp/a.png", "5"], ["shot", "/tmp/a.png", "b.png"]]
+)
+def test_build_request_rejects_shot_without_exactly_one_path(args):
+    with pytest.raises(ValueError, match="usage: shot PATH"):
+        build_request(args)
+
+
+@pytest.mark.parametrize(
+    "argv", [["switch2-remote", "shot"], ["switch2-remote", "shot", "/tmp/a.png", "5"]]
+)
+def test_main_does_not_send_shot_without_exactly_one_path(monkeypatch, capsys, argv):
+    def fail_if_connecting(*args):
+        raise AssertionError("must not connect to daemon")
+
+    monkeypatch.setattr(client.socket, "socket", fail_if_connecting)
+    monkeypatch.setattr(client.sys, "argv", argv)
+    assert client.main() == 1
+    assert capsys.readouterr().err == "error usage: shot PATH\n"
+
+
 def test_build_request_passes_fps_through():
     assert build_request(["fps", "12"]) == "fps 12\n"
 

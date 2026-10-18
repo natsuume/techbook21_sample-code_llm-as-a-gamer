@@ -14,12 +14,15 @@ from collections import deque
 
 def initial_accumulator(ffmpeg_fps: int, process_fps: int) -> int:
     """累積値の初期値 (ffmpeg_fps - process_fps) を返す。処理レートを変えたときもこの値に戻す。"""
-    raise NotImplementedError
+    return ffmpeg_fps - process_fps
 
 
 def next_keep(acc: int, ffmpeg_fps: int, process_fps: int) -> tuple[int, bool]:
     """フレーム 1 枚分の間引きを判定し、新しい累積値と、このフレームを残すかを返す。"""
-    raise NotImplementedError
+    acc += process_fps
+    if acc >= ffmpeg_fps:
+        return acc - ffmpeg_fps, True
+    return acc, False
 
 
 class FrameBuffer[T]:
@@ -34,11 +37,17 @@ class FrameBuffer[T]:
 
     def append(self, now: float, frame: T) -> None:
         """時刻 now のフレームを追加し、now - seconds より古い要素を先頭から捨てる。"""
-        raise NotImplementedError
+        self.items.append((now, frame))
+        oldest_allowed = now - self.seconds
+        # 追加したばかりの要素は必ず残るため、空になるまで捨て続けることはない
+        while self.items[0][0] < oldest_allowed:
+            self.items.popleft()
 
     def latest(self) -> T | None:
         """最後に追加したフレームを返す。空なら None を返す。"""
-        raise NotImplementedError
+        if not self.items:
+            return None
+        return self.items[-1][1]
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        return len(self.items)
