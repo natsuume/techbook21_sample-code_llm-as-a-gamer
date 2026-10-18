@@ -11,7 +11,7 @@
 #   現在のレポートが中立以外なら、10ms ごとに書き込み続ける (SEND_INTERVAL_MS。Windows の既定のタイマー分解能では実際の間隔は約 15ms)
 #   中立に変わったら中立を 100ms 書き込み、次の set まで書き込みを止める (NEUTRAL_TAIL_MS)
 #   $KeepSendingNeutral = $true にすると、中立も書き込み続ける (既定は $false)
-#   書き込みが例外になったら出力: "fatal <message>" (プロセスは終了コード 1 で終える)
+#   書き込みが例外になったら出力: "fatal <message>" (中立を 200ms 送ることを試みてから、プロセスを終了コード 1 で終える)
 #   C# クラスが受け取る書き込み先: System.IO.Stream (実機では $port.BaseStream、偽の Stream でも動く)
 #   C# のスレッドからは PowerShell のスクリプトブロックを呼ばない (スレッドに Runspace が無いため)
 param([string]$PortName = "COM3")
@@ -32,6 +32,7 @@ public class PicoReportSender
 {
     public const int SEND_INTERVAL_MS = 10;
     public const int NEUTRAL_TAIL_MS = 100;
+    public const int NEUTRAL_ON_FATAL_MS = 200;
 
     private const byte END = 0xC0; private const byte ESC = 0xDB; private const byte ESC_END = 0xDC; private const byte ESC_ESC = 0xDD;
 
@@ -214,7 +215,12 @@ public class PicoReportSender
         catch (Exception)
         {
         }
-        if (exitOnFatal) { Environment.Exit(1); }
+        if (exitOnFatal)
+        {
+            // Environment.Exit skips the PowerShell finally block, so try to leave the controller neutral here first.
+            try { SendFor(stream, NeutralReport(), NEUTRAL_ON_FATAL_MS); } catch (Exception) { }
+            Environment.Exit(1);
+        }
     }
 }
 '@
