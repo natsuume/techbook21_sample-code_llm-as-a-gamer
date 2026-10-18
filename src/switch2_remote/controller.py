@@ -39,6 +39,7 @@ from switch2_remote.controller_state import (
     merge_all,
     remove_targets,
 )
+from switch2_remote.error_message import describe_error
 
 TAP_PRESS_MS = 120  # tap で CHORD を押している時間
 TAP_RELEASE_MS = 100  # tap で CHORD を離した後の待ち
@@ -105,7 +106,7 @@ class Controller:
 
         応答: `ok tap RIGHT RIGHT A+B` (各 CHORD の正規化表記を空白区切り)。
         途中で bridge の送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
-        `error <例外の repr> (already sent: <押して離すまで送り終えた CHORD を空白区切り。無ければ none>; unconfirmed: <押下の ack の後に失敗したか、例外が UnconfirmedInputError なら失敗した CHORD、それ以外は none>)`
+        `error <例外の説明 (error_message.describe_error)> (already sent: <押して離すまで送り終えた CHORD を空白区切り。無ければ none>; unconfirmed: <押下の ack の後に失敗したか、例外が UnconfirmedInputError なら失敗した CHORD、それ以外は none>)`
         を返す。失敗したときは tapping を空に戻す。
         """
         with self.lock:
@@ -136,7 +137,7 @@ class Controller:
                     else "none"
                 )
                 return (
-                    f"error {e!r} (already sent: {already_sent}; "
+                    f"error {describe_error(e)} (already sent: {already_sent}; "
                     f"unconfirmed: {unconfirmed})"
                 )
             sent.append(format_state(chord))
@@ -236,7 +237,7 @@ class Controller:
 
         解放スレッドから RELEASE_CHECK_INTERVAL ごとに呼ぶ。テストから直接呼べるよう公開している。
         期限切れの hold が無ければ何も送らない。送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
-        最初の失敗の repr を last_error に記録して holds を変えない。
+        最初の失敗の説明 (error_message.describe_error) を last_error に記録して holds を変えない。
         """
         with self.lock:
             self._release_expired_locked(raise_on_failure=False)
@@ -258,7 +259,7 @@ class Controller:
             # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
             # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
             if self.last_error is None:
-                self.last_error = repr(e)
+                self.last_error = describe_error(e)
             if raise_on_failure:
                 raise
             return

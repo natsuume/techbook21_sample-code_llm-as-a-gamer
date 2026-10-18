@@ -268,6 +268,19 @@ def test_serve_connection_passes_controller_to_handle_command(monkeypatch):
     assert reply == "ok fake\n"
 
 
+def test_serve_connection_replies_error_with_exception_message(monkeypatch):
+    def fake_handle_command(request, capture, controller):
+        raise ValueError("already pressed: B")
+
+    monkeypatch.setattr(daemon, "handle_command", fake_handle_command)
+    server_side, client_side = socket.socketpair()
+    with server_side, client_side:
+        client_side.sendall(b"tap B\n")
+        assert daemon.serve_connection(server_side, object(), object()) is False
+        reply = client_side.makefile("r", encoding="utf-8").readline()
+    assert reply == "error already pressed: B\n"
+
+
 def test_serve_connection_returns_true_on_quit():
     server_side, client_side = socket.socketpair()
     with server_side, client_side:
