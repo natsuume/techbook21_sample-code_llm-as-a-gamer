@@ -169,6 +169,23 @@ def test_tap_clears_tapping_when_it_fails():
 # --- hold ---
 
 
+def test_hold_counts_duration_from_press_ack():
+    # 押下のレポートの ack までに 0.6 秒かかるブリッジ
+    clock = FakeClock()
+
+    class SlowBridge(FakeBridge):
+        def set_report(self, report: bytes) -> str:
+            clock.now += 0.6
+            return super().set_report(report)
+
+    bridge = SlowBridge()
+    controller = Controller(
+        bridge, clock=clock, sleep=lambda s: None, start_timer=False
+    )
+    controller.hold(pad("A"), 500)
+    assert controller.status_text() == "held=none holds=A:500ms last_error=none"
+
+
 def test_hold_replies_immediately_and_releases_after_ms():
     controller, bridge, clock, sleeps = make_controller(now=10.0)
     reply = controller.hold(pad("RIGHT", "B"), 2000)

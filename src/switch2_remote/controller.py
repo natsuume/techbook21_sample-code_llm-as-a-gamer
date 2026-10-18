@@ -147,15 +147,18 @@ class Controller:
     def hold(self, chord: PadState, ms: int) -> str:
         """「現在の合成状態 + chord」を送り、送れたらすぐ `ok hold B+RIGHT 2000ms` を返す。
 
-        ms は commands.parse_hold_ms で検証済み (1〜60000) の値。解放の期限は clock() + ms / 1000。
+        ms は commands.parse_hold_ms で検証済み (1〜60000) の値。
+        解放の期限は、押下のレポートの ack を受け取った後の clock() + ms / 1000 (ack までの時間を押下の時間に含めない)。
         衝突の検証は tap と同じで、衝突すれば何も送らずに ValueError にする。
         """
         with self.lock:
             pressed = merge_all([self.held, *self._hold_chords(self.holds)])
             merge(pressed, chord)
-            new_holds = [*self.holds, ActiveHold(chord, self.clock() + ms / 1000)]
-            self._send(self.held, new_holds, self.tapping)
-            self.holds = new_holds
+            # 送るレポートは CHORD だけで決まるため、期限は送れた後に決める
+            self._send(
+                self.held, [*self.holds, ActiveHold(chord, math.inf)], self.tapping
+            )
+            self.holds = [*self.holds, ActiveHold(chord, self.clock() + ms / 1000)]
         return f"ok hold {format_state(chord)} {ms}ms"
 
     def down(self, chords: Sequence[PadState]) -> str:
