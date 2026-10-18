@@ -23,8 +23,10 @@ BRIDGE_SCRIPT = os.path.join(
 )
 BRIDGE_READY_TIMEOUT = 30.0  # PowerShell の起動と COM ポートを開くまでの上限 (秒)
 BRIDGE_ACK_TIMEOUT = 2.0  # set を書き込んでから ack が返るまでの上限 (秒)
-# broken にしたブリッジに quit を送ってから、プロセスの終了を待つ上限 (秒)
-BRIDGE_QUIT_TIMEOUT = 1.0
+# broken にしたブリッジに quit を送ってから、プロセスの終了を待つ上限 (秒)。
+# ブリッジの終了処理は、送信スレッドの停止でシリアルの書き込みのタイムアウト (1 秒) を待ち、
+# その後に中立を 200ms 送ることがあるため、それより長くとる
+BRIDGE_QUIT_TIMEOUT = 3.0
 REPORT_BYTES = 8
 
 
@@ -101,7 +103,8 @@ class Bridge:
         書き込みと ack 待ちを 1 つのロックで囲み、スレッドから呼ばれても応答の対応がずれないようにする。
         - broken または終了済みのブリッジでは、書き込まずに RuntimeError にする
         - ack が BRIDGE_ACK_TIMEOUT 秒以内に来なければ UnconfirmedInputError にする (broken にする)
-        - ack の前に出力が終われば (EOF) RuntimeError にする (broken にする)
+        - ack の前に出力が終われば (EOF) UnconfirmedInputError にする (broken にする)。
+          ブリッジはレポートを書き込んでから ack を出力するため、ack の前に終了してもレポートは届いている可能性がある
         - `ack <同じ16進> ` で始まらない応答は UnconfirmedInputError にする (broken にする)
         """
         if len(report) != REPORT_BYTES:
@@ -122,7 +125,7 @@ class Bridge:
                 raise UnconfirmedInputError("no ack from bridge in time") from e
             if ack is None:
                 self._stop_broken_bridge()
-                raise RuntimeError("controller bridge exited before ack")
+                raise UnconfirmedInputError("controller bridge exited before ack")
             if not ack.startswith(f"ack {report_hex} "):
                 self._stop_broken_bridge()
                 raise UnconfirmedInputError(f"unexpected bridge reply: {ack}")

@@ -21,7 +21,7 @@ I/O・スレッド・時刻を扱わない。押下状態の保持と送信は c
 
 状態の正規化表記 (format_state):
     ボタンを BUTTON_ORDER の順、続いてスティックを STICK_ORDER の順に並べ、+ でつなぐ。
-    スティックは LS:0.5,-1 のように各値を format(v, "g") で書く。何も押していなければ none
+    スティックは LS:0.5,-1 のように各値を小数点以下 6 桁までの小数表記 (末尾の 0 を除く) で書き、そのまま SPEC として受け付けられる形にする。何も押していなければ none
 
 8 バイトのレポート (build_report):
     [b1, b2, hat, LX, LY, RX, RY, 0]
@@ -277,13 +277,20 @@ def build_report(state: PadState) -> bytes:
     return bytes(report)
 
 
+def format_stick_value(value: float) -> str:
+    """スティックの 1 軸の値を、STICK_SPEC_PATTERN が受け付ける小数表記 (小数点以下 6 桁まで、末尾の 0 を除く) にする。"""
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    # -0.0 や、6 桁で丸めると 0 になる負の値は、符号を付けずに 0 と書く
+    return "0" if text == "-0" else text
+
+
 def format_state(state: PadState) -> str:
     """押下状態を正規化表記 (例: A+RIGHT+LS:0.5,-1) にする。空なら none を返す。"""
     parts = [button for button in BUTTON_ORDER if button in state.buttons]
     for stick in STICK_ORDER:
         if stick in state.sticks:
             x, y = state.sticks[stick]
-            parts.append(f"{stick}:{format(x, 'g')},{format(y, 'g')}")
+            parts.append(f"{stick}:{format_stick_value(x)},{format_stick_value(y)}")
     return "+".join(parts) if parts else "none"
 
 

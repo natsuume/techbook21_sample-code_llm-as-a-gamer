@@ -322,6 +322,19 @@ def test_format_state_orders_dpad_by_fixed_order():
     assert format_state(pad("RIGHT", "B", "UP")) == "B+UP+RIGHT"
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [(1.0, "1"), (-1.0, "-1"), (0.0, "0"), (-0.0, "0"), (0.00001, "0.00001")],
+)
+def test_format_state_writes_stick_values_in_decimal(value, expected):
+    assert format_state(pad(LS=(value, 0.5))) == f"LS:{expected},0.5"
+
+
+def test_format_state_of_stick_can_be_parsed_again():
+    state = pad(LS=(0.00001, -0.0000001))
+    assert parse_chord(format_state(state)) == pad(LS=(0.00001, 0.0))
+
+
 def test_format_holds():
     assert format_holds([]) == "none"
     assert format_holds([(pad("RIGHT", "B"), 1200), (pad("A"), 5)]) == (

@@ -94,11 +94,11 @@ def test_set_report_raises_unconfirmed_and_quits_bridge_on_unexpected_reply(repl
     assert bridge.proc.stdin.written[-1] == "quit\n"
 
 
-def test_set_report_raises_runtime_error_and_quits_bridge_on_eof():
+def test_set_report_raises_unconfirmed_and_quits_bridge_on_eof():
+    # ブリッジはレポートを書き込んでから ack を出力するため、ack の前の終了は未確認として扱う
     bridge = make_bridge([None])
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(UnconfirmedInputError):
         bridge.set_report(REPORT_A)
-    assert type(excinfo.value) is RuntimeError
     assert bridge.broken
     assert bridge.proc.stdin.written[-1] == "quit\n"
 
