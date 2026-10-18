@@ -1,35 +1,50 @@
 import pytest
 
-from switch2_remote import commands
-from switch2_remote.commands import (
-    handle_command,
-    parse_hold_ms,
-    parse_shot,
-    tap_sequence,
-    validate_buttons,
-)
-from switch2_remote.controller_bridge import UnconfirmedInputError
+from switch2_remote.commands import handle_command, parse_hold_ms, parse_shot
+from switch2_remote.controller_state import PadState
+
+
+def pad(*buttons: str, **sticks: tuple[float, float]) -> PadState:
+    """ボタン名とスティック (LS=(x, y) など) から PadState を作る。"""
+    return PadState(frozenset(buttons), dict(sticks))
 
 
 class FakeBridge:
-    """controller_bridge.Bridge の代わりに、押されたボタンを記録する偽物。
-
-    fail_on に指定したボタンを押すと、fail_with の例外を送出する。
-    """
-
-    def __init__(self, fail_on: str | None = None, fail_with: Exception | None = None):
-        self.taps: list[tuple[str, int]] = []
-        self.fail_on = fail_on
-        self.fail_with = fail_with
-
-    def tap(self, button: str, hold_ms: int = 120) -> str:
-        if button == self.fail_on:
-            raise self.fail_with
-        self.taps.append((button, hold_ms))
-        return f"ack {button} 1 / done {button} 2"
+    """controller_bridge.Bridge の代わり。status の bridge_alive に使う is_alive だけを持つ。"""
 
     def is_alive(self) -> bool:
         return True
+
+
+class FakeController:
+    """controller.Controller の代わりに、呼ばれた操作と引数を記録する偽物。"""
+
+    def __init__(self):
+        self.bridge = FakeBridge()
+        self.calls: list[tuple] = []
+
+    def tap(self, chords) -> str:
+        self.calls.append(("tap", list(chords)))
+        return "ok tap (fake)"
+
+    def hold(self, chord, ms) -> str:
+        self.calls.append(("hold", chord, ms))
+        return "ok hold (fake)"
+
+    def down(self, chords) -> str:
+        self.calls.append(("down", list(chords)))
+        return "ok held=(fake)"
+
+    def up(self, targets) -> str:
+        self.calls.append(("up", targets))
+        return "ok held=(fake)"
+
+    def up_all(self) -> str:
+        self.calls.append(("up_all",))
+        return "ok held=none"
+
+    def status_text(self) -> str:
+        return "held=A holds=B+RIGHT:1200ms last_error=none"
 
 
 class FakeCapture:
@@ -46,27 +61,14 @@ class FakeCapture:
         return "ok frames=10 ffmpeg_drops=0 ended=False"
 
 
-@pytest.fixture(autouse=True)
-def no_tap_interval(monkeypatch):
-    # ボタン間の待ちはテストでは不要なので省く
-    monkeypatch.setattr(commands.time, "sleep", lambda seconds: None)
-
-
-def test_validate_buttons_uppercases_names():
-    assert validate_buttons(["a", "Right", "lr"]) == ["A", "RIGHT", "LR"]
-
-
-def test_validate_buttons_rejects_unknown_names():
-    with pytest.raises(ValueError, match="unknown button: FOO BAR"):
-        validate_buttons(["A", "foo", "bar"])
-
-
-@pytest.mark.parametrize("text, expected", [("1", 1), ("500", 500), ("5000", 5000)])
+@pytest.mark.parametrize(
+    "text, expected", [("1", 1), ("500", 500), ("5000", 5000), ("60000", 60000)]
+)
 def test_parse_hold_ms_accepts_range(text, expected):
     assert parse_hold_ms(text) == expected
 
 
-@pytest.mark.parametrize("text", ["0", "5001", "-1", "abc"])
+@pytest.mark.parametrize("text", ["0", "60001", "-1", "abc", "1.5"])
 def test_parse_hold_ms_rejects_out_of_range_or_non_integer(text):
     with pytest.raises(ValueError):
         parse_hold_ms(text)
@@ -96,61 +98,106 @@ def test_parse_shot_rejects_missing_arguments():
         parse_shot("shot 5")
 
 
-def test_tap_sequence_presses_buttons_in_order():
-    bridge = FakeBridge()
-    reply = tap_sequence(bridge, ["RIGHT", "A"])
-    assert bridge.taps == [("RIGHT", 120), ("A", 120)]
-    assert reply == "ack RIGHT 1 / done RIGHT 2 | ack A 1 / done A 2"
+def test_handle_command_tap_parses_each_chord():
+    controller = FakeController()
+    reply = handle_command("tap right a+b ls:0.5,-1\n", FakeCapture(), controller)
+    assert controller.calls == [
+        ("tap", [pad("RIGHT"), pad("A", "B"), pad(LS=(0.5, -1.0))])
+    ]
+    assert reply == "ok tap (fake)"
 
 
-def test_tap_sequence_reports_sent_inputs_when_bridge_fails_before_ack():
-    bridge = FakeBridge(fail_on="A", fail_with=RuntimeError("bridge exited"))
-    reply = tap_sequence(bridge, ["RIGHT", "A", "B"])
-    assert bridge.taps == [("RIGHT", 120)]
-    assert reply == (
-        "error RuntimeError('bridge exited') "
-        "(already sent: ack RIGHT 1 / done RIGHT 2; unconfirmed: none)"
-    )
-
-
-def test_tap_sequence_reports_unconfirmed_button_after_ack():
-    bridge = FakeBridge(fail_on="RIGHT", fail_with=UnconfirmedInputError("no ack"))
-    reply = tap_sequence(bridge, ["RIGHT", "A"])
-    assert bridge.taps == []
-    assert reply == (
-        "error UnconfirmedInputError('no ack') (already sent: none; unconfirmed: RIGHT)"
-    )
-
-
-def test_handle_command_tap_validates_all_buttons_before_sending():
-    bridge = FakeBridge()
+@pytest.mark.parametrize(
+    "request_line", ["tap RIGHT FOO\n", "tap A+\n", "tap LR\n", "tap UP+DOWN\n"]
+)
+def test_handle_command_tap_rejects_invalid_chord_before_sending(request_line):
+    controller = FakeController()
     with pytest.raises(ValueError):
-        handle_command("tap RIGHT FOO\n", FakeCapture(), bridge)
-    assert bridge.taps == []
+        handle_command(request_line, FakeCapture(), controller)
+    assert controller.calls == []
 
 
-def test_handle_command_hold_passes_duration():
-    bridge = FakeBridge()
-    reply = handle_command("hold a 500\n", FakeCapture(), bridge)
-    assert bridge.taps == [("A", 500)]
-    assert reply == "ack A 1 / done A 2"
+def test_handle_command_hold_passes_chord_and_duration():
+    controller = FakeController()
+    reply = handle_command("hold b+right 2000\n", FakeCapture(), controller)
+    assert controller.calls == [("hold", pad("B", "RIGHT"), 2000)]
+    assert reply == "ok hold (fake)"
+
+
+def test_handle_command_hold_accepts_max_duration():
+    controller = FakeController()
+    handle_command("hold A 60000\n", FakeCapture(), controller)
+    assert controller.calls == [("hold", pad("A"), 60000)]
+
+
+@pytest.mark.parametrize(
+    "request_line", ["hold A 0\n", "hold A 60001\n", "hold A 1.5\n", "hold FOO 100\n"]
+)
+def test_handle_command_hold_rejects_invalid_arguments(request_line):
+    controller = FakeController()
+    with pytest.raises(ValueError):
+        handle_command(request_line, FakeCapture(), controller)
+    assert controller.calls == []
+
+
+def test_handle_command_down_passes_chords():
+    controller = FakeController()
+    reply = handle_command("down a LS:0,1\n", FakeCapture(), controller)
+    assert controller.calls == [("down", [pad("A"), pad(LS=(0.0, 1.0))])]
+    assert reply == "ok held=(fake)"
+
+
+def test_handle_command_up_passes_targets():
+    controller = FakeController()
+    reply = handle_command("up a+ls B\n", FakeCapture(), controller)
+    assert controller.calls == [("up", frozenset({"A", "LS", "B"}))]
+    assert reply == "ok held=(fake)"
+
+
+@pytest.mark.parametrize("request_line", ["up ALL\n", "up all\n"])
+def test_handle_command_up_all_releases_everything(request_line):
+    controller = FakeController()
+    reply = handle_command(request_line, FakeCapture(), controller)
+    assert controller.calls == [("up_all",)]
+    assert reply == "ok held=none"
+
+
+@pytest.mark.parametrize("request_line", ["up FOO\n", "up LS:0,1\n", "up A+\n"])
+def test_handle_command_up_rejects_invalid_target(request_line):
+    controller = FakeController()
+    with pytest.raises(ValueError):
+        handle_command(request_line, FakeCapture(), controller)
+    assert controller.calls == []
 
 
 def test_handle_command_shot_passes_path_and_timeout():
     capture = FakeCapture()
-    reply = handle_command("shot 3.0 /tmp/my screen.png\n", capture, FakeBridge())
+    reply = handle_command("shot 3.0 /tmp/my screen.png\n", capture, FakeController())
     assert capture.shots == [("/tmp/my screen.png", 3.0)]
     assert reply == "ok /tmp/my screen.png settled=True waited=0.30s"
 
 
-def test_handle_command_status_includes_bridge_state():
-    reply = handle_command("status\n", FakeCapture(), FakeBridge())
-    assert reply == "ok frames=10 ffmpeg_drops=0 ended=False bridge_alive=True"
+def test_handle_command_status_includes_bridge_and_controller_state():
+    reply = handle_command("status\n", FakeCapture(), FakeController())
+    assert reply == (
+        "ok frames=10 ffmpeg_drops=0 ended=False bridge_alive=True "
+        "held=A holds=B+RIGHT:1200ms last_error=none"
+    )
 
 
-@pytest.mark.parametrize("request_line", ["jump\n", "tap\n", "hold A\n"])
+@pytest.mark.parametrize(
+    "request_line",
+    [
+        "jump\n",
+        "tap\n",
+        "hold A\n",
+        "hold A 100 200\n",
+        "down\n",
+        "up\n",
+    ],
+)
 def test_handle_command_rejects_unknown_or_malformed_command(request_line):
-    bridge = FakeBridge()
-    reply = handle_command(request_line, FakeCapture(), bridge)
+    controller = FakeController()
+    reply = handle_command(request_line, FakeCapture(), controller)
     assert reply == f"error unknown command: {request_line.strip()}"
-    assert bridge.taps == []
+    assert controller.calls == []

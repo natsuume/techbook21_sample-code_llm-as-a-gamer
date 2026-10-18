@@ -8,7 +8,9 @@
     capture_command      ffmpeg.exe のコマンド組み立てとフレームの読み取り
     still_detection      画面の静止判定 (純粋関数)
     capture              キャプチャの常駐と撮影
-    controller_bridge    controller_bridge.ps1 の常駐とボタン入力
+    controller_state     押下状態の解釈・合成・レポート化 (純粋関数)
+    controller           押下状態の保持とレポートの送信
+    controller_bridge    controller_bridge.ps1 の常駐とレポートの送信
     commands             1 行コマンドの解釈と実行
     daemon               Unix ソケットでコマンドを受け付ける常駐デーモン (switch2-remote-daemon)
     client               デーモンにコマンドを送るクライアント (switch2-remote)
