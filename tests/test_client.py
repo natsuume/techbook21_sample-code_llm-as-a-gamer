@@ -22,32 +22,46 @@ def test_build_request_passes_chords_and_sticks_through():
     assert build_request(["down", "LS:0.5,-1+A"]) == "down LS:0.5,-1+A\n"
 
 
-def test_build_request_reorders_shot_with_default_timeout():
-    assert build_request(["shot", "/tmp/screen.png"]) == "shot 5.0 /tmp/screen.png\n"
-
-
-def test_build_request_reorders_shot_with_timeout():
-    assert build_request(["shot", "/tmp/screen.png", "3"]) == (
-        "shot 3.0 /tmp/screen.png\n"
-    )
+def test_build_request_sends_shot_with_absolute_path():
+    assert build_request(["shot", "/tmp/screen.png"]) == "shot /tmp/screen.png\n"
 
 
 def test_build_request_makes_shot_path_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert build_request(["shot", "screen.png"]) == (
-        f"shot 5.0 {tmp_path / 'screen.png'}\n"
+        f"shot {tmp_path / 'screen.png'}\n"
     )
 
 
 def test_build_request_keeps_spaces_in_shot_path():
     assert build_request(["shot", "/tmp/my screen.png"]) == (
-        "shot 5.0 /tmp/my screen.png\n"
+        "shot /tmp/my screen.png\n"
     )
 
 
-def test_build_request_rejects_non_numeric_shot_timeout():
-    with pytest.raises(ValueError):
-        build_request(["shot", "/tmp/screen.png", "soon"])
+@pytest.mark.parametrize(
+    "args", [["shot"], ["shot", "/tmp/a.png", "5"], ["shot", "/tmp/a.png", "b.png"]]
+)
+def test_build_request_rejects_shot_without_exactly_one_path(args):
+    with pytest.raises(ValueError, match="usage: shot PATH"):
+        build_request(args)
+
+
+@pytest.mark.parametrize(
+    "argv", [["switch2-remote", "shot"], ["switch2-remote", "shot", "/tmp/a.png", "5"]]
+)
+def test_main_does_not_send_shot_without_exactly_one_path(monkeypatch, capsys, argv):
+    def fail_if_connecting(*args):
+        raise AssertionError("must not connect to daemon")
+
+    monkeypatch.setattr(client.socket, "socket", fail_if_connecting)
+    monkeypatch.setattr(client.sys, "argv", argv)
+    assert client.main() == 1
+    assert capsys.readouterr().err == "error usage: shot PATH\n"
+
+
+def test_build_request_passes_fps_through():
+    assert build_request(["fps", "12"]) == "fps 12\n"
 
 
 @pytest.mark.parametrize("arg", ["A\nquit", "A\r"])

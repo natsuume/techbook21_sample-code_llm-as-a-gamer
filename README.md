@@ -41,9 +41,9 @@ ch01_setup/            第1章のサンプル
 | ファイル | 役割 |
 |---|---|
 | `ffmpeg_locator.py` | Windows 側に winget で導入した ffmpeg.exe を探す |
-| `capture_command.py` | ffmpeg.exe のコマンド (720p NV12 無変換) を組み立て、標準出力からフレームを読み取る |
-| `still_detection.py` | フレーム間の動き量から画面の静止を判定する |
-| `capture.py` | ffmpeg.exe を起動したまま保持し、最新フレームと静止判定から撮影する |
+| `capture_command.py` | ffmpeg.exe のコマンド (NV12、デバイスの 1280x720・60fps を出力側で間引き・縮小する) を組み立て、標準出力からフレームを読み取る |
+| `frame_buffer.py` | 受け取ったフレームを処理レートに間引き、直近の一定時間分を保持する |
+| `capture.py` | ffmpeg.exe を起動したままにし、間引いたフレームを直近の一定時間分保持して、最新フレームを撮影する |
 | `controller_state.py` | ボタン・スティックの指定を解釈し、押下状態を合成してゲームパッドのレポートを組み立てる |
 | `controller.py` | 押し続けている入力と時間を指定した長押しを保持し、変化のたびにレポートをブリッジへ送る |
 | `controller_bridge.py` | controller_bridge.ps1 を起動したまま保持し、送るレポートを差し替える |

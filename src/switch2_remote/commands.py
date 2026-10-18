@@ -17,9 +17,12 @@ CHORD は SPEC (ボタン名か LS:x,y / RS:x,y) を + でつないだもので�
                            応答: ok held=<down で押したままの入力。無ければ none>
     up ALL                 down と hold で押している入力をすべて離す (ALL は大文字小文字を区別しない)
                            応答: ok held=none
-    shot TIMEOUT PATH      コマンド受信後のフレームで画面が STABLE_FRAMES 枚静止するまで待ち (最大 TIMEOUT 秒, 0〜60)、PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
-    status                 受信フレーム数、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
-                           応答: ok frames=... ffmpeg_drops=... ended=... bridge_alive=... held=... holds=B+RIGHT:1200ms last_error=none
+    shot PATH              バッファーの最新フレームを待たずに PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
+                           応答: ok /tmp/screen.png
+    fps N                  処理レート (バッファーに残すフレームレート) を N (整数 1〜ffmpeg_fps) に変える
+                           応答: ok fps=12
+    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
+                           応答: ok frames=... buffered=... latest_age=0.05s ffmpeg_fps=... process_fps=... ffmpeg_drops=... ended=... bridge_alive=... held=... holds=B+RIGHT:1200ms last_error=none
 
 tap・hold・down は、既に押している入力と重なる CHORD (同じボタン、同じスティック、相反する十字キー) をエラーにし、何も送らない。
 上記以外のコマンドと引数の数が合わないコマンドには `error unknown command: ...` を返す。
@@ -33,8 +36,7 @@ from switch2_remote.controller import Controller
 from switch2_remote.controller_state import parse_chord, parse_up_targets
 
 HOLD_MS_MIN, HOLD_MS_MAX = 1, 60000
-# shot の待ち上限 (秒)。単一スレッドで処理するため、上限が無いと後続のコマンド (quit を含む) が止まる
-SHOT_TIMEOUT_MIN, SHOT_TIMEOUT_MAX = 0.0, 60.0
+PROCESS_FPS_MIN = 1  # 処理レートの下限。上限は Capture.ffmpeg_fps
 
 
 def parse_hold_ms(text: str) -> int:
@@ -44,27 +46,42 @@ def parse_hold_ms(text: str) -> int:
     return hold_ms
 
 
-def parse_shot(request: str) -> tuple[float, str]:
-    """`shot TIMEOUT PATH` を解釈する。PATH は空白を含みうるため、2 つ目の空白以降をすべてパスとして扱う。"""
-    parts = request.rstrip("\r\n").split(maxsplit=2)
-    if len(parts) != 3:
-        raise ValueError("usage: shot TIMEOUT ABSOLUTE_PATH")
-    timeout, path = float(parts[1]), parts[2]
-    if not (SHOT_TIMEOUT_MIN < timeout <= SHOT_TIMEOUT_MAX):
-        raise ValueError(
-            f"shot timeout must be in ({SHOT_TIMEOUT_MIN}, {SHOT_TIMEOUT_MAX}]: {parts[1]}"
-        )
+def parse_shot(request: str) -> str:
+    """`shot PATH` を解釈して PATH を返す。PATH は空白を含みうるため、1 つ目の空白以降をすべてパスとして扱う。
+
+    PATH が無い場合と、絶対パスでない場合は ValueError にする。
+    """
+    parts = request.rstrip("\r\n").split(maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError("usage: shot ABSOLUTE_PATH")
+    path = parts[1]
     if not os.path.isabs(path):
         raise ValueError(f"shot path must be absolute: {path}")
-    return timeout, path
+    return path
+
+
+def parse_fps(text: str, max_fps: int) -> int:
+    """`fps N` の N を解釈する。N は整数 PROCESS_FPS_MIN〜max_fps。
+
+    範囲外と整数でない N は、現在の範囲を含むメッセージ (例: `fps must be 1..30: 45`) の ValueError にする。
+    """
+    error = ValueError(f"fps must be {PROCESS_FPS_MIN}..{max_fps}: {text}")
+    try:
+        fps = int(text)
+    except ValueError:
+        raise error from None
+    if not PROCESS_FPS_MIN <= fps <= max_fps:
+        raise error
+    return fps
 
 
 def handle_command(request: str, capture: Capture, controller: Controller) -> str:
     """1 行コマンドを解釈し、Controller か Capture の対応する操作を呼んで応答の 1 行を返す。
 
-    文字列の解釈 (controller_state.parse_chord / parse_up_targets、parse_hold_ms、parse_shot) と振り分けだけを行う。
-    解釈できない CHORD・TARGET・MS は、何も送らずに ValueError にする。
+    文字列の解釈 (controller_state.parse_chord / parse_up_targets、parse_hold_ms、parse_shot、parse_fps) と振り分けだけを行う。
+    解釈できない CHORD・TARGET・MS・PATH・N は、何も送らずに ValueError にする。
     up の引数が ALL の 1 つだけなら controller.up_all() を呼ぶ。
+    fps の N の上限には capture.ffmpeg_fps を使う。
     status は capture.status() に ` bridge_alive=<controller.bridge.is_alive()> ` と controller.status_text() を続けた行を返す。
     """
     parts = request.split()
@@ -80,8 +97,9 @@ def handle_command(request: str, capture: Capture, controller: Controller) -> st
             return controller.up_all()
         return controller.up(parse_up_targets(args))
     if cmd == "shot":
-        timeout, path = parse_shot(request)
-        return capture.shot(path, timeout)
+        return capture.shot(parse_shot(request))
+    if cmd == "fps" and len(args) == 1:
+        return capture.set_process_fps(parse_fps(args[0], capture.ffmpeg_fps))
     if cmd == "status":
         return (
             f"{capture.status()} bridge_alive={controller.bridge.is_alive()} "

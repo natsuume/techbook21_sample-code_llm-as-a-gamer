@@ -6,7 +6,7 @@
 モジュール:
     ffmpeg_locator       Windows 側にある ffmpeg.exe の探索
     capture_command      ffmpeg.exe のコマンド組み立てとフレームの読み取り
-    still_detection      画面の静止判定 (純粋関数)
+    frame_buffer         フレームの間引きと直近の一定時間分の保持 (純粋なロジック)
     capture              キャプチャの常駐と撮影
     controller_state     押下状態の解釈・合成・レポート化 (純粋関数)
     controller           押下状態の保持とレポートの送信
