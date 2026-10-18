@@ -40,6 +40,7 @@ from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH, Capt
 from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge
+from switch2_remote.error_message import describe_error
 
 SOCKET_ADDRESS = (
     "\0switch2-remote"  # 抽象名前空間。ファイルパスの長さ制限と後片付けが不要
@@ -86,7 +87,7 @@ def serve_connection(
         try:
             reply = handle_command(request, capture, controller)
         except (RuntimeError, ValueError, OSError, cv2.error) as e:
-            reply = f"error {e!r}"
+            reply = f"error {describe_error(e)}"
         conn.sendall((reply + "\n").encode())
     except OSError:
         pass  # 応答前にクライアントが切断した場合は、その接続だけを捨てる
