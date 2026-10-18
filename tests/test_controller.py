@@ -178,6 +178,16 @@ def test_hold_can_press_again_right_after_previous_hold_expires():
     assert bridge.reports == [A, NEUTRAL, A]
 
 
+def test_command_reports_bridge_failure_when_expired_hold_cannot_be_released():
+    # 期限切れの hold を離す送信が失敗したら、衝突のエラーではなく送信の失敗を返す
+    bridge = FakeBridge(fail_at=1, fail_with=RuntimeError("bridge exited"))
+    controller, _, clock, _ = make_controller(bridge)
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    with pytest.raises(RuntimeError, match="bridge exited"):
+        controller.hold(pad("A"), 500)
+
+
 def test_hold_counts_duration_from_press_ack():
     # 押下のレポートの ack までに 0.6 秒かかるブリッジ
     clock = FakeClock()

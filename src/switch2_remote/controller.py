@@ -239,13 +239,14 @@ class Controller:
         最初の失敗の repr を last_error に記録して holds を変えない。
         """
         with self.lock:
-            self._release_expired_locked()
+            self._release_expired_locked(raise_on_failure=False)
 
-    def _release_expired_locked(self) -> None:
+    def _release_expired_locked(self, raise_on_failure: bool = True) -> None:
         """release_expired の本体。呼び出し側がロックを持つ。
 
         tap / hold / down / up も衝突の検証の前に呼び、期限を過ぎた hold が解放スレッドの次の確認まで
-        押されたままとして扱われないようにする。
+        押されたままとして扱われないようにする。コマンドから呼ぶとき (raise_on_failure=True) は、
+        送信の失敗を衝突のエラーに見せないよう、last_error に記録したうえで例外をそのまま出す。
         """
         now = self.clock()
         remaining = [hold for hold in self.holds if hold.release_at > now]
@@ -258,6 +259,8 @@ class Controller:
             # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
             if self.last_error is None:
                 self.last_error = repr(e)
+            if raise_on_failure:
+                raise
             return
         self.holds = remaining
 
