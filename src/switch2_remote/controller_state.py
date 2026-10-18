@@ -109,11 +109,11 @@ class PadState:
 
     def is_empty(self) -> bool:
         """ボタンもスティックも含まなければ True を返す。"""
-        raise NotImplementedError
+        return not self.buttons and not self.sticks
 
     def names(self) -> frozenset[str]:
         """含んでいるボタン名とスティック名 (LS / RS) の集合を返す。up の TARGET との照合に使う。"""
-        raise NotImplementedError
+        return self.buttons | frozenset(self.sticks)
 
 
 def parse_stick_spec(spec: str) -> tuple[str, float, float]:
@@ -121,7 +121,13 @@ def parse_stick_spec(spec: str) -> tuple[str, float, float]:
 
     STICK_SPEC_PATTERN に fullmatch しないもの、x か y が -1.0〜1.0 の範囲外のものは ValueError にする。
     """
-    raise NotImplementedError
+    match = STICK_SPEC_PATTERN.fullmatch(spec)
+    if match is None:
+        raise ValueError(f"stick spec must be LS:X,Y or RS:X,Y with decimals: {spec}")
+    stick, x, y = match[1], float(match[2]), float(match[3])
+    if not (-1.0 <= x <= 1.0 and -1.0 <= y <= 1.0):
+        raise ValueError(f"stick values must be -1.0..1.0: {spec}")
+    return stick, x, y
 
 
 def parse_chord(text: str) -> PadState:
@@ -130,7 +136,20 @@ def parse_chord(text: str) -> PadState:
     空の要素、未知の SPEC、同じスティックの重複、十字キーの相反する方向は ValueError にする。
     同じボタンの重複は許す。
     """
-    raise NotImplementedError
+    buttons: set[str] = set()
+    sticks: dict[str, tuple[float, float]] = {}
+    for spec in text.upper().split("+"):
+        if spec in BUTTONS:
+            buttons.add(spec)
+            continue
+        if not spec.startswith(("LS:", "RS:")):
+            raise ValueError(f"unknown spec: {spec!r} in chord {text!r}")
+        stick, x, y = parse_stick_spec(spec)
+        if stick in sticks:
+            raise ValueError(f"duplicate stick in chord: {stick}")
+        sticks[stick] = (x, y)
+    dpad_to_hat(frozenset(buttons) & DPAD_DIRECTIONS)
+    return PadState(frozenset(buttons), sticks)
 
 
 def join_chords(chords: Sequence[PadState]) -> PadState:
@@ -139,7 +158,16 @@ def join_chords(chords: Sequence[PadState]) -> PadState:
     parse_chord に + でつないだ文字列を渡したときと同じ規則で検証する。
     同じボタンの重複は許し、同じスティックの重複と十字キーの相反する方向は ValueError にする。
     """
-    raise NotImplementedError
+    buttons: set[str] = set()
+    sticks: dict[str, tuple[float, float]] = {}
+    for chord in chords:
+        buttons |= chord.buttons
+        for stick, value in chord.sticks.items():
+            if stick in sticks:
+                raise ValueError(f"duplicate stick in chord: {stick}")
+            sticks[stick] = value
+    dpad_to_hat(frozenset(buttons) & DPAD_DIRECTIONS)
+    return PadState(frozenset(buttons), sticks)
 
 
 def parse_up_targets(texts: Sequence[str]) -> frozenset[str]:
@@ -148,7 +176,13 @@ def parse_up_targets(texts: Sequence[str]) -> frozenset[str]:
     各 TARGET は + でつないでもよい。空の要素と、ボタン名でも LS / RS でもない要素は ValueError にする。
     up ALL は commands.handle_command が先に振り分けるため、ここでは ALL を受け付けない。
     """
-    raise NotImplementedError
+    targets: set[str] = set()
+    for text in texts:
+        for name in text.upper().split("+"):
+            if name not in BUTTONS and name not in STICKS:
+                raise ValueError(f"unknown up target: {name!r}")
+            targets.add(name)
+    return frozenset(targets)
 
 
 def merge(base: PadState, chord: PadState) -> PadState:
@@ -159,12 +193,23 @@ def merge(base: PadState, chord: PadState) -> PadState:
         - chord のスティックが base で既に倒されている
         - 合成後の十字キーが相反する方向 (UP と DOWN、LEFT と RIGHT) を含む
     """
-    raise NotImplementedError
+    pressed_buttons = base.buttons & chord.buttons
+    if pressed_buttons:
+        raise ValueError(f"already pressed: {' '.join(sorted(pressed_buttons))}")
+    tilted_sticks = base.sticks.keys() & chord.sticks.keys()
+    if tilted_sticks:
+        raise ValueError(f"already tilted: {' '.join(sorted(tilted_sticks))}")
+    buttons = base.buttons | chord.buttons
+    dpad_to_hat(buttons & DPAD_DIRECTIONS)
+    return PadState(buttons, {**base.sticks, **chord.sticks})
 
 
 def merge_all(layers: Iterable[PadState]) -> PadState:
     """held・各 hold・tapping などの層を merge で順に合成した状態を返す。何も無ければ空の状態を返す。"""
-    raise NotImplementedError
+    state = PadState()
+    for layer in layers:
+        state = merge(state, layer)
+    return state
 
 
 def add_to_held(held: PadState, holds: PadState, chord: PadState) -> PadState:
@@ -175,7 +220,13 @@ def add_to_held(held: PadState, holds: PadState, chord: PadState) -> PadState:
     - chord のボタン・スティックが holds にもあれば ValueError にする
     - 新しい held と holds を合わせた十字キーが相反する方向を含めば ValueError にする
     """
-    raise NotImplementedError
+    held_by_hold = chord.names() & holds.names()
+    if held_by_hold:
+        raise ValueError(f"pressed by hold: {' '.join(sorted(held_by_hold))}")
+    buttons = held.buttons | chord.buttons
+    dpad_to_hat((buttons | holds.buttons) & DPAD_DIRECTIONS)
+    # chord の値を後に置き、held にあるスティックを新しい値で置き換える
+    return PadState(buttons, {**held.sticks, **chord.sticks})
 
 
 def remove_targets(state: PadState, targets: frozenset[str]) -> PadState:
@@ -183,7 +234,10 @@ def remove_targets(state: PadState, targets: frozenset[str]) -> PadState:
 
     state に無い名前は無視する。押されていない TARGET のエラーは呼び出し側 (Controller.up) が判定する。
     """
-    raise NotImplementedError
+    sticks = {
+        stick: value for stick, value in state.sticks.items() if stick not in targets
+    }
+    return PadState(state.buttons - targets, sticks)
 
 
 def stick_axis_to_byte(value: float) -> int:
@@ -192,12 +246,17 @@ def stick_axis_to_byte(value: float) -> int:
     round(128 + value * (127 if value >= 0 else 128)) で変換する。正側は 127 段、負側は 128 段とし、
     両端がちょうど 255 と 0 になるようにする。round は Python の偶数丸め。
     """
-    raise NotImplementedError
+    scale = 127 if value >= 0 else 128
+    return round(STICK_NEUTRAL + value * scale)
 
 
 def dpad_to_hat(directions: frozenset[str]) -> int:
     """十字キーの押下方向の組を DPAD_HAT で hat の値にする。相反する方向の組は ValueError にする。"""
-    raise NotImplementedError
+    if directions not in DPAD_HAT:
+        raise ValueError(
+            f"conflicting d-pad directions: {' '.join(sorted(directions))}"
+        )
+    return DPAD_HAT[directions]
 
 
 def build_report(state: PadState) -> bytes:
@@ -205,12 +264,27 @@ def build_report(state: PadState) -> bytes:
 
     倒していないスティックは中立 (128, 128) にする。LY / RY には -y を変換した値を入れる。
     """
-    raise NotImplementedError
+    report = bytearray(NEUTRAL_REPORT)
+    for button in state.buttons:
+        if button in BUTTON_BITS:
+            index, bit = BUTTON_BITS[button]
+            report[index] |= bit
+    report[2] = dpad_to_hat(state.buttons & DPAD_DIRECTIONS)
+    for stick, (x, y) in state.sticks.items():
+        x_index = 3 if stick == "LS" else 5
+        report[x_index] = stick_axis_to_byte(x)
+        report[x_index + 1] = stick_axis_to_byte(-y)
+    return bytes(report)
 
 
 def format_state(state: PadState) -> str:
     """押下状態を正規化表記 (例: A+RIGHT+LS:0.5,-1) にする。空なら none を返す。"""
-    raise NotImplementedError
+    parts = [button for button in BUTTON_ORDER if button in state.buttons]
+    for stick in STICK_ORDER:
+        if stick in state.sticks:
+            x, y = state.sticks[stick]
+            parts.append(f"{stick}:{format(x, 'g')},{format(y, 'g')}")
+    return "+".join(parts) if parts else "none"
 
 
 def format_holds(holds: Sequence[tuple[PadState, int]]) -> str:
@@ -219,4 +293,6 @@ def format_holds(holds: Sequence[tuple[PadState, int]]) -> str:
     各 hold を `B+RIGHT:1200ms` の形で書いて , でつなぐ。hold が無ければ none を返す。
     残り ms の算出 (切り捨て) は呼び出し側 (Controller.status_text) が行う。
     """
-    raise NotImplementedError
+    if not holds:
+        return "none"
+    return ",".join(f"{format_state(chord)}:{ms}ms" for chord, ms in holds)

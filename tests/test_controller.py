@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from switch2_remote.controller import Controller
@@ -351,3 +353,24 @@ def test_release_failure_is_recorded_in_last_error():
     assert controller.status_text() == (
         "held=none holds=A:0ms last_error=RuntimeError('bridge exited')"
     )
+
+
+# --- 解放スレッド ---
+
+
+def test_release_timer_releases_expired_hold_until_close():
+    bridge = FakeBridge()
+    clock = FakeClock()
+    controller = Controller(bridge, clock=clock, start_timer=True)
+    timer_thread = controller.timer_thread
+    try:
+        controller.hold(pad("A"), 1000)
+        clock.now = 1.0
+        # 解放スレッドが RELEASE_CHECK_INTERVAL ごとに確かめるため、実時間で少し待つ
+        deadline = time.monotonic() + 2.0
+        while bridge.reports[-1] != NEUTRAL and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert bridge.reports == [A, NEUTRAL]
+    finally:
+        controller.close()
+    assert not timer_thread.is_alive()

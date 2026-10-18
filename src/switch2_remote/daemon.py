@@ -27,6 +27,7 @@ import cv2
 
 from switch2_remote.capture import Capture
 from switch2_remote.commands import handle_command
+from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge
 
 SOCKET_ADDRESS = (
@@ -43,7 +44,9 @@ def peer_uid(conn: socket.socket) -> int:
     return struct.unpack("3i", creds)[1]
 
 
-def serve_connection(conn: socket.socket, capture: Capture, bridge: Bridge) -> bool:
+def serve_connection(
+    conn: socket.socket, capture: Capture, controller: Controller
+) -> bool:
     """1 接続分のコマンドを処理し、quit を受けたら True を返す。
 
     抽象名前空間のソケットにはファイル権限が無いため、デーモンと同じユーザー以外からの接続は拒否する。
@@ -63,7 +66,7 @@ def serve_connection(conn: socket.socket, capture: Capture, bridge: Bridge) -> b
             conn.sendall(b"bye\n")
             return True
         try:
-            reply = handle_command(request, capture, bridge)
+            reply = handle_command(request, capture, controller)
         except (RuntimeError, ValueError, OSError, cv2.error) as e:
             reply = f"error {e!r}"
         conn.sendall((reply + "\n").encode())
@@ -74,9 +77,11 @@ def serve_connection(conn: socket.socket, capture: Capture, bridge: Bridge) -> b
 
 def main():
     bridge = Bridge()
+    controller = None
     capture = None
     server = None
     try:
+        controller = Controller(bridge)
         capture = Capture()
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_ADDRESS)
@@ -85,9 +90,12 @@ def main():
         while True:
             conn, _ = server.accept()
             with conn:
-                if serve_connection(conn, capture, bridge):
+                if serve_connection(conn, capture, controller):
                     break
     finally:
+        # 解放スレッドを止めてからブリッジを閉じ、hold の解放がブリッジの終了と重ならないようにする
+        if controller is not None:
+            controller.close()
         bridge.close()
         if capture is not None:
             capture.close()

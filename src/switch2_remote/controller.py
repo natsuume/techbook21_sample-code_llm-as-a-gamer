@@ -20,12 +20,25 @@ tap の待ち (sleep) はロックの外で行う (tap の待ち中も hold の�
 送信 (bridge.set_report) に成功してから内部状態を確定するため、送信に失敗した操作は押下状態を変えない。
 """
 
+import math
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from switch2_remote.controller_state import PadState
+from switch2_remote.controller_bridge import UnconfirmedInputError
+from switch2_remote.controller_state import (
+    PadState,
+    add_to_held,
+    build_report,
+    format_holds,
+    format_state,
+    join_chords,
+    merge,
+    merge_all,
+    remove_targets,
+)
 
 TAP_PRESS_MS = 120  # tap で CHORD を押している時間
 TAP_RELEASE_MS = 100  # tap で CHORD を離した後の待ち
@@ -65,7 +78,22 @@ class Controller:
         sleep: Callable[[float], None] = time.sleep,
         start_timer: bool = True,
     ):
-        raise NotImplementedError
+        self.bridge = bridge
+        self.clock = clock
+        self.sleep = sleep
+        # 状態の変更と送信をまとめて守るロック。デーモンのコマンド処理と解放スレッドが共有する
+        self.lock = threading.Lock()
+        self.held = PadState()
+        self.holds: list[ActiveHold] = []
+        self.tapping = PadState()
+        self.last_error: str | None = None
+        self.stop_timer = threading.Event()
+        self.timer_thread: threading.Thread | None = None
+        if start_timer:
+            self.timer_thread = threading.Thread(
+                target=self._run_release_timer, daemon=True
+            )
+            self.timer_thread.start()
 
     def tap(self, chords: Sequence[PadState]) -> str:
         """CHORD を順に押して離し、全 CHORD を送り終えてから応答を返す。
@@ -80,7 +108,37 @@ class Controller:
         `error <例外の repr> (already sent: <押して離すまで送り終えた CHORD を空白区切り。無ければ none>; unconfirmed: <例外が UnconfirmedInputError なら失敗した CHORD、それ以外は none>)`
         を返す。
         """
-        raise NotImplementedError
+        with self.lock:
+            pressed = merge_all([self.held, *self._hold_chords(self.holds)])
+            for chord in chords:
+                merge(pressed, chord)
+        sent: list[str] = []
+        for index, chord in enumerate(chords):
+            try:
+                with self.lock:
+                    self._send(self.held, self.holds, chord)
+                    self.tapping = chord
+                self.sleep(TAP_PRESS_MS / 1000)
+                with self.lock:
+                    self._send(self.held, self.holds, PadState())
+                    self.tapping = PadState()
+            except (RuntimeError, OSError) as e:
+                already_sent = " ".join(sent) if sent else "none"
+                # ack を確認できなかった CHORD は、届いた可能性があるため未送信と区別して報告する
+                unconfirmed = (
+                    format_state(chord)
+                    if isinstance(e, UnconfirmedInputError)
+                    else "none"
+                )
+                return (
+                    f"error {e!r} (already sent: {already_sent}; "
+                    f"unconfirmed: {unconfirmed})"
+                )
+            sent.append(format_state(chord))
+            self.sleep(TAP_RELEASE_MS / 1000)
+            if index < len(chords) - 1:
+                self.sleep(TAP_INTERVAL_MS / 1000)
+        return f"ok tap {' '.join(sent)}"
 
     def hold(self, chord: PadState, ms: int) -> str:
         """「現在の合成状態 + chord」を送り、送れたらすぐ `ok hold B+RIGHT 2000ms` を返す。
@@ -88,7 +146,13 @@ class Controller:
         ms は commands.parse_hold_ms で検証済み (1〜60000) の値。解放の期限は clock() + ms / 1000。
         衝突の検証は tap と同じで、衝突すれば何も送らずに ValueError にする。
         """
-        raise NotImplementedError
+        with self.lock:
+            pressed = merge_all([self.held, *self._hold_chords(self.holds)])
+            merge(pressed, chord)
+            new_holds = [*self.holds, ActiveHold(chord, self.clock() + ms / 1000)]
+            self._send(self.held, new_holds, self.tapping)
+            self.holds = new_holds
+        return f"ok hold {format_state(chord)} {ms}ms"
 
     def down(self, chords: Sequence[PadState]) -> str:
         """全 CHORD を 1 つにつないだもの (controller_state.join_chords) を held に加え、合成状態を送る。
@@ -97,7 +161,12 @@ class Controller:
         holds にあるボタン・スティックとの重複と、十字キーの相反は何も送らずに ValueError にする。
         応答: `ok held=<held の正規化表記>`
         """
-        raise NotImplementedError
+        with self.lock:
+            holds_state = merge_all(self._hold_chords(self.holds))
+            new_held = add_to_held(self.held, holds_state, join_chords(chords))
+            self._send(new_held, self.holds, self.tapping)
+            self.held = new_held
+            return f"ok held={format_state(self.held)}"
 
     def up(self, targets: frozenset[str]) -> str:
         """targets (ボタン名とスティック名 LS / RS) を held と holds の両方から離し、合成状態を送る。
@@ -106,21 +175,50 @@ class Controller:
         targets のうち 1 つでも held にも holds にも無ければ、何も送らずに ValueError にする。
         応答: `ok held=<held の正規化表記>`
         """
-        raise NotImplementedError
+        with self.lock:
+            pressed = self.held.names()
+            for hold in self.holds:
+                pressed |= hold.chord.names()
+            not_pressed = targets - pressed
+            if not_pressed:
+                raise ValueError(f"not pressed: {' '.join(sorted(not_pressed))}")
+            new_held = remove_targets(self.held, targets)
+            new_holds = []
+            for hold in self.holds:
+                rest = remove_targets(hold.chord, targets)
+                if not rest.is_empty():
+                    new_holds.append(ActiveHold(rest, hold.release_at))
+            self._send(new_held, new_holds, self.tapping)
+            self.held, self.holds = new_held, new_holds
+            return f"ok held={format_state(self.held)}"
 
     def up_all(self) -> str:
         """held と holds をすべて空にして合成状態を送る。何も押されていなくてもエラーにしない。
 
         応答: `ok held=none`
         """
-        raise NotImplementedError
+        with self.lock:
+            self._send(PadState(), [], self.tapping)
+            self.held, self.holds = PadState(), []
+        return "ok held=none"
 
     def status_text(self) -> str:
         """`held=<held の表記> holds=<holds の表記> last_error=<最後のバックグラウンド送信の失敗の repr。無ければ none>` を返す。
 
         holds の表記は controller_state.format_holds の形式で、残り時間は (release_at - clock()) を ms にして切り捨てた整数。
         """
-        raise NotImplementedError
+        with self.lock:
+            now = self.clock()
+            holds = format_holds(
+                [
+                    (hold.chord, max(0, math.floor((hold.release_at - now) * 1000)))
+                    for hold in self.holds
+                ]
+            )
+            last_error = self.last_error if self.last_error is not None else "none"
+            return (
+                f"held={format_state(self.held)} holds={holds} last_error={last_error}"
+            )
 
     def release_expired(self) -> None:
         """期限 (release_at <= clock()) を過ぎた hold を外し、外した後の合成状態を送る。
@@ -129,8 +227,38 @@ class Controller:
         期限切れの hold が無ければ何も送らない。送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
         その repr を last_error に記録して holds を変えない。
         """
-        raise NotImplementedError
+        with self.lock:
+            now = self.clock()
+            remaining = [hold for hold in self.holds if hold.release_at > now]
+            if len(remaining) == len(self.holds):
+                return
+            try:
+                self._send(self.held, remaining, self.tapping)
+            except (RuntimeError, OSError) as e:
+                # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する
+                self.last_error = repr(e)
+                return
+            self.holds = remaining
 
     def close(self) -> None:
         """解放スレッドを止める。押下状態の中立化は、ブリッジの終了処理 (中立を 200ms 送る) に任せる。"""
-        raise NotImplementedError
+        self.stop_timer.set()
+        if self.timer_thread is not None:
+            self.timer_thread.join()
+            self.timer_thread = None
+
+    def _run_release_timer(self) -> None:
+        """close() まで、RELEASE_CHECK_INTERVAL ごとに期限切れの hold を外す (解放スレッドの本体)。"""
+        while not self.stop_timer.wait(RELEASE_CHECK_INTERVAL):
+            self.release_expired()
+
+    @staticmethod
+    def _hold_chords(holds: Sequence[ActiveHold]) -> list[PadState]:
+        return [hold.chord for hold in holds]
+
+    def _send(
+        self, held: PadState, holds: Sequence[ActiveHold], tapping: PadState
+    ) -> None:
+        """3 層を合成したレポートを送る。呼び出し側がロックを持つ。失敗したら例外をそのまま出す。"""
+        layers = [held, *self._hold_chords(holds), tapping]
+        self.bridge.set_report(build_report(merge_all(layers)))

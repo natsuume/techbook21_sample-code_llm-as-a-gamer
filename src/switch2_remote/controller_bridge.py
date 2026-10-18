@@ -23,6 +23,9 @@ BRIDGE_SCRIPT = os.path.join(
 )
 BRIDGE_READY_TIMEOUT = 30.0  # PowerShell の起動と COM ポートを開くまでの上限 (秒)
 BRIDGE_ACK_TIMEOUT = 2.0  # set を書き込んでから ack が返るまでの上限 (秒)
+# broken にしたブリッジに quit を送ってから、プロセスの終了を待つ上限 (秒)
+BRIDGE_QUIT_TIMEOUT = 1.0
+REPORT_BYTES = 8
 
 
 class UnconfirmedInputError(RuntimeError):
@@ -33,6 +36,10 @@ class Bridge:
     """controller_bridge.ps1 を常駐させ、set コマンドでレポートを差し替えて ack を待つ。
 
     set_report は書き込みと ack 待ちを 1 つのロックで囲むため、複数のスレッドから呼んでよい。
+    ack のタイムアウト、想定外の応答、ack 前の出力の終了 (EOF) ではブリッジを broken にし、以後は使わない。
+    broken にしたときは、押されたままの入力を残さないよう best-effort でブリッジを終了させる
+    (quit を書く → 最大 BRIDGE_QUIT_TIMEOUT 秒終了を待つ → 終わらなければ kill)。
+    ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
     """
 
     def __init__(self):
@@ -60,6 +67,8 @@ class Bridge:
         self.lines: queue.Queue[str | None] = queue.Queue()
         # 応答が期限内に来なかった後は、遅れて届く応答と対応がずれるため使わない
         self.broken = False
+        # set の書き込みと ack 待ちの組を、デーモンのコマンド処理と hold の解放スレッドの間で混ぜないためのロック
+        self.lock = threading.Lock()
         threading.Thread(target=self._read_stdout, daemon=True).start()
         try:
             line = self._next_line(BRIDGE_READY_TIMEOUT)
@@ -95,7 +104,46 @@ class Bridge:
         - ack の前に出力が終われば (EOF) RuntimeError にする (broken にする)
         - `ack <同じ16進> ` で始まらない応答は UnconfirmedInputError にする (broken にする)
         """
-        raise NotImplementedError
+        if len(report) != REPORT_BYTES:
+            raise ValueError(f"report must be {REPORT_BYTES} bytes: {report.hex()}")
+        report_hex = report.hex()
+        with self.lock:
+            if not self.is_alive():
+                raise RuntimeError(
+                    "controller bridge is not usable; restart the daemon"
+                )
+            self.proc.stdin.write(f"set {report_hex}\n")
+            self.proc.stdin.flush()
+            # 書き込んだ後は、応答が無くてもブリッジが遅れてレポートを送る可能性があるため未確認として扱う
+            try:
+                ack = self._next_line(BRIDGE_ACK_TIMEOUT)
+            except queue.Empty as e:
+                self._stop_broken_bridge()
+                raise UnconfirmedInputError("no ack from bridge in time") from e
+            if ack is None:
+                self._stop_broken_bridge()
+                raise RuntimeError("controller bridge exited before ack")
+            if not ack.startswith(f"ack {report_hex} "):
+                self._stop_broken_bridge()
+                raise UnconfirmedInputError(f"unexpected bridge reply: {ack}")
+            return ack
+
+    def _stop_broken_bridge(self) -> None:
+        """ブリッジを broken にし、best-effort で終了させる。
+
+        quit を書き (書き込みの例外は無視する)、最大 BRIDGE_QUIT_TIMEOUT 秒プロセスの終了を待ち、
+        終わらなければ kill する。出力の終了は一度しか届かないため、broken にした後は書き込まない。
+        """
+        self.broken = True
+        try:
+            self.proc.stdin.write("quit\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass  # 既に終了したブリッジでは、標準入力が閉じている
+        try:
+            self.proc.wait(timeout=BRIDGE_QUIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
 
     def close(self):
         try:

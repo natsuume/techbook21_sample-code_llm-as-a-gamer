@@ -30,6 +30,7 @@ import os
 
 from switch2_remote.capture import Capture
 from switch2_remote.controller import Controller
+from switch2_remote.controller_state import parse_chord, parse_up_targets
 
 HOLD_MS_MIN, HOLD_MS_MAX = 1, 60000
 # shot の待ち上限 (秒)。単一スレッドで処理するため、上限が無いと後続のコマンド (quit を含む) が止まる
@@ -66,4 +67,24 @@ def handle_command(request: str, capture: Capture, controller: Controller) -> st
     up の引数が ALL の 1 つだけなら controller.up_all() を呼ぶ。
     status は capture.status() に ` bridge_alive=<controller.bridge.is_alive()> ` と controller.status_text() を続けた行を返す。
     """
-    raise NotImplementedError
+    parts = request.split()
+    cmd, args = parts[0], parts[1:]
+    if cmd == "tap" and args:
+        return controller.tap([parse_chord(arg) for arg in args])
+    if cmd == "hold" and len(args) == 2:
+        return controller.hold(parse_chord(args[0]), parse_hold_ms(args[1]))
+    if cmd == "down" and args:
+        return controller.down([parse_chord(arg) for arg in args])
+    if cmd == "up" and args:
+        if len(args) == 1 and args[0].upper() == "ALL":
+            return controller.up_all()
+        return controller.up(parse_up_targets(args))
+    if cmd == "shot":
+        timeout, path = parse_shot(request)
+        return capture.shot(path, timeout)
+    if cmd == "status":
+        return (
+            f"{capture.status()} bridge_alive={controller.bridge.is_alive()} "
+            f"{controller.status_text()}"
+        )
+    return f"error unknown command: {' '.join(parts)}"
