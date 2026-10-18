@@ -102,33 +102,48 @@ uv run switch2-remote-daemon
 ```bash
 uv run switch2-remote status                  # 動作状況を確かめる
 uv run switch2-remote tap RIGHT RIGHT A       # RIGHT、RIGHT、A を順に押す
-uv run switch2-remote hold A 500              # A を 500 ミリ秒押し続ける
+uv run switch2-remote tap L+R                 # L と R を同時に押す
+uv run switch2-remote hold B+RIGHT 2000       # B と RIGHT を同時に 2000 ミリ秒押す
+uv run switch2-remote down LS:0,1             # 左スティックを上に倒したままにする
+uv run switch2-remote up ALL                  # 押したままの入力をすべて離す
 uv run switch2-remote shot /tmp/screen.png 5  # 画面が止まるまで最大 5 秒待ち、PNG で保存する
 uv run switch2-remote quit                    # ブリッジとキャプチャーを止めてデーモンを終了する
 ```
 
+入力のコマンドでは、ボタンとスティックを次の形で指定します。
+
+- ボタン名: `A` `B` `X` `Y` `L` `R` `ZL` `ZR` `PLUS` `MINUS` `HOME` `UP` `RIGHT` `DOWN` `LEFT`。小文字で書いても受け付けます
+- スティック: `LS:x,y` (左) / `RS:x,y` (右)。x は右、y は上を正とし、-1.0〜1.0 の小数で書きます (例: `LS:0.5,-1`)
+- 同時押し: `+` でつなぎます (例: `A+B`、`B+LS:1,0`)。十字キーの 2 方向 (`UP+RIGHT` など) は斜めになります。`UP+DOWN` と `LEFT+RIGHT` はエラーです
+
 | コマンド | 動作 |
 |---|---|
-| `tap BTN [BTN ...]` | ボタンを順に押します。1 つあたり押下 120 ミリ秒、ボタン間の待ちは 150 ミリ秒です。不明なボタン名が 1 つでもあれば、何も送らずにエラーを返します |
-| `hold BTN MS` | ボタンを MS ミリ秒 (1〜5000) 押し続けます |
+| `tap CHORD [CHORD ...]` | CHORD (`+` でつないだ指定) を順に短く押します。1 つあたり押下 120 ミリ秒、離して 100 ミリ秒、次の CHORD までの待ちは 150 ミリ秒です。すべてを送り終えてから応答します |
+| `hold CHORD MS` | CHORD を MS ミリ秒 (1〜60000) 押します。押し始めた時点で応答し、MS ミリ秒たつとデーモンが離します。押している間も他のコマンドを送れます |
+| `down CHORD [CHORD ...]` | `up` で離すまで押したままにします。押したままのスティックを `down` で指定し直すと、新しい値に変わります |
+| `up TARGET [TARGET ...]` | 指定したボタン、または `LS` / `RS` を離します。`down` と `hold` のどちらで押したものも離れます。`up ALL` はすべてを離します |
 | `shot PATH [TIMEOUT]` | コマンドを受け取った後のフレームで、画面が 10 フレーム続けて止まるまで最大 TIMEOUT 秒 (省略時 5 秒、0 より大きく 60 以下) 待ち、PATH に PNG で保存します。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
-| `status` | 受信フレーム数、ffmpeg のフレーム落ち回数、キャプチャーの終了、ブリッジの生存を返します |
+| `status` | 受信フレーム数、ffmpeg のフレーム落ち回数、キャプチャーの終了、ブリッジの生存、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
 | `quit` | ブリッジとキャプチャーを止めてデーモンを終了します |
 
-ボタン名は `A` `B` `X` `Y` `L` `R` `ZL` `ZR` `PLUS` `MINUS` `HOME` `UP` `RIGHT` `DOWN` `LEFT` `LR` です。`LR` は L と R の同時押しです。小文字で書いても受け付けます。
+送るレポートは、`down` で押したままの入力、`hold` で押している入力、`tap` で押している入力を重ねたものです。`tap` と `hold` が終わると、`down` で押したままの状態に戻ります。たとえば `down LS:0,1` の後に `tap X` を送ると、左スティックを上に倒したまま X を押せます。すでに押されているボタンやスティックを `tap` / `hold` で押そうとした場合や、十字キーの相反する方向が重なる場合は、何も送らずにエラーを返します。
 
 応答の例を示します。
 
 ```text
+$ uv run switch2-remote down LS:0,1
+ok held=LS:0,1
+$ uv run switch2-remote hold B 3000
+ok hold B 3000ms
 $ uv run switch2-remote status
-ok frames=1234 ffmpeg_drops=0 ended=False bridge_alive=True
+ok frames=1234 ffmpeg_drops=0 ended=False bridge_alive=True held=LS:0,1 holds=B:2480ms last_error=none
 $ uv run switch2-remote shot /tmp/screen.png 5
 ok /tmp/screen.png settled=True waited=0.25s
 ```
 
 `shot` の `settled=False` は、TIMEOUT までに画面が止まらなかったことを示します。その場合も、その時点の最新フレームを保存します。
 
-応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。ブリッジとの通信が途切れると `status` の `bridge_alive` が `False` になり、以後の入力を受け付けなくなります。その場合はデーモンを起動し直してください。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。
+応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。ブリッジとの通信が途切れると、デーモンはブリッジに終了を指示し (ブリッジは中立のレポートを送ってから終了します。1 秒以内に終わらなければプロセスを止めます)、`status` の `bridge_alive` が `False` になります。以後の入力は受け付けないので、デーモンを起動し直してください。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。
 
 デーモンは、デーモンと同じユーザー以外からの接続を拒否します。クライアントも、接続先が自分と同じユーザーのプロセスでなければ送信しません。
 
@@ -139,7 +154,7 @@ ok /tmp/screen.png settled=True waited=0.25s
 3. Pico 2 W の L と R を同時に押して 1P にし、A で確定します
 
 ```bash
-uv run switch2-remote tap LR
+uv run switch2-remote tap L+R
 uv run switch2-remote tap A
 ```
 
@@ -155,7 +170,7 @@ uv run switch2-remote tap A
 
 デーモンを起動し直した直後に、HOME 画面で RIGHT の短押し 2 回がカーソルに反映されなかったことがあります。その後の短押しは 1 回ずつ反映され、もう一度デーモンを起動し直したときは再現しませんでした。原因は確認できていません。起動直後は、決定を伴わない入力と撮影で反映を確かめてから操作を始めてください。
 
-このとき RIGHT を 400 ミリ秒長押しすると、カーソルが 3 つ進みました。HOME メニューのキーリピートによるものかは確認できていませんが、カーソル移動には長押し (`hold`) を使わず、短押し (`tap`) を使ってください。また、HOME メニューのソフト一覧では、左端で LEFT を押すとカーソルが右端の「もっとみる」へ回り込みます。
+このとき RIGHT を 400 ミリ秒長押しすると、カーソルが 3 つ進みました。HOME メニューのキーリピートによるものかは確認できていませんが、カーソル移動には長押し (`hold` と `down`) を使わず、短押し (`tap`) を使ってください。また、HOME メニューのソフト一覧では、左端で LEFT を押すとカーソルが右端の「もっとみる」へ回り込みます。
 
 ### 静止判定が画面遷移の途中で成立することがある
 

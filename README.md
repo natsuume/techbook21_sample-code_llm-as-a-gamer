@@ -44,9 +44,11 @@ ch01_setup/            第1章のサンプル
 | `capture_command.py` | ffmpeg.exe のコマンド (720p NV12 無変換) を組み立て、標準出力からフレームを読み取る |
 | `still_detection.py` | フレーム間の動き量から画面の静止を判定する |
 | `capture.py` | ffmpeg.exe を起動したまま保持し、最新フレームと静止判定から撮影する |
-| `controller_bridge.py` | controller_bridge.ps1 を起動したまま保持し、ボタン入力を送る |
-| `controller_bridge.ps1` | Windows 側で COM ポートを開き、Pico 2 W にゲームパッドのレポートを送る |
-| `commands.py` | デーモンが受け取る 1 行コマンドを解釈して実行する |
+| `controller_state.py` | ボタン・スティックの指定を解釈し、押下状態を合成してゲームパッドのレポートを組み立てる |
+| `controller.py` | 押し続けている入力と時間を指定した長押しを保持し、変化のたびにレポートをブリッジへ送る |
+| `controller_bridge.py` | controller_bridge.ps1 を起動したまま保持し、送るレポートを差し替える |
+| `controller_bridge.ps1` | Windows 側で COM ポートを開き、指定されたレポートを Pico 2 W に送り続ける |
+| `commands.py` | デーモンが受け取る 1 行コマンドを解釈して振り分ける |
 | `daemon.py` | Unix ソケットでコマンドを受け付ける常駐デーモン (`switch2-remote-daemon`) |
 | `client.py` | デーモンにコマンドを送るクライアント (`switch2-remote`) |
 
