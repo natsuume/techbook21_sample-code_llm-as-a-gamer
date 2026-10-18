@@ -22,32 +22,25 @@ def test_build_request_passes_chords_and_sticks_through():
     assert build_request(["down", "LS:0.5,-1+A"]) == "down LS:0.5,-1+A\n"
 
 
-def test_build_request_reorders_shot_with_default_timeout():
-    assert build_request(["shot", "/tmp/screen.png"]) == "shot 5.0 /tmp/screen.png\n"
-
-
-def test_build_request_reorders_shot_with_timeout():
-    assert build_request(["shot", "/tmp/screen.png", "3"]) == (
-        "shot 3.0 /tmp/screen.png\n"
-    )
+def test_build_request_sends_shot_with_absolute_path():
+    assert build_request(["shot", "/tmp/screen.png"]) == "shot /tmp/screen.png\n"
 
 
 def test_build_request_makes_shot_path_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert build_request(["shot", "screen.png"]) == (
-        f"shot 5.0 {tmp_path / 'screen.png'}\n"
+        f"shot {tmp_path / 'screen.png'}\n"
     )
 
 
 def test_build_request_keeps_spaces_in_shot_path():
     assert build_request(["shot", "/tmp/my screen.png"]) == (
-        "shot 5.0 /tmp/my screen.png\n"
+        "shot /tmp/my screen.png\n"
     )
 
 
-def test_build_request_rejects_non_numeric_shot_timeout():
-    with pytest.raises(ValueError):
-        build_request(["shot", "/tmp/screen.png", "soon"])
+def test_build_request_passes_fps_through():
+    assert build_request(["fps", "12"]) == "fps 12\n"
 
 
 @pytest.mark.parametrize("arg", ["A\nquit", "A\r"])

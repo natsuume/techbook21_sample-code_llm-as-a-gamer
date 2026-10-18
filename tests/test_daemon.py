@@ -35,9 +35,10 @@ def recorder(monkeypatch):
             rec.events.append("controller closed")
 
     class FakeCapture:
-        def __init__(self):
+        def __init__(self, ffmpeg_fps, process_fps, buffer_seconds):
             rec.events.append("capture created")
             rec.capture = self
+            self.rates = (ffmpeg_fps, process_fps, buffer_seconds)
 
         def close(self):
             rec.events.append("capture closed")
@@ -78,7 +79,7 @@ def recorder(monkeypatch):
 
 
 def test_main_passes_controller_built_from_bridge(recorder):
-    daemon.main()
+    daemon.main([])
     capture, controller = recorder.served
     assert controller is recorder.controller
     assert controller.bridge is recorder.bridge
@@ -86,7 +87,7 @@ def test_main_passes_controller_built_from_bridge(recorder):
 
 
 def test_main_closes_controller_bridge_capture_in_order(recorder):
-    daemon.main()
+    daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
     assert closes == [
         "controller closed",
@@ -97,12 +98,12 @@ def test_main_closes_controller_bridge_capture_in_order(recorder):
 
 
 def test_main_closes_only_created_objects_when_capture_fails(recorder, monkeypatch):
-    def failing_capture():
+    def failing_capture(ffmpeg_fps, process_fps, buffer_seconds):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(daemon, "Capture", failing_capture)
-    with pytest.raises(RuntimeError):
-        daemon.main()
+    with pytest.raises(RuntimeError, match="ffmpeg not found"):
+        daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
     assert closes == ["controller closed", "bridge closed"]
 
@@ -112,10 +113,87 @@ def test_main_closes_bridge_when_controller_fails(recorder, monkeypatch):
         raise RuntimeError("controller failed")
 
     monkeypatch.setattr(daemon, "Controller", failing_controller)
-    with pytest.raises(RuntimeError):
-        daemon.main()
+    with pytest.raises(RuntimeError, match="controller failed"):
+        daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
     assert closes == ["bridge closed"]
+
+
+def test_main_passes_default_rates_to_capture(recorder):
+    daemon.main([])
+    assert recorder.capture.rates == (30, 10, 5)
+
+
+def test_main_passes_given_rates_to_capture(recorder):
+    daemon.main(["--ffmpeg-fps", "60", "--process-fps", "12", "--buffer-seconds", "10"])
+    assert recorder.capture.rates == (60, 12, 10)
+
+
+def test_main_reads_command_line_when_argv_is_none(recorder, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["switch2-remote-daemon", "--process-fps", "5"])
+    daemon.main()
+    assert recorder.capture.rates == (30, 5, 5)
+
+
+def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
+    with pytest.raises(SystemExit):
+        daemon.main(["--process-fps", "40"])
+    assert recorder.events == []
+
+
+def test_parse_args_uses_defaults():
+    args = daemon.parse_args([])
+    assert (args.ffmpeg_fps, args.process_fps, args.buffer_seconds) == (30, 10, 5)
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--ffmpeg-fps", "1", "--process-fps", "1"], (1, 1, 5)),
+        (["--ffmpeg-fps", "60", "--process-fps", "60"], (60, 60, 5)),
+        (["--ffmpeg-fps", "12", "--process-fps", "12"], (12, 12, 5)),
+        (["--buffer-seconds", "1"], (30, 10, 1)),
+        (["--buffer-seconds", "60"], (30, 10, 60)),
+    ],
+)
+def test_parse_args_accepts_range(argv, expected):
+    args = daemon.parse_args(argv)
+    assert (args.ffmpeg_fps, args.process_fps, args.buffer_seconds) == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--ffmpeg-fps", "0"],
+        ["--ffmpeg-fps", "61"],
+        ["--ffmpeg-fps", "abc"],
+        ["--process-fps", "0"],
+        ["--process-fps", "1.5"],
+        ["--buffer-seconds", "0"],
+        ["--buffer-seconds", "61"],
+    ],
+)
+def test_parse_args_rejects_out_of_range_or_non_integer(argv, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(argv)
+    assert excinfo.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--ffmpeg-fps", "30", "--process-fps", "31"],
+        ["--process-fps", "40"],
+        # --process-fps の既定値 10 も --ffmpeg-fps 以下でなければならない
+        ["--ffmpeg-fps", "5"],
+    ],
+)
+def test_parse_args_rejects_process_fps_above_ffmpeg_fps(argv, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(argv)
+    assert excinfo.value.code == 2
+    assert "usage:" in capsys.readouterr().err
 
 
 def test_serve_connection_passes_controller_to_handle_command(monkeypatch):

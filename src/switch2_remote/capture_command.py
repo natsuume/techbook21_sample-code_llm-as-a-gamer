@@ -1,6 +1,7 @@
 """Elgato 4K X の映像を受け取る ffmpeg.exe のコマンドを組み立て、標準出力からフレームを読み取る。
 
-デバイスの NV12 出力を無変換で転送し、WSL2 側で 1 フレーム分ずつ固定長で読み取る。
+デバイスからは NV12 を device_fps で受け取り、ffmpeg の出力側のフィルター (-vf fps=N) で output_fps に間引く。
+出力は NV12 の rawvideo のままとし、WSL2 側で 1 フレーム分ずつ固定長で読み取る。
 DirectShow デバイスはプロセス排他のため、実行前に Elgato Studio / OBS 等を終了しておく。
 """
 
@@ -11,35 +12,15 @@ DEVICE_NAME = "Elgato 4K X"
 
 
 def build_command(
-    ffmpeg: str, width: int, height: int, fps: int
+    ffmpeg: str, width: int, height: int, device_fps: int, output_fps: int
 ) -> tuple[list[str], int]:
-    """NV12 無変換転送の ffmpeg.exe のコマンドラインと、1 フレームのバイト数を返す。"""
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "repeat+warning",
-        "-f",
-        "dshow",
-        "-video_size",
-        f"{width}x{height}",
-        "-framerate",
-        str(fps),
-        "-pixel_format",
-        "nv12",
-        "-i",
-        f"video={DEVICE_NAME}",
-        "-fps_mode",
-        "passthrough",
-        "-c:v",
-        "copy",
-        "-f",
-        "rawvideo",
-        "-",
-    ]
-    # NV12 は輝度 (width x height) の後に、縦横半分の色差が 2 成分並ぶ
-    frame_bytes = width * height * 3 // 2
-    return cmd, frame_bytes
+    """ffmpeg.exe のコマンドラインと、1 フレームのバイト数を返す。
+
+    入力側 (dshow) は -framerate device_fps と -pixel_format nv12 で受け取り、
+    出力側は -vf fps=output_fps で間引いて -c:v rawvideo -pix_fmt nv12 で標準出力に書く。
+    1 フレームのバイト数は NV12 の width * height * 3 // 2 で、output_fps によらない。
+    """
+    raise NotImplementedError
 
 
 def iter_raw_frames(stream: IO[bytes], frame_bytes: int) -> Iterator[bytes]:

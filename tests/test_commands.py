@@ -1,6 +1,11 @@
 import pytest
 
-from switch2_remote.commands import handle_command, parse_hold_ms, parse_shot
+from switch2_remote.commands import (
+    handle_command,
+    parse_fps,
+    parse_hold_ms,
+    parse_shot,
+)
 from switch2_remote.controller_state import PadState
 
 
@@ -48,17 +53,26 @@ class FakeController:
 
 
 class FakeCapture:
-    """capture.Capture の代わりに、撮影の要求を記録する偽物。"""
+    """capture.Capture の代わりに、撮影と処理レートの変更の要求を記録する偽物。"""
 
-    def __init__(self):
-        self.shots: list[tuple[str, float]] = []
+    def __init__(self, ffmpeg_fps: int = 30):
+        self.ffmpeg_fps = ffmpeg_fps
+        self.shots: list[str] = []
+        self.process_fps_changes: list[int] = []
 
-    def shot(self, path: str, timeout: float) -> str:
-        self.shots.append((path, timeout))
-        return f"ok {path} settled=True waited=0.30s"
+    def shot(self, path: str) -> str:
+        self.shots.append(path)
+        return f"ok {path}"
+
+    def set_process_fps(self, fps: int) -> str:
+        self.process_fps_changes.append(fps)
+        return f"ok fps={fps}"
 
     def status(self) -> str:
-        return "ok frames=10 ffmpeg_drops=0 ended=False"
+        return (
+            "ok frames=10 buffered=5 ffmpeg_fps=30 process_fps=10 "
+            "ffmpeg_drops=0 ended=False"
+        )
 
 
 @pytest.mark.parametrize(
@@ -74,28 +88,51 @@ def test_parse_hold_ms_rejects_out_of_range_or_non_integer(text):
         parse_hold_ms(text)
 
 
+def test_parse_shot_returns_path():
+    assert parse_shot("shot /tmp/screen.png\n") == "/tmp/screen.png"
+
+
 def test_parse_shot_keeps_spaces_in_path():
-    assert parse_shot("shot 5.0 /tmp/my screen.png\n") == (5.0, "/tmp/my screen.png")
+    assert parse_shot("shot /tmp/my screen.png\n") == "/tmp/my screen.png"
 
 
-@pytest.mark.parametrize("timeout", ["0", "-1", "60.1"])
-def test_parse_shot_rejects_timeout_out_of_range(timeout):
-    with pytest.raises(ValueError, match="shot timeout must be in"):
-        parse_shot(f"shot {timeout} /tmp/screen.png")
-
-
-def test_parse_shot_accepts_max_timeout():
-    assert parse_shot("shot 60 /tmp/screen.png") == (60.0, "/tmp/screen.png")
-
-
-def test_parse_shot_rejects_relative_path():
+@pytest.mark.parametrize(
+    "request_line", ["shot screen.png\n", "shot 5 /tmp/screen.png\n"]
+)
+def test_parse_shot_rejects_relative_path(request_line):
     with pytest.raises(ValueError, match="shot path must be absolute"):
-        parse_shot("shot 5 screen.png")
+        parse_shot(request_line)
 
 
-def test_parse_shot_rejects_missing_arguments():
-    with pytest.raises(ValueError, match="usage: shot TIMEOUT ABSOLUTE_PATH"):
-        parse_shot("shot 5")
+@pytest.mark.parametrize("request_line", ["shot\n", "shot   \n"])
+def test_parse_shot_rejects_missing_path(request_line):
+    with pytest.raises(ValueError, match="usage: shot ABSOLUTE_PATH"):
+        parse_shot(request_line)
+
+
+@pytest.mark.parametrize(
+    "text, max_fps, expected",
+    [("1", 30, 1), ("10", 30, 10), ("30", 30, 30), ("60", 60, 60)],
+)
+def test_parse_fps_accepts_range(text, max_fps, expected):
+    assert parse_fps(text, max_fps) == expected
+
+
+@pytest.mark.parametrize("text", ["0", "31", "45", "-1", "abc", "1.5", ""])
+def test_parse_fps_rejects_out_of_range_or_non_integer_with_range(text):
+    with pytest.raises(ValueError, match=r"fps must be 1\.\.30: "):
+        parse_fps(text, 30)
+
+
+def test_parse_fps_reports_current_range_and_value():
+    with pytest.raises(ValueError) as excinfo:
+        parse_fps("45", 30)
+    assert str(excinfo.value) == "fps must be 1..30: 45"
+
+
+def test_parse_fps_uses_given_max_fps():
+    with pytest.raises(ValueError, match=r"fps must be 1\.\.12: 13"):
+        parse_fps("13", 12)
 
 
 def test_handle_command_tap_parses_each_chord():
@@ -170,17 +207,47 @@ def test_handle_command_up_rejects_invalid_target(request_line):
     assert controller.calls == []
 
 
-def test_handle_command_shot_passes_path_and_timeout():
+def test_handle_command_shot_passes_path():
     capture = FakeCapture()
-    reply = handle_command("shot 3.0 /tmp/my screen.png\n", capture, FakeController())
-    assert capture.shots == [("/tmp/my screen.png", 3.0)]
-    assert reply == "ok /tmp/my screen.png settled=True waited=0.30s"
+    reply = handle_command("shot /tmp/my screen.png\n", capture, FakeController())
+    assert capture.shots == ["/tmp/my screen.png"]
+    assert reply == "ok /tmp/my screen.png"
+
+
+@pytest.mark.parametrize("request_line", ["shot screen.png\n", "shot\n"])
+def test_handle_command_shot_rejects_invalid_path_before_shooting(request_line):
+    capture = FakeCapture()
+    with pytest.raises(ValueError):
+        handle_command(request_line, capture, FakeController())
+    assert capture.shots == []
+
+
+def test_handle_command_fps_changes_process_fps():
+    capture = FakeCapture()
+    reply = handle_command("fps 12\n", capture, FakeController())
+    assert capture.process_fps_changes == [12]
+    assert reply == "ok fps=12"
+
+
+def test_handle_command_fps_uses_capture_ffmpeg_fps_as_max():
+    capture = FakeCapture(ffmpeg_fps=60)
+    handle_command("fps 45\n", capture, FakeController())
+    assert capture.process_fps_changes == [45]
+
+
+@pytest.mark.parametrize("request_line", ["fps 0\n", "fps 31\n", "fps abc\n"])
+def test_handle_command_fps_rejects_invalid_value_before_changing(request_line):
+    capture = FakeCapture(ffmpeg_fps=30)
+    with pytest.raises(ValueError, match=r"fps must be 1\.\.30: "):
+        handle_command(request_line, capture, FakeController())
+    assert capture.process_fps_changes == []
 
 
 def test_handle_command_status_includes_bridge_and_controller_state():
     reply = handle_command("status\n", FakeCapture(), FakeController())
     assert reply == (
-        "ok frames=10 ffmpeg_drops=0 ended=False bridge_alive=True "
+        "ok frames=10 buffered=5 ffmpeg_fps=30 process_fps=10 "
+        "ffmpeg_drops=0 ended=False bridge_alive=True "
         "held=A holds=B+RIGHT:1200ms last_error=none"
     )
 
@@ -194,6 +261,8 @@ def test_handle_command_status_includes_bridge_and_controller_state():
         "hold A 100 200\n",
         "down\n",
         "up\n",
+        "fps\n",
+        "fps 10 20\n",
     ],
 )
 def test_handle_command_rejects_unknown_or_malformed_command(request_line):

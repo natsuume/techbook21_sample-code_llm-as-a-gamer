@@ -1,7 +1,7 @@
 """Switch 2 を 1 コマンドずつ操作するための常駐デーモン。
 
-キャプチャ (ffmpeg.exe, 720p NV12) と controller_bridge.ps1 を起動したまま保持し、
-ブリッジから作った Controller で押下状態を保持する。
+キャプチャ (ffmpeg.exe, 720p NV12) と controller_bridge.ps1 を起動したまま保持する。
+キャプチャは処理レートに間引いたフレームを直近の一定時間分保持し、ブリッジから作った Controller は押下状態を保持する。
 Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを受け付けて 1 行で応答する。
 クライアントは switch2-remote を使う。
 終了時は Controller、ブリッジ、キャプチャの順に閉じる。
@@ -11,21 +11,30 @@ Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを
     hold CHORD MS          CHORD を MS ミリ秒 (1〜60000) 押す。押したらすぐ応答し、MS 経過後にバックグラウンドで離す
     down CHORD [CHORD ...] CHORD を押したままにする
     up TARGET [TARGET ...] TARGET (ボタン名か LS / RS) を離す。up ALL ですべて離す
-    shot TIMEOUT PATH      コマンド受信後のフレームで画面が STABLE_FRAMES 枚静止するまで待ち (最大 TIMEOUT 秒, 0〜60)、PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
-    status                 受信フレーム数、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
+    shot PATH              バッファーの最新フレームを待たずに PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
+    fps N                  処理レートを N (整数 1〜ffmpeg_fps) に変える
+    status                 受信フレーム数、バッファー内の枚数、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
     quit                   コントローラー、ブリッジ、キャプチャを止めて終了する
+
+起動引数:
+    --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜60、既定 30)。起動後は変えられない
+    --process-fps N     バッファーに残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
+    --buffer-seconds N  バッファーに保持する秒数 (整数 1〜60、既定 5)
+    範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方:
     uv run switch2-remote-daemon
+    uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5
 """
 
+import argparse
 import os
 import socket
 import struct
 
 import cv2
 
-from switch2_remote.capture import Capture
+from switch2_remote.capture import DEVICE_FPS, Capture
 from switch2_remote.commands import handle_command
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge
@@ -34,6 +43,11 @@ SOCKET_ADDRESS = (
     "\0switch2-remote"  # 抽象名前空間。ファイルパスの長さ制限と後片付けが不要
 )
 REQUEST_READ_TIMEOUT = 5.0  # リクエスト 1 行の受信と応答の送信にかける上限 (秒)
+FFMPEG_FPS_MIN, FFMPEG_FPS_MAX = 1, DEVICE_FPS
+DEFAULT_FFMPEG_FPS = 30
+DEFAULT_PROCESS_FPS = 10
+BUFFER_SECONDS_MIN, BUFFER_SECONDS_MAX = 1, 60
+DEFAULT_BUFFER_SECONDS = 5
 
 
 def peer_uid(conn: socket.socket) -> int:
@@ -75,14 +89,25 @@ def serve_connection(
     return False
 
 
-def main():
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """起動引数を解釈し、ffmpeg_fps・process_fps・buffer_seconds を持つ Namespace を返す。
+
+    argv が None なら sys.argv[1:] を使う。範囲外の値と、process_fps が ffmpeg_fps より大きい組み合わせは
+    parser.error で使い方とともに表示して終了する (SystemExit)。
+    """
+    raise NotImplementedError
+
+
+def main(argv: list[str] | None = None):
+    """起動引数を解釈してから、ブリッジ・Controller・キャプチャ・ソケットを用意してコマンドを受け付ける。"""
+    args = parse_args(argv)
     bridge = Bridge()
     controller = None
     capture = None
     server = None
     try:
         controller = Controller(bridge)
-        capture = Capture()
+        capture = Capture(args.ffmpeg_fps, args.process_fps, args.buffer_seconds)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_ADDRESS)
         server.listen(1)

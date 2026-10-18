@@ -1,64 +1,39 @@
-"""ffmpeg.exe を起動したまま保持し、最新フレームと静止判定から画面を撮影する。"""
+"""ffmpeg.exe を起動したまま保持し、処理レートに間引いたフレームを直近の一定時間分保持して撮影する。
 
-import subprocess
-import threading
-import time
+デバイスから DEVICE_FPS で受け取った映像を ffmpeg の出力側で ffmpeg_fps に間引き、
+受信したフレームをさらに process_fps に間引いて (frame_buffer.next_keep)、
+直近 buffer_seconds 秒分を FrameBuffer に保持する。ffmpeg_fps は起動後に変えない。
+shot はバッファーの最新フレームを待たずに PNG 保存する。
+"""
 
-import cv2
-import numpy as np
-
-from switch2_remote.capture_command import build_command, iter_raw_frames
-from switch2_remote.ffmpeg_locator import find_ffmpeg
-from switch2_remote.still_detection import motion_between, next_still_count
-
+DEVICE_FPS = 60  # デバイスから受け取るフレームレート (dshow の -framerate)
 WIDTH, HEIGHT = 1280, 720
-FPS = 60
-ANALYSIS_SIZE = (320, 180)  # 静止判定に使う縮小サイズ
-# 静止とみなす連続フレーム数。ゲーム画面の一瞬の静止を撮影の合図にしないための窓
-STABLE_FRAMES = 10
-SHOT_MIN_DELAY = (
-    0.2  # 入力直後の、まだ画面が変わり始めていない静止を拾わないための待ち (秒)
-)
 
 
 class Capture:
-    """ffmpeg.exe からフレームを読み続け、最新フレームと連続静止フレーム数を保持する。"""
+    """ffmpeg.exe からフレームを読み続け、間引いたフレームのリングバッファーと受信状況を保持する。
 
-    def __init__(self):
-        cmd, frame_bytes = build_command(find_ffmpeg(), WIDTH, HEIGHT, FPS)
-        self.proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=8 << 20,
-            cwd="/mnt/c",
-        )
-        self.frame_bytes = frame_bytes
-        self.lock = threading.Lock()
-        self.latest: np.ndarray | None = None
-        self.frame_no = 0
-        self.still_count = 0
-        self.ffmpeg_drops = 0
-        self.ended = False
-        threading.Thread(target=self._read_frames, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+    フレームの読み取りと ffmpeg の stderr の読み捨ては、それぞれバックグラウンドのスレッドで行う。
+    状態の読み書きは 1 つのロックの中で行う。
+
+    主な属性:
+        ffmpeg_fps    ffmpeg の出力のフレームレート。起動後は変えない (commands.parse_fps の上限に使う)
+        process_fps   バッファーに残すフレームレート。set_process_fps で変える
+    """
+
+    def __init__(self, ffmpeg_fps: int, process_fps: int, buffer_seconds: int):
+        """ffmpeg.exe を起動し、フレームの読み取りと stderr の読み捨てのスレッドを始める。
+
+        バッファーの時刻には time.monotonic() を使う。
+        """
+        raise NotImplementedError
 
     def _read_frames(self):
-        prev_small = None
-        for raw in iter_raw_frames(self.proc.stdout, self.frame_bytes):
-            nv12 = np.frombuffer(raw, np.uint8).reshape(HEIGHT * 3 // 2, WIDTH)
-            # NV12 の先頭 HEIGHT 行は輝度 (グレースケール) なので、色変換せずに静止判定に使える
-            small = cv2.resize(
-                nv12[:HEIGHT], ANALYSIS_SIZE, interpolation=cv2.INTER_AREA
-            )
-            motion = motion_between(prev_small, small)
-            prev_small = small
-            with self.lock:
-                self.latest = nv12
-                self.frame_no += 1
-                self.still_count = next_still_count(self.still_count, motion)
-        with self.lock:
-            self.ended = True
+        """フレームを受信するたびに受信数を数え、間引きで残すフレームだけを NV12 の配列としてバッファーに追加する。
+
+        出力が終わったら ended を True にする。
+        """
+        raise NotImplementedError
 
     def _read_stderr(self):
         # 読み捨てないとパイプが詰まり ffmpeg が止まる。フレーム落ちの警告だけ数える
@@ -67,45 +42,29 @@ class Capture:
                 with self.lock:
                     self.ffmpeg_drops += 1
 
-    def shot(self, path: str, timeout: float) -> str:
-        start = time.monotonic()
-        with self.lock:
-            request_frame = self.frame_no
-        time.sleep(SHOT_MIN_DELAY)
-        # 待ちの間に届いたフレームを静止の数に含めないよう、静止を数える起点は待ちの後に取る
-        with self.lock:
-            still_start_frame = self.frame_no
-        settled = False
-        nv12 = None
-        while time.monotonic() - start < timeout:
-            with self.lock:
-                if self.ended:
-                    return "error capture ended"
-                settled = (
-                    self.frame_no - still_start_frame >= STABLE_FRAMES
-                    and self.still_count >= STABLE_FRAMES
-                )
-                if settled:
-                    # 静止を確かめたフレームそのものを保存するため、同じロックの中で取り出す
-                    nv12 = self.latest
-                    break
-            time.sleep(0.02)
-        if nv12 is None:
-            with self.lock:
-                # 待ち時間が SHOT_MIN_DELAY 以下だとループを通らないため、ここでも終了を確かめる
-                if self.ended:
-                    return "error capture ended"
-                # キャプチャが止まっている場合に要求前の古い画面を返さない
-                if self.frame_no == request_frame:
-                    return "error no new frame since request"
-                nv12 = self.latest
-        if not cv2.imwrite(path, cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)):
-            return f"error failed to write {path}"
-        return f"ok {path} settled={settled} waited={time.monotonic() - start:.2f}s"
+    def set_process_fps(self, fps: int) -> str:
+        """処理レートを fps に変え、累積値を initial_accumulator(ffmpeg_fps, fps) に戻す。
+
+        fps の範囲 (1〜ffmpeg_fps) は呼び出し側 (commands.parse_fps) で確かめる。
+        応答: ok fps=<fps>
+        """
+        raise NotImplementedError
+
+    def shot(self, path: str) -> str:
+        """バッファーの最新フレームを待たずに path へ PNG 保存する。
+
+        応答: 成功時は `ok <path>`。ffmpeg が終了していれば `error capture ended`、
+        バッファーが空なら `error no frame yet`、書き込みに失敗したら `error failed to write <path>`
+        """
+        raise NotImplementedError
 
     def status(self) -> str:
-        with self.lock:
-            return f"ok frames={self.frame_no} ffmpeg_drops={self.ffmpeg_drops} ended={self.ended}"
+        """受信状況を 1 行で返す。
+
+        応答: ok frames=<受信フレーム数> buffered=<バッファー内の枚数> ffmpeg_fps=<N> process_fps=<N>
+        ffmpeg_drops=<N> ended=<bool>
+        """
+        raise NotImplementedError
 
     def close(self):
         self.proc.kill()
