@@ -125,9 +125,12 @@ class BridgeSupervisor:
         self._state: BridgeState = "ok"
         self._restarts = 0
         self._last_recovery_error: str | None = None
-        # 実行中の復旧が無ければ set。recovering にしたときに clear し、_recover の終わりに set する
+        # 実行中の復旧が無ければ set。recovering にしたときに clear し、最新の世代の _recover の終わりに set する
         self.recovery_idle = threading.Event()
         self.recovery_idle.set()
+        # 復旧の世代番号 (ロックで守る)。recovering にするたびに 1 増やし、古い復旧の終わりで
+        # 新しい復旧の recovery_idle と recovery_thread を消さないために使う
+        self._recovery_generation = 0
         # 復旧を実行しているスレッド。close() が復旧の中 (on_recovered 等) から呼ばれたときに、自分の終了を待たないために使う
         self.recovery_thread: threading.Thread | None = None
         self.watcher_thread: threading.Thread | None = None
@@ -170,7 +173,11 @@ class BridgeSupervisor:
 
         - state が "recovering" なら送らずに RuntimeError(RECONNECTING_MESSAGE) にする
         - state が "failed" なら送らずに RuntimeError(FAILED_MESSAGE) にする
-        - ブリッジの set_report の例外はそのまま外に出す。例外の後に現在のブリッジが is_alive() でなければ、
+        - state が "ok" でも現在のブリッジが is_alive() でなければ (監視の次の確認より前に止まっていた)、
+          送らずに復旧を開始して RuntimeError(RECONNECTING_MESSAGE) にする。何も送っていないため、
+          UnconfirmedInputError にはしない
+        - ブリッジの set_report の例外は、型を変えずにそのまま外に出す (tap の unconfirmed の判定が
+          UnconfirmedInputError の型を使うため)。例外の後に現在のブリッジが is_alive() でなければ、
           外に出す前に復旧を開始する (run_recovery に渡すだけで、復旧の終わりは待たない)
         ブリッジの set_report はロックの外で呼ぶ。
         """
@@ -180,6 +187,9 @@ class BridgeSupervisor:
             raise RuntimeError(RECONNECTING_MESSAGE)
         if state == "failed":
             raise RuntimeError(FAILED_MESSAGE)
+        if not bridge.is_alive():
+            self._start_recovery(bridge)
+            raise RuntimeError(RECONNECTING_MESSAGE)
         try:
             return bridge.set_report(report)
         except Exception:
@@ -227,13 +237,14 @@ class BridgeSupervisor:
         """state が "ok" のまま failed_bridge が現在のブリッジなら、state を "recovering" にして run_recovery を呼ぶ。
 
         state の確認と変更はロックの中で行い、"recovering" にした呼び出しだけが run_recovery を呼ぶ
-        (復旧は同時に 1 つだけ)。recovering にするときに、同じロックの中で recovery_idle を clear する
+        (復旧は同時に 1 つだけ)。recovering にするときに、同じロックの中で復旧の世代を 1 増やし、recovery_idle を clear する
         (復旧のスレッドが動き出す前に close() されても、その復旧の終わりを待てるように)。run_recovery はロックの外で呼ぶ。
         """
         with self.lock:
             if self._state != "ok" or self.bridge is not failed_bridge:
                 return
             self._state = "recovering"
+            self._recovery_generation += 1
             self.recovery_idle.clear()
         self.run_recovery(self._recover)
 
@@ -262,14 +273,20 @@ class BridgeSupervisor:
         起動に成功して差し替えなかった新しいブリッジがあれば、その close() を呼ぶ (例外は無視する)。
 
         不変条件: close() で中止した場合を除き、state を "recovering" にした復旧は必ず "ok" か "failed" で終わる。
-        どの終わり方 (成功・failed・中止・想定外の例外) でも、最後に recovery_idle を set する。
+        どの終わり方 (成功・failed・中止・想定外の例外) でも、最後に、ロックの中で現在の世代が開始時の自分の世代と
+        同じときだけ recovery_idle を set し、recovery_thread を None に戻す。差し替えた新しいブリッジがすぐ止まって
+        次の復旧が始まっていたら (世代が進んでいたら)、その復旧の recovery_idle と recovery_thread には触れない。
         """
-        self.recovery_thread = threading.current_thread()
+        with self.lock:
+            generation = self._recovery_generation
+            self.recovery_thread = threading.current_thread()
         try:
             self._recover_steps()
         finally:
-            self.recovery_thread = None
-            self.recovery_idle.set()
+            with self.lock:
+                if self._recovery_generation == generation:
+                    self.recovery_thread = None
+                    self.recovery_idle.set()
 
     def _recover_steps(self) -> None:
         """_recover の手順の本体。手順と例外の扱いは _recover の docstring のとおり。"""

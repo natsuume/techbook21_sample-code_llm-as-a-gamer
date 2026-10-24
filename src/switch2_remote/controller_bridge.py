@@ -129,7 +129,8 @@ class Bridge:
         """8 バイトのレポートを `set <16 桁の小文字 16 進>` で送り、ブリッジの ack の行を返す。
 
         書き込みと ack 待ちを 1 つのロックで囲み、スレッドから呼ばれても応答の対応がずれないようにする。
-        - broken または終了済みのブリッジでは、書き込まずに RuntimeError にする
+        - broken または終了済みのブリッジでは、書き込まずに RuntimeError("controller bridge is not usable") にする
+          (デーモンでは bridge_supervisor.BridgeSupervisor がブリッジを起動し直すため、起動し直しの案内は付けない)
         - ack が BRIDGE_ACK_TIMEOUT 秒以内に来なければ UnconfirmedInputError にする (broken にする)
         - ack の前に出力が終われば (EOF) UnconfirmedInputError にする (broken にする)。
           ブリッジはレポートを書き込んでから ack を出力するため、ack の前に終了してもレポートは届いている可能性がある
@@ -140,9 +141,7 @@ class Bridge:
         report_hex = report.hex()
         with self.lock:
             if not self.is_alive():
-                raise RuntimeError(
-                    "controller bridge is not usable; restart the daemon"
-                )
+                raise RuntimeError("controller bridge is not usable")
             self.proc.stdin.write(f"set {report_hex}\n")
             self.proc.stdin.flush()
             # 書き込んだ後は、応答が無くてもブリッジが遅れてレポートを送る可能性があるため未確認として扱う

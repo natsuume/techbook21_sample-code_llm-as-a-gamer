@@ -680,3 +680,71 @@ def test_close_gives_up_waiting_for_recovery_after_timeout(monkeypatch):
 def test_recovery_join_timeout_is_longer_than_bridge_ready_timeout():
     assert bridge_supervisor.RECOVERY_JOIN_TIMEOUT == 35.0
     assert bridge_supervisor.RECOVERY_JOIN_TIMEOUT > BRIDGE_READY_TIMEOUT
+
+
+# --- 止まったブリッジへの送信 ---
+
+
+def test_set_report_to_dead_bridge_raises_reconnecting_without_sending():
+    # 監視の次の確認より前に、state が ok のままブリッジが止まっていた
+    old = FakeBridge()
+    harness = Harness([old, FakeBridge()], pending_recovery=True)
+    old.alive = False
+    with pytest.raises(RuntimeError) as excinfo:
+        harness.supervisor.set_report(REPORT_A)
+    assert str(excinfo.value) == RECONNECTING
+    assert type(excinfo.value) is RuntimeError
+    assert old.calls == 0
+    assert len(harness.pending) == 1
+    assert harness.supervisor.state == "recovering"
+
+
+def test_unconfirmed_error_after_sending_keeps_its_type_and_starts_recovery():
+    old = FakeBridge(fail_with=UnconfirmedInputError("no ack from bridge in time"))
+    harness = Harness([old, FakeBridge()], pending_recovery=True)
+    with pytest.raises(UnconfirmedInputError, match="no ack"):
+        harness.supervisor.set_report(REPORT_A)
+    assert old.calls == 1
+    assert len(harness.pending) == 1
+    assert harness.supervisor.state == "recovering"
+
+
+# --- 続けて起きる復旧 ---
+
+
+def test_finished_recovery_does_not_mark_next_recovery_idle():
+    first = FakeBridge()
+    second = FakeBridge()
+    third = FakeBridge()
+    pending: list[Callable[[], None]] = []
+
+    def run_first_now_and_hold_later(recover: Callable[[], None]) -> None:
+        # 1 回目の復旧はその場で実行し、2 回目は保留する
+        if harness.starts.calls == 1:
+            recover()
+        else:
+            pending.append(recover)
+
+    harness = Harness([first, second, third], run_recovery=run_first_now_and_hold_later)
+
+    def stop_new_bridge_after_swap(message: str) -> None:
+        harness.logs.append(message)
+        # 差し替えた後 (1 回目の復旧の終わりの前) に新しいブリッジが止まり、2 回目の復旧が始まる
+        if message.startswith("controller bridge reconnected"):
+            second.alive = False
+            harness.supervisor.check()
+
+    harness.supervisor.log = stop_new_bridge_after_swap
+    first.alive = False
+    harness.supervisor.check()
+    # 1 回目の復旧は終わったが、2 回目が保留中なので idle にしない
+    assert harness.supervisor.restarts == 1
+    assert harness.supervisor.state == "recovering"
+    assert len(pending) == 1
+    assert not harness.supervisor.recovery_idle.is_set()
+    pending[0]()
+    assert harness.supervisor.state == "ok"
+    assert harness.supervisor.restarts == 2
+    assert harness.supervisor.bridge is third
+    assert harness.supervisor.recovery_idle.is_set()
+    assert harness.supervisor.recovery_thread is None

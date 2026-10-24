@@ -435,6 +435,31 @@ def test_reset_state_clears_all_layers_without_sending():
     assert controller.down([pad("L")]) == "ok held=L"
 
 
+def test_reset_state_clears_last_error_so_next_failure_is_recorded():
+    # 0: A の hold を押す、1: 復旧中の解放 (失敗)
+    bridge = FakeBridge(
+        fail_at=1, fail_with=RuntimeError("controller bridge is reconnecting")
+    )
+    controller, _, clock, _ = make_controller(bridge)
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    controller.release_expired()
+    assert controller.status_text().endswith(
+        "last_error=controller bridge is reconnecting"
+    )
+    # 復旧に成功した (新しいブリッジは中立から始まる)
+    controller.reset_state()
+    assert controller.status_text() == "held=none holds=none last_error=none"
+    # 新しいブリッジで押せた後の、解放の失敗は新しく記録される
+    bridge.fail_at = None
+    controller.hold(pad("B"), 500)
+    bridge.fail_at = bridge.calls
+    bridge.fail_with = RuntimeError("bridge exited")
+    clock.now = 2.0
+    controller.release_expired()
+    assert controller.status_text().endswith("last_error=bridge exited")
+
+
 # --- 解放スレッド ---
 
 

@@ -216,20 +216,23 @@ class Controller:
         return "ok held=none"
 
     def reset_state(self) -> None:
-        """ロックの中で held・holds・tapping をすべて空にする。レポートは送らない。
+        """ロックの中で held・holds・tapping をすべて空にし、last_error を None に戻す。レポートは送らない。
 
         ブリッジを起動し直した後に呼ぶ (BridgeSupervisor.on_recovered)。新しいブリッジは起動時に中立を送るため、
-        内部の押下状態も中立にそろえる。
+        内部の押下状態も中立にそろえる。last_error も消し、新しいブリッジでの最初の失敗を記録できるようにする
+        (復旧の回数は status の bridge_restarts で分かる)。
         """
         with self.lock:
             self.held = PadState()
             self.holds = []
             self.tapping = PadState()
+            self.last_error = None
 
     def status_text(self) -> str:
-        """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の repr。無ければ none>` を返す。
+        """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の説明。無ければ none>` を返す。
 
         holds の表記は controller_state.format_holds の形式で、残り時間は (release_at - clock()) を ms にして切り捨てた整数。
+        last_error はブリッジの復旧に成功すると消える (reset_state)。復旧の回数は status の bridge_restarts で分かる。
         """
         with self.lock:
             now = self.clock()
@@ -250,6 +253,7 @@ class Controller:
         解放スレッドから RELEASE_CHECK_INTERVAL ごとに呼ぶ。テストから直接呼べるよう公開している。
         期限切れの hold が無ければ何も送らない。送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
         最初の失敗の説明 (error_message.describe_error) を last_error に記録して holds を変えない。
+        記録はブリッジの復旧に成功するまで (reset_state まで) 残し、その間の後の失敗では上書きしない。
         """
         with self.lock:
             self._release_expired_locked(raise_on_failure=False)

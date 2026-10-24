@@ -325,3 +325,11 @@ def test_close_kills_process_when_stdin_is_closed():
     bridge = make_bridge([], process)
     bridge.close()
     assert bridge.proc.killed
+
+
+def test_set_report_on_unusable_bridge_does_not_ask_to_restart_daemon():
+    # デーモンでは BridgeSupervisor がブリッジを起動し直すため、起動し直しの案内を付けない
+    bridge = make_bridge([], FakeProcess(returncode=1))
+    with pytest.raises(RuntimeError) as excinfo:
+        bridge.set_report(REPORT_A)
+    assert str(excinfo.value) == "controller bridge is not usable"
