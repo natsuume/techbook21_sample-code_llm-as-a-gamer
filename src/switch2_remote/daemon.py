@@ -6,6 +6,12 @@ Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを
 クライアントは switch2-remote を使う。
 終了時は Controller、ブリッジ、キャプチャの順に閉じる。
 
+ブリッジは bridge_supervisor.BridgeSupervisor で包み、ブリッジが使えなくなったら裏ですぐ復旧を始める:
+COM ポートの開き直しを再試行し、戻らなければ Windows の Bluetooth 無線をオフ・オンしてから開き直す。
+復旧中の入力のコマンドは error を返す。復旧に成功したら押下状態を空にし (Controller.reset_state)、
+status の bridge_state が ok に戻り、bridge_restarts が 1 増える。復旧できなければ bridge_state が failed になる。
+ブリッジの最初の起動に失敗したら、デーモンは起動せずに終了する。
+
 コマンド (CHORD は SPEC を + でつないだもの。詳しくは commands を参照):
     tap CHORD [CHORD ...]  CHORD を順に押す (押下 120ms、離して 100ms、CHORD 間にさらに 150ms)。送り終えてから応答する
     hold CHORD MS          CHORD を MS ミリ秒 (1〜60000) 押す。押したらすぐ応答し、MS 経過後にバックグラウンドで離す
@@ -13,14 +19,18 @@ Unix ソケット (抽象名前空間 "switch2-remote") で 1 行コマンドを
     up TARGET [TARGET ...] TARGET (ボタン名か LS / RS) を離す。up ALL ですべて離す
     shot PATH              バッファーの最新フレームを待たずに PATH に PNG 保存する。PATH は絶対パスで空白を含んでよい
     fps N                  処理レートを N (整数 1〜ffmpeg_fps) に変える
-    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
-    quit                   コントローラー、ブリッジ、キャプチャを止めて終了する
+    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、
+                           ブリッジの生存・状態・復旧に成功した回数、押下状態を返す
+    quit                  コントローラー、ブリッジ、キャプチャを止めて終了する
 
 起動引数:
     --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜60、既定 30)。起動後は変えられない
     --process-fps N     バッファーに残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
     --buffer-seconds N  バッファーに保持する秒数 (整数 1〜60、既定 5)
     --output-size WxH   ffmpeg の出力の解像度 (幅・高さとも 2 以上の偶数で 1280x720 以下、既定 1280x720)。起動後は変えられない
+    --keep-sending-neutral
+                        ブリッジが中立のレポートも 10ms ごとに送り続ける (既定は中立を 100ms 送ってから止める)。
+                        接続維持の効果を比べる実験用
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方:
@@ -114,7 +124,7 @@ def parse_output_size(text: str) -> tuple[int, int]:
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """起動引数を解釈し、ffmpeg_fps・process_fps・buffer_seconds・output_size ((幅, 高さ)) を持つ Namespace を返す。
+    """起動引数を解釈し、ffmpeg_fps・process_fps・buffer_seconds・output_size ((幅, 高さ))・keep_sending_neutral (bool) を持つ Namespace を返す。
 
     argv が None なら sys.argv[1:] を使う。範囲外の値、process_fps が ffmpeg_fps より大きい組み合わせ、
     parse_output_size で解釈できない output_size は、parser.error で使い方とともに表示して終了する (SystemExit)。
@@ -146,6 +156,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_OUTPUT_SIZE,
         metavar="WxH",
         help=f"ffmpeg の出力の解像度 (幅・高さとも 2 以上の偶数で {DEFAULT_OUTPUT_SIZE} 以下、既定 {DEFAULT_OUTPUT_SIZE})",
+    )
+    parser.add_argument(
+        "--keep-sending-neutral",
+        action="store_true",
+        help="中立のレポートも送り続ける (接続維持の実験用)",
     )
     args = parser.parse_args(argv)
     if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:

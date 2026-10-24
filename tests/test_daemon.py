@@ -158,6 +158,14 @@ def test_parse_args_uses_defaults():
     assert args.output_size == (1280, 720)
 
 
+def test_parse_args_does_not_keep_sending_neutral_by_default():
+    assert daemon.parse_args([]).keep_sending_neutral is False
+
+
+def test_parse_args_accepts_keep_sending_neutral():
+    assert daemon.parse_args(["--keep-sending-neutral"]).keep_sending_neutral is True
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [

@@ -1,6 +1,8 @@
 # Pico 2 W (PlayAbility Receiver) へ Switch 用の 8 バイトのゲームパッドレポートを SLIP + CRC32 で送る常駐ブリッジ (Windows PowerShell 5.1)
 # このファイルは BOM なし UTF-8 で、PowerShell 5.1 は CP932 として読むため、日本語を含む行は ASCII の文字で終える (改行がコメントに取り込まれるのを防ぐ)
 # 標準入力から 1 行 1 コマンドを受け取り、標準出力へ 1 行で応答する (stdin / stdout)
+# 起動引数: -PortName <PORT> (既定 COM3)、-KeepSendingNeutral (中立のレポートも書き込み続ける。既定は無効 = off)
+# 標準出力の文字コードは BOM なし UTF-8 (BOM が付くと最初の ready の行の判定が崩れるため。UTF-8 without BOM)
 # 起動時: COM ポート (既定 COM3, 115200bps) を開き、中立を 200ms 送ってから出力: "ready <PORT> <epoch_ms>"
 #   set <HEX>   HEX は 8 バイトのレポートを表す 16 桁の小文字 16 進 (例: A の押下は 04000f8080808000)
 #               現在のレポートを差し替え、送信スレッドが新しいレポートを 1 回書き込んだ後に出力: "ack <HEX> <epoch_ms>"
@@ -10,14 +12,12 @@
 # 送信スレッド (Add-Type の C# クラス内の Thread):
 #   現在のレポートが中立以外なら、10ms ごとに書き込み続ける (SEND_INTERVAL_MS。Windows の既定のタイマー分解能では実際の間隔は約 15ms)
 #   中立に変わったら中立を 100ms 書き込み、次の set まで書き込みを止める (NEUTRAL_TAIL_MS)
-#   $KeepSendingNeutral = $true にすると、中立も書き込み続ける (既定は $false)
+#   -KeepSendingNeutral を付けて起動すると、中立も 10ms ごとに書き込み続ける (NEUTRAL_TAIL_MS で止めない)
 #   書き込みが例外になったら出力: "fatal <message>" (中立を 200ms 送ることを試みてから、プロセスを終了コード 1 で終える)
 #   C# クラスが受け取る書き込み先: System.IO.Stream (実機では $port.BaseStream、偽の Stream でも動く)
 #   C# のスレッドからは PowerShell のスクリプトブロックを呼ばない (スレッドに Runspace が無いため)
-param([string]$PortName = "COM3")
+param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)
 $ErrorActionPreference = "Stop"
-# $true にすると、中立のレポートも止めずに書き込み続ける (既定の $false では中立を 100ms 書き込んでから止める)
-$KeepSendingNeutral = $false
 $SetReportTimeoutMs = 1000  # set の後、送信スレッドが新しいレポートを書き込むまで待つ上限 (ms)
 $EdgeNeutralMs = 200  # 起動時と終了時に中立を書き込む時間 (ms)
 
@@ -229,6 +229,8 @@ function Now-Ms { return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 
 $port = [System.IO.Ports.SerialPort]::new($PortName, 115200, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
 $port.WriteTimeout = 1000
+# [Console]::Out は OutputEncoding を設定すると作り直されるため、設定してから取り出す (UTF-8 without BOM)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $out = [Console]::Out
 $sender = $null
 try {
@@ -236,7 +238,7 @@ try {
     [PicoReportSender]::SendFor($port.BaseStream, [PicoReportSender]::NeutralReport(), $EdgeNeutralMs)
     # 書き込みの失敗では、送信スレッドが fatal を出力してプロセスを終了コード 1 で終える (exit 1)
     $sender = [PicoReportSender]::new($port.BaseStream, $out, $true)
-    $sender.KeepSendingNeutral = $KeepSendingNeutral
+    $sender.KeepSendingNeutral = $KeepSendingNeutral.IsPresent
     $sender.Start()
     $out.WriteLine("ready $PortName $(Now-Ms)"); $out.Flush()
     while ($null -ne ($line = [Console]::In.ReadLine())) {

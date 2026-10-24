@@ -413,6 +413,28 @@ def test_last_error_keeps_first_release_failure():
     )
 
 
+# --- reset_state ---
+
+
+def test_reset_state_clears_all_layers_without_sending():
+    controller, bridge, clock, _ = make_controller()
+    controller.down([pad("L", LS=(0.0, 1.0))])
+    controller.hold(pad("B"), 2000)
+    controller.tapping = pad("A")
+    sent_before = list(bridge.reports)
+    controller.reset_state()
+    assert bridge.reports == sent_before
+    assert controller.held.is_empty()
+    assert controller.holds == []
+    assert controller.tapping.is_empty()
+    assert controller.status_text() == "held=none holds=none last_error=none"
+    # 空にした後は、以前に押していた入力を衝突とみなさず、期限が来ても何も送らない
+    clock.now = 2.0
+    controller.release_expired()
+    assert bridge.reports == sent_before
+    assert controller.down([pad("L")]) == "ok held=L"
+
+
 # --- 解放スレッド ---
 
 

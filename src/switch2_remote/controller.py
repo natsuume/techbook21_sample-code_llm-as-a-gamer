@@ -48,7 +48,7 @@ RELEASE_CHECK_INTERVAL = 0.01  # 解放スレッドが期限切れの hold を�
 
 
 class ReportSender(Protocol):
-    """Controller がレポートを送る先。実機では controller_bridge.Bridge を使う。"""
+    """Controller がレポートを送る先。デーモンでは controller_bridge.Bridge を包んだ bridge_supervisor.BridgeSupervisor を使う。"""
 
     def set_report(self, report: bytes) -> str:
         """8 バイトのレポートを送り、ブリッジの ack の行を返す。"""
@@ -66,7 +66,8 @@ class ActiveHold:
 class Controller:
     """押下状態 (held / holds / tapping) を保持し、変化のたびに合成したレポートを bridge.set_report で送る。
 
-    bridge      set_report(bytes) -> str を持つもの。commands の status が bridge.is_alive() を読むため、公開の属性として持つ
+    bridge      set_report(bytes) -> str を持つもの。commands の status が bridge.is_alive()・bridge.state・bridge.restarts
+                を読むため、公開の属性として持つ (デーモンでは bridge_supervisor.BridgeSupervisor)
     clock       現在時刻 (秒) を返す関数。hold の期限と status の残り時間に使う
     sleep       秒数を受け取って待つ関数。tap の待ちに使う
     start_timer False なら解放スレッドを起動しない (テストでは release_expired を直接呼ぶ)
@@ -213,6 +214,14 @@ class Controller:
             self._send(PadState(), [], self.tapping)
             self.held, self.holds = PadState(), []
         return "ok held=none"
+
+    def reset_state(self) -> None:
+        """ロックの中で held・holds・tapping をすべて空にする。レポートは送らない。
+
+        ブリッジを起動し直した後に呼ぶ (BridgeSupervisor.on_recovered)。新しいブリッジは起動時に中立を送るため、
+        内部の押下状態も中立にそろえる。
+        """
+        raise NotImplementedError
 
     def status_text(self) -> str:
         """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の repr。無ければ none>` を返す。

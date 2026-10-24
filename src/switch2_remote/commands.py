@@ -21,8 +21,9 @@ CHORD は SPEC (ボタン名か LS:x,y / RS:x,y) を + でつないだもので�
                            応答: ok /tmp/screen.png
     fps N                  処理レート (バッファーに残すフレームレート) を N (整数 1〜ffmpeg_fps) に変える
                            応答: ok fps=12
-    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、ブリッジの生存、押下状態を返す
-                           応答: ok frames=... buffered=... latest_age=0.05s ffmpeg_fps=... process_fps=... ffmpeg_drops=... ended=... bridge_alive=... held=... holds=B+RIGHT:1200ms last_error=none
+    status                 受信フレーム数、バッファー内の枚数、最新フレームの経過時間、フレームレート、ffmpeg のフレーム落ち回数、
+                           ブリッジの生存・状態 (ok / recovering / failed)・復旧に成功した回数、押下状態を返す
+                           応答: ok frames=... buffered=... latest_age=0.05s ffmpeg_fps=... process_fps=... ffmpeg_drops=... ended=... bridge_alive=... bridge_state=ok bridge_restarts=0 held=... holds=B+RIGHT:1200ms last_error=none
 
 tap・hold・down は、既に押している入力と重なる CHORD (同じボタン、同じスティック、相反する十字キー) をエラーにし、何も送らない。
 上記以外のコマンドと引数の数が合わないコマンドには `error unknown command: ...` を返す。
@@ -82,7 +83,8 @@ def handle_command(request: str, capture: Capture, controller: Controller) -> st
     解釈できない CHORD・TARGET・MS・PATH・N は、何も送らずに ValueError にする。
     up の引数が ALL の 1 つだけなら controller.up_all() を呼ぶ。
     fps の N の上限には capture.ffmpeg_fps を使う。
-    status は capture.status() に ` bridge_alive=<controller.bridge.is_alive()> ` と controller.status_text() を続けた行を返す。
+    status は capture.status() に ` bridge_alive=<controller.bridge.is_alive()> bridge_state=<controller.bridge.state>
+    bridge_restarts=<controller.bridge.restarts> ` と controller.status_text() を続けた 1 行を返す。
     """
     parts = request.split()
     cmd, args = parts[0], parts[1:]
