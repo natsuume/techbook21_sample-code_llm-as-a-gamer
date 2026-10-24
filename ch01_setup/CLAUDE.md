@@ -21,7 +21,7 @@ uv run switch2-remote up ALL                   # 押したままの入力をす�
 uv run switch2-remote status                   # 動作状況と押したままの入力を確かめる
 ```
 
-- ボタン名: `A` `B` `X` `Y` `L` `R` `ZL` `ZR` `PLUS` `MINUS` `HOME` `UP` `RIGHT` `DOWN` `LEFT`
+- ボタン名: `A` `B` `X` `Y` `L` `R` `ZL` `ZR` `L3` `R3` `PLUS` `MINUS` `HOME` `UP` `RIGHT` `DOWN` `LEFT`。`L3` / `R3` はスティックの押し込みです
 - スティック: `LS:x,y` / `RS:x,y`。x は右、y は上を正とし、-1.0〜1.0 の小数で書きます
 - 同時に押すものは `+` でつなぎます (例: `L+R`、`B+LS:1,0`)
 - `down` で押したものは、`tap` や `hold` が終わった後も、`up` で離すまで押されたままです

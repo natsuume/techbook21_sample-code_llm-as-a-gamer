@@ -1,7 +1,7 @@
 """デーモンが受け取る 1 行コマンドを解釈し、キャプチャとコントローラーに振り分ける。
 
 CHORD は SPEC (ボタン名か LS:x,y / RS:x,y) を + でつないだもので、含まれる SPEC を同時に押す。
-ボタン名は A B X Y L R ZL ZR PLUS MINUS HOME UP RIGHT DOWN LEFT (大文字小文字を区別しない)。
+ボタン名は A B X Y L R ZL ZR L3 R3 PLUS MINUS HOME UP RIGHT DOWN LEFT (大文字小文字を区別しない。L3 / R3 はスティックの押し込み)。
 スティックの x は右、y は上を正とする -1.0〜1.0 の小数。詳しい規則は controller_state を参照。
 
 コマンド:
