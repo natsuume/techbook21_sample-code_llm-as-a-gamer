@@ -9,6 +9,7 @@ BridgeSupervisor は Controller に bridge として渡す (set_report を持つ
     4. もう一度、REOPEN_INTERVAL 秒待ってから起動し直すことを RADIO_REOPEN_ATTEMPTS 回まで繰り返す
     5. 起動できたら新しいブリッジに差し替える。全部失敗したら failed にし、自動では戻らない
 復旧中と failed の間の set_report は送らずに RuntimeError にする。
+close() は復旧の待ちを中断し、実行中の復旧の終了を RECOVERY_JOIN_TIMEOUT 秒まで待ってからブリッジを閉じる。
 状態は state (ok / recovering / failed) と restarts (復旧に成功した回数) で読める (commands の status が使う)。
 """
 
@@ -24,6 +25,9 @@ REOPEN_ATTEMPTS = 3  # 無線をオフ・オンする前に、ブリッジを起
 RADIO_REOPEN_ATTEMPTS = 12  # 無線をオフ・オンした後に、ブリッジを起動し直す回数
 REOPEN_INTERVAL = 5.0  # ブリッジを起動し直す前の待ち (秒)
 WATCH_INTERVAL = 0.5  # 監視スレッドがブリッジの生存を確かめる間隔 (秒)
+# close() が実行中の復旧の終了を待つ上限 (秒)。
+# 復旧はブリッジの起動の待ちの途中にもありうるため、その上限 (controller_bridge.BRIDGE_READY_TIMEOUT の 30 秒) より長くとる
+RECOVERY_JOIN_TIMEOUT = 35.0
 
 RECONNECTING_MESSAGE = (
     "controller bridge is reconnecting; wait until status shows bridge_state=ok"
@@ -78,7 +82,8 @@ class BridgeSupervisor:
     start_bridge   ブリッジを起動して返す関数。復旧の中では、送出した Exception はどれも起動の失敗として扱う
                    (controller_bridge.BridgeStartError、wslpath の subprocess.CalledProcessError 等)
     reset_radio    Bluetooth 無線をオフ・オンする関数。送出した Exception はどれも無線のオフ・オンの失敗として扱う
-    sleep          秒数を受け取って待つ関数。起動し直す前の待ちに使う
+    sleep          秒数を受け取って待つ関数。起動し直す前の待ちに使う。None (既定) なら stop.wait(秒数) を使い、
+                   close() で待ちを中断できるようにする
     log            復旧の開始・失敗・成功を 1 行ずつ記録する関数
     start_watcher  False なら監視スレッドを起動しない (テストでは check を直接呼ぶ)
     run_recovery   復旧の本体 (引数なしの関数) を受け取って実行する関数。既定では daemon スレッドで起動して待たない
@@ -98,14 +103,19 @@ class BridgeSupervisor:
         self,
         start_bridge: Callable[[], ManagedBridge],
         reset_radio: Callable[[], None],
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
         log: Callable[[str], None] = log_with_time,
         start_watcher: bool = True,
         run_recovery: Callable[[Callable[[], None]], None] = run_in_daemon_thread,
     ):
         self.start_bridge = start_bridge
         self.reset_radio = reset_radio
-        self.sleep = sleep
+        # close() で立て、監視スレッドと復旧の待ちを止める
+        self.stop = threading.Event()
+        # 既定の待ちは stop.wait にし、close() で待ちの途中でも復旧が stop に気づけるようにする (戻り値は使わない)
+        self.sleep = (
+            sleep if sleep is not None else lambda seconds: self.stop.wait(seconds)
+        )
         self.log = log
         self.run_recovery = run_recovery
         self.on_recovered: Callable[[], None] | None = None
@@ -115,8 +125,11 @@ class BridgeSupervisor:
         self._state: BridgeState = "ok"
         self._restarts = 0
         self._last_recovery_error: str | None = None
-        # close() で立て、監視スレッドと復旧の待ちを止める
-        self.stop = threading.Event()
+        # 実行中の復旧が無ければ set。recovering にしたときに clear し、_recover の終わりに set する
+        self.recovery_idle = threading.Event()
+        self.recovery_idle.set()
+        # 復旧を実行しているスレッド。close() が復旧の中 (on_recovered 等) から呼ばれたときに、自分の終了を待たないために使う
+        self.recovery_thread: threading.Thread | None = None
         self.watcher_thread: threading.Thread | None = None
         if start_watcher:
             self.watcher_thread = threading.Thread(
@@ -188,16 +201,24 @@ class BridgeSupervisor:
     def close(self) -> None:
         """復旧と監視スレッドを止め、現在のブリッジを閉じる。
 
-        1. stop を立てる (監視スレッドと、復旧の待ち・差し替えが止まる)
+        1. stop を立てる (監視スレッドと、復旧の待ちが止まる。既定の sleep は stop.wait なので待ちの途中でも戻る)
         2. 監視スレッドがあれば終了を待つ
-        3. ロックの中で現在のブリッジを読み、そのブリッジの close() を呼ぶ
-        復旧の差し替えはロックの中で stop を確かめてから行うため、差し替えがこの 3 より前なら新しいブリッジをここで閉じ、
-        後なら復旧の側が新しいブリッジを閉じる。どちらの順でも、起動に成功したブリッジが閉じられずに残ることはない。
+        3. recovery_idle.wait(RECOVERY_JOIN_TIMEOUT) で、実行中の復旧の終了を待つ。期限までに終わらなければ、
+           log に 1 行出してそのまま続ける。復旧の中 (on_recovered 等) から呼ばれたときは、自分の終了を待たない
+        4. ロックの中で現在のブリッジを読み、そのブリッジの close() を呼ぶ
+        保証の範囲: 復旧が RECOVERY_JOIN_TIMEOUT 秒以内に終われば、起動に成功したブリッジは必ず閉じられる
+        (差し替えの前に stop に気づいた復旧は新しいブリッジを自分で閉じ、差し替えた後なら 4 で閉じる)。
+        無線のオフ・オンの途中などで期限を過ぎた場合は、復旧の終わりを待たずに終える。
         """
         self.stop.set()
         if self.watcher_thread is not None:
             self.watcher_thread.join()
             self.watcher_thread = None
+        called_from_recovery = threading.current_thread() is self.recovery_thread
+        if not called_from_recovery and not self.recovery_idle.wait(
+            RECOVERY_JOIN_TIMEOUT
+        ):
+            self.log("controller bridge recovery did not stop in time")
         with self.lock:
             bridge = self.bridge
         bridge.close()
@@ -206,12 +227,14 @@ class BridgeSupervisor:
         """state が "ok" のまま failed_bridge が現在のブリッジなら、state を "recovering" にして run_recovery を呼ぶ。
 
         state の確認と変更はロックの中で行い、"recovering" にした呼び出しだけが run_recovery を呼ぶ
-        (復旧は同時に 1 つだけ)。run_recovery はロックの外で呼ぶ。
+        (復旧は同時に 1 つだけ)。recovering にするときに、同じロックの中で recovery_idle を clear する
+        (復旧のスレッドが動き出す前に close() されても、その復旧の終わりを待てるように)。run_recovery はロックの外で呼ぶ。
         """
         with self.lock:
             if self._state != "ok" or self.bridge is not failed_bridge:
                 return
             self._state = "recovering"
+            self.recovery_idle.clear()
         self.run_recovery(self._recover)
 
     def _recover(self) -> None:
@@ -239,7 +262,17 @@ class BridgeSupervisor:
         起動に成功して差し替えなかった新しいブリッジがあれば、その close() を呼ぶ (例外は無視する)。
 
         不変条件: close() で中止した場合を除き、state を "recovering" にした復旧は必ず "ok" か "failed" で終わる。
+        どの終わり方 (成功・failed・中止・想定外の例外) でも、最後に recovery_idle を set する。
         """
+        self.recovery_thread = threading.current_thread()
+        try:
+            self._recover_steps()
+        finally:
+            self.recovery_thread = None
+            self.recovery_idle.set()
+
+    def _recover_steps(self) -> None:
+        """_recover の手順の本体。手順と例外の扱いは _recover の docstring のとおり。"""
         new_bridge: ManagedBridge | None = None
         try:
             with self.lock:
