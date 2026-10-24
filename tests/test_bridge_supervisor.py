@@ -528,6 +528,42 @@ def test_bridge_started_while_closing_is_closed_and_not_adopted():
     assert harness.supervisor.restarts == 0
 
 
+def test_radio_is_not_reset_when_closed_during_last_reopen_before_it():
+    # 無線をオフ・オンする前の最後の開き直しの間に close() され、その開き直しも失敗した
+    old = FakeBridge()
+    harness = Harness([old, start_error(1), start_error(2), start_error(3)])
+
+    def close_during_last_reopen() -> None:
+        if harness.starts.calls == 1 + bridge_supervisor.REOPEN_ATTEMPTS:
+            harness.supervisor.close()
+
+    harness.starts.while_starting = close_during_last_reopen
+    old.alive = False
+    harness.supervisor.check()
+    assert harness.radio.calls == 0
+    assert harness.supervisor.state == "recovering"
+
+
+def test_state_does_not_become_failed_when_closed_during_last_reopen():
+    # 無線をオフ・オンした後の最後の開き直しの間に close() され、その開き直しも失敗した
+    old = FakeBridge()
+    attempts = (
+        bridge_supervisor.REOPEN_ATTEMPTS + bridge_supervisor.RADIO_REOPEN_ATTEMPTS
+    )
+    harness = Harness([old, *[start_error(n) for n in range(1, attempts + 1)]])
+
+    def close_during_last_reopen() -> None:
+        if harness.starts.calls == 1 + attempts:
+            harness.supervisor.close()
+
+    harness.starts.while_starting = close_during_last_reopen
+    old.alive = False
+    harness.supervisor.check()
+    assert harness.radio.calls == 1
+    assert harness.supervisor.state == "recovering"
+    assert not any("could not be reconnected" in line for line in harness.logs)
+
+
 def test_bridge_is_not_adopted_when_closed_just_before_swap():
     # 起動に成功した後、差し替えの前 (on_recovered の間) に close() された
     old = FakeBridge()

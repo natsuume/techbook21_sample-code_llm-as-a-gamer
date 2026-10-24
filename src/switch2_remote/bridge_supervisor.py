@@ -339,6 +339,8 @@ class BridgeSupervisor:
 
         成功したら (新しいブリッジ, None)、全部失敗したら (None, 最後の失敗の例外) を返す。
         起動に成功した直後に stop が立っていたら、新しいブリッジを閉じて RecoveryStopped を送出する。
+        全部失敗した後に stop が立っていたら、RecoveryStopped を送出する
+        (終了の途中で無線をオフ・オンしたり、failed にしたりしないため)。
         """
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
@@ -357,6 +359,8 @@ class BridgeSupervisor:
                 close_quietly(bridge)
                 raise RecoveryStopped
             return bridge, None
+        if self.stop.is_set():
+            raise RecoveryStopped
         return None, last_error
 
     def _reset_radio_and_record(self) -> None:
