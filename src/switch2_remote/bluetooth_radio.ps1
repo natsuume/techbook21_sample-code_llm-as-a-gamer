@@ -9,7 +9,7 @@
 #      SetStateAsync の後は Radio の State を $StatePollMs ごとに確かめ、$StateTimeoutSeconds 以内に目的の状態にならなければ失敗 (timeout)
 #      (radio did not turn <off|on>: <その時点の State>)
 #      オフの SetStateAsync が拒否されたら、オンは試さずに終える (the radio was not turned off)
-#      オフの SetStateAsync が Allowed なら、オフの待ちの期限切れや例外があってもオンを必ず試す (finally)
+#      それ以外は、オフの要求やオフの待ちの期限切れ・例外があってもオンを必ず試す (always turn the radio back on)
 #      オフの待ちが期限切れで、オンも失敗したときの理由は "radio did not turn off: <State>; <オンの失敗の理由>" とする (both reasons)
 #   WinRT の非同期の結果は System.WindowsRuntimeSystemExtensions.AsTask で .NET の Task にして待つ (await)
 #   1 つの非同期の待ちは $AsyncTimeoutSeconds までとし、超えたら失敗 (winrt operation timed out)
@@ -84,33 +84,38 @@ try {
         if ($null -eq $bluetooth) {
             $result = "error no bluetooth radio"
         } else {
-            $offStatus = Wait-AsyncOperation ($bluetooth.SetStateAsync([Windows.Devices.Radios.RadioState]::Off)) ([Windows.Devices.Radios.RadioAccessStatus])
-            if ($offStatus -ne [Windows.Devices.Radios.RadioAccessStatus]::Allowed) {
-                $result = "error radio state change denied: $offStatus"
-            } else {
-                $offError = $null
-                $onError = "radio was not turned on"
-                try {
-                    if (Wait-RadioState $bluetooth ([Windows.Devices.Radios.RadioState]::Off)) {
-                        Start-Sleep -Seconds $OffSeconds
-                    } else {
-                        $offError = "radio did not turn off: $($bluetooth.State)"
-                    }
-                }
-                finally {
-                    # 無線をオフのまま残さないよう、オフの待ちが失敗してもオンに戻す (always turn the radio back on)
-                    $onError = Set-RadioState $bluetooth ([Windows.Devices.Radios.RadioState]::On) "on"
-                }
-                if ($null -ne $offError -and $null -ne $onError) {
-                    $result = "error ${offError}; $onError"
-                } elseif ($null -ne $offError) {
-                    $result = "error $offError"
-                } elseif ($null -ne $onError) {
-                    $result = "error $onError"
+            $offError = $null
+            $onError = $null
+            $turnOn = $true
+            try {
+                $offStatus = Wait-AsyncOperation ($bluetooth.SetStateAsync([Windows.Devices.Radios.RadioState]::Off)) ([Windows.Devices.Radios.RadioAccessStatus])
+                if ($offStatus -ne [Windows.Devices.Radios.RadioAccessStatus]::Allowed) {
+                    # 拒否されたときは無線の状態が変わっていないため、オンは試さない (the radio was not turned off)
+                    $turnOn = $false
+                    $offError = "radio state change denied: $offStatus"
+                } elseif (Wait-RadioState $bluetooth ([Windows.Devices.Radios.RadioState]::Off)) {
+                    Start-Sleep -Seconds $OffSeconds
                 } else {
-                    $result = "ok"
-                    $exitCode = 0
+                    $offError = "radio did not turn off: $($bluetooth.State)"
                 }
+            }
+            catch {
+                # オフの要求の期限切れや例外の後も、無線がオフになった可能性があるためオンを試す (may have turned off)
+                $offError = $_.Exception.GetBaseException().Message -replace "[\r\n]+", " "
+            }
+            if ($turnOn) {
+                # 無線をオフのまま残さないよう、オフの待ちが失敗してもオンに戻す (always turn the radio back on)
+                $onError = Set-RadioState $bluetooth ([Windows.Devices.Radios.RadioState]::On) "on"
+            }
+            if ($null -ne $offError -and $null -ne $onError) {
+                $result = "error ${offError}; $onError"
+            } elseif ($null -ne $offError) {
+                $result = "error $offError"
+            } elseif ($null -ne $onError) {
+                $result = "error $onError"
+            } else {
+                $result = "ok"
+                $exitCode = 0
             }
         }
     }

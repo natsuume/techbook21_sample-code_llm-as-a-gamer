@@ -64,6 +64,21 @@ def test_radio_script_waits_for_winrt_operations_with_time_limit():
     assert "$task.Wait($AsyncTimeoutSeconds * 1000)" in text
 
 
+def test_radio_script_turns_radio_on_even_if_off_request_fails():
+    """オフの要求は try の中で行い、期限切れや例外の後もオンに戻す処理に進む。
+
+    オフの要求が期限切れになっても、無線がオフになっている可能性があるため。
+    オンを試さないのは、オフの要求が拒否された ($turnOn = $false) ときだけ。
+    """
+    text = read_script(RADIO_SCRIPT)
+    off_request = text.index("SetStateAsync([Windows.Devices.Radios.RadioState]::Off)")
+    guard = text.rindex("try {", 0, off_request)
+    turn_on = text.index("if ($turnOn) {")
+    assert text.index("catch {", off_request) < turn_on
+    assert guard < off_request < turn_on
+    assert text.count("$turnOn = $false") == 1
+
+
 def test_bridge_script_takes_keep_sending_neutral_switch():
     text = read_script(BRIDGE_SCRIPT)
     assert 'param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)' in text
