@@ -39,6 +39,10 @@ def test_parse_chord_accepts_single_button():
     assert parse_chord("home") == pad("HOME")
 
 
+def test_parse_chord_accepts_stick_click_buttons_with_stick_tilt():
+    assert parse_chord("l3+R3+LS:0,1") == pad("L3", "R3", LS=(0.0, 1.0))
+
+
 def test_parse_chord_allows_duplicate_button():
     assert parse_chord("A+a") == pad("A")
 
@@ -161,6 +165,8 @@ def test_dpad_to_hat_rejects_conflicting_directions(directions):
         (pad("L", "R"), report(b1=0x30)),
         (pad("Y", "B", "X", "ZL", "ZR"), report(b1=0xCB)),
         (pad("MINUS", "PLUS", "HOME"), report(b2=0x13)),
+        (pad("L3", "R3"), report(b2=0x0C)),
+        (pad("L3", LS=(0.0, 1.0)), report(b2=0x04, ly=0)),
         (pad("UP", "RIGHT"), report(hat=1)),
         (pad("DOWN"), report(hat=4)),
         (pad(LS=(1.0, 0.0)), report(lx=255, ly=128)),
@@ -200,6 +206,7 @@ def test_merge_allows_diagonal_dpad():
     [
         (pad("A"), pad("A")),  # 既に押されているボタン
         (pad("A", "B"), pad("X", "B")),
+        (pad("L3"), pad("L3")),  # 既に押し込まれているスティック
         (pad(LS=(0.0, 1.0)), pad(LS=(1.0, 0.0))),  # 既に倒されているスティック
         (pad("UP"), pad("DOWN")),  # 合成後の十字キーが相反する
         (pad("RIGHT"), pad("LEFT")),
@@ -273,6 +280,10 @@ def test_parse_up_targets_uppercases_and_splits_plus():
     assert parse_up_targets(["a+ls", "B", "rs"]) == frozenset({"A", "LS", "B", "RS"})
 
 
+def test_parse_up_targets_accepts_stick_click_buttons():
+    assert parse_up_targets(["l3+R3"]) == frozenset({"L3", "R3"})
+
+
 @pytest.mark.parametrize(
     "texts",
     [
@@ -296,6 +307,12 @@ def test_remove_targets_removes_buttons_and_sticks():
     assert remove_targets(state, frozenset({"A", "LS"})) == pad("B", RS=(1.0, 0.0))
 
 
+def test_remove_targets_separates_stick_tilt_and_stick_click():
+    state = pad("L3", LS=(0.0, 1.0))
+    assert remove_targets(state, frozenset({"LS"})) == pad("L3")
+    assert remove_targets(state, frozenset({"L3"})) == pad(LS=(0.0, 1.0))
+
+
 def test_remove_targets_ignores_names_not_in_state():
     assert remove_targets(pad("A"), frozenset({"B", "RS"})) == pad("A")
 
@@ -316,6 +333,10 @@ def test_format_state_of_empty_state_is_none():
 def test_format_state_orders_buttons_then_sticks():
     state = pad("LEFT", "HOME", "ZR", "A", RS=(0.0, 0.25), LS=(0.5, -1.0))
     assert format_state(state) == "A+ZR+HOME+LEFT+LS:0.5,-1+RS:0,0.25"
+
+
+def test_format_state_orders_stick_click_buttons_after_zr():
+    assert format_state(pad("HOME", "R3", "PLUS", "L3", "ZR")) == "ZR+L3+R3+PLUS+HOME"
 
 
 def test_format_state_orders_dpad_by_fixed_order():

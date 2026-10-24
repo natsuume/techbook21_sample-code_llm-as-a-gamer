@@ -3,8 +3,9 @@
 I/O・スレッド・時刻を扱わない。押下状態の保持と送信は controller.Controller が行う。
 
 用語:
-    SPEC     ボタン名 A B X Y L R ZL ZR PLUS MINUS HOME UP RIGHT DOWN LEFT (大文字小文字を区別しない)、
+    SPEC     ボタン名 A B X Y L R ZL ZR L3 R3 PLUS MINUS HOME UP RIGHT DOWN LEFT (大文字小文字を区別しない)、
              またはスティック LS:x,y / RS:x,y。x は右、y は上を正とし、範囲は -1.0〜1.0。
+             L3 / R3 は左右のスティックの押し込みで、スティックの傾き (LS / RS) とは別のボタンとして扱う。
              スティックの値は小数表記だけを受け付ける (STICK_SPEC_PATTERN に fullmatch する。先頭の +、指数表記、nan、inf は不可)
     CHORD    SPEC を + でつないだもの。含まれる SPEC を同時に押す。
              空の要素 (A+、+A、A++B)、未知の SPEC、同じスティックを 2 回含むもの、
@@ -26,7 +27,7 @@ I/O・スレッド・時刻を扱わない。押下状態の保持と送信は c
 8 バイトのレポート (build_report):
     [b1, b2, hat, LX, LY, RX, RY, 0]
     b1   Y=0x01 B=0x02 A=0x04 X=0x08 L=0x10 R=0x20 ZL=0x40 ZR=0x80
-    b2   MINUS=0x01 PLUS=0x02 HOME=0x10
+    b2   MINUS=0x01 PLUS=0x02 L3=0x04 R3=0x08 HOME=0x10
     hat  押している十字キーの方向の組を DPAD_HAT で変換した値 (押していなければ 15)
     LX, LY, RX, RY
          スティック 1 軸の値 (stick_axis_to_byte)。Switch のレポートの Y は下向きに増える (0 が上) ため、
@@ -48,6 +49,8 @@ BUTTON_ORDER = (
     "R",
     "ZL",
     "ZR",
+    "L3",
+    "R3",
     "PLUS",
     "MINUS",
     "HOME",
@@ -86,6 +89,8 @@ BUTTON_BITS = {
     "ZR": (0, 0x80),
     "MINUS": (1, 0x01),
     "PLUS": (1, 0x02),
+    "L3": (1, 0x04),
+    "R3": (1, 0x08),
     "HOME": (1, 0x10),
 }
 # スティックの SPEC (大文字にそろえた後の形)。値は小数表記だけを許す
