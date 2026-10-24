@@ -230,7 +230,8 @@ function Now-Ms { return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 $port = [System.IO.Ports.SerialPort]::new($PortName, 115200, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
 $port.WriteTimeout = 1000
 # [Console]::Out は OutputEncoding を設定すると作り直されるため、設定してから取り出す (UTF-8 without BOM)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+# コンソールの無い環境では設定が例外になることがあるため、失敗しても既定の文字コードのまま続ける (keep the default encoding)
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 $out = [Console]::Out
 $sender = $null
 try {

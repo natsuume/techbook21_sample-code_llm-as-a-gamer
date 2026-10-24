@@ -42,6 +42,17 @@ def test_script_writes_utf8_without_bom_before_taking_console_out(script):
     assert text.index(UTF8_WITHOUT_BOM) < text.index(TAKE_CONSOLE_OUT)
 
 
+@pytest.mark.parametrize("script", [BRIDGE_SCRIPT, RADIO_SCRIPT])
+def test_script_continues_when_output_encoding_cannot_be_set(script):
+    """OutputEncoding の設定は try / catch で囲み、失敗しても既定の文字コードのまま続ける。
+
+    コンソールの無い環境では設定が例外になることがあり、$ErrorActionPreference = "Stop" のままでは
+    ready / ok を出力する前に終わってしまうため。
+    """
+    text = read_script(script)
+    assert f"try {{ {UTF8_WITHOUT_BOM} }} catch {{ }}" in text
+
+
 def test_bridge_script_takes_keep_sending_neutral_switch():
     text = read_script(BRIDGE_SCRIPT)
     assert 'param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)' in text
