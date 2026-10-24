@@ -12,10 +12,13 @@ BridgeSupervisor は Controller に bridge として渡す (set_report を持つ
 状態は state (ok / recovering / failed) と restarts (復旧に成功した回数) で読める (commands の status が使う)。
 """
 
+import contextlib
 import threading
 import time
 from collections.abc import Callable
 from typing import Literal, Protocol
+
+from switch2_remote.error_message import describe_error
 
 REOPEN_ATTEMPTS = 3  # 無線をオフ・オンする前に、ブリッジを起動し直す回数
 RADIO_REOPEN_ATTEMPTS = 12  # 無線をオフ・オンした後に、ブリッジを起動し直す回数
@@ -47,6 +50,16 @@ class ManagedBridge(Protocol):
     def close(self) -> None:
         """ブリッジを終了させる。"""
         ...
+
+
+class RecoveryStopped(Exception):
+    """close() で復旧を中止したことを、復旧の手順の途中から _recover に伝える。"""
+
+
+def close_quietly(bridge: ManagedBridge) -> None:
+    """bridge.close() を呼び、例外は無視する (閉じられないブリッジのために復旧を止めない)。"""
+    with contextlib.suppress(Exception):
+        bridge.close()
 
 
 def log_with_time(message: str) -> None:
@@ -114,12 +127,14 @@ class BridgeSupervisor:
     @property
     def state(self) -> BridgeState:
         """ "ok" (現在のブリッジを使える)、"recovering" (復旧中)、"failed" (復旧できなかった) のいずれかを返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return self._state
 
     @property
     def restarts(self) -> int:
         """復旧に成功した回数を返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return self._restarts
 
     @property
     def last_recovery_error(self) -> str | None:
@@ -128,11 +143,14 @@ class BridgeSupervisor:
         reset_radio の失敗、無線のオフ・オンの後の起動し直しが全部失敗したときの最後の失敗、
         復旧の中の想定外の例外 (on_recovered の例外等) で更新する。復旧に成功しても消さない。
         """
-        raise NotImplementedError
+        with self.lock:
+            return self._last_recovery_error
 
     def is_alive(self) -> bool:
         """state が "ok" で、かつ現在のブリッジが is_alive() なら True を返す (commands の status の bridge_alive)。"""
-        raise NotImplementedError
+        with self.lock:
+            state, bridge = self._state, self.bridge
+        return state == "ok" and bridge.is_alive()
 
     def set_report(self, report: bytes) -> str:
         """state が "ok" なら現在のブリッジの set_report に渡し、その ack の行を返す。
@@ -143,7 +161,18 @@ class BridgeSupervisor:
           外に出す前に復旧を開始する (run_recovery に渡すだけで、復旧の終わりは待たない)
         ブリッジの set_report はロックの外で呼ぶ。
         """
-        raise NotImplementedError
+        with self.lock:
+            state, bridge = self._state, self.bridge
+        if state == "recovering":
+            raise RuntimeError(RECONNECTING_MESSAGE)
+        if state == "failed":
+            raise RuntimeError(FAILED_MESSAGE)
+        try:
+            return bridge.set_report(report)
+        except Exception:
+            if not bridge.is_alive():
+                self._start_recovery(bridge)
+            raise
 
     def check(self) -> None:
         """state が "ok" で現在のブリッジが is_alive() でなければ、復旧を開始する。
@@ -151,7 +180,10 @@ class BridgeSupervisor:
         監視スレッドが WATCH_INTERVAL 秒ごとに呼び、入力の無い間にブリッジのプロセスが終わった場合を拾う。
         テストから直接呼べるよう公開している。
         """
-        raise NotImplementedError
+        with self.lock:
+            state, bridge = self._state, self.bridge
+        if state == "ok" and not bridge.is_alive():
+            self._start_recovery(bridge)
 
     def close(self) -> None:
         """復旧と監視スレッドを止め、現在のブリッジを閉じる。
@@ -162,7 +194,13 @@ class BridgeSupervisor:
         復旧の差し替えはロックの中で stop を確かめてから行うため、差し替えがこの 3 より前なら新しいブリッジをここで閉じ、
         後なら復旧の側が新しいブリッジを閉じる。どちらの順でも、起動に成功したブリッジが閉じられずに残ることはない。
         """
-        raise NotImplementedError
+        self.stop.set()
+        if self.watcher_thread is not None:
+            self.watcher_thread.join()
+            self.watcher_thread = None
+        with self.lock:
+            bridge = self.bridge
+        bridge.close()
 
     def _start_recovery(self, failed_bridge: ManagedBridge) -> None:
         """state が "ok" のまま failed_bridge が現在のブリッジなら、state を "recovering" にして run_recovery を呼ぶ。
@@ -170,7 +208,11 @@ class BridgeSupervisor:
         state の確認と変更はロックの中で行い、"recovering" にした呼び出しだけが run_recovery を呼ぶ
         (復旧は同時に 1 つだけ)。run_recovery はロックの外で呼ぶ。
         """
-        raise NotImplementedError
+        with self.lock:
+            if self._state != "ok" or self.bridge is not failed_bridge:
+                return
+            self._state = "recovering"
+        self.run_recovery(self._recover)
 
     def _recover(self) -> None:
         """復旧の本体。run_recovery から呼ばれる。
@@ -198,8 +240,98 @@ class BridgeSupervisor:
 
         不変条件: close() で中止した場合を除き、state を "recovering" にした復旧は必ず "ok" か "failed" で終わる。
         """
-        raise NotImplementedError
+        new_bridge: ManagedBridge | None = None
+        try:
+            with self.lock:
+                old_bridge = self.bridge
+            self.log("controller bridge is not usable; reconnecting")
+            close_quietly(old_bridge)
+            new_bridge, _ = self._reopen(REOPEN_ATTEMPTS)
+            if new_bridge is None:
+                self._reset_radio_and_record()
+                new_bridge, last_error = self._reopen(RADIO_REOPEN_ATTEMPTS)
+                if new_bridge is None:
+                    self._fail(last_error)
+                    return
+            if self.on_recovered is not None:
+                self.on_recovered()
+            with self.lock:
+                adopted = not self.stop.is_set()
+                if adopted:
+                    self.bridge = new_bridge
+                    self._state = "ok"
+                    self._restarts += 1
+                    restarts = self._restarts
+            if not adopted:
+                close_quietly(new_bridge)
+                return
+            # 差し替えた後は現在のブリッジなので、下の想定外の例外の扱いで閉じない
+            new_bridge = None
+            self.log(f"controller bridge reconnected (restarts={restarts})")
+        except RecoveryStopped:
+            return
+        # 復旧のスレッドを例外で終わらせず、recovering のまま残さないため、想定外の例外もすべて受ける
+        except Exception as e:  # noqa: BLE001
+            if new_bridge is not None:
+                close_quietly(new_bridge)
+            self._fail(e)
+
+    def _sleep_unless_stopped(self) -> None:
+        """sleep(REOPEN_INTERVAL) する。前と後で stop が立っていたら RecoveryStopped を送出する。"""
+        if self.stop.is_set():
+            raise RecoveryStopped
+        self.sleep(REOPEN_INTERVAL)
+        if self.stop.is_set():
+            raise RecoveryStopped
+
+    def _reopen(self, attempts: int) -> tuple[ManagedBridge | None, Exception | None]:
+        """attempts 回まで、待ってから start_bridge() を呼ぶ。
+
+        成功したら (新しいブリッジ, None)、全部失敗したら (None, 最後の失敗の例外) を返す。
+        起動に成功した直後に stop が立っていたら、新しいブリッジを閉じて RecoveryStopped を送出する。
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self._sleep_unless_stopped()
+            try:
+                bridge = self.start_bridge()
+            # 起動の失敗の型は起動の方法によって様々なため (queue.Empty、CalledProcessError 等)、すべて失敗として扱う
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                self.log(
+                    f"controller bridge reopen failed ({attempt}/{attempts}): "
+                    f"{describe_error(e)}"
+                )
+                continue
+            if self.stop.is_set():
+                close_quietly(bridge)
+                raise RecoveryStopped
+            return bridge, None
+        return None, last_error
+
+    def _reset_radio_and_record(self) -> None:
+        """reset_radio() を呼ぶ。失敗 (Exception) は last_recovery_error に記録して log に出し、外に出さない。"""
+        self.log("turning bluetooth radio off and on")
+        try:
+            self.reset_radio()
+        # 無線のオフ・オンに失敗しても開き直しを続けるため、失敗の型を問わない
+        except Exception as e:  # noqa: BLE001
+            reason = describe_error(e)
+            with self.lock:
+                self._last_recovery_error = reason
+            self.log(f"bluetooth radio could not be turned off and on: {reason}")
+            return
+        self.log("bluetooth radio was turned off and on")
+
+    def _fail(self, error: Exception | None) -> None:
+        """state を "failed" にし、error の説明を last_recovery_error に記録して log に出す。"""
+        reason = describe_error(error) if error is not None else "unknown error"
+        with self.lock:
+            self._state = "failed"
+            self._last_recovery_error = reason
+        self.log(f"controller bridge could not be reconnected: {reason}")
 
     def _run_watcher(self) -> None:
         """close() まで、WATCH_INTERVAL 秒ごとに check() を呼ぶ (監視スレッドの本体)。"""
-        raise NotImplementedError
+        while not self.stop.wait(WATCH_INTERVAL):
+            self.check()

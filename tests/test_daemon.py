@@ -3,6 +3,8 @@ import socket
 import pytest
 
 from switch2_remote import daemon
+from switch2_remote.bluetooth_radio import reset_bluetooth_radio
+from switch2_remote.controller_bridge import BridgeStartError
 
 
 class Recorder:
@@ -14,22 +16,42 @@ class Recorder:
 
 @pytest.fixture
 def recorder(monkeypatch):
-    """daemon.main が使う Bridge / Controller / Capture / ソケット / serve_connection を偽物に差し替える。"""
+    """daemon.main が使う Bridge / BridgeSupervisor / Controller / Capture / ソケット / serve_connection を偽物に差し替える。
+
+    偽の BridgeSupervisor は、受け取った start_bridge を本物と同じくコンストラクターで 1 回呼ぶ。
+    rec.bridge_error を設定すると、偽の Bridge はその例外を送出する (起動の失敗)。
+    """
     rec = Recorder()
+    rec.bridge_error = None
 
     class FakeBridge:
-        def __init__(self):
+        def __init__(self, keep_sending_neutral=False):
+            if rec.bridge_error is not None:
+                raise rec.bridge_error
             rec.events.append("bridge created")
             rec.bridge = self
+            self.keep_sending_neutral = keep_sending_neutral
+
+    class FakeSupervisor:
+        def __init__(self, start_bridge, reset_radio):
+            self.start_bridge = start_bridge
+            self.reset_radio = reset_radio
+            self.on_recovered = None
+            self.bridge = start_bridge()
+            rec.events.append("supervisor created")
+            rec.supervisor = self
 
         def close(self):
-            rec.events.append("bridge closed")
+            rec.events.append("supervisor closed")
 
     class FakeController:
         def __init__(self, bridge):
             rec.events.append("controller created")
             rec.controller = self
             self.bridge = bridge
+
+        def reset_state(self):
+            rec.events.append("controller reset")
 
         def close(self):
             rec.events.append("controller closed")
@@ -74,6 +96,7 @@ def recorder(monkeypatch):
         return True  # quit を受けたものとして終了させる
 
     monkeypatch.setattr(daemon, "Bridge", FakeBridge)
+    monkeypatch.setattr(daemon, "BridgeSupervisor", FakeSupervisor)
     monkeypatch.setattr(daemon, "Controller", FakeController)
     monkeypatch.setattr(daemon, "Capture", FakeCapture)
     monkeypatch.setattr(daemon.socket, "socket", FakeServer)
@@ -81,20 +104,51 @@ def recorder(monkeypatch):
     return rec
 
 
-def test_main_passes_controller_built_from_bridge(recorder):
+def test_main_passes_controller_built_from_supervisor(recorder):
     daemon.main([])
     capture, controller = recorder.served
     assert controller is recorder.controller
-    assert controller.bridge is recorder.bridge
+    assert controller.bridge is recorder.supervisor
     assert capture is recorder.capture
 
 
-def test_main_closes_controller_bridge_capture_in_order(recorder):
+def test_main_builds_supervisor_with_bridge_and_radio_reset(recorder):
+    daemon.main([])
+    supervisor = recorder.supervisor
+    assert supervisor.bridge is recorder.bridge
+    assert supervisor.reset_radio is reset_bluetooth_radio
+
+
+@pytest.mark.parametrize(
+    "argv, expected", [([], False), (["--keep-sending-neutral"], True)]
+)
+def test_main_starts_every_bridge_with_keep_sending_neutral(recorder, argv, expected):
+    daemon.main(argv)
+    assert recorder.bridge.keep_sending_neutral is expected
+    # 復旧で起動し直すブリッジにも同じ指定を渡す
+    restarted = recorder.supervisor.start_bridge()
+    assert restarted.keep_sending_neutral is expected
+
+
+def test_main_resets_controller_state_on_recovery(recorder):
+    daemon.main([])
+    assert recorder.supervisor.on_recovered == recorder.controller.reset_state
+
+
+def test_main_exits_with_message_when_first_bridge_fails(recorder):
+    recorder.bridge_error = BridgeStartError("controller bridge failed: fatal port")
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.main([])
+    assert excinfo.value.code == "controller bridge failed: fatal port"
+    assert recorder.events == []
+
+
+def test_main_closes_controller_supervisor_capture_in_order(recorder):
     daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
     assert closes == [
         "controller closed",
-        "bridge closed",
+        "supervisor closed",
         "capture closed",
         "server closed",
     ]
@@ -110,10 +164,10 @@ def test_main_closes_only_created_objects_when_capture_fails(recorder, monkeypat
     with pytest.raises(RuntimeError, match="ffmpeg not found"):
         daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
-    assert closes == ["controller closed", "bridge closed"]
+    assert closes == ["controller closed", "supervisor closed"]
 
 
-def test_main_closes_bridge_when_controller_fails(recorder, monkeypatch):
+def test_main_closes_supervisor_when_controller_fails(recorder, monkeypatch):
     def failing_controller(bridge):
         raise RuntimeError("controller failed")
 
@@ -121,7 +175,7 @@ def test_main_closes_bridge_when_controller_fails(recorder, monkeypatch):
     with pytest.raises(RuntimeError, match="controller failed"):
         daemon.main([])
     closes = [event for event in recorder.events if event.endswith("closed")]
-    assert closes == ["bridge closed"]
+    assert closes == ["supervisor closed"]
 
 
 def test_main_passes_default_rates_to_capture(recorder):

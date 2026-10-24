@@ -46,10 +46,12 @@ import struct
 
 import cv2
 
+from switch2_remote.bluetooth_radio import reset_bluetooth_radio
+from switch2_remote.bridge_supervisor import BridgeSupervisor
 from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH, Capture
 from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
-from switch2_remote.controller_bridge import Bridge
+from switch2_remote.controller_bridge import Bridge, BridgeStartError
 from switch2_remote.error_message import describe_error
 
 SOCKET_ADDRESS = (
@@ -192,14 +194,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None):
-    """起動引数を解釈してから、ブリッジ・Controller・キャプチャ・ソケットを用意してコマンドを受け付ける。"""
+    """起動引数を解釈してから、ブリッジ・Controller・キャプチャ・ソケットを用意してコマンドを受け付ける。
+
+    ブリッジは BridgeSupervisor で包み、起動し直すときも --keep-sending-neutral の指定を引き継ぐ。
+    最初のブリッジの起動に失敗したら (BridgeStartError)、そのメッセージで終了する (SystemExit)。
+    復旧に成功したら Controller の押下状態を空にする (on_recovered = controller.reset_state)。
+    """
     args = parse_args(argv)
-    bridge = Bridge()
+    try:
+        supervisor = BridgeSupervisor(
+            start_bridge=lambda: Bridge(keep_sending_neutral=args.keep_sending_neutral),
+            reset_radio=reset_bluetooth_radio,
+        )
+    except BridgeStartError as e:
+        raise SystemExit(str(e)) from None
     controller = None
     capture = None
     server = None
     try:
-        controller = Controller(bridge)
+        controller = Controller(supervisor)
+        supervisor.on_recovered = controller.reset_state
         output_width, output_height = args.output_size
         capture = Capture(
             args.ffmpeg_fps,
@@ -221,7 +235,7 @@ def main(argv: list[str] | None = None):
         # 解放スレッドを止めてからブリッジを閉じ、hold の解放がブリッジの終了と重ならないようにする
         if controller is not None:
             controller.close()
-        bridge.close()
+        supervisor.close()
         if capture is not None:
             capture.close()
         if server is not None:

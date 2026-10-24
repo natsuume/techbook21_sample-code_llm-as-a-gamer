@@ -277,3 +277,51 @@ def test_bridge_kills_process_and_reraises_keyboard_interrupt_while_starting(
     with pytest.raises(KeyboardInterrupt):
         Bridge()
     assert popen_calls.processes[0].killed
+
+
+# --- close ---
+
+
+class ClosedStdin(FakeStdin):
+    """閉じたパイプの代わり。書き込みで ValueError を送出する。"""
+
+    def write(self, text: str) -> int:
+        raise ValueError("I/O operation on closed file.")
+
+
+def test_close_writes_quit_and_waits_for_exit():
+    bridge = make_bridge([])
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert bridge.proc.returncode == 0
+    assert not bridge.proc.killed
+
+
+def test_close_twice_writes_quit_only_once():
+    bridge = make_bridge([])
+    bridge.close()
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert not bridge.proc.killed
+
+
+def test_close_on_exited_process_neither_writes_nor_kills():
+    bridge = make_bridge([], FakeProcess(returncode=1))
+    bridge.close()
+    assert bridge.proc.stdin.written == []
+    assert not bridge.proc.killed
+
+
+def test_close_kills_process_that_does_not_exit_after_quit():
+    bridge = make_bridge([], FakeProcess(exits_on_quit=False))
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert bridge.proc.killed
+
+
+def test_close_kills_process_when_stdin_is_closed():
+    process = FakeProcess()
+    process.stdin = ClosedStdin()
+    bridge = make_bridge([], process)
+    bridge.close()
+    assert bridge.proc.killed

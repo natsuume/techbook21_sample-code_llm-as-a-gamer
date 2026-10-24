@@ -221,7 +221,10 @@ class Controller:
         ブリッジを起動し直した後に呼ぶ (BridgeSupervisor.on_recovered)。新しいブリッジは起動時に中立を送るため、
         内部の押下状態も中立にそろえる。
         """
-        raise NotImplementedError
+        with self.lock:
+            self.held = PadState()
+            self.holds = []
+            self.tapping = PadState()
 
     def status_text(self) -> str:
         """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の repr。無ければ none>` を返す。

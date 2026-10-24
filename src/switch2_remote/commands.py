@@ -103,8 +103,10 @@ def handle_command(request: str, capture: Capture, controller: Controller) -> st
     if cmd == "fps" and len(args) == 1:
         return capture.set_process_fps(parse_fps(args[0], capture.ffmpeg_fps))
     if cmd == "status":
+        bridge = controller.bridge
         return (
-            f"{capture.status()} bridge_alive={controller.bridge.is_alive()} "
+            f"{capture.status()} bridge_alive={bridge.is_alive()} "
+            f"bridge_state={bridge.state} bridge_restarts={bridge.restarts} "
             f"{controller.status_text()}"
         )
     return f"error unknown command: {' '.join(parts)}"

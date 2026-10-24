@@ -12,6 +12,8 @@ import os
 import subprocess
 from collections.abc import Callable
 
+from switch2_remote.ffmpeg_locator import POWERSHELL
+
 RADIO_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "bluetooth_radio.ps1"
 )
@@ -45,4 +47,47 @@ def reset_bluetooth_radio(
     RADIO_RESET_TIMEOUT 秒以内に終わらなければ (subprocess.TimeoutExpired)、
     RuntimeError(f"bluetooth radio reset failed: timed out after {RADIO_RESET_TIMEOUT} seconds") にする。
     """
-    raise NotImplementedError
+    command = [
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        to_windows_path(RADIO_SCRIPT),
+    ]
+    try:
+        result = run(
+            command,
+            cwd="/mnt/c",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=RADIO_RESET_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"bluetooth radio reset failed: timed out after "
+            f"{RADIO_RESET_TIMEOUT} seconds"
+        ) from None
+    reason = failure_reason(result.stdout or "", result.stderr or "", result.returncode)
+    if reason is not None:
+        raise RuntimeError(f"bluetooth radio reset failed: {reason}")
+
+
+def failure_reason(stdout: str, stderr: str, returncode: int) -> str | None:
+    """bluetooth_radio.ps1 の出力と終了コードから、失敗の理由を返す。成功なら None を返す。
+
+    判定と理由の決め方は reset_bluetooth_radio の docstring のとおり。
+    """
+    lines = [line.lstrip("\ufeff").strip() for line in stdout.splitlines()]
+    non_empty = [line for line in lines if line]
+    last_line = non_empty[-1] if non_empty else ""
+    if last_line == "ok" and returncode == 0:
+        return None
+    if last_line.startswith("error "):
+        return last_line.removeprefix("error ")
+    output = (stdout + stderr).lstrip("\ufeff").strip()
+    if output:
+        return output
+    return f"exit code {returncode}"

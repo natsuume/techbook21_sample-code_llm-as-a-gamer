@@ -65,15 +65,18 @@ class Bridge:
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()
+        command = [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            bridge_win_path,
+        ]
+        if keep_sending_neutral:
+            command.append("-KeepSendingNeutral")
         self.proc = subprocess.Popen(
-            [
-                POWERSHELL,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                bridge_win_path,
-            ],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             cwd="/mnt/c",
@@ -91,6 +94,13 @@ class Bridge:
         threading.Thread(target=self._read_stdout, daemon=True).start()
         try:
             line = self._next_line(BRIDGE_READY_TIMEOUT)
+        except queue.Empty:
+            self.proc.kill()
+            self.proc.wait()
+            raise BridgeStartError(
+                f"controller bridge failed: no ready line within "
+                f"{BRIDGE_READY_TIMEOUT} seconds"
+            ) from None
         except (
             BaseException
         ):  # 起動待ちの割り込み等でも、COM ポートを掴んだ子プロセスを残さない
@@ -100,11 +110,12 @@ class Bridge:
         if line is None or not line.startswith("ready"):
             self.proc.kill()
             self.proc.wait()
-            raise SystemExit(f"controller bridge failed: {line}")
+            raise BridgeStartError(f"controller bridge failed: {line}")
 
     def _read_stdout(self):
         for line in self.proc.stdout:
-            self.lines.put(line.strip())
+            # 出力の文字コードは BOM なし UTF-8 だが、BOM が付いても行の判定が崩れないように除く
+            self.lines.put(line.lstrip("\ufeff").strip())
         self.lines.put(None)
 
     def _next_line(self, timeout: float) -> str | None:
@@ -166,9 +177,16 @@ class Bridge:
             self.proc.kill()
 
     def close(self):
+        """quit を書いて最大 5 秒プロセスの終了を待ち、終わらなければ kill する。2 回呼んでもよい。
+
+        プロセスが既に終わっていれば (poll() が None でない)、quit を書かず kill もしない。
+        書き込みの OSError と ValueError (閉じたパイプ) と、終了待ちの期限切れでは kill する。
+        """
+        if self.proc.poll() is not None:
+            return
         try:
             self.proc.stdin.write("quit\n")
             self.proc.stdin.flush()
             self.proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             self.proc.kill()
