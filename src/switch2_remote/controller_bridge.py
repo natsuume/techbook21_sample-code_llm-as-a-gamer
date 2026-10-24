@@ -37,7 +37,11 @@ class UnconfirmedInputError(RuntimeError):
 
 
 class BridgeStartError(RuntimeError):
-    """ブリッジが起動時に ready を出力しなかった (COM ポートを開けなかった等)。メッセージは `controller bridge failed: <行>`。"""
+    """ブリッジが起動時に ready を出力しなかった (COM ポートを開けなかった、ready の待ちの期限切れ等)。
+
+    メッセージは `controller bridge failed: <最初の行>`、期限切れなら
+    `controller bridge failed: no ready line within <BRIDGE_READY_TIMEOUT> seconds`。
+    """
 
 
 class Bridge:
@@ -47,6 +51,9 @@ class Bridge:
     (中立のレポートも書き込み続ける。接続維持の効果を比べる実験用)。
     起動時の最初の行が ready で始まらなければ (出力の終了も含む)、プロセスを kill して終了を待ってから
     BridgeStartError(f"controller bridge failed: {行}") を送出する。
+    BRIDGE_READY_TIMEOUT 秒以内に最初の行が来なければ (queue.Empty)、同じく kill して終了を待ってから
+    BridgeStartError(f"controller bridge failed: no ready line within {BRIDGE_READY_TIMEOUT} seconds") を送出する。
+    起動待ちの間の KeyboardInterrupt などの BaseException は、kill して終了を待ってからそのまま外に出す。
     set_report は書き込みと ack 待ちを 1 つのロックで囲むため、複数のスレッドから呼んでよい。
     ack のタイムアウト、想定外の応答、ack 前の出力の終了 (EOF) ではブリッジを broken にし、以後は使わない。
     broken にしたときは、押されたままの入力を残さないよう best-effort でブリッジを終了させる

@@ -62,9 +62,9 @@ def run_in_daemon_thread(recover: Callable[[], None]) -> None:
 class BridgeSupervisor:
     """ブリッジを保持し、使えなくなったら裏で起動し直す。Controller の bridge として使う。
 
-    start_bridge   ブリッジを起動して返す関数。失敗は RuntimeError か OSError
-                   (controller_bridge.BridgeStartError は RuntimeError の派生)
-    reset_radio    Bluetooth 無線をオフ・オンする関数。失敗は RuntimeError
+    start_bridge   ブリッジを起動して返す関数。復旧の中では、送出した Exception はどれも起動の失敗として扱う
+                   (controller_bridge.BridgeStartError、wslpath の subprocess.CalledProcessError 等)
+    reset_radio    Bluetooth 無線をオフ・オンする関数。送出した Exception はどれも無線のオフ・オンの失敗として扱う
     sleep          秒数を受け取って待つ関数。起動し直す前の待ちに使う
     log            復旧の開始・失敗・成功を 1 行ずつ記録する関数
     start_watcher  False なら監視スレッドを起動しない (テストでは check を直接呼ぶ)
@@ -125,8 +125,8 @@ class BridgeSupervisor:
     def last_recovery_error(self) -> str | None:
         """最後に復旧で失敗した理由 (例外の error_message.describe_error の説明文) を返す。無ければ None。
 
-        reset_radio の失敗と、無線のオフ・オンの後の起動し直しが全部失敗したときの最後の失敗で更新する。
-        復旧に成功しても消さない。
+        reset_radio の失敗、無線のオフ・オンの後の起動し直しが全部失敗したときの最後の失敗、
+        復旧の中の想定外の例外 (on_recovered の例外等) で更新する。復旧に成功しても消さない。
         """
         raise NotImplementedError
 
@@ -154,7 +154,14 @@ class BridgeSupervisor:
         raise NotImplementedError
 
     def close(self) -> None:
-        """監視スレッドを止め、stop を立てて復旧を止め、現在のブリッジの close() を呼ぶ。"""
+        """復旧と監視スレッドを止め、現在のブリッジを閉じる。
+
+        1. stop を立てる (監視スレッドと、復旧の待ち・差し替えが止まる)
+        2. 監視スレッドがあれば終了を待つ
+        3. ロックの中で現在のブリッジを読み、そのブリッジの close() を呼ぶ
+        復旧の差し替えはロックの中で stop を確かめてから行うため、差し替えがこの 3 より前なら新しいブリッジをここで閉じ、
+        後なら復旧の側が新しいブリッジを閉じる。どちらの順でも、起動に成功したブリッジが閉じられずに残ることはない。
+        """
         raise NotImplementedError
 
     def _start_recovery(self, failed_bridge: ManagedBridge) -> None:
@@ -170,13 +177,26 @@ class BridgeSupervisor:
 
         1. log で開始を記録し、古いブリッジの close() を呼ぶ (例外は無視する)
         2. REOPEN_ATTEMPTS 回まで、sleep(REOPEN_INTERVAL) してから start_bridge() を呼ぶ。成功したら 5 へ
-        3. reset_radio() を呼ぶ。RuntimeError なら last_recovery_error に記録して log に出し、4 へ進む
+        3. reset_radio() を呼ぶ。例外 (Exception) なら last_recovery_error に記録して log に出し、4 へ進む
            (無線のオフ・オンに失敗しても、Windows が自分でつなぎ直す可能性があるため)
         4. RADIO_REOPEN_ATTEMPTS 回まで、sleep(REOPEN_INTERVAL) してから start_bridge() を呼ぶ。成功したら 5 へ。
            全部失敗したら state を "failed" にし、last_recovery_error に最後の失敗を記録して log に出す
-        5. on_recovered があれば呼ぶ → ロックの中で現在のブリッジを差し替え、state を "ok"、restarts を 1 増やす → log に記録する
-        start_bridge の失敗として扱う例外は RuntimeError と OSError で、失敗のたびに log に出す。
-        各 sleep の前と後で stop が立っていたら、それ以上何もせずに戻る (close() 中の復旧を止める)。
+        5. on_recovered があれば呼ぶ → ロックの中で stop を確かめてから現在のブリッジを差し替え、state を "ok"、
+           restarts を 1 増やす → log に記録する
+        start_bridge が送出した Exception はどれも起動の失敗として扱い、失敗のたびに log に出して次の試行に進む
+        (queue.Empty、subprocess.CalledProcessError 等の RuntimeError / OSError 以外も含む)。
+
+        close() による中止: 次のいずれかで stop が立っていたら、それ以上何もせずに戻る (state は変えない)。
+            - 各 sleep の前と後
+            - start_bridge() が成功した直後。新しいブリッジの close() を呼び (例外は無視する)、
+              on_recovered を呼ばず、差し替えもしない
+            - 5 の差し替えの直前 (ロックの中で確かめる)。新しいブリッジの close() を呼び (例外は無視する)、差し替えない
+
+        想定外の例外: 上の扱い以外で例外 (Exception) が出そうになったら (on_recovered の例外等)、外に出さずに
+        state を "failed" にし、last_recovery_error にその説明 (error_message.describe_error) を記録して log に出す。
+        起動に成功して差し替えなかった新しいブリッジがあれば、その close() を呼ぶ (例外は無視する)。
+
+        不変条件: close() で中止した場合を除き、state を "recovering" にした復旧は必ず "ok" か "failed" で終わる。
         """
         raise NotImplementedError
 

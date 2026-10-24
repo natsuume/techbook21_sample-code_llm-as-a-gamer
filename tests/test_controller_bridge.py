@@ -241,3 +241,39 @@ def test_bridge_strips_bom_from_reply_lines(popen_calls):
     ]
     bridge = Bridge()
     assert bridge.set_report(REPORT_A) == "ack 04000f8080808000 1700000000001"
+
+
+def test_bridge_raises_start_error_when_ready_line_does_not_come_in_time(
+    popen_calls, monkeypatch
+):
+    monkeypatch.setattr(controller_bridge, "BRIDGE_READY_TIMEOUT", 0.01)
+    released = threading.Event()
+
+    def silent_stdout():
+        # 何も出力しないまま止まっているブリッジ。テストの終わりに読み取りスレッドを終わらせる
+        released.wait(timeout=5)
+        yield from ()
+
+    popen_calls.stdout_lines = silent_stdout()
+    try:
+        with pytest.raises(BridgeStartError) as excinfo:
+            Bridge()
+    finally:
+        released.set()
+    assert (
+        str(excinfo.value)
+        == "controller bridge failed: no ready line within 0.01 seconds"
+    )
+    assert popen_calls.processes[0].killed
+
+
+def test_bridge_kills_process_and_reraises_keyboard_interrupt_while_starting(
+    popen_calls, monkeypatch
+):
+    def interrupted(self, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Bridge, "_next_line", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        Bridge()
+    assert popen_calls.processes[0].killed

@@ -1,3 +1,5 @@
+import queue
+import subprocess
 from collections.abc import Callable
 
 import pytest
@@ -51,16 +53,22 @@ class FakeBridge:
 
 
 class BridgeStarts:
-    """start_bridge の代わりに、結果の並び (FakeBridge か送出する例外) を先頭から 1 つずつ返す偽物。"""
+    """start_bridge の代わりに、結果の並び (FakeBridge か送出する例外) を先頭から 1 つずつ返す偽物。
+
+    while_starting を設定すると、各呼び出しで結果を返す前に呼ぶ (起動中に close() される場合を作るため)。
+    """
 
     def __init__(self, results: list[FakeBridge | Exception], events: list[str]):
         self.results = list(results)
         self.events = events
         self.calls = 0
+        self.while_starting: Callable[[], None] | None = None
 
     def __call__(self) -> FakeBridge:
         self.calls += 1
         self.events.append("start_bridge")
+        if self.while_starting is not None:
+            self.while_starting()
         result = self.results.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -288,6 +296,77 @@ def test_recovery_is_logged():
     assert len(harness.logs) >= 2
 
 
+def test_start_bridge_failures_of_any_exception_type_are_retried():
+    # ready の待ちの期限切れ (queue.Empty) や wslpath の失敗 (CalledProcessError) でも、次の試行に進む
+    old = FakeBridge(fail_with=RuntimeError("bridge exited"))
+    new = FakeBridge()
+    harness = Harness(
+        [old, queue.Empty(), subprocess.CalledProcessError(1, ["wslpath"]), new]
+    )
+    with pytest.raises(RuntimeError, match="bridge exited"):
+        harness.supervisor.set_report(REPORT_A)
+    assert harness.starts.calls == 4
+    assert harness.radio.calls == 0
+    assert harness.sleeps == [5.0] * 3
+    assert harness.supervisor.state == "ok"
+    assert harness.supervisor.restarts == 1
+    harness.supervisor.set_report(REPORT_A)
+    assert new.reports == [REPORT_A]
+
+
+def test_all_reopens_failing_with_other_exception_types_end_in_failed():
+    old = FakeBridge(fail_with=RuntimeError("bridge exited"))
+    errors: list[FakeBridge | Exception] = [queue.Empty() for _ in range(15)]
+    harness = Harness([old, *errors])
+    with pytest.raises(RuntimeError, match="bridge exited"):
+        harness.supervisor.set_report(REPORT_A)
+    assert harness.starts.calls == 16
+    assert harness.supervisor.state == "failed"
+    # メッセージが空の例外は、describe_error がクラス名で表す
+    assert harness.supervisor.last_recovery_error == "Empty"
+
+
+def test_reopening_continues_when_radio_reset_raises_other_exception():
+    old = FakeBridge(fail_with=RuntimeError("bridge exited"))
+    new = FakeBridge()
+    harness = Harness(
+        [old, start_error(1), start_error(2), start_error(3), new],
+        radio_fails_with=ValueError("unexpected radio state"),
+    )
+    with pytest.raises(RuntimeError, match="bridge exited"):
+        harness.supervisor.set_report(REPORT_A)
+    assert harness.radio.calls == 1
+    assert harness.starts.calls == 5
+    assert harness.supervisor.state == "ok"
+    assert harness.supervisor.restarts == 1
+    assert harness.supervisor.last_recovery_error == "unexpected radio state"
+
+
+def test_on_recovered_exception_makes_state_failed_without_raising():
+    old = FakeBridge()
+    new = FakeBridge()
+    harness = Harness([old, new])
+
+    def failing_on_recovered() -> None:
+        raise ValueError("reset_state failed")
+
+    harness.supervisor.on_recovered = failing_on_recovered
+    old.alive = False
+    # 復旧の中の例外は外に出さない (check はそのまま戻る)
+    harness.supervisor.check()
+    assert harness.supervisor.state == "failed"
+    assert harness.supervisor.restarts == 0
+    assert harness.supervisor.last_recovery_error == "reset_state failed"
+    assert any("reset_state failed" in line for line in harness.logs)
+    # 差し替えなかった新しいブリッジは閉じる
+    assert new.closed
+    assert harness.supervisor.bridge is old
+    with pytest.raises(RuntimeError) as excinfo:
+        harness.supervisor.set_report(REPORT_A)
+    assert str(excinfo.value) == FAILED
+    assert new.reports == []
+
+
 # --- recovering の間 ---
 
 
@@ -416,3 +495,34 @@ def test_recovery_stops_when_closed_during_sleep():
     harness.pending[0]()
     assert sleeps == [5.0]
     assert harness.starts.calls == 1
+
+
+def test_bridge_started_while_closing_is_closed_and_not_adopted():
+    old = FakeBridge()
+    new = FakeBridge()
+    harness = Harness([old, new])
+
+    def close_during_reopen() -> None:
+        if harness.starts.calls == 2:
+            harness.supervisor.close()
+
+    harness.starts.while_starting = close_during_reopen
+    old.alive = False
+    harness.supervisor.check()
+    assert new.closed
+    assert harness.recovered_states == []
+    assert harness.supervisor.bridge is old
+    assert harness.supervisor.restarts == 0
+
+
+def test_bridge_is_not_adopted_when_closed_just_before_swap():
+    # 起動に成功した後、差し替えの前 (on_recovered の間) に close() された
+    old = FakeBridge()
+    new = FakeBridge()
+    harness = Harness([old, new])
+    harness.supervisor.on_recovered = harness.supervisor.close
+    old.alive = False
+    harness.supervisor.check()
+    assert new.closed
+    assert harness.supervisor.bridge is old
+    assert harness.supervisor.restarts == 0
