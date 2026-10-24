@@ -12,6 +12,8 @@
 #      オフの SetStateAsync が Allowed なら、オフの待ちの期限切れや例外があってもオンを必ず試す (finally)
 #      オフの待ちが期限切れで、オンも失敗したときの理由は "radio did not turn off: <State>; <オンの失敗の理由>" とする (both reasons)
 #   WinRT の非同期の結果は System.WindowsRuntimeSystemExtensions.AsTask で .NET の Task にして待つ (await)
+#   1 つの非同期の待ちは $AsyncTimeoutSeconds までとし、超えたら失敗 (winrt operation timed out)
+#   (bluetooth_radio.py が 60 秒でプロセスを止める前に、オンに戻す処理まで必ず進むようにするため)
 #   想定外の例外は、そのメッセージを 1 行にして失敗として出力する (error <message>)
 # 出力: 標準出力の文字コードは BOM なし UTF-8 で、1 行だけ出力する (UTF-8 without BOM)
 #   成功: "ok" (終了コード 0)
@@ -20,6 +22,7 @@ param([int]$OffSeconds = 5)
 $ErrorActionPreference = "Stop"
 $StatePollMs = 500  # SetStateAsync の後に State を確かめる間隔 (ms)
 $StateTimeoutSeconds = 10  # SetStateAsync の後に State が目的の状態になるまで待つ上限 (秒)
+$AsyncTimeoutSeconds = 10  # WinRT の非同期の操作 1 つを待つ上限 (秒)
 
 # [Console]::Out は OutputEncoding を設定すると作り直されるため、設定してから取り出す (UTF-8 without BOM)
 # コンソールの無い環境では設定が例外になることがあるため、失敗しても既定の文字コードのまま続ける (keep the default encoding)
@@ -30,7 +33,9 @@ $out = [Console]::Out
 function Wait-AsyncOperation($Operation, [Type]$ResultType) {
     $asTask = $script:AsTaskGeneric.MakeGenericMethod($ResultType)
     $task = $asTask.Invoke($null, @($Operation))
-    $task.Wait(-1) | Out-Null
+    if (-not $task.Wait($AsyncTimeoutSeconds * 1000)) {
+        throw "winrt operation timed out after $AsyncTimeoutSeconds seconds"
+    }
     return $task.Result
 }
 

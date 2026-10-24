@@ -311,6 +311,26 @@ def test_recovery_is_logged():
     assert len(harness.logs) >= 2
 
 
+def test_log_failure_after_swap_keeps_state_ok():
+    # 差し替えた後のログの失敗 (標準出力が閉じている等) で、使えるブリッジを failed にしない
+    old = FakeBridge()
+    new = FakeBridge()
+    harness = Harness([old, new])
+
+    def log(message: str) -> None:
+        if "reconnected" in message:
+            raise OSError("stdout is closed")
+        harness.logs.append(message)
+
+    harness.supervisor.log = log
+    old.alive = False
+    harness.supervisor.check()
+    assert harness.supervisor.state == "ok"
+    assert harness.supervisor.bridge is new
+    assert harness.supervisor.restarts == 1
+    assert not new.closed
+
+
 def test_start_bridge_failures_of_any_exception_type_are_retried():
     # ready の待ちの期限切れ (queue.Empty) や wslpath の失敗 (CalledProcessError) でも、次の試行に進む
     old = FakeBridge(fail_with=RuntimeError("bridge exited"))

@@ -53,6 +53,17 @@ def test_script_continues_when_output_encoding_cannot_be_set(script):
     assert f"try {{ {UTF8_WITHOUT_BOM} }} catch {{ }}" in text
 
 
+def test_radio_script_waits_for_winrt_operations_with_time_limit():
+    """WinRT の非同期の待ちに上限を設け、無期限には待たない。
+
+    bluetooth_radio.py は RADIO_RESET_TIMEOUT でプロセスを止めるため、止められる前に
+    無線をオンに戻す処理 (finally) まで進めるようにする。
+    """
+    text = read_script(RADIO_SCRIPT)
+    assert "$task.Wait(-1)" not in text
+    assert "$task.Wait($AsyncTimeoutSeconds * 1000)" in text
+
+
 def test_bridge_script_takes_keep_sending_neutral_switch():
     text = read_script(BRIDGE_SCRIPT)
     assert 'param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)' in text

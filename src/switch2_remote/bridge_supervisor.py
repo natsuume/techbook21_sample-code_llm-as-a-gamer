@@ -325,7 +325,6 @@ class BridgeSupervisor:
                 return
             # 差し替えた後は現在のブリッジなので、下の想定外の例外の扱いで閉じない
             new_bridge = None
-            self.log(f"controller bridge reconnected (restarts={restarts})")
         except RecoveryStopped:
             return
         # 復旧のスレッドを例外で終わらせず、recovering のまま残さないため、想定外の例外もすべて受ける
@@ -333,6 +332,10 @@ class BridgeSupervisor:
             if new_bridge is not None:
                 close_quietly(new_bridge)
             self._fail(e)
+            return
+        # 差し替えた後のログの失敗で state を failed にしないよう、上の例外の扱いの外で書く
+        with contextlib.suppress(Exception):
+            self.log(f"controller bridge reconnected (restarts={restarts})")
 
     def _sleep_unless_stopped(self) -> None:
         """sleep(REOPEN_INTERVAL) する。前と後で stop が立っていたら RecoveryStopped を送出する。"""
