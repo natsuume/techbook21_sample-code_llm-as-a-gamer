@@ -8,7 +8,9 @@ controller_bridge.ps1 はこのパッケージに同梱しており、このフ�
                    不正な行には `error <理由>` を出力する
     quit           送信スレッドを止め、中立を 200ms 送り、ポートを閉じて `closed` を出力する (標準入力の EOF でも同じ)
 ブリッジは中立以外のレポートを 10ms ごとに書き込み続け、中立に変わったら中立を 100ms 書き込んでから止まる。
+起動引数 -KeepSendingNeutral を付けると、中立も 10ms ごとに書き込み続ける (Bridge(keep_sending_neutral=True))。
 書き込みに失敗したブリッジは `fatal <メッセージ>` を出力して終了する。
+ブリッジの出力は BOM なし UTF-8 で、読み取りでは念のため行頭の BOM (U+FEFF) を除く。
 """
 
 import os
@@ -34,9 +36,24 @@ class UnconfirmedInputError(RuntimeError):
     """set を書き込んだ後に ack を確認できなかった。レポートは Switch 2 に届いている可能性がある。"""
 
 
+class BridgeStartError(RuntimeError):
+    """ブリッジが起動時に ready を出力しなかった (COM ポートを開けなかった、ready の待ちの期限切れ等)。
+
+    メッセージは `controller bridge failed: <最初の行>`、期限切れなら
+    `controller bridge failed: no ready line within <BRIDGE_READY_TIMEOUT> seconds`。
+    """
+
+
 class Bridge:
     """controller_bridge.ps1 を常駐させ、set コマンドでレポートを差し替えて ack を待つ。
 
+    keep_sending_neutral が True なら、PowerShell の引数に -KeepSendingNeutral を加えて起動する
+    (中立のレポートも書き込み続ける。接続維持の効果を比べる実験用)。
+    起動時の最初の行が ready で始まらなければ (出力の終了も含む)、プロセスを kill して終了を待ってから
+    BridgeStartError(f"controller bridge failed: {行}") を送出する。
+    BRIDGE_READY_TIMEOUT 秒以内に最初の行が来なければ (queue.Empty)、同じく kill して終了を待ってから
+    BridgeStartError(f"controller bridge failed: no ready line within {BRIDGE_READY_TIMEOUT} seconds") を送出する。
+    起動待ちの間の KeyboardInterrupt などの BaseException は、kill して終了を待ってからそのまま外に出す。
     set_report は書き込みと ack 待ちを 1 つのロックで囲むため、複数のスレッドから呼んでよい。
     ack のタイムアウト、想定外の応答、ack 前の出力の終了 (EOF) ではブリッジを broken にし、以後は使わない。
     broken にしたときは、押されたままの入力を残さないよう best-effort でブリッジを終了させる
@@ -44,19 +61,22 @@ class Bridge:
     ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
     """
 
-    def __init__(self):
+    def __init__(self, keep_sending_neutral: bool = False):
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()
+        command = [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            bridge_win_path,
+        ]
+        if keep_sending_neutral:
+            command.append("-KeepSendingNeutral")
         self.proc = subprocess.Popen(
-            [
-                POWERSHELL,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                bridge_win_path,
-            ],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             cwd="/mnt/c",
@@ -74,6 +94,13 @@ class Bridge:
         threading.Thread(target=self._read_stdout, daemon=True).start()
         try:
             line = self._next_line(BRIDGE_READY_TIMEOUT)
+        except queue.Empty:
+            self.proc.kill()
+            self.proc.wait()
+            raise BridgeStartError(
+                f"controller bridge failed: no ready line within "
+                f"{BRIDGE_READY_TIMEOUT} seconds"
+            ) from None
         except (
             BaseException
         ):  # 起動待ちの割り込み等でも、COM ポートを掴んだ子プロセスを残さない
@@ -83,11 +110,12 @@ class Bridge:
         if line is None or not line.startswith("ready"):
             self.proc.kill()
             self.proc.wait()
-            raise SystemExit(f"controller bridge failed: {line}")
+            raise BridgeStartError(f"controller bridge failed: {line}")
 
     def _read_stdout(self):
         for line in self.proc.stdout:
-            self.lines.put(line.strip())
+            # 出力の文字コードは BOM なし UTF-8 だが、BOM が付いても行の判定が崩れないように除く
+            self.lines.put(line.lstrip("\ufeff").strip())
         self.lines.put(None)
 
     def _next_line(self, timeout: float) -> str | None:
@@ -101,7 +129,8 @@ class Bridge:
         """8 バイトのレポートを `set <16 桁の小文字 16 進>` で送り、ブリッジの ack の行を返す。
 
         書き込みと ack 待ちを 1 つのロックで囲み、スレッドから呼ばれても応答の対応がずれないようにする。
-        - broken または終了済みのブリッジでは、書き込まずに RuntimeError にする
+        - broken または終了済みのブリッジでは、書き込まずに RuntimeError("controller bridge is not usable") にする
+          (デーモンでは bridge_supervisor.BridgeSupervisor がブリッジを起動し直すため、起動し直しの案内は付けない)
         - ack が BRIDGE_ACK_TIMEOUT 秒以内に来なければ UnconfirmedInputError にする (broken にする)
         - ack の前に出力が終われば (EOF) UnconfirmedInputError にする (broken にする)。
           ブリッジはレポートを書き込んでから ack を出力するため、ack の前に終了してもレポートは届いている可能性がある
@@ -112,9 +141,7 @@ class Bridge:
         report_hex = report.hex()
         with self.lock:
             if not self.is_alive():
-                raise RuntimeError(
-                    "controller bridge is not usable; restart the daemon"
-                )
+                raise RuntimeError("controller bridge is not usable")
             self.proc.stdin.write(f"set {report_hex}\n")
             self.proc.stdin.flush()
             # 書き込んだ後は、応答が無くてもブリッジが遅れてレポートを送る可能性があるため未確認として扱う
@@ -149,9 +176,16 @@ class Bridge:
             self.proc.kill()
 
     def close(self):
+        """quit を書いて最大 5 秒プロセスの終了を待ち、終わらなければ kill する。2 回呼んでもよい。
+
+        プロセスが既に終わっていれば (poll() が None でない)、quit を書かず kill もしない。
+        書き込みの OSError と ValueError (閉じたパイプ) と、終了待ちの期限切れでは kill する。
+        """
+        if self.proc.poll() is not None:
+            return
         try:
             self.proc.stdin.write("quit\n")
             self.proc.stdin.flush()
             self.proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             self.proc.kill()

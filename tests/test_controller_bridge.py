@@ -5,7 +5,12 @@ import threading
 import pytest
 
 from switch2_remote import controller_bridge
-from switch2_remote.controller_bridge import Bridge, UnconfirmedInputError
+from switch2_remote.controller_bridge import (
+    Bridge,
+    BridgeStartError,
+    UnconfirmedInputError,
+)
+from switch2_remote.ffmpeg_locator import POWERSHELL
 
 REPORT_A = bytes.fromhex("04000f8080808000")
 
@@ -133,3 +138,198 @@ def test_set_report_rejects_report_of_wrong_length():
     with pytest.raises(ValueError):
         bridge.set_report(b"\x00\x00\x0f")
     assert bridge.proc.stdin.written == []
+
+
+# --- 起動 (Bridge.__init__) ---
+
+WINDOWS_BRIDGE_PATH = r"\\wsl.localhost\Ubuntu\repo\controller_bridge.ps1"
+
+
+class StartedProcess(FakeProcess):
+    """Bridge.__init__ が起動する subprocess.Popen の代わり。stdout から決まった行を読ませる。"""
+
+    def __init__(self, stdout_lines: list[str]):
+        super().__init__()
+        self.stdout = iter(stdout_lines)
+
+
+@pytest.fixture
+def popen_calls(monkeypatch):
+    """controller_bridge の subprocess.run (wslpath) と subprocess.Popen を偽物に差し替え、Popen の呼び出しを記録する。
+
+    起動するプロセスの stdout は popen_calls.stdout_lines (既定は ready の 1 行) を読ませる。
+    """
+
+    class Calls:
+        def __init__(self):
+            self.args: list[list[str]] = []
+            self.processes: list[StartedProcess] = []
+            self.stdout_lines = ["ready COM3 1700000000000\n"]
+
+    calls = Calls()
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 0, stdout=WINDOWS_BRIDGE_PATH + "\n", stderr=""
+        )
+
+    def fake_popen(args, **kwargs):
+        calls.args.append(list(args))
+        process = StartedProcess(calls.stdout_lines)
+        calls.processes.append(process)
+        return process
+
+    monkeypatch.setattr(controller_bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(controller_bridge.subprocess, "Popen", fake_popen)
+    return calls
+
+
+BRIDGE_COMMAND = [
+    POWERSHELL,
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    WINDOWS_BRIDGE_PATH,
+]
+
+
+def test_bridge_starts_without_keep_sending_neutral_by_default(popen_calls):
+    Bridge()
+    assert popen_calls.args == [BRIDGE_COMMAND]
+
+
+def test_bridge_passes_keep_sending_neutral_switch(popen_calls):
+    Bridge(keep_sending_neutral=True)
+    assert popen_calls.args == [[*BRIDGE_COMMAND, "-KeepSendingNeutral"]]
+
+
+@pytest.mark.parametrize(
+    "stdout_lines, first_line",
+    [
+        (
+            ["fatal 指定されたポートが見つかりません。\n"],
+            "fatal 指定されたポートが見つかりません。",
+        ),
+        ([], None),
+    ],
+)
+def test_bridge_raises_start_error_when_not_ready(
+    popen_calls, stdout_lines, first_line
+):
+    popen_calls.stdout_lines = stdout_lines
+    with pytest.raises(BridgeStartError) as excinfo:
+        Bridge()
+    assert str(excinfo.value) == f"controller bridge failed: {first_line}"
+    assert popen_calls.processes[0].killed
+
+
+def test_bridge_start_error_is_runtime_error():
+    assert issubclass(BridgeStartError, RuntimeError)
+
+
+def test_bridge_accepts_ready_line_with_bom(popen_calls):
+    popen_calls.stdout_lines = ["\ufeffready COM3 1700000000000\n"]
+    bridge = Bridge()
+    assert bridge.is_alive()
+
+
+def test_bridge_strips_bom_from_reply_lines(popen_calls):
+    popen_calls.stdout_lines = [
+        "\ufeffready COM3 1700000000000\n",
+        "\ufeffack 04000f8080808000 1700000000001\n",
+    ]
+    bridge = Bridge()
+    assert bridge.set_report(REPORT_A) == "ack 04000f8080808000 1700000000001"
+
+
+def test_bridge_raises_start_error_when_ready_line_does_not_come_in_time(
+    popen_calls, monkeypatch
+):
+    monkeypatch.setattr(controller_bridge, "BRIDGE_READY_TIMEOUT", 0.01)
+    released = threading.Event()
+
+    def silent_stdout():
+        # 何も出力しないまま止まっているブリッジ。テストの終わりに読み取りスレッドを終わらせる
+        released.wait(timeout=5)
+        yield from ()
+
+    popen_calls.stdout_lines = silent_stdout()
+    try:
+        with pytest.raises(BridgeStartError) as excinfo:
+            Bridge()
+    finally:
+        released.set()
+    assert (
+        str(excinfo.value)
+        == "controller bridge failed: no ready line within 0.01 seconds"
+    )
+    assert popen_calls.processes[0].killed
+
+
+def test_bridge_kills_process_and_reraises_keyboard_interrupt_while_starting(
+    popen_calls, monkeypatch
+):
+    def interrupted(self, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Bridge, "_next_line", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        Bridge()
+    assert popen_calls.processes[0].killed
+
+
+# --- close ---
+
+
+class ClosedStdin(FakeStdin):
+    """閉じたパイプの代わり。書き込みで ValueError を送出する。"""
+
+    def write(self, text: str) -> int:
+        raise ValueError("I/O operation on closed file.")
+
+
+def test_close_writes_quit_and_waits_for_exit():
+    bridge = make_bridge([])
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert bridge.proc.returncode == 0
+    assert not bridge.proc.killed
+
+
+def test_close_twice_writes_quit_only_once():
+    bridge = make_bridge([])
+    bridge.close()
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert not bridge.proc.killed
+
+
+def test_close_on_exited_process_neither_writes_nor_kills():
+    bridge = make_bridge([], FakeProcess(returncode=1))
+    bridge.close()
+    assert bridge.proc.stdin.written == []
+    assert not bridge.proc.killed
+
+
+def test_close_kills_process_that_does_not_exit_after_quit():
+    bridge = make_bridge([], FakeProcess(exits_on_quit=False))
+    bridge.close()
+    assert bridge.proc.stdin.written == ["quit\n"]
+    assert bridge.proc.killed
+
+
+def test_close_kills_process_when_stdin_is_closed():
+    process = FakeProcess()
+    process.stdin = ClosedStdin()
+    bridge = make_bridge([], process)
+    bridge.close()
+    assert bridge.proc.killed
+
+
+def test_set_report_on_unusable_bridge_does_not_ask_to_restart_daemon():
+    # デーモンでは BridgeSupervisor がブリッジを起動し直すため、起動し直しの案内を付けない
+    bridge = make_bridge([], FakeProcess(returncode=1))
+    with pytest.raises(RuntimeError) as excinfo:
+        bridge.set_report(REPORT_A)
+    assert str(excinfo.value) == "controller bridge is not usable"

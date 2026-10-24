@@ -2,6 +2,7 @@ import time
 
 import pytest
 
+from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import UnconfirmedInputError
 from switch2_remote.controller_state import PadState
@@ -410,6 +411,69 @@ def test_last_error_keeps_first_release_failure():
     controller.release_expired()
     assert controller.status_text() == (
         "held=none holds=A:0ms last_error=bridge exited"
+    )
+
+
+# --- reset_state ---
+
+
+def test_reset_state_clears_all_layers_without_sending():
+    controller, bridge, clock, _ = make_controller()
+    controller.down([pad("L", LS=(0.0, 1.0))])
+    controller.hold(pad("B"), 2000)
+    controller.tapping = pad("A")
+    sent_before = list(bridge.reports)
+    controller.reset_state()
+    assert bridge.reports == sent_before
+    assert controller.held.is_empty()
+    assert controller.holds == []
+    assert controller.tapping.is_empty()
+    assert controller.status_text() == "held=none holds=none last_error=none"
+    # 空にした後は、以前に押していた入力を衝突とみなさず、期限が来ても何も送らない
+    clock.now = 2.0
+    controller.release_expired()
+    assert bridge.reports == sent_before
+    assert controller.down([pad("L")]) == "ok held=L"
+
+
+def test_reset_state_clears_last_error_so_next_failure_is_recorded():
+    # 0: A の hold を押す、1: ブリッジが止まって解放に失敗する
+    bridge = FakeBridge(fail_at=1, fail_with=RuntimeError("bridge exited"))
+    controller, _, clock, _ = make_controller(bridge)
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    controller.release_expired()
+    assert controller.status_text().endswith("last_error=bridge exited")
+    # 復旧に成功した (新しいブリッジは中立から始まる)
+    controller.reset_state()
+    assert controller.status_text() == "held=none holds=none last_error=none"
+    # 新しいブリッジで押せた後の、解放の失敗は新しく記録される
+    bridge.fail_at = None
+    controller.hold(pad("B"), 500)
+    bridge.fail_at = bridge.calls
+    bridge.fail_with = RuntimeError("bridge exited")
+    clock.now = 2.0
+    controller.release_expired()
+    assert controller.status_text().endswith("last_error=bridge exited")
+
+
+def test_reconnecting_refusal_is_not_recorded_and_later_failure_is():
+    # 0: A の hold を押す、1 以降: 復旧中のため送れない
+    bridge = FakeBridge(
+        fail_at=1,
+        fail_with=BridgeReconnectingError("controller bridge is reconnecting"),
+    )
+    controller, _, clock, _ = make_controller(bridge)
+    controller.hold(pad("A"), 1000)
+    clock.now = 1.0
+    controller.release_expired()
+    # 一時的な拒否は記録せず、hold も残して次の確認で離し直す
+    assert controller.status_text() == "held=none holds=A:0ms last_error=none"
+    # 復旧が failed で終わった後の失敗は記録する
+    bridge.fail_with = RuntimeError("controller bridge could not be reconnected")
+    controller.release_expired()
+    assert controller.status_text().endswith(
+        "last_error=controller bridge could not be reconnected"
     )
 
 

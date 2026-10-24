@@ -48,6 +48,9 @@ ch01_setup/            第1章のサンプル
 | `controller.py` | 押し続けている入力と時間を指定した長押しを保持し、変化のたびにレポートをブリッジへ送る |
 | `controller_bridge.py` | controller_bridge.ps1 を起動したまま保持し、送るレポートを差し替える |
 | `controller_bridge.ps1` | Windows 側で COM ポートを開き、指定されたレポートを Pico 2 W に送り続ける |
+| `bridge_supervisor.py` | ブリッジの失敗を検知し、COM ポートの開き直しと Bluetooth 無線のオフ・オンで裏で復旧させる |
+| `bluetooth_radio.py` | bluetooth_radio.ps1 を実行し、Windows の Bluetooth 無線をオフ・オンする |
+| `bluetooth_radio.ps1` | Windows 側で Bluetooth 無線をオフにし、待ってからオンに戻す |
 | `commands.py` | デーモンが受け取る 1 行コマンドを解釈して振り分ける |
 | `daemon.py` | Unix ソケットでコマンドを受け付ける常駐デーモン (`switch2-remote-daemon`) |
 | `client.py` | デーモンにコマンドを送るクライアント (`switch2-remote`) |

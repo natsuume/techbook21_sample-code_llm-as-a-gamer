@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.controller_bridge import UnconfirmedInputError
 from switch2_remote.controller_state import (
     PadState,
@@ -48,7 +49,7 @@ RELEASE_CHECK_INTERVAL = 0.01  # 解放スレッドが期限切れの hold を�
 
 
 class ReportSender(Protocol):
-    """Controller がレポートを送る先。実機では controller_bridge.Bridge を使う。"""
+    """Controller がレポートを送る先。デーモンでは controller_bridge.Bridge を包んだ bridge_supervisor.BridgeSupervisor を使う。"""
 
     def set_report(self, report: bytes) -> str:
         """8 バイトのレポートを送り、ブリッジの ack の行を返す。"""
@@ -66,7 +67,8 @@ class ActiveHold:
 class Controller:
     """押下状態 (held / holds / tapping) を保持し、変化のたびに合成したレポートを bridge.set_report で送る。
 
-    bridge      set_report(bytes) -> str を持つもの。commands の status が bridge.is_alive() を読むため、公開の属性として持つ
+    bridge      set_report(bytes) -> str を持つもの。commands の status が bridge.is_alive()・bridge.state・bridge.restarts
+                を読むため、公開の属性として持つ (デーモンでは bridge_supervisor.BridgeSupervisor)
     clock       現在時刻 (秒) を返す関数。hold の期限と status の残り時間に使う
     sleep       秒数を受け取って待つ関数。tap の待ちに使う
     start_timer False なら解放スレッドを起動しない (テストでは release_expired を直接呼ぶ)
@@ -214,10 +216,24 @@ class Controller:
             self.held, self.holds = PadState(), []
         return "ok held=none"
 
+    def reset_state(self) -> None:
+        """ロックの中で held・holds・tapping をすべて空にし、last_error を None に戻す。レポートは送らない。
+
+        ブリッジを起動し直した後に呼ぶ (BridgeSupervisor.on_recovered)。新しいブリッジは起動時に中立を送るため、
+        内部の押下状態も中立にそろえる。last_error も消し、新しいブリッジでの最初の失敗を記録できるようにする
+        (復旧の回数は status の bridge_restarts で分かる)。
+        """
+        with self.lock:
+            self.held = PadState()
+            self.holds = []
+            self.tapping = PadState()
+            self.last_error = None
+
     def status_text(self) -> str:
-        """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の repr。無ければ none>` を返す。
+        """`held=<held の表記> holds=<holds の表記> last_error=<最初のバックグラウンド送信の失敗の説明。無ければ none>` を返す。
 
         holds の表記は controller_state.format_holds の形式で、残り時間は (release_at - clock()) を ms にして切り捨てた整数。
+        last_error はブリッジの復旧に成功すると消える (reset_state)。復旧の回数は status の bridge_restarts で分かる。
         """
         with self.lock:
             now = self.clock()
@@ -238,6 +254,7 @@ class Controller:
         解放スレッドから RELEASE_CHECK_INTERVAL ごとに呼ぶ。テストから直接呼べるよう公開している。
         期限切れの hold が無ければ何も送らない。送信が失敗 (RuntimeError / OSError) したら例外を外に出さず、
         最初の失敗の説明 (error_message.describe_error) を last_error に記録して holds を変えない。
+        記録はブリッジの復旧に成功するまで (reset_state まで) 残し、その間の後の失敗では上書きしない。
         """
         with self.lock:
             self._release_expired_locked(raise_on_failure=False)
@@ -257,8 +274,9 @@ class Controller:
             self._send(self.held, remaining, self.tapping)
         except (RuntimeError, OSError) as e:
             # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
-            # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
-            if self.last_error is None:
+            # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す。
+            # 復旧中の一時的な拒否は原因ではないため記録せず、復旧の結果 (failed 等) の失敗を残す
+            if self.last_error is None and not isinstance(e, BridgeReconnectingError):
                 self.last_error = describe_error(e)
             if raise_on_failure:
                 raise

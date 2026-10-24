@@ -11,6 +11,8 @@
     controller_state     押下状態の解釈・合成・レポート化 (純粋関数)
     controller           押下状態の保持とレポートの送信
     controller_bridge    controller_bridge.ps1 の常駐とレポートの送信
+    bridge_supervisor    ブリッジの失敗の検知と自動復旧
+    bluetooth_radio      Windows の Bluetooth 無線のオフ・オン (bluetooth_radio.ps1 の実行)
     commands             1 行コマンドの解釈と実行
     daemon               Unix ソケットでコマンドを受け付ける常駐デーモン (switch2-remote-daemon)
     client               デーモンにコマンドを送るクライアント (switch2-remote)

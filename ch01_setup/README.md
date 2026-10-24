@@ -63,7 +63,7 @@ COM4  着信  PlayAbility Receiver ...
 
 PC から Pico 2 W へ送信するときは、発信側の COM ポートを使います。着信側は使いません。
 
-ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、controller_bridge.ps1 の先頭にある `param([string]$PortName = "COM3")` の値を書き換えてください。
+ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、controller_bridge.ps1 の先頭にある `param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)` の `"COM3"` を書き換えてください。
 
 ## 3. ffmpeg の導入
 
@@ -95,7 +95,7 @@ uv run switch2-remote-daemon
 
 ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動が終わると、`daemon ready` と表示されます。デーモンは同時に 1 つだけ起動します。
 
-起動引数で、フレームレート、保持する時間、デーモンが受け取る映像の解像度を指定できます。`--output-size` 以外の値は整数です。
+起動引数で、フレームレート、保持する時間、デーモンが受け取る映像の解像度、中立のレポートの送り方を指定できます。値を取る引数のうち、`--output-size` 以外の値は整数です。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
@@ -103,6 +103,7 @@ uv run switch2-remote-daemon
 | `--process-fps N` | デーモンが保持するフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
 | `--buffer-seconds N` | フレームを保持する時間 (秒)。直近 N 秒分を保持します | 5 | 1〜60 |
 | `--output-size WxH` | デーモンが受け取る映像の解像度。デバイスから 1280x720 で受け取り、ffmpeg.exe の中で縮小します | 1280x720 | 幅・高さとも偶数で 1280x720 以下 |
+| `--keep-sending-neutral` | 何も押していないとき (中立) のレポートも 10 ミリ秒ごとに送り続けます。指定しなければ、中立に戻してから 100 ミリ秒送った後は送るのを止めます。接続が切れにくくなるかを比べる実験用です | 無効 | 値を取りません |
 
 ```bash
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5 --output-size 640x360
@@ -142,7 +143,7 @@ uv run switch2-remote quit                    # ブリッジとキャプチャ�
 | `up TARGET [TARGET ...]` | 指定したボタン、または `LS` / `RS` を離します。`LS` / `RS` はスティックの傾きを戻し、押し込み (`L3` / `R3`) は離しません。`down` と `hold` のどちらで押したものも離れます。`up ALL` はすべてを離します |
 | `shot PATH` | 保持している最新のフレームを、新しいフレームを待たずに PATH に PNG で保存します。引数は PATH 1 つだけです。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
 | `fps N` | デーモンが保持するフレームレートを N fps (1〜`--ffmpeg-fps` の値の整数) に変えます。応答は `ok fps=N` です |
-| `status` | 受信フレーム数、保持しているフレームの枚数、最新のフレームを保持してからの経過秒数 (`latest_age`)、ffmpeg.exe が出力するフレームレート、保持するフレームレート、ffmpeg.exe のフレーム落ち回数、キャプチャーの終了、ブリッジの生存、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
+| `status` | 受信フレーム数、保持しているフレームの枚数、最新のフレームを保持してからの経過秒数 (`latest_age`)、ffmpeg.exe が出力するフレームレート、保持するフレームレート、ffmpeg.exe のフレーム落ち回数、キャプチャーの終了、ブリッジの生存・状態 (`bridge_state`)・復旧に成功した回数 (`bridge_restarts`)、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
 | `quit` | ブリッジとキャプチャーを止めてデーモンを終了します |
 
 送るレポートは、`down` で押したままの入力、`hold` で押している入力、`tap` で押している入力を重ねたものです。`tap` と `hold` が終わると、`down` で押したままの状態に戻ります。たとえば `down LS:0,1` の後に `tap X` を送ると、左スティックを上に倒したまま X を押せます。すでに押されているボタンやスティックを `tap` / `hold` で押そうとした場合や、十字キーの相反する方向が重なる場合は、何も送らずにエラーを返します。
@@ -155,14 +156,26 @@ ok held=LS:0,1
 $ uv run switch2-remote hold B 3000
 ok hold B 3000ms
 $ uv run switch2-remote status
-ok frames=1234 buffered=50 latest_age=0.05s ffmpeg_fps=30 process_fps=10 ffmpeg_drops=0 ended=False bridge_alive=True held=LS:0,1 holds=B:2480ms last_error=none
+ok frames=1234 buffered=50 latest_age=0.05s ffmpeg_fps=30 process_fps=10 ffmpeg_drops=0 ended=False bridge_alive=True bridge_state=ok bridge_restarts=0 held=LS:0,1 holds=B:2480ms last_error=none
 $ uv run switch2-remote shot /tmp/screen.png
 ok /tmp/screen.png
 ```
 
 `shot` は、デーモンの起動直後でまだフレームを保持していないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
 
-応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。ブリッジとの通信が途切れると、デーモンはブリッジに終了を指示し (ブリッジは中立のレポートを送ってから終了します。3 秒以内に終わらなければプロセスを止めます)、`status` の `bridge_alive` が `False` になります。以後の入力は受け付けないので、デーモンを起動し直してください。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。`latest_age` が大きいまま増え続ける場合は、ffmpeg.exe からフレームが届いていません。
+応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。`latest_age` が大きいまま増え続ける場合は、ffmpeg.exe からフレームが届いていません。
+
+ブリッジとの通信が途切れたり、ブリッジが止まったりすると、デーモンはすぐに裏で復旧を始めます。まず古いブリッジに終了を指示し (ブリッジは中立のレポートを送ってから終了します。終わらなければプロセスを止めます)、COM ポートを開き直すことを 5 秒おきに 3 回まで試します。開けなければ、Windows の Bluetooth 無線をオフにし、オフになってから 5 秒後にオンに戻して、もう一度 5 秒おきに 12 回まで開き直します。無線をオフ・オンしている間は、PC につないでいるほかの Bluetooth 機器 (マウス、キーボード、ヘッドホンなど) も切れます。Windows のプライバシーの設定で、アプリによる無線の制御を許可していないと、無線のオフ・オンが拒否される可能性があります (実機では確認していません)。
+
+復旧の状態は `status` の `bridge_state` で確かめられます。`bridge_alive` は、`bridge_state` が `ok` で、ブリッジのプロセスが動いているときに `True` になります。
+
+| `bridge_state` | 状態 |
+|---|---|
+| `ok` | ブリッジを使えます |
+| `recovering` | 復旧中です。入力のコマンドは送らずに `error` を返します |
+| `failed` | 復旧できませんでした。以後の入力は送らずに `error` を返します |
+
+復旧に成功すると `bridge_state` が `ok` に戻り、`bridge_restarts` が 1 増えます。このとき、`down` と `hold` で押していた入力は離れた状態になります。`status` の `last_error` (`hold` を離すときの送信の失敗) も、復旧に成功すると `none` に戻ります。失敗した入力は、届いたかどうか分からない入力を二重に押さないよう、自動では送り直しません。撮影で画面を確かめてから、必要なら送り直してください。`failed` になった場合は、Windows の設定で Bluetooth をオフにしてからオンに戻し、デーモンを起動し直してください。
 
 デーモンは、デーモンと同じユーザー以外からの接続を拒否します。クライアントも、接続先が自分と同じユーザーのプロセスでなければ送信しません。
 
