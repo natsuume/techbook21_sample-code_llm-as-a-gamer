@@ -144,6 +144,12 @@ def test_handle_command_tap_parses_each_chord():
     assert reply == "ok tap (fake)"
 
 
+def test_handle_command_tap_accepts_stick_click_buttons():
+    controller = FakeController()
+    handle_command("tap l3 R3+RS:1,0\n", FakeCapture(), controller)
+    assert controller.calls == [("tap", [pad("L3"), pad("R3", RS=(1.0, 0.0))])]
+
+
 @pytest.mark.parametrize(
     "request_line", ["tap RIGHT FOO\n", "tap A+\n", "tap LR\n", "tap UP+DOWN\n"]
 )
