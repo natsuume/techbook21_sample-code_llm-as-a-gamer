@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.controller_bridge import UnconfirmedInputError
 from switch2_remote.controller_state import (
     PadState,
@@ -273,8 +274,9 @@ class Controller:
             self._send(self.held, remaining, self.tapping)
         except (RuntimeError, OSError) as e:
             # 解放スレッドには応答を返す相手がいないため、status で読めるように記録する。
-            # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す
-            if self.last_error is None:
+            # 失敗した後は送信のたびにブリッジが使えない旨の例外になるため、原因を示す最初の失敗を残す。
+            # 復旧中の一時的な拒否は原因ではないため記録せず、復旧の結果 (failed 等) の失敗を残す
+            if self.last_error is None and not isinstance(e, BridgeReconnectingError):
                 self.last_error = describe_error(e)
             if raise_on_failure:
                 raise

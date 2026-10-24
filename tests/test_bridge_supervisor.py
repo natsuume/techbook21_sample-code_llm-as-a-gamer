@@ -7,7 +7,11 @@ from collections.abc import Callable
 import pytest
 
 from switch2_remote import bridge_supervisor
-from switch2_remote.bridge_supervisor import BridgeSupervisor, run_in_daemon_thread
+from switch2_remote.bridge_supervisor import (
+    BridgeReconnectingError,
+    BridgeSupervisor,
+    run_in_daemon_thread,
+)
 from switch2_remote.controller_bridge import (
     BRIDGE_READY_TIMEOUT,
     BridgeStartError,
@@ -729,7 +733,8 @@ def test_set_report_to_dead_bridge_raises_reconnecting_without_sending():
     with pytest.raises(RuntimeError) as excinfo:
         harness.supervisor.set_report(REPORT_A)
     assert str(excinfo.value) == RECONNECTING
-    assert type(excinfo.value) is RuntimeError
+    # 何も送っていないため、届いたか分からない入力 (UnconfirmedInputError) としては扱わない
+    assert type(excinfo.value) is BridgeReconnectingError
     assert old.calls == 0
     assert len(harness.pending) == 1
     assert harness.supervisor.state == "recovering"

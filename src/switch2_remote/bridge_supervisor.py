@@ -56,6 +56,14 @@ class ManagedBridge(Protocol):
         ...
 
 
+class BridgeReconnectingError(RuntimeError):
+    """復旧中のため送らなかった。復旧が終われば送れるようになる一時的な拒否で、失敗の原因ではない。
+
+    Controller は、この例外を status の last_error に記録しない (復旧が failed で終わったときに、
+    復旧を待つよう案内するメッセージが残らないようにするため)。
+    """
+
+
 class RecoveryStopped(Exception):
     """close() で復旧を中止したことを、復旧の手順の途中から _recover に伝える。"""
 
@@ -171,10 +179,10 @@ class BridgeSupervisor:
     def set_report(self, report: bytes) -> str:
         """state が "ok" なら現在のブリッジの set_report に渡し、その ack の行を返す。
 
-        - state が "recovering" なら送らずに RuntimeError(RECONNECTING_MESSAGE) にする
+        - state が "recovering" なら送らずに BridgeReconnectingError(RECONNECTING_MESSAGE) にする
         - state が "failed" なら送らずに RuntimeError(FAILED_MESSAGE) にする
         - state が "ok" でも現在のブリッジが is_alive() でなければ (監視の次の確認より前に止まっていた)、
-          送らずに復旧を開始して RuntimeError(RECONNECTING_MESSAGE) にする。何も送っていないため、
+          送らずに復旧を開始して BridgeReconnectingError(RECONNECTING_MESSAGE) にする。何も送っていないため、
           UnconfirmedInputError にはしない
         - ブリッジの set_report の例外は、型を変えずにそのまま外に出す (tap の unconfirmed の判定が
           UnconfirmedInputError の型を使うため)。例外の後に現在のブリッジが is_alive() でなければ、
@@ -184,12 +192,12 @@ class BridgeSupervisor:
         with self.lock:
             state, bridge = self._state, self.bridge
         if state == "recovering":
-            raise RuntimeError(RECONNECTING_MESSAGE)
+            raise BridgeReconnectingError(RECONNECTING_MESSAGE)
         if state == "failed":
             raise RuntimeError(FAILED_MESSAGE)
         if not bridge.is_alive():
             self._start_recovery(bridge)
-            raise RuntimeError(RECONNECTING_MESSAGE)
+            raise BridgeReconnectingError(RECONNECTING_MESSAGE)
         try:
             return bridge.set_report(report)
         except Exception:
