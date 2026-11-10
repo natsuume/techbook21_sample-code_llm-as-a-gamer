@@ -1,6 +1,6 @@
 # 第2章 Switch 2 をコマンドで操作する環境を作る
 
-第2章のサンプルです。Nintendo Switch 2 の画面を WSL2 から撮影し、WSL2 からボタン入力を送れる環境を作ります。操作には、このディレクトリーの uv プロジェクトにあるパッケージ [`switch2_remote`](./src/switch2_remote/) の 2 つのコマンドを使います。第3章の試行も、このデーモンとクライアントで行いました。
+第2章のサンプルです。Nintendo Switch 2 の画面を WSL2 から撮影し、WSL2 からボタン入力を送れる環境を作ります。操作には、このディレクトリーの uv プロジェクトにあるパッケージ [`switch2_remote`](./src/switch2_remote/) の 2 つのコマンドを使います。第3章の試行の指示ファイル (`../ch03_playtest/CLAUDE.md`) も、このデーモンとクライアントのコマンドを使います。
 
 - `switch2-remote-daemon`: キャプチャーとコントローラーのブリッジを起動したまま保持する常駐デーモン
 - `switch2-remote`: デーモンに 1 行のコマンドを送り、応答を表示するクライアント
@@ -159,7 +159,7 @@ $ uv run switch2-remote shot /tmp/screen.png
 ok /tmp/screen.png
 ```
 
-`shot` は、デーモンの起動直後でまだフレームを保持していないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
+`shot` は、デーモンの起動直後でまだフレームを持っていないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
 
 応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。`latest_age` が大きいまま増え続ける場合は、ffmpeg.exe からフレームが届いていません。
 
