@@ -12,17 +12,18 @@
 - Python 3.12 以上
 - [uv](https://docs.astral.sh/uv/)
 
-必要な機材と、Pico 2 W・ffmpeg の準備は [`ch01_setup/README.md`](./ch01_setup/README.md) で説明しています。
+必要な機材と、Pico 2 W・ffmpeg の準備は [`ch02_setup/README.md`](./ch02_setup/README.md) で説明しています。
 
 ## セットアップ
 
-リポジトリーの直下で依存パッケージを導入します。
+`ch02_setup` ディレクトリーで依存パッケージを導入します。
 
 ```bash
+cd ch02_setup
 uv sync
 ```
 
-導入すると、次の 2 つのコマンドを `uv run` で実行できます。
+導入すると、`ch02_setup` ディレクトリーで次の 2 つのコマンドを `uv run` で実行できます。
 
 - `switch2-remote-daemon`: キャプチャーとコントローラーのブリッジを起動したまま保持する常駐デーモン
 - `switch2-remote`: デーモンに 1 行のコマンドを送るクライアント
@@ -30,24 +31,32 @@ uv sync
 ## 構成
 
 ```text
-pyproject.toml
-src/switch2_remote/    各章で使う共通パッケージ
-tests/                 共通パッケージのテスト
-ch01_setup/            第1章のサンプル
+ch02_setup/              第2章: 環境構築の手順書と、デーモン・クライアントの uv プロジェクト
+  pyproject.toml
+  src/switch2_remote/    デーモンとクライアントのパッケージ
+  tests/                 パッケージのテスト
+ch03_playtest/           第3章: 試行でエージェントに読ませた指示ファイル
 ```
 
-### 共通パッケージ `src/switch2_remote`
+### 章ディレクトリー
+
+| ディレクトリー | 章 | 内容 |
+|---|---|---|
+| [`ch02_setup`](./ch02_setup/) | 第2章 | 機材の準備、デーモンとクライアントの使い方と実装 |
+| [`ch03_playtest`](./ch03_playtest/) | 第3章 | 試行でエージェントに読ませた指示ファイル (`CLAUDE.md`)。操作には `ch02_setup` のデーモンとクライアントを使います |
+
+### パッケージ `ch02_setup/src/switch2_remote`
 
 | ファイル | 役割 |
 |---|---|
 | `ffmpeg_locator.py` | Windows 側に winget で導入した ffmpeg.exe を探す |
-| `capture_command.py` | ffmpeg.exe のコマンド (NV12、デバイスの 1280x720・60fps を出力側で間引き・縮小する) を組み立て、標準出力からフレームを読み取る |
-| `frame_buffer.py` | 受け取ったフレームを処理レートに間引き、直近の一定時間分を保持する |
-| `capture.py` | ffmpeg.exe を起動したままにし、間引いたフレームを直近の一定時間分保持して、最新フレームを撮影する |
+| `capture_command.py` | ffmpeg.exe のコマンド (NV12、デバイスの 1280x720・60fps を出力側で間引く) を組み立て、標準出力からフレームを読み取る |
+| `frame_buffer.py` | 受け取ったフレームを処理レートに間引き、最新の 1 枚を保持する |
+| `capture.py` | ffmpeg.exe を起動したままにし、間引いたフレームのうち最新の 1 枚を保持して撮影する |
 | `controller_state.py` | ボタン・スティックの指定を解釈し、押下状態を合成してゲームパッドのレポートを組み立てる |
 | `controller.py` | 押し続けている入力と時間を指定した長押しを保持し、変化のたびにレポートをブリッジへ送る |
 | `controller_bridge.py` | controller_bridge.ps1 を起動したまま保持し、送るレポートを差し替える |
-| `controller_bridge.ps1` | Windows 側で COM ポートを開き、指定されたレポートを Pico 2 W に送り続ける |
+| `controller_bridge.ps1` | Windows 側で COM ポートを開き、指定されたレポートを Pico 2 W に送る |
 | `bridge_supervisor.py` | ブリッジの失敗を検知し、COM ポートの開き直しと Bluetooth 無線のオフ・オンで裏で復旧させる |
 | `bluetooth_radio.py` | bluetooth_radio.ps1 を実行し、Windows の Bluetooth 無線をオフ・オンする |
 | `bluetooth_radio.ps1` | Windows 側で Bluetooth 無線をオフにし、待ってからオンに戻す |
@@ -55,13 +64,9 @@ ch01_setup/            第1章のサンプル
 | `daemon.py` | Unix ソケットでコマンドを受け付ける常駐デーモン (`switch2-remote-daemon`) |
 | `client.py` | デーモンにコマンドを送るクライアント (`switch2-remote`) |
 
-### 章ディレクトリー
-
-| ディレクトリー | 章 | 内容 | 使う共通パッケージ |
-|---|---|---|---|
-| [`ch01_setup`](./ch01_setup/) | 第1章 | 機材の準備、デーモンとクライアントの使い方、エージェント向けの指示ファイルの例 | `switch2_remote` 全体 |
-
 ## 開発用コマンド
+
+`ch02_setup` ディレクトリーで実行します。
 
 ```bash
 uv run ruff format   # コードを整形する
