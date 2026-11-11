@@ -45,4 +45,8 @@ def select_request_frames(
         recent = selector.select(history.between(start, now), recent_max)
         meaningful = store.latest_before(start, meaningful_max)
     """
-    raise NotImplementedError
+    start = previous_sent_at if previous_sent_at is not None else now - first_window_s
+    return RequestFrames(
+        recent=selector.select(history.between(start, now), recent_max),
+        meaningful=store.latest_before(start, meaningful_max),
+    )

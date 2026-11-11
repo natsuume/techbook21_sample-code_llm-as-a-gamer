@@ -9,9 +9,11 @@ from dataclasses import dataclass
 
 from switch2_remote.controller_state import PadState
 
-from switch2_agent.questions import Question
+from switch2_agent.questions import ADVISOR_QUESTION_NAME, Question
 
 DEFAULT_THRESHOLD = 0.5  # 各種類のしきい値の既定値
+# 十字キーの相反する方向の組
+OPPOSITE_DPAD_PAIRS = (("UP", "DOWN"), ("LEFT", "RIGHT"))
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,10 @@ class Thresholds:
 
     def __post_init__(self) -> None:
         """press・tap・stick・advisor のどれかが 0〜1 の範囲の外なら ValueError にする。"""
-        raise NotImplementedError
+        for kind in ("press", "tap", "stick", "advisor"):
+            value = getattr(self, kind)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"threshold for {kind} must be 0..1: {value}")
 
 
 @dataclass(frozen=True)
@@ -64,4 +69,94 @@ def decide_action(
        (RIGHT − LEFT、UP − DOWN) にし、どちらも偽なら 0 にする。横と縦の両方が 0 のスティックは held に入れない
     4. advisor_requested = probabilities["advisor"] > thresholds.advisor、advisor_probability = probabilities["advisor"]
     """
-    raise NotImplementedError
+    missing = [q.name for q in questions if q.name not in probabilities]
+    if missing:
+        raise ValueError(f"missing probabilities: {' '.join(missing)}")
+    adopted = adopt_buttons(probabilities, questions, thresholds)
+    remove_opposite_dpad(adopted)
+    held_buttons = frozenset(b for b, (kind, _) in adopted.items() if kind == "press")
+    taps = frozenset(b for b, (kind, _) in adopted.items() if kind == "tap")
+    advisor_probability = probabilities[ADVISOR_QUESTION_NAME]
+    return PadAction(
+        held=PadState(
+            held_buttons, decide_sticks(probabilities, questions, thresholds)
+        ),
+        taps=taps,
+        advisor_requested=advisor_probability > thresholds.advisor,
+        advisor_probability=advisor_probability,
+    )
+
+
+def adopt_buttons(
+    probabilities: Mapping[str, float],
+    questions: Sequence[Question],
+    thresholds: Thresholds,
+) -> dict[str, tuple[str, float]]:
+    """真になった press / tap の問いから、ボタン → (採った種類 "press" / "tap", その問いの確率) を返す。
+
+    同じボタンで両方が真なら、確率の高いほうを採る (同じ値なら press)。
+    """
+    adopted: dict[str, tuple[str, float]] = {}
+    for question in questions:
+        if question.kind == "press":
+            threshold = thresholds.press
+        elif question.kind == "tap":
+            threshold = thresholds.tap
+        else:
+            continue
+        probability = probabilities[question.name]
+        if probability <= threshold:
+            continue
+        current = adopted.get(question.target)
+        if current is None:
+            adopted[question.target] = (question.kind, probability)
+            continue
+        _, current_probability = current
+        if probability > current_probability or (
+            probability == current_probability and question.kind == "press"
+        ):
+            adopted[question.target] = (question.kind, probability)
+    return adopted
+
+
+def remove_opposite_dpad(adopted: dict[str, tuple[str, float]]) -> None:
+    """adopted (adopt_buttons の結果) で十字キーの相反する方向が両方とも採られていたら、確率の低いほうを外す。
+
+    同じ確率なら両方とも外す。adopted をその場で書き換える。
+    """
+    for first, second in OPPOSITE_DPAD_PAIRS:
+        if first not in adopted or second not in adopted:
+            continue
+        first_probability = adopted[first][1]
+        second_probability = adopted[second][1]
+        if first_probability >= second_probability:
+            del adopted[second]
+        if second_probability >= first_probability:
+            del adopted[first]
+
+
+def decide_sticks(
+    probabilities: Mapping[str, float],
+    questions: Sequence[Question],
+    thresholds: Thresholds,
+) -> dict[str, tuple[float, float]]:
+    """stick の問いから、スティック名 → (x, y) を返す。x と y の両方が 0 のスティックは含めない。
+
+    真になった方向 (確率が thresholds.stick を超えた方向) の確率だけを使い、
+    x = RIGHT の確率 − LEFT の確率、y = UP の確率 − DOWN の確率 (偽の方向は 0 として扱う) とする。
+    """
+    true_probabilities: dict[str, dict[str, float]] = {}
+    for question in questions:
+        if question.kind != "stick":
+            continue
+        stick, direction = question.target.split("_", 1)
+        probability = probabilities[question.name]
+        directions = true_probabilities.setdefault(stick, {})
+        directions[direction] = probability if probability > thresholds.stick else 0.0
+    sticks: dict[str, tuple[float, float]] = {}
+    for stick, directions in true_probabilities.items():
+        x = directions.get("RIGHT", 0.0) - directions.get("LEFT", 0.0)
+        y = directions.get("UP", 0.0) - directions.get("DOWN", 0.0)
+        if x != 0.0 or y != 0.0:
+            sticks[stick] = (x, y)
+    return sticks

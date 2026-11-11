@@ -27,8 +27,47 @@ Ctrl+C で止まる。
 """
 
 import argparse
+import os
+import threading
+import time
+from pathlib import Path
 
-from switch2_remote.capture import DEVICE_FPS, DEVICE_WIDTH
+from switch2_remote.bluetooth_radio import reset_bluetooth_radio
+from switch2_remote.bridge_supervisor import BridgeSupervisor
+from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH
+from switch2_remote.controller_bridge import Bridge, BridgeStartError
+
+from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
+from switch2_agent.advisors.claude_code_headless import (
+    DEFAULT_ADVISOR_TIMEOUT_S,
+    ClaudeCodeHeadlessAdvisor,
+)
+from switch2_agent.capture_with_history import CaptureWithHistory
+from switch2_agent.decision_models import decisions_api, jev
+from switch2_agent.decision_models.base import DecisionModel
+from switch2_agent.decision_models.decisions_api import DecisionsApiModel
+from switch2_agent.decision_models.jev import JevModel
+from switch2_agent.decision_request import JpegCache
+from switch2_agent.frame_history import FrameHistory, TimedFrame
+from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
+from switch2_agent.frame_selection.meaningful_frames import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    DEFAULT_VALLEY_RATIO,
+    MeanAbsDiffSimilarity,
+    MeaningfulFrameStore,
+    SharpnessValleyDetector,
+)
+from switch2_agent.game_notes import ensure_game_notes, game_notes_dir, read_game_notes
+from switch2_agent.image_metrics import nv12_to_jpeg
+from switch2_agent.operation_log import OperationLog
+from switch2_agent.pad_output import PadOutput
+from switch2_agent.pipeline import (
+    DEFAULT_MAX_CONSECUTIVE_ERRORS,
+    Pipeline,
+    PipelineParts,
+)
+from switch2_agent.questions import build_questions
+from switch2_agent.run_log import RunLog
 
 FFMPEG_FPS_MIN, FFMPEG_FPS_MAX = 1, DEVICE_FPS  # 第2章の daemon と同じ範囲
 PROCESS_FPS_MIN = 1  # 上限は --ffmpeg-fps
@@ -41,6 +80,21 @@ MODEL_CHOICES = ("jev", "decisions")
 RUNS_DIR_NAME = "runs"  # 実行のログを置くディレクトリー (ch04_techniques の下)
 NOTES_DIR_NAME = "game_notes"  # ゲームの情報を置くディレクトリー (ch04_techniques の下)
 RUN_LOG_FILE_NAME = "run.jsonl"
+DEFAULT_FFMPEG_FPS = 30
+DEFAULT_PROCESS_FPS = 10
+DEFAULT_HISTORY_SECONDS = 5.0
+# 画像の幅と JPEG の品質の既定値。Decision Model の精度と要求の大きさの釣り合いは、実機と実際の API で確かめていない
+DEFAULT_IMAGE_WIDTH = DEVICE_WIDTH
+DEFAULT_JPEG_QUALITY = 85
+# --model ごとの API キーの環境変数の名前
+API_KEY_ENVS = {"jev": jev.API_KEY_ENV, "decisions": decisions_api.API_KEY_ENV}
+# しきい値の種類 → 起動引数の説明で使う呼び名
+THRESHOLD_TITLES = {
+    "press": "押下状態",
+    "tap": "短押し",
+    "stick": "スティック",
+    "advisor": "advisor",
+}
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -56,7 +110,148 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     数として読めない値、--process-fps が --ffmpeg-fps より大きい組み合わせは、第2章の daemon.parse_args と同じく
     parser.error で使い方とともに表示して終了する (SystemExit、終了コード 2)。
     """
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(
+        prog="switch2-agent",
+        description="型付きの判断を返すモデルと Claude Code の advisor で Switch 2 のゲームを遊ぶ",
+    )
+    parser.add_argument(
+        "--game",
+        required=True,
+        help="ゲーム名 (英数字・_・-)。game_notes/<名前>/ に情報を置く",
+    )
+    parser.add_argument(
+        "--model",
+        required=True,
+        choices=MODEL_CHOICES,
+        help="Decision Model (jev: TypeSafe Jev、decisions: OpenAI Decisions API)",
+    )
+    parser.add_argument(
+        "--ffmpeg-fps",
+        type=int,
+        default=DEFAULT_FFMPEG_FPS,
+        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜{FFMPEG_FPS_MAX})",
+    )
+    parser.add_argument(
+        "--process-fps",
+        type=int,
+        default=DEFAULT_PROCESS_FPS,
+        help=f"間引いて残すフレームレート ({PROCESS_FPS_MIN}〜ffmpeg_fps)",
+    )
+    parser.add_argument(
+        "--history-seconds",
+        type=float,
+        default=DEFAULT_HISTORY_SECONDS,
+        help="フレームの履歴を持つ秒数 (0 より大きい値)",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=DEFAULT_IMAGE_WIDTH,
+        help=f"要求に載せる画像の幅 ({IMAGE_WIDTH_MIN}〜{IMAGE_WIDTH_MAX})",
+    )
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=DEFAULT_JPEG_QUALITY,
+        help=f"要求に載せる画像の JPEG の品質 ({JPEG_QUALITY_MIN}〜{JPEG_QUALITY_MAX})",
+    )
+    for kind, title in THRESHOLD_TITLES.items():
+        parser.add_argument(
+            f"--threshold-{kind}",
+            type=float,
+            default=DEFAULT_THRESHOLD,
+            help=f"{title}の問いのしきい値 (0〜1)。確率がこれを超えたら真",
+        )
+    parser.add_argument(
+        "--valley-ratio",
+        type=float,
+        default=DEFAULT_VALLEY_RATIO,
+        help="鮮明度の谷とみなす比 (0 と 1 を含まない範囲)",
+    )
+    parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        help=(
+            "意味のあるフレームが似ているとみなす差分の上限 "
+            f"({SIMILARITY_THRESHOLD_MIN:g}〜{SIMILARITY_THRESHOLD_MAX:g})"
+        ),
+    )
+    parser.add_argument(
+        "--advisor-timeout",
+        type=float,
+        default=DEFAULT_ADVISOR_TIMEOUT_S,
+        help="advisor の 1 回の実行の上限 (秒。0 より大きい値)",
+    )
+    parser.add_argument(
+        "--max-consecutive-errors",
+        type=int,
+        default=DEFAULT_MAX_CONSECUTIVE_ERRORS,
+        help="Decision Model の失敗がこの回数続いたら止まる (1 以上)",
+    )
+    args = parser.parse_args(argv)
+    for message in range_errors(args):
+        parser.error(message)
+    return args
+
+
+def range_errors(args: argparse.Namespace) -> list[str]:
+    """parse_args の結果の範囲の誤りを、起動引数の名前を含むメッセージのリストにする (誤りが無ければ空)。
+
+    nan は、どの範囲にも入らないものとして扱う。
+    """
+    errors = []
+    if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
+        errors.append(
+            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN}..{FFMPEG_FPS_MAX}: {args.ffmpeg_fps}"
+        )
+    if args.process_fps < PROCESS_FPS_MIN:
+        errors.append(
+            f"--process-fps must be {PROCESS_FPS_MIN} or more: {args.process_fps}"
+        )
+    elif args.process_fps > args.ffmpeg_fps:
+        message = (
+            f"--process-fps ({args.process_fps}) must not exceed "
+            f"--ffmpeg-fps ({args.ffmpeg_fps})"
+        )
+        if args.process_fps == DEFAULT_PROCESS_FPS:
+            message += f". --process-fps defaults to {DEFAULT_PROCESS_FPS}"
+        errors.append(message)
+    if not args.history_seconds > 0:
+        errors.append(f"--history-seconds must be more than 0: {args.history_seconds}")
+    if not IMAGE_WIDTH_MIN <= args.image_width <= IMAGE_WIDTH_MAX:
+        errors.append(
+            f"--image-width must be {IMAGE_WIDTH_MIN}..{IMAGE_WIDTH_MAX}: {args.image_width}"
+        )
+    if not JPEG_QUALITY_MIN <= args.jpeg_quality <= JPEG_QUALITY_MAX:
+        errors.append(
+            f"--jpeg-quality must be {JPEG_QUALITY_MIN}..{JPEG_QUALITY_MAX}: "
+            f"{args.jpeg_quality}"
+        )
+    for kind in ("press", "tap", "stick", "advisor"):
+        value = getattr(args, f"threshold_{kind}")
+        if not 0.0 <= value <= 1.0:
+            errors.append(f"--threshold-{kind} must be 0..1: {value}")
+    if not 0.0 < args.valley_ratio < 1.0:
+        errors.append(
+            f"--valley-ratio must be between 0 and 1 (exclusive): {args.valley_ratio}"
+        )
+    if (
+        not SIMILARITY_THRESHOLD_MIN
+        <= args.similarity_threshold
+        <= SIMILARITY_THRESHOLD_MAX
+    ):
+        errors.append(
+            f"--similarity-threshold must be {SIMILARITY_THRESHOLD_MIN:g}.."
+            f"{SIMILARITY_THRESHOLD_MAX:g}: {args.similarity_threshold}"
+        )
+    if not args.advisor_timeout > 0:
+        errors.append(f"--advisor-timeout must be more than 0: {args.advisor_timeout}")
+    if args.max_consecutive_errors < 1:
+        errors.append(
+            f"--max-consecutive-errors must be 1 or more: {args.max_consecutive_errors}"
+        )
+    return errors
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -78,13 +273,127 @@ def main(argv: list[str] | None = None) -> None:
            判定の feed が返したフレームを保管に add する
         6. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout, log=RunLog.write)
         7. Decision Model (JevModel / DecisionsApiModel)
-        8. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache)
+        8. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
+           bridge_failed は supervisor.state == "failed"、capture_ended は capture.ended)
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
-    Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。
+    Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを output.neutral()、output.close()、advisor.close()、capture.close()、
     supervisor.close() の順に閉じる。
     """
-    raise NotImplementedError
+    args = parse_args(argv)
+    workdir = Path.cwd()
+    if not (workdir / ".claude" / "skills").is_dir():
+        raise SystemExit(
+            f"{workdir / '.claude' / 'skills'} was not found. "
+            "Run switch2-agent in the ch04_techniques directory"
+        )
+    api_key_env = API_KEY_ENVS[args.model]
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        raise SystemExit(f"Set the API key of --model {args.model} in {api_key_env}")
+    notes_root = workdir / NOTES_DIR_NAME
+    try:
+        note_paths = ensure_game_notes(notes_root, args.game)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
+    notes_dir = game_notes_dir(notes_root, args.game)
+    run_dir = workdir / RUNS_DIR_NAME / time.strftime("%Y%m%d-%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_log = RunLog(run_dir / RUN_LOG_FILE_NAME)
+
+    try:
+        supervisor = BridgeSupervisor(
+            start_bridge=Bridge, reset_radio=reset_bluetooth_radio
+        )
+    except BridgeStartError as e:
+        raise SystemExit(str(e)) from None
+    output = None
+    capture = None
+    advisor = None
+    stop = threading.Event()
+    try:
+        output = PadOutput(supervisor)
+        detector = SharpnessValleyDetector(
+            args.valley_ratio, MeanAbsDiffSimilarity(args.similarity_threshold)
+        )
+        store = MeaningfulFrameStore()
+
+        def keep_meaningful_frame(frame: TimedFrame) -> None:
+            meaningful = detector.feed(frame)
+            if meaningful is not None:
+                store.add(meaningful)
+
+        history = FrameHistory(args.history_seconds)
+        capture = CaptureWithHistory(
+            args.ffmpeg_fps, args.process_fps, history, keep_meaningful_frame
+        )
+        advisor = ClaudeCodeHeadlessAdvisor(
+            workdir,
+            notes_dir,
+            run_dir,
+            args.game,
+            args.advisor_timeout,
+            log=run_log.write,
+        )
+        model: DecisionModel = (
+            JevModel(api_key) if args.model == "jev" else DecisionsApiModel(api_key)
+        )
+
+        def encode(frame: TimedFrame) -> bytes:
+            return nv12_to_jpeg(
+                frame.nv12, DEVICE_HEIGHT, args.image_width, args.jpeg_quality
+            )
+
+        running_capture = capture
+        pipeline = Pipeline(
+            PipelineParts(
+                history=history,
+                store=store,
+                selector=EvenIntervalSelector(),
+                model=model,
+                output=output,
+                advisor=advisor,
+                read_notes=lambda: read_game_notes(note_paths),
+                questions=build_questions(),
+                thresholds=Thresholds(
+                    press=args.threshold_press,
+                    tap=args.threshold_tap,
+                    stick=args.threshold_stick,
+                    advisor=args.threshold_advisor,
+                ),
+                encode=JpegCache(encode),
+                operation_log=OperationLog(),
+                log=run_log.write,
+                clock=time.monotonic,
+                sleep=time.sleep,
+                game=args.game,
+                capture_ended=lambda: running_capture.ended,
+                bridge_failed=lambda: supervisor.state == "failed",
+            ),
+            max_consecutive_errors=args.max_consecutive_errors,
+        )
+        run_log.write(
+            {
+                "event": "start",
+                "game": args.game,
+                "model": args.model,
+                "run_dir": run_dir,
+            }
+        )
+        try:
+            pipeline.run(stop)
+        except KeyboardInterrupt:
+            stop.set()
+            run_log.write({"event": "interrupted"})
+    finally:
+        if output is not None:
+            output.neutral()
+            output.close()
+        if advisor is not None:
+            advisor.close()
+        if capture is not None:
+            capture.close()
+        supervisor.close()
 
 
 if __name__ == "__main__":

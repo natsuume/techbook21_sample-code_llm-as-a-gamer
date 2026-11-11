@@ -25,11 +25,18 @@ https://docs.typesafe.ai/models、2026-11-12 に確認) に合わせる。
 問い 1 つあたり 32k トークンで、画像 10 枚と 43 問が収まるかは未確認。超えると 400 (max_tokens_exceeded)。
 """
 
+import base64
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 
 import httpx
 
-from switch2_agent.decision_models.base import Decision
+from switch2_agent.decision_models.base import (
+    Decision,
+    DecisionModelError,
+    post_json,
+    read_probability,
+)
 from switch2_agent.decision_request import DecisionRequest
 
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
@@ -44,7 +51,7 @@ DEFAULT_TIMEOUT_S = 10.0  # 1 回の要求の HTTP のタイムアウト (秒)
 
 def new_asset_reference() -> str:
     """asset の参照文字列として、新しい UUID (uuid.uuid4) の文字列を返す (公式ドキュメントは UUID を推奨している)。"""
-    raise NotImplementedError
+    return str(uuid.uuid4())
 
 
 def build_jev_headers(api_key: str, has_images: bool) -> dict[str, str]:
@@ -53,7 +60,10 @@ def build_jev_headers(api_key: str, has_images: bool) -> dict[str, str]:
     {"Authorization": "Bearer <api_key>", "Content-Type": "application/json"} に、
     has_images が真なら IMAGES_HEADER: "true" を足す。
     """
-    raise NotImplementedError
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if has_images:
+        headers[IMAGES_HEADER] = "true"
+    return headers
 
 
 def build_jev_payload(
@@ -70,7 +80,31 @@ def build_jev_payload(
     questions は request.questions の name をキーにし、値を {"type": "noul", "instructions": text} にする。
     画像が無ければ assets を入れない。
     """
-    raise NotImplementedError
+    frames: list[dict[str, str]] = []
+    assets: dict[str, dict[str, str]] = {}
+    for image in request.images:
+        reference = make_reference()
+        frames.append({"label": image.label, "image": reference})
+        assets[reference] = {
+            "type": "image",
+            "format": JPEG_ASSET_FORMAT,
+            "data_base64": base64.b64encode(image.jpeg).decode("ascii"),
+        }
+    payload: dict[str, object] = {
+        "model": model,
+        "state": {
+            "instructions": request.instructions,
+            "game_notes": request.state_text,
+            "frames": frames,
+        },
+        "questions": {
+            question.name: {"type": "noul", "instructions": question.text}
+            for question in request.questions
+        },
+    }
+    if assets:
+        payload["assets"] = assets
+    return payload
 
 
 def parse_jev_response(
@@ -83,7 +117,18 @@ def parse_jev_response(
     answer が object でないか type が noul でないものは DecisionModelError にする。
     names に無い ID の answer は無視する。
     """
-    raise NotImplementedError
+    answers = body.get("answers")
+    if not isinstance(answers, dict):
+        raise DecisionModelError("jev response has no answers object")
+    probabilities: dict[str, float] = {}
+    for name in names:
+        if name not in answers:
+            raise DecisionModelError(f"jev response has no answer for: {name}")
+        answer = answers[name]
+        if not isinstance(answer, dict) or answer.get("type") != "noul":
+            raise DecisionModelError(f"jev answer of {name} is not a noul: {answer!r}")
+        probabilities[name] = read_probability(answer.get("noul"), name)
+    return probabilities
 
 
 class JevModel:
@@ -96,11 +141,6 @@ class JevModel:
         model       要求の model
     """
 
-    api_key: str
-    client: httpx.Client
-    timeout_s: float
-    model: str
-
     def __init__(
         self,
         api_key: str,
@@ -109,7 +149,10 @@ class JevModel:
         model: str = DEFAULT_JEV_MODEL,
     ):
         """属性を入れる。client が None なら httpx.Client() を作る。"""
-        raise NotImplementedError
+        self.api_key = api_key
+        self.client = client if client is not None else httpx.Client()
+        self.timeout_s = timeout_s
+        self.model = model
 
     def decide(self, request: DecisionRequest) -> Decision:
         """request を JEV_URL に POST し、Decision(parse_jev_response の結果, refusals=0) を返す。
@@ -117,4 +160,14 @@ class JevModel:
         ヘッダーは build_jev_headers(api_key, 画像があるか)、本文は build_jev_payload(request, model)。
         送信と応答の検証は base.post_json で行う (httpx の例外と 2xx 以外の応答は DecisionModelError)。
         """
-        raise NotImplementedError
+        body = post_json(
+            self.client,
+            JEV_URL,
+            build_jev_headers(self.api_key, bool(request.images)),
+            build_jev_payload(request, self.model),
+            self.timeout_s,
+        )
+        probabilities = parse_jev_response(
+            body, [question.name for question in request.questions]
+        )
+        return Decision(probabilities=probabilities, refusals=0)

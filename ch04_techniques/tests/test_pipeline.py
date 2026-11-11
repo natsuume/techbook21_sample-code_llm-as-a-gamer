@@ -12,7 +12,12 @@ from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
 from switch2_agent.operation_log import OperationLog, format_action
-from switch2_agent.pipeline import CaptureStoppedError, Pipeline, PipelineParts
+from switch2_agent.pipeline import (
+    CaptureStoppedError,
+    OutputSendError,
+    Pipeline,
+    PipelineParts,
+)
 from switch2_agent.questions import build_questions
 
 NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
@@ -134,6 +139,7 @@ class Env:
         self.logs: list[dict] = []
         self.sleeps: list[float] = []
         self.capture_ended = False
+        self.bridge_failed = False
 
     def add_frames(self, *times: float) -> None:
         for t in times:
@@ -163,6 +169,7 @@ def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
         sleep=env.sleeps.append,
         game="zelda",
         capture_ended=lambda: env.capture_ended,
+        bridge_failed=lambda: env.bridge_failed,
     )
     return Pipeline(parts, **kwargs), env
 
@@ -322,6 +329,51 @@ def test_no_request_without_frames():
     assert env.sleeps == [0.05]
 
 
+def test_first_frame_is_waited_longer_than_stale_timeout():
+    pipeline, env = make_pipeline()
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # まだ要求を送っていない間は、stale_frame_timeout_s (2 秒) を過ぎても止まらない
+    env.clock.now = 13.0
+    pipeline.run_once()
+    env.clock.now = 19.9
+    pipeline.run_once()
+    assert env.output.events == []
+    assert env.sleeps == [0.05, 0.05, 0.05]
+    # 最初のフレームが first_frame_timeout_s (10 秒) 届かなければ止まる
+    env.clock.now = 20.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    assert env.output.events == ["neutral"]
+    assert env.model.requests == []
+
+
+def test_first_frame_timeout_can_be_given():
+    pipeline, env = make_pipeline(first_frame_timeout_s=3.0)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.clock.now = 13.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+
+
+def test_first_request_is_sent_when_first_frame_arrives():
+    pipeline, env = make_pipeline()
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.add_frames(15.0)
+    env.clock.now = 15.2
+    pipeline.run_once()
+    assert len(env.model.requests) == 1
+    # 最初の要求を送った後は、stale_frame_timeout_s で判定する
+    env.model.decide_s = 0.0
+    env.clock.now = 15.5
+    pipeline.run_once()
+    env.clock.now = 17.5
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+
+
 def test_no_request_until_new_frame_arrives_and_stops_when_stale():
     pipeline, env = make_pipeline()
     env.model.decide_s = 0.0
@@ -478,15 +530,69 @@ def test_run_logs_and_raises_capture_stopped():
         OSError("pipe closed"),
     ],
 )
-def test_run_logs_and_raises_other_send_errors(error):
+def test_run_logs_and_raises_send_errors_when_bridge_failed(error):
     pipeline, env = make_pipeline()
     env.output.apply_errors = [error]
+    env.bridge_failed = True
     env.add_frames(9.9)
     env.clock.now = 10.0
     with pytest.raises(type(error)) as excinfo:
         pipeline.run(threading.Event())
     assert excinfo.value is error
     assert len(env.events("pipeline_error")) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("bridge did not acknowledge the report"),
+        OSError("pipe closed"),
+    ],
+)
+def test_run_logs_and_continues_send_errors_while_bridge_is_not_failed(error):
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    env.output.apply_errors = [error]
+
+    def add_frame_and_stop_after_two_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    env.model.on_decide = add_frame_and_stop_after_two_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 2
+    assert len(env.output.applied) == 1
+    assert len(env.events("send_error")) == 1
+    assert env.events("pipeline_error") == []
+
+
+def test_run_once_wraps_send_error_from_apply():
+    pipeline, env = make_pipeline()
+    error = RuntimeError("bridge did not acknowledge the report")
+    env.output.apply_errors = [error]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(OutputSendError) as excinfo:
+        pipeline.run_once()
+    assert excinfo.value.error is error
+
+
+def test_run_does_not_treat_other_runtime_errors_as_send_errors():
+    pipeline, env = make_pipeline()
+
+    def failing_read_notes() -> dict[str, str]:
+        raise RuntimeError("notes broken")
+
+    pipeline.parts.read_notes = failing_read_notes
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(RuntimeError, match="notes broken"):
+        pipeline.run(threading.Event())
+    assert env.events("send_error") == []
 
 
 def test_run_does_nothing_when_stop_is_already_set():

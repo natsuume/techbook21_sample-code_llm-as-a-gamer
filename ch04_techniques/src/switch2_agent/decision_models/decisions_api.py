@@ -23,11 +23,17 @@ answer は {"type": "refusal", "name": ...} (probability が無い) のことも
 ドキュメントの PNG の例 (data:image/png;base64,...) からの類推で、JPEG の例は未確認。
 """
 
+import base64
 from collections.abc import Mapping, Sequence
 
 import httpx
 
-from switch2_agent.decision_models.base import Decision
+from switch2_agent.decision_models.base import (
+    Decision,
+    DecisionModelError,
+    post_json,
+    read_probability,
+)
 from switch2_agent.decision_request import DecisionRequest
 
 DECISIONS_URL = "https://api.openai.com/v1/decisions"
@@ -41,12 +47,12 @@ def jpeg_data_url(jpeg: bytes) -> str:
 
     base64 は標準のアルファベットで、= のパディングを付け、改行を入れない (base64.b64encode)。
     """
-    raise NotImplementedError
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
 
 def build_decisions_headers(api_key: str) -> dict[str, str]:
     """要求のヘッダー {"Authorization": "Bearer <api_key>", "Content-Type": "application/json"} を返す。"""
-    raise NotImplementedError
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
 def build_decisions_payload(
@@ -59,7 +65,22 @@ def build_decisions_payload(
     1 組ずつ置く。各画像の本体は要求の中に 1 回だけ入る。
     questions は request.questions の順に、{"type": "predicate", "name": name, "instructions": text}。
     """
-    raise NotImplementedError
+    content: list[dict[str, str]] = [
+        {"type": "input_text", "text": request.instructions},
+        {"type": "input_text", "text": request.state_text},
+    ]
+    for image in request.images:
+        # 画像の説明の専用のフィールドは無いため、画像の直前にラベルのテキストを置く
+        content.append({"type": "input_text", "text": image.label})
+        content.append({"type": "input_image", "image_url": jpeg_data_url(image.jpeg)})
+    return {
+        "model": model,
+        "input": [{"role": "user", "content": content}],
+        "questions": [
+            {"type": "predicate", "name": question.name, "instructions": question.text}
+            for question in request.questions
+        ],
+    }
 
 
 def parse_decisions_response(
@@ -73,7 +94,34 @@ def parse_decisions_response(
     names のうち answer が無い問い、answers がリストでない応答、answer が object でないか type が
     predicate / refusal 以外のものは DecisionModelError にする。names に無い name の answer は無視する。
     """
-    raise NotImplementedError
+    answers = body.get("answers")
+    if not isinstance(answers, list):
+        raise DecisionModelError("decisions response has no answers list")
+    requested = set(names)
+    probabilities: dict[str, float] = {}
+    refusals = 0
+    for answer in answers:
+        if not isinstance(answer, dict):
+            raise DecisionModelError(f"decisions answer is not an object: {answer!r}")
+        name = answer.get("name")
+        answer_type = answer.get("type")
+        if answer_type not in ("predicate", "refusal"):
+            raise DecisionModelError(
+                f"decisions answer of {name} has unexpected type: {answer_type!r}"
+            )
+        if name not in requested:
+            continue
+        if answer_type == "refusal":
+            probabilities[name] = 0.0
+            refusals += 1
+        else:
+            probabilities[name] = read_probability(answer.get("probability"), name)
+    missing = [name for name in names if name not in probabilities]
+    if missing:
+        raise DecisionModelError(
+            f"decisions response has no answer for: {' '.join(missing)}"
+        )
+    return Decision(probabilities=probabilities, refusals=refusals)
 
 
 class DecisionsApiModel:
@@ -86,11 +134,6 @@ class DecisionsApiModel:
         model       要求の model
     """
 
-    api_key: str
-    client: httpx.Client
-    timeout_s: float
-    model: str
-
     def __init__(
         self,
         api_key: str,
@@ -99,7 +142,10 @@ class DecisionsApiModel:
         model: str = DEFAULT_DECISIONS_MODEL,
     ):
         """属性を入れる。client が None なら httpx.Client() を作る。"""
-        raise NotImplementedError
+        self.api_key = api_key
+        self.client = client if client is not None else httpx.Client()
+        self.timeout_s = timeout_s
+        self.model = model
 
     def decide(self, request: DecisionRequest) -> Decision:
         """request を DECISIONS_URL に POST し、parse_decisions_response の結果を返す。
@@ -107,4 +153,13 @@ class DecisionsApiModel:
         ヘッダーは build_decisions_headers、本文は build_decisions_payload(request, model)。
         送信と応答の検証は base.post_json で行う (httpx の例外と 2xx 以外の応答は DecisionModelError)。
         """
-        raise NotImplementedError
+        body = post_json(
+            self.client,
+            DECISIONS_URL,
+            build_decisions_headers(self.api_key),
+            build_decisions_payload(request, self.model),
+            self.timeout_s,
+        )
+        return parse_decisions_response(
+            body, [question.name for question in request.questions]
+        )

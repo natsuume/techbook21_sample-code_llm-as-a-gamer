@@ -12,6 +12,7 @@ from typing import Literal
 
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.base import FrameSimilarity
+from switch2_agent.image_metrics import mean_abs_diff
 
 # 似ているとみなす差分 (image_metrics.mean_abs_diff、0〜255) の上限の既定値
 DEFAULT_SIMILARITY_THRESHOLD = 0.15
@@ -29,15 +30,13 @@ class MeanAbsDiffSimilarity:
     threshold   似ているとみなす差分の上限 (この値未満なら似ている)
     """
 
-    threshold: float
-
     def __init__(self, threshold: float = DEFAULT_SIMILARITY_THRESHOLD):
         """threshold を持つ判定を作る。"""
-        raise NotImplementedError
+        self.threshold = threshold
 
     def is_similar(self, a: TimedFrame, b: TimedFrame) -> bool:
         """image_metrics.mean_abs_diff(a.gray_small, b.gray_small) < threshold なら True を返す。"""
-        raise NotImplementedError
+        return mean_abs_diff(a.gray_small, b.gray_small) < self.threshold
 
 
 class SharpnessValleyDetector:
@@ -51,14 +50,8 @@ class SharpnessValleyDetector:
 
     鮮明度の浅い揺れは谷にならない。谷になるのは、山の鮮明度 * valley_ratio 以下まで下がったときだけ。
     谷が確定するのは、谷の鮮明度の 1 / valley_ratio 倍以上まで回復したとき。
+    Capture のフレーム読み取りスレッドだけから呼ぶため、ロックは持たない。
     """
-
-    valley_ratio: float
-    similarity: FrameSimilarity
-    phase: ValleyPhase
-    peak: TimedFrame | None
-    valley: TimedFrame | None
-    last_kept: TimedFrame | None
 
     def __init__(
         self,
@@ -70,7 +63,16 @@ class SharpnessValleyDetector:
         0 < valley_ratio < 1 でなければ ValueError にする。
         初期状態は phase = "rising"、peak・valley・last_kept はすべて None。
         """
-        raise NotImplementedError
+        if not 0.0 < valley_ratio < 1.0:
+            raise ValueError(f"valley_ratio must be between 0 and 1: {valley_ratio}")
+        self.valley_ratio = valley_ratio
+        self.similarity: FrameSimilarity = (
+            similarity if similarity is not None else MeanAbsDiffSimilarity()
+        )
+        self.phase: ValleyPhase = "rising"
+        self.peak: TimedFrame | None = None
+        self.valley: TimedFrame | None = None
+        self.last_kept: TimedFrame | None = None
 
     def feed(self, frame: TimedFrame) -> TimedFrame | None:
         """frame を受け取り、確定した意味のあるフレームを返す。確定しなければ None を返す。
@@ -90,7 +92,40 @@ class SharpnessValleyDetector:
               candidate を返す。似ていれば None を返す
             - それ以外は None を返す
         """
-        raise NotImplementedError
+        if self.peak is None:
+            self.peak = frame
+            self.phase = "rising"
+            return None
+        if self.phase == "rising":
+            if frame.sharpness >= self.peak.sharpness:
+                self.peak = frame
+            elif frame.sharpness <= self.peak.sharpness * self.valley_ratio:
+                self.phase = "falling"
+                self.valley = frame
+            return None
+        valley = self.valley
+        assert valley is not None  # falling の間は必ず谷がある
+        if frame.sharpness <= valley.sharpness:
+            self.valley = frame
+            return None
+        if frame.sharpness * self.valley_ratio >= valley.sharpness:
+            return self._close_segment(frame)
+        return None
+
+    def _close_segment(self, frame: TimedFrame) -> TimedFrame | None:
+        """谷を確定し、frame から新しい区間を始める。前の区間の山が直前に残したものと似ていなければ返す。"""
+        candidate = self.peak
+        self.peak = frame
+        self.phase = "rising"
+        self.valley = None
+        if candidate is None:
+            return None
+        if self.last_kept is not None and self.similarity.is_similar(
+            candidate, self.last_kept
+        ):
+            return None
+        self.last_kept = candidate
+        return candidate
 
 
 class MeaningfulFrameStore:
@@ -100,21 +135,24 @@ class MeaningfulFrameStore:
     フレームの time は add の順に増えていく前提とする。
     """
 
-    capacity: int
-    lock: threading.Lock
-    frames: deque[TimedFrame]
-
     def __init__(self, capacity: int = DEFAULT_STORE_CAPACITY):
         """capacity 枚まで持つ、空の保管を作る。"""
-        raise NotImplementedError
+        self.capacity = capacity
+        self.lock = threading.Lock()
+        self.frames: deque[TimedFrame] = deque(maxlen=capacity)
 
     def add(self, frame: TimedFrame) -> None:
         """frame を末尾に足す。capacity を超えたら最も古いフレームを捨てる。"""
-        raise NotImplementedError
+        with self.lock:
+            self.frames.append(frame)
 
     def latest_before(self, time: float, count: int) -> list[TimedFrame]:
         """frame.time < time のフレームのうち、新しい count 枚を古い順に返す。
 
         該当が count 枚より少なければ、あるだけを返す。count <= 0 なら空のリストを返す。
         """
-        raise NotImplementedError
+        if count <= 0:
+            return []
+        with self.lock:
+            before = [frame for frame in self.frames if frame.time < time]
+        return before[-count:]

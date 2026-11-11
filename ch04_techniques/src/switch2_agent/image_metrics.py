@@ -5,6 +5,7 @@
 I/O・スレッド・時刻を扱わない。
 """
 
+import cv2
 import numpy as np
 
 # 鮮明度と差分の計算に使う縮小後の大きさ (幅, 高さ)
@@ -17,7 +18,11 @@ def to_small_gray(nv12: np.ndarray, height: int) -> np.ndarray:
     縮小は cv2.resize(..., (ANALYSIS_WIDTH, ANALYSIS_HEIGHT), interpolation=cv2.INTER_AREA) で行う。
     戻り値の形は (ANALYSIS_HEIGHT, ANALYSIS_WIDTH)。height は元のフレームの高さ (Y 面の行数)。
     """
-    raise NotImplementedError
+    return cv2.resize(
+        nv12[:height],
+        (ANALYSIS_WIDTH, ANALYSIS_HEIGHT),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def sharpness(gray: np.ndarray) -> float:
@@ -25,7 +30,7 @@ def sharpness(gray: np.ndarray) -> float:
 
     輪郭が多くはっきりした画像ほど大きく、一様な画像は 0 になる。
     """
-    raise NotImplementedError
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def mean_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
@@ -33,7 +38,7 @@ def mean_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
 
     同じ画像なら 0 になる。
     """
-    raise NotImplementedError
+    return float(cv2.absdiff(a, b).mean())
 
 
 def nv12_to_jpeg(
@@ -46,4 +51,12 @@ def nv12_to_jpeg(
     cv2.imencode(".jpg", ..., [cv2.IMWRITE_JPEG_QUALITY, quality]) の結果を返す。
     height は元のフレームの高さ (Y 面の行数)。符号化に失敗したら ValueError にする。
     """
-    raise NotImplementedError
+    bgr = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+    original_width = bgr.shape[1]
+    if width is not None and width != original_width:
+        resized_height = round(height * width / original_width)
+        bgr = cv2.resize(bgr, (width, resized_height), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise ValueError("failed to encode frame as JPEG")
+    return encoded.tobytes()

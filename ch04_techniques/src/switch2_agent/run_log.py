@@ -3,7 +3,10 @@
 Pipeline のスレッドと advisor のスレッドの両方から書くため、書き込みは 1 つのロックの中で行う。
 """
 
+import json
+import math
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,7 +16,8 @@ def format_wall_time(now: float) -> str:
 
     ミリ秒は now の小数部を 1000 倍して切り捨てた値。
     """
-    raise NotImplementedError
+    milliseconds = math.floor((now - math.floor(now)) * 1000)
+    return f"{time.strftime('%H:%M:%S', time.localtime(now))}.{milliseconds:03d}"
 
 
 def summarize_event(event: dict) -> str:
@@ -22,7 +26,10 @@ def summarize_event(event: dict) -> str:
     `<event["event"]> <キー>=<値> <キー>=<値> …` の形 (event のキーの順。event キー自体は先頭にだけ書く)。
     event キーが無ければ `event` と書く。
     """
-    raise NotImplementedError
+    parts = [str(event.get("event", "event"))]
+    parts += [f"{key}={value}" for key, value in event.items() if key != "event"]
+    # 値に改行が含まれても 1 行に収める
+    return " ".join(" ".join(parts).split())
 
 
 class RunLog:
@@ -32,13 +39,11 @@ class RunLog:
     echo   要約の 1 行を受け取る関数 (既定 print)。None なら画面に出さない
     """
 
-    path: Path
-    echo: Callable[[str], None] | None
-    lock: threading.Lock
-
     def __init__(self, path: Path, echo: Callable[[str], None] | None = print):
         """属性を入れる。ファイルはまだ開かない。"""
-        raise NotImplementedError
+        self.path = path
+        self.echo = echo
+        self.lock = threading.Lock()
 
     def write(self, event: dict) -> None:
         """event の先頭に "time" (format_wall_time(time.time())) を足した辞書を、JSON の 1 行として path に追記する。
@@ -46,4 +51,10 @@ class RunLog:
         JSON は ensure_ascii=False で書き、JSON にできない値は str にする。ファイルは UTF-8 で開く。
         echo があれば `<time> <summarize_event(event)>` の 1 行を渡す。追記と echo はロックの中で行う。
         """
-        raise NotImplementedError
+        wall_time = format_wall_time(time.time())
+        line = json.dumps({"time": wall_time, **event}, ensure_ascii=False, default=str)
+        with self.lock:
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write(line + "\n")
+            if self.echo is not None:
+                self.echo(f"{wall_time} {summarize_event(event)}")

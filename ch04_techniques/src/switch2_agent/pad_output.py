@@ -21,7 +21,8 @@ import time
 from collections.abc import Callable
 from typing import Protocol
 
-from switch2_remote.controller_state import PadState
+from switch2_remote.controller_state import DPAD_DIRECTIONS, PadState, build_report
+from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction
 
@@ -29,6 +30,8 @@ TAP_PRESS_S = 0.12  # 短押しで押している時間 (秒)。第2章の tap �
 # 同じボタンを離してから次に押すまでの最小の間隔 (秒)。第2章の tap と同じ
 TAP_RELEASE_GAP_S = 0.1
 TIMER_INTERVAL_S = 0.01  # タイマースレッドが離す時刻を過ぎた短押しを確かめる間隔 (秒)
+# 十字キーの方向 → 反対の方向
+OPPOSITE_DIRECTION = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
 
 
 class ReportSender(Protocol):
@@ -45,7 +48,8 @@ def compose_report_state(held: PadState, tapping: frozenset[str]) -> PadState:
     ボタンは held のボタンと tapping の和、スティックは held のもの。tapping に十字キーの方向があれば、
     その反対の方向を held のボタンから外す (短押しを優先する)。tapping どうしは相反する方向を含まない前提とする。
     """
-    raise NotImplementedError
+    overridden = frozenset(OPPOSITE_DIRECTION[d] for d in tapping & DPAD_DIRECTIONS)
+    return PadState((held.buttons - overridden) | tapping, held.sticks)
 
 
 class PadOutput:
@@ -64,16 +68,6 @@ class PadOutput:
         timer_thread      タイマースレッド。start_timer が False なら None
     """
 
-    sender: ReportSender
-    clock: Callable[[], float]
-    lock: threading.Lock
-    held: PadState
-    tapping: dict[str, float]
-    last_released: dict[str, float]
-    last_error: str | None
-    stop_timer: threading.Event
-    timer_thread: threading.Thread | None
-
     def __init__(
         self,
         sender: ReportSender,
@@ -85,7 +79,18 @@ class PadOutput:
         start_timer が True なら、TIMER_INTERVAL_S ごとに release_due_taps を呼ぶタイマースレッド
         (daemon スレッド) を起動する。False なら起動しない (テストでは release_due_taps を直接呼ぶ)。
         """
-        raise NotImplementedError
+        self.sender = sender
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.held = PadState()
+        self.tapping: dict[str, float] = {}
+        self.last_released: dict[str, float] = {}
+        self.last_error: str | None = None
+        self.stop_timer = threading.Event()
+        self.timer_thread: threading.Thread | None = None
+        if start_timer:
+            self.timer_thread = threading.Thread(target=self._run_timer, daemon=True)
+            self.timer_thread.start()
 
     def apply(self, action: PadAction) -> None:
         """held を action.held に置き換え、action.taps の短押しを始めて、合成したレポートを送る。
@@ -99,7 +104,13 @@ class PadOutput:
         短押しの最中のボタンの離す時刻は変えない。送るのは compose_report_state(held, tapping のボタン) の
         build_report。変化が無くても送る。送信の例外はそのまま呼び出し側に出す (状態は更新したまま)。
         """
-        raise NotImplementedError
+        with self.lock:
+            now = self.clock()
+            self.held = action.held
+            for button in sorted(action.taps):
+                if self._can_start_tap(button, now):
+                    self.tapping[button] = now + TAP_PRESS_S
+            self._send_locked()
 
     def release_due_taps(self) -> None:
         """離す時刻を過ぎた (離す時刻 <= clock()) 短押しを tapping から外し、外したときだけ合成したレポートを送る。
@@ -108,15 +119,60 @@ class PadOutput:
         送信の例外 (RuntimeError / OSError) は外に出さず、説明を last_error に記録する (タイマースレッドから呼ぶため)。
         タイマースレッドから TIMER_INTERVAL_S ごとに呼ぶ。テストから直接呼べるよう公開している。
         """
-        raise NotImplementedError
+        with self.lock:
+            now = self.clock()
+            due = [
+                button
+                for button, release_at in self.tapping.items()
+                if release_at <= now
+            ]
+            if not due:
+                return
+            for button in due:
+                del self.tapping[button]
+                self.last_released[button] = now
+            self._send_quietly_locked()
 
     def neutral(self) -> None:
         """held と tapping を空にし、中立のレポート (controller_state.NEUTRAL_REPORT) を送る。
 
         送信の例外 (RuntimeError / OSError) は外に出さず、説明を last_error に記録する。
         """
-        raise NotImplementedError
+        with self.lock:
+            self.held = PadState()
+            self.tapping.clear()
+            self._send_quietly_locked()
 
     def close(self) -> None:
         """タイマースレッドを止め、終わるのを待つ。タイマースレッドが無ければ何もしない。"""
-        raise NotImplementedError
+        self.stop_timer.set()
+        if self.timer_thread is not None:
+            self.timer_thread.join()
+            self.timer_thread = None
+
+    def _can_start_tap(self, button: str, now: float) -> bool:
+        """button の短押しを今始めてよいかを返す (apply の docstring の 4 つの条件)。呼び出し側がロックを持つ。"""
+        if button in self.held.buttons or button in self.tapping:
+            return False
+        opposite = OPPOSITE_DIRECTION.get(button)
+        if opposite is not None and opposite in self.tapping:
+            return False
+        released_at = self.last_released.get(button)
+        return released_at is None or now - released_at >= TAP_RELEASE_GAP_S
+
+    def _send_locked(self) -> None:
+        """held と tapping を合成したレポートを送る。呼び出し側がロックを持つ。失敗したら例外をそのまま出す。"""
+        state = compose_report_state(self.held, frozenset(self.tapping))
+        self.sender.set_report(build_report(state))
+
+    def _send_quietly_locked(self) -> None:
+        """_send_locked を呼び、送信の失敗 (RuntimeError / OSError) を last_error に記録する。呼び出し側がロックを持つ。"""
+        try:
+            self._send_locked()
+        except (RuntimeError, OSError) as e:
+            self.last_error = describe_error(e)
+
+    def _run_timer(self) -> None:
+        """close() まで、TIMER_INTERVAL_S ごとに release_due_taps を呼ぶ (タイマースレッドの本体)。"""
+        while not self.stop_timer.wait(TIMER_INTERVAL_S):
+            self.release_due_taps()

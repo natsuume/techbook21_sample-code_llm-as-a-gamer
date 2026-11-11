@@ -17,4 +17,11 @@ class EvenIntervalSelector:
         - それ以外は、n = len(frames) として、添字 round(i * (n - 1) / (max_count - 1))
           (i = 0..max_count-1) のフレームを返す。最初と最後のフレームを必ず含む
         """
-        raise NotImplementedError
+        if max_count <= 0:
+            raise ValueError(f"max_count must be 1 or more: {max_count}")
+        n = len(frames)
+        if n <= max_count:
+            return list(frames)
+        if max_count == 1:
+            return [frames[-1]]
+        return [frames[round(i * (n - 1) / (max_count - 1))] for i in range(max_count)]

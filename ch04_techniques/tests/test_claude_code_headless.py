@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -7,12 +9,14 @@ import pytest
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.advisors.claude_code_headless import (
     ADVISOR_SKILLS,
+    TERMINATE_GRACE_S,
     ClaudeCodeHeadlessAdvisor,
     advisor_run_dir_name,
     build_advisor_prompt,
     build_allowed_tools,
     build_claude_command,
     image_file_name,
+    start_daemon_thread,
     write_advisor_inputs,
 )
 from switch2_agent.decision_request import LabeledImage
@@ -36,6 +40,7 @@ CLAUDE_OUTPUT = {
         {"tool_name": "Bash", "tool_use_id": "toolu_1", "tool_input": {"command": "ls"}}
     ],
 }
+WAIT_TIMEOUT = 2.0  # テストがスレッドの進みを待つ上限 (秒)
 
 
 def sample_context(
@@ -68,25 +73,97 @@ class FakeClock:
         return self.now
 
 
-class FakeRunCommand:
-    """subprocess.run の代わり。呼び出しを記録し、result (CompletedProcess) を返すか error を送出する。"""
+class FakeProcess:
+    """subprocess.Popen の代わりの子プロセス。呼び出しを calls に記録する。
 
-    def __init__(self, clock: FakeClock, duration: float = 12.5):
+    最初の communicate は、clock を duration 進めてから、次のどれかになる:
+        - block が真なら、terminate (terminate_works が真のとき) か kill が呼ばれるまで待ってから出力を返す
+        - timeout_first が真なら TimeoutExpired を送出する
+        - それ以外は (stdout, stderr) を返し、returncode を exit_code にする
+    2 回目以降の communicate は、止められていれば出力を返し、止められていなければ TimeoutExpired を送出する。
+    wait は、止められていれば returncode を返し、止められていなければすぐ TimeoutExpired を送出する。
+    """
+
+    def __init__(self, args, clock: FakeClock, settings: "FakeStartProcess"):
+        self.args = args
         self.clock = clock
-        self.duration = duration
-        self.calls: list[tuple[list[str], dict]] = []
-        self.stdout = json.dumps(CLAUDE_OUTPUT, ensure_ascii=False)
-        self.returncode = 0
-        self.error: BaseException | None = None
+        self.settings = settings
+        self.calls: list = []
+        self.returncode: int | None = None
+        self.stopped = threading.Event()
+        self.communicate_count = 0
 
-    def __call__(self, cmd, **kwargs):
-        self.calls.append((list(cmd), kwargs))
-        self.clock.now += self.duration
+    def communicate(self, timeout=None):
+        self.calls.append(("communicate", timeout))
+        self.communicate_count += 1
+        if self.communicate_count == 1:
+            self.clock.now += self.settings.duration
+            if self.settings.block:
+                self.stopped.wait(WAIT_TIMEOUT)
+            elif self.settings.timeout_first:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            else:
+                self.returncode = self.settings.exit_code
+        elif not self.stopped.is_set():
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self.settings.stdout, self.settings.stderr
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self.settings.terminate_works:
+            self.returncode = -15
+            self.stopped.set()
+
+    def kill(self):
+        self.calls.append("kill")
+        self.returncode = -9
+        self.stopped.set()
+
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        if not self.stopped.is_set():
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self.returncode
+
+
+class FakeStartProcess:
+    """subprocess.Popen の代わりに FakeProcess を作る。引数は Popen と同じキーワードだけを受け付ける。"""
+
+    def __init__(self, clock: FakeClock):
+        self.clock = clock
+        self.calls: list[tuple[list[str], dict]] = []
+        self.processes: list[FakeProcess] = []
+        self.started = threading.Event()
+        self.error: BaseException | None = None
+        self.duration = 12.5
+        self.stdout = json.dumps(CLAUDE_OUTPUT, ensure_ascii=False)
+        self.stderr = ""
+        self.exit_code = 0
+        self.block = False
+        self.timeout_first = False
+        self.terminate_works = True
+
+    def __call__(self, args, *, cwd, stdin, stdout, stderr, text, encoding, errors):
+        self.calls.append(
+            (
+                list(args),
+                {
+                    "cwd": cwd,
+                    "stdin": stdin,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "text": text,
+                    "encoding": encoding,
+                    "errors": errors,
+                },
+            )
+        )
         if self.error is not None:
             raise self.error
-        return subprocess.CompletedProcess(
-            cmd, self.returncode, stdout=self.stdout, stderr=""
-        )
+        process = FakeProcess(list(args), self.clock, self)
+        self.processes.append(process)
+        self.started.set()
+        return process
 
 
 class Recorder:
@@ -103,7 +180,7 @@ class Recorder:
 
 
 def make_advisor(tmp_path: Path, start_thread=None, **kwargs):
-    """tmp_path の下を workdir にした advisor と、偽の run_command・clock・記録を返す。
+    """tmp_path の下を workdir にした advisor と、偽の start_process・記録・実行のディレクトリーを返す。
 
     start_thread を省略すると、実行の本体をその場で呼ぶ。
     """
@@ -112,25 +189,33 @@ def make_advisor(tmp_path: Path, start_thread=None, **kwargs):
     notes_dir.mkdir(parents=True)
     runs_dir = workdir / "runs" / "20261112-120000"
     clock = FakeClock(100.0)
-    run_command = FakeRunCommand(clock)
+    start_process = FakeStartProcess(clock)
     recorder = Recorder()
     advisor = ClaudeCodeHeadlessAdvisor(
         workdir,
         notes_dir,
         runs_dir,
         "zelda",
-        run_command=run_command,
+        start_process=start_process,
         log=recorder.log,
         start_thread=start_thread if start_thread is not None else (lambda job: job()),
         clock=clock,
         **kwargs,
     )
-    return advisor, run_command, recorder, runs_dir
+    return advisor, start_process, recorder, runs_dir
 
 
 def read_result(runs_dir: Path, index: int = 1) -> dict:
     path = runs_dir / advisor_run_dir_name(index) / "result.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def wait_until(condition, message: str) -> None:
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while not condition():
+        if time.monotonic() >= deadline:
+            pytest.fail(message)
+        time.sleep(0.01)
 
 
 # --- 名前 ---
@@ -281,36 +366,40 @@ def test_request_update_returns_false_while_running(tmp_path):
     assert len(recorder_box.held_jobs) == 2
 
 
-def test_request_update_runs_claude_in_workdir_with_timeout(tmp_path):
-    advisor, run_command, _, _ = make_advisor(tmp_path)
+def test_request_update_starts_claude_in_workdir_and_waits_with_timeout(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path)
     advisor.request_update(sample_context())
-    assert len(run_command.calls) == 1
-    cmd, kwargs = run_command.calls[0]
+    assert len(start_process.calls) == 1
+    cmd, kwargs = start_process.calls[0]
     assert kwargs == {
         "cwd": tmp_path / "ch04_techniques",
-        "capture_output": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
         "text": True,
-        "timeout": 300.0,
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     assert cmd[:2] == ["claude", "-p"]
     assert option_value(cmd, "--allowedTools").split(",") == EXPECTED_ALLOWED_TOOLS
+    assert start_process.processes[0].calls == [("communicate", 300.0)]
 
 
 def test_request_update_passes_given_timeout(tmp_path):
-    advisor, run_command, _, _ = make_advisor(tmp_path, timeout_s=42.0)
+    advisor, start_process, _, _ = make_advisor(tmp_path, timeout_s=42.0)
     advisor.request_update(sample_context())
-    assert run_command.calls[0][1]["timeout"] == 42.0
+    assert start_process.processes[0].calls == [("communicate", 42.0)]
 
 
 def test_request_update_writes_inputs_in_numbered_run_dir(tmp_path):
-    advisor, run_command, _, runs_dir = make_advisor(tmp_path)
+    advisor, start_process, _, runs_dir = make_advisor(tmp_path)
     advisor.request_update(sample_context())
     advisor.request_update(sample_context())
     for index in (1, 2):
         run_dir = runs_dir / advisor_run_dir_name(index)
         assert (run_dir / "context.md").is_file()
         assert (run_dir / "frame-01.jpg").read_bytes() == b"jpeg-one"
-    prompt = run_command.calls[0][0][2]
+    prompt = start_process.calls[0][0][2]
     assert str(runs_dir / "advisor-001" / "context.md") in prompt
 
 
@@ -323,10 +412,13 @@ def test_request_update_writes_result_json_and_logs(tmp_path):
     assert result["timed_out"] is False
     assert result["error"] is None
     assert result["output"] == CLAUDE_OUTPUT
+    assert result["stdout"] is None
+    assert result["stderr"] == ""
     assert result["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event["event"] == "advisor"
+    assert event["run_dir"] == str(runs_dir / "advisor-001")
     assert event["returncode"] == 0
     assert event["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
     assert event["result"] == "戦略を更新した"
@@ -334,9 +426,9 @@ def test_request_update_writes_result_json_and_logs(tmp_path):
 
 
 def test_request_update_records_non_json_output(tmp_path):
-    advisor, run_command, _, runs_dir = make_advisor(tmp_path)
-    run_command.stdout = "not json"
-    run_command.returncode = 1
+    advisor, start_process, _, runs_dir = make_advisor(tmp_path)
+    start_process.stdout = "not json"
+    start_process.exit_code = 1
     advisor.request_update(sample_context())
     result = read_result(runs_dir)
     assert result["returncode"] == 1
@@ -345,24 +437,48 @@ def test_request_update_records_non_json_output(tmp_path):
     assert result["permission_denials"] == []
 
 
-def test_request_update_records_timeout(tmp_path):
-    advisor, run_command, recorder, runs_dir = make_advisor(tmp_path)
-    run_command.error = subprocess.TimeoutExpired(
-        ["claude"], 300.0, output=b"partial", stderr=b"still running"
-    )
+def test_request_update_terminates_claude_on_timeout(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_advisor(tmp_path)
+    start_process.timeout_first = True
+    start_process.stdout = "partial"
+    start_process.stderr = "still running"
     advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("communicate", 300.0),
+        "terminate",
+        ("communicate", TERMINATE_GRACE_S),
+    ]
     result = read_result(runs_dir)
     assert result["timed_out"] is True
     assert result["returncode"] is None
-    assert "timed out" in result["error"]
+    assert result["error"] == "timed out after 300.0 seconds"
+    assert result["stdout"] == "partial"
+    assert result["stderr"] == "still running"
     assert len(recorder.events) == 1
     assert recorder.events[0]["timed_out"] is True
     assert advisor.is_busy() is False
 
 
+def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path):
+    advisor, start_process, _, runs_dir = make_advisor(tmp_path)
+    start_process.timeout_first = True
+    start_process.terminate_works = False
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("communicate", 300.0),
+        "terminate",
+        ("communicate", TERMINATE_GRACE_S),
+        "kill",
+        ("communicate", None),
+    ]
+    assert TERMINATE_GRACE_S == 5.0
+    assert read_result(runs_dir)["timed_out"] is True
+    assert advisor.is_busy() is False
+
+
 def test_request_update_records_exception(tmp_path):
-    advisor, run_command, recorder, runs_dir = make_advisor(tmp_path)
-    run_command.error = FileNotFoundError("claude not found")
+    advisor, start_process, recorder, runs_dir = make_advisor(tmp_path)
+    start_process.error = FileNotFoundError("claude not found")
     advisor.request_update(sample_context())
     result = read_result(runs_dir)
     assert result["timed_out"] is False
@@ -374,9 +490,62 @@ def test_request_update_records_exception(tmp_path):
     assert advisor.request_update(sample_context()) is True
 
 
-def test_close_does_not_wait_for_running_advisor(tmp_path):
-    recorder_box = Recorder()
-    advisor, run_command, _, _ = make_advisor(tmp_path, start_thread=recorder_box.hold)
-    advisor.request_update(sample_context())
+# --- close ---
+
+
+def test_close_without_running_advisor_returns():
+    advisor = ClaudeCodeHeadlessAdvisor(
+        Path("/work"), Path("/work/game_notes/zelda"), Path("/work/runs"), "zelda"
+    )
     advisor.close()
-    assert run_command.calls == []
+    assert advisor.request_update(sample_context()) is False
+
+
+def test_close_terminates_running_claude_and_waits_for_thread(tmp_path):
+    advisor, start_process, _, runs_dir = make_advisor(
+        tmp_path, start_thread=start_daemon_thread
+    )
+    start_process.block = True
+    advisor.request_update(sample_context())
+    assert start_process.started.wait(WAIT_TIMEOUT)
+    advisor.close()
+    process = start_process.processes[0]
+    assert "terminate" in process.calls
+    assert "kill" not in process.calls
+    assert advisor.is_busy() is False
+    result = read_result(runs_dir)
+    assert result["returncode"] == -15
+    assert result["error"] == "stopped by close"
+    # close の後は要求を受け付けない
+    assert advisor.request_update(sample_context()) is False
+
+
+def test_close_kills_claude_that_ignores_terminate(tmp_path):
+    advisor, start_process, _, _ = make_advisor(
+        tmp_path, start_thread=start_daemon_thread
+    )
+    start_process.block = True
+    start_process.terminate_works = False
+    advisor.request_update(sample_context())
+    assert start_process.started.wait(WAIT_TIMEOUT)
+    advisor.close()
+    process = start_process.processes[0]
+    assert process.calls[1:] == ["terminate", ("wait", TERMINATE_GRACE_S), "kill"]
+    assert advisor.is_busy() is False
+
+
+def test_close_prevents_starting_claude_for_pending_request(tmp_path):
+    recorder_box = Recorder()
+    advisor, start_process, _, runs_dir = make_advisor(
+        tmp_path, start_thread=recorder_box.hold
+    )
+    advisor.request_update(sample_context())
+    closer = threading.Thread(target=advisor.close)
+    closer.start()
+    wait_until(lambda: advisor.closed, "close() did not mark the advisor closed")
+    # close() の後に動き出した実行は、claude を起動しない
+    recorder_box.held_jobs[0]()
+    closer.join(WAIT_TIMEOUT)
+    assert not closer.is_alive()
+    assert start_process.calls == []
+    assert read_result(runs_dir)["error"] == "stopped by close"

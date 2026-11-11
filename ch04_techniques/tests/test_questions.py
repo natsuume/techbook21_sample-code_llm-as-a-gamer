@@ -52,14 +52,17 @@ def test_each_button_has_press_and_tap_questions():
 
 
 def test_press_question_text():
+    # 呼び名と「を」の間に空白を入れない
     assert questions_by_name()["press_A"].text == (
-        "今、A ボタン を押した状態にするべきか。押した状態は次の判断まで続く。"
+        "今、A ボタンを押した状態にするべきか。押した状態は次の判断まで続く。"
     )
 
 
 def test_tap_question_text_uses_button_label():
-    assert questions_by_name()["tap_L3"].text == (
-        "今、L3 (左スティックの押し込み) を 1 回だけ短く押すべきか。"
+    by_name = questions_by_name()
+    assert by_name["tap_UP"].text == "今、十字キーの上を 1 回だけ短く押すべきか。"
+    assert by_name["tap_L3"].text == (
+        "今、L3 (左スティックの押し込み)を 1 回だけ短く押すべきか。"
     )
 
 

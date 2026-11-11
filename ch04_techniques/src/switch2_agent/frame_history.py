@@ -38,25 +38,29 @@ class FrameHistory:
         frames      持っているフレーム (古い順)
     """
 
-    max_age_s: float
-    lock: threading.Lock
-    frames: deque[TimedFrame]
-
     def __init__(self, max_age_s: float):
         """max_age_s 秒分のフレームを持つ、空の履歴を作る。"""
-        raise NotImplementedError
+        self.max_age_s = max_age_s
+        self.lock = threading.Lock()
+        self.frames: deque[TimedFrame] = deque()
 
     def add(self, frame: TimedFrame) -> None:
         """frame を末尾に足し、time が frame.time - max_age_s より古い (小さい) フレームを先頭から捨てる。
 
         time がちょうど frame.time - max_age_s のフレームは残す。
         """
-        raise NotImplementedError
+        oldest_kept = frame.time - self.max_age_s
+        with self.lock:
+            self.frames.append(frame)
+            while self.frames[0].time < oldest_kept:
+                self.frames.popleft()
 
     def between(self, start: float, end: float) -> list[TimedFrame]:
         """start <= time <= end のフレームを古い順に返す (両端を含む)。無ければ空のリストを返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return [frame for frame in self.frames if start <= frame.time <= end]
 
     def latest(self) -> TimedFrame | None:
         """最も新しいフレームを返す。まだ無ければ None を返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return self.frames[-1] if self.frames else None

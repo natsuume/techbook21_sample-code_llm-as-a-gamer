@@ -5,8 +5,11 @@ Pipeline は要求のたびに最新の内容を読む (advisor の出力は戦�
 """
 
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+
+from switch2_remote.error_message import describe_error
 
 # ゲームの情報の種別。並びは要求の文に並べる順でもある
 NOTE_KINDS = ("controls", "tips", "progress", "strategy")
@@ -28,7 +31,9 @@ def game_notes_dir(root: Path, game: str) -> Path:
 
     game が GAME_NAME_PATTERN に fullmatch しなければ ValueError にする (root の外を指せないようにする)。
     """
-    raise NotImplementedError
+    if GAME_NAME_PATTERN.fullmatch(game) is None:
+        raise ValueError(f"game name must use only letters, digits, _ and -: {game!r}")
+    return root / game
 
 
 def ensure_game_notes(root: Path, game: str) -> dict[str, Path]:
@@ -37,7 +42,17 @@ def ensure_game_notes(root: Path, game: str) -> dict[str, Path]:
     ディレクトリーは親を含めて作る。作るファイルの中身は空にする。既にあるファイルは変えない。
     game が不正なら game_notes_dir と同じく ValueError にする。
     """
-    raise NotImplementedError
+    notes_dir = game_notes_dir(root, game)
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    paths = {kind: notes_dir / f"{kind}.md" for kind in NOTE_KINDS}
+    for path in paths.values():
+        # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)
+        try:
+            with path.open("x", encoding="utf-8"):
+                pass
+        except FileExistsError:
+            pass
+    return paths
 
 
 def read_game_notes(paths: Mapping[str, Path]) -> dict[str, str]:
@@ -46,7 +61,20 @@ def read_game_notes(paths: Mapping[str, Path]) -> dict[str, str]:
     無いファイルと読めないファイル (OSError、UnicodeDecodeError) は空文字にする。読めない理由は呼び出し側に
     返さず、無いファイル以外は警告を標準エラー出力に 1 行書く。
     """
-    raise NotImplementedError
+    notes: dict[str, str] = {}
+    for kind, path in paths.items():
+        try:
+            notes[kind] = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            notes[kind] = ""
+        except (OSError, UnicodeDecodeError) as e:
+            print(
+                f"warning: could not read {path}: {describe_error(e)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            notes[kind] = ""
+    return notes
 
 
 def format_game_notes(notes: Mapping[str, str]) -> str:
@@ -55,4 +83,8 @@ def format_game_notes(notes: Mapping[str, str]) -> str:
     各種別は `## <見出し>\\n<中身の前後の空白を除いたもの>` とし、種別の間は空行 1 つ (\\n\\n) でつなぐ。
     中身の前後の空白を除くと空になるか、notes にその種別が無ければ、中身の代わりに EMPTY_NOTE_TEXT を置く。
     """
-    raise NotImplementedError
+    sections = []
+    for kind in NOTE_KINDS:
+        content = notes.get(kind, "").strip()
+        sections.append(f"## {NOTE_TITLES[kind]}\n{content or EMPTY_NOTE_TEXT}")
+    return "\n\n".join(sections)

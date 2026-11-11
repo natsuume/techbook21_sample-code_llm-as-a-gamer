@@ -4,6 +4,10 @@ advisor は Skill (record-controls・record-tips・record-progress・record-stra
 ゲームの情報の 4 ファイルを書き換える。同時に実行するのは 1 件だけで、実行中に来た要求は捨てる。
 実行ごとに runs_dir/advisor-<連番>/ を作り、入力 (画像と context.md) と結果 (result.json) を残す。
 
+子プロセスの寿命: claude は subprocess.Popen で起動し、実行中の子プロセスを持っておく。
+daemon スレッドは親のプロセスの終了とともに消えるため、待ちの上限 (timeout_s) を過ぎたときと close() のときに、
+子プロセスを terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、子プロセスを残さない。
+
 フラグの綴りと許可ルールの書き方は公式ドキュメント (https://code.claude.com/docs/en/headless、
 https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/skills、2026-11-12 に確認) に合わせる。
 
@@ -20,6 +24,7 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 - --setting-sources project でユーザー側の設定を読まず、disableAllHooks で hook を動かさない。
   --bare は付けない (付けるとプロジェクトの Skill を読まない)
 - ~/.claude.json (フォルダーの信頼) は書き換えない
+- 標準入力は渡さない (subprocess.DEVNULL)。claude -p は標準入力も読むため、端末の入力を読ませない
 拒否された操作は出力の JSON の permission_denials に入り、拒否されても実行は止まらない。
 
 未確認 (公式ドキュメントに記載なし): --max-turns に達したときと、拒否された操作があったときの終了コード
@@ -28,13 +33,22 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 --setting-sources project を付けたときに ~/.claude/CLAUDE.md が読まれるか。
 """
 
+import json
+import logging
 import subprocess
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+from switch2_remote.error_message import describe_error
+
 from switch2_agent.advisors.base import AdvisorContext
+from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
+from switch2_agent.safety import SAFETY_RULES
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 CLAUDE_EXECUTABLE = "claude"
 # advisor に使わせる Skill の名前 (.claude/skills/<名前>/SKILL.md)
@@ -46,20 +60,26 @@ ADVISOR_SKILLS = (
 )
 DEFAULT_MAX_TURNS = 30  # claude -p の --max-turns の既定値
 DEFAULT_ADVISOR_TIMEOUT_S = 300.0  # 1 回の advisor の実行の上限 (秒)
+# terminate してから kill するまでに、子プロセスが終わるのを待つ時間 (秒)
+TERMINATE_GRACE_S = 5.0
+# close() が、advisor のスレッドの終了を待つ上限 (秒)
+CLOSE_WAIT_S = 10.0
 # --settings に渡すインライン JSON。hook を動かさない
 DISABLE_HOOKS_SETTINGS = '{"disableAllHooks": true}'
 CONTEXT_FILE_NAME = "context.md"
 RESULT_FILE_NAME = "result.json"
+EMPTY_STRATEGY_TEXT = "(まだ書かれていない)"
+EMPTY_OPERATION_LOG_TEXT = "(記録なし)"
 
 
 def advisor_run_dir_name(index: int) -> str:
     """index 回目 (1 始まり) の実行のディレクトリー名 `advisor-<index を 3 桁の 0 埋め>` を返す (例: advisor-001)。"""
-    raise NotImplementedError
+    return f"advisor-{index:03d}"
 
 
 def image_file_name(index: int) -> str:
     """index 枚目 (1 始まり) の画像のファイル名 `frame-<index を 2 桁の 0 埋め>.jpg` を返す (例: frame-01.jpg)。"""
-    raise NotImplementedError
+    return f"frame-{index:02d}.jpg"
 
 
 def write_advisor_inputs(run_dir: Path, context: AdvisorContext) -> Path:
@@ -71,7 +91,41 @@ def write_advisor_inputs(run_dir: Path, context: AdvisorContext) -> Path:
         画像のファイル名とラベルの一覧 (画像の順)、今の戦略 (current_strategy。空なら「(まだ書かれていない)」)、
         前回 advisor を呼んでからの応答と送った操作 (operation_log_text。空なら「(記録なし)」)
     """
-    raise NotImplementedError
+    run_dir.mkdir(parents=True, exist_ok=True)
+    image_lines = []
+    for index, image in enumerate(context.images, start=1):
+        name = image_file_name(index)
+        (run_dir / name).write_bytes(image.jpeg)
+        image_lines.append(f"- {name}: {image.label}")
+    strategy = context.current_strategy.strip() or EMPTY_STRATEGY_TEXT
+    operation_log = context.operation_log_text.strip() or EMPTY_OPERATION_LOG_TEXT
+    text = "\n".join(
+        [
+            "# advisor への文脈",
+            "",
+            f"- ゲーム: {context.game}",
+            (
+                f"- きっかけ: {context.trigger_time_text} の要求で、advisor の問いの確率が "
+                f"{context.trigger_probability:.2f} だった"
+            ),
+            "",
+            "## 画像 (古い順)",
+            "",
+            *(image_lines or ["(画像なし)"]),
+            "",
+            "## 今の戦略",
+            "",
+            strategy,
+            "",
+            "## 前回 advisor を呼んでからの応答と送った操作",
+            "",
+            operation_log,
+            "",
+        ]
+    )
+    context_path = run_dir / CONTEXT_FILE_NAME
+    context_path.write_text(text, encoding="utf-8")
+    return context_path
 
 
 def build_advisor_prompt(context_path: Path, notes_dir: Path, game: str) -> str:
@@ -88,7 +142,26 @@ def build_advisor_prompt(context_path: Path, notes_dir: Path, game: str) -> str:
         - safety.SAFETY_RULES (全文を入れる) を守り、戦略にも反映する
         - 最後に、更新した内容を 3 行以内で答える
     """
-    raise NotImplementedError
+    note_lines = "\n".join(
+        f"   - {notes_dir / f'{kind}.md'} ({NOTE_TITLES[kind]})" for kind in NOTE_KINDS
+    )
+    return f"""\
+あなたは、Nintendo Switch 2 のゲーム「{game}」を遊ぶ速い層 (画面の画像を見て、問いごとに型付きの判断を返すモデル) のために、戦略を考える advisor である。ゲーム名は {game}。
+
+手順:
+1. {context_path} を読む。そこに並ぶ画像 (同じディレクトリーの frame-01.jpg など) も読む。
+2. ゲームの情報の 4 ファイルを読む。
+{note_lines}
+3. 新しく分かったことがあれば、種別ごとの Skill で更新する。操作方法は record-controls、攻略情報は record-tips、進行状況は record-progress。
+4. 戦略は record-strategy で必ず更新する。
+5. 最後に、更新した内容を 3 行以内で答える。
+
+守ること:
+- 4 ファイルは速い層の要求に毎回そのまま入るため、短く保つ。
+- 4 ファイル以外のファイルを書き換えない。
+- 次の安全のための規則を守り、戦略にも反映する。
+
+{SAFETY_RULES}"""
 
 
 def build_allowed_tools(notes_dir_relative: str) -> list[str]:
@@ -98,7 +171,11 @@ def build_allowed_tools(notes_dir_relative: str) -> list[str]:
     `Skill(record-progress)`, `Skill(record-strategy)`] の順。notes_dir_relative は workdir からの
     相対パス (例: game_notes/zelda)。書き込みの許可は notes_dir_relative の配下の Edit だけで、Bash は含めない。
     """
-    raise NotImplementedError
+    return [
+        "Read",
+        f"Edit(/{notes_dir_relative}/**)",
+        *(f"Skill({name})" for name in ADVISOR_SKILLS),
+    ]
 
 
 def build_claude_command(
@@ -115,41 +192,114 @@ def build_claude_command(
      "--max-turns", str(max_turns)]
     --bare は付けない。
     """
-    raise NotImplementedError
+    return [
+        executable,
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "dontAsk",
+        "--setting-sources",
+        "project",
+        "--settings",
+        DISABLE_HOOKS_SETTINGS,
+        "--allowedTools",
+        ",".join(build_allowed_tools(notes_dir_relative)),
+        "--max-turns",
+        str(max_turns),
+    ]
+
+
+def build_result_record(
+    returncode: int | None,
+    duration_s: float,
+    timed_out: bool,
+    error: str | None,
+    stdout: str | None,
+    stderr: str | None,
+) -> dict:
+    """result.json に書く辞書を返す (純粋な関数)。キーは ClaudeCodeHeadlessAdvisor.request_update の docstring のとおり。
+
+    stdout を JSON として読めたら output に入れて stdout は None に、読めなければ output を None にして
+    stdout をそのまま入れる (空なら None)。permission_denials は output が object で、その permission_denials が
+    リストならそれ、そうでなければ []。stderr が None なら空文字にする。
+    """
+    output = None
+    raw_stdout = stdout or None
+    if raw_stdout is not None:
+        try:
+            output = json.loads(raw_stdout)
+            raw_stdout = None
+        except ValueError:
+            output = None
+    denials = output.get("permission_denials") if isinstance(output, dict) else None
+    return {
+        "returncode": returncode,
+        "duration_s": duration_s,
+        "timed_out": timed_out,
+        "error": error,
+        "output": output,
+        "stdout": raw_stdout,
+        "stderr": stderr or "",
+        "permission_denials": denials if isinstance(denials, list) else [],
+    }
+
+
+def build_log_event(run_dir: Path, record: dict) -> dict:
+    """log に渡す 1 件の辞書を、result.json の辞書 record から作る (純粋な関数)。"""
+    output = record["output"]
+    return {
+        "event": "advisor",
+        "run_dir": str(run_dir),
+        "returncode": record["returncode"],
+        "duration_s": record["duration_s"],
+        "timed_out": record["timed_out"],
+        "error": record["error"],
+        "permission_denials": record["permission_denials"],
+        "result": output.get("result") if isinstance(output, dict) else None,
+    }
 
 
 def start_daemon_thread(job: Callable[[], None]) -> None:
     """job を daemon スレッドで起動し、終わるのを待たずに戻る。"""
-    raise NotImplementedError
+    threading.Thread(target=job, daemon=True).start()
+
+
+def stop_process(process: subprocess.Popen) -> tuple[str | None, str | None]:
+    """実行中の process を terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、出力を読み切る。
+
+    (標準出力, 標準エラー出力) を返す。process の communicate を呼んでいるスレッドから呼ぶ。
+    """
+    process.terminate()
+    try:
+        return process.communicate(timeout=TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.communicate()
 
 
 class ClaudeCodeHeadlessAdvisor:
     """advisors.base.Advisor の実装。claude -p を裏のスレッドで 1 件ずつ実行する。
 
-    workdir       claude -p の cwd (ch04_techniques のルート。.claude/skills がある)
-    notes_dir     ゲームの情報のディレクトリー (workdir の配下。game_notes.game_notes_dir の結果)
-    runs_dir      実行ごとのディレクトリー advisor-<連番>/ を作る場所
-    game          ゲーム名
-    timeout_s     1 回の実行の上限 (秒)。run_command の timeout に渡す
-    run_command   コマンドを実行する関数 (subprocess.run と同じ引数を受け取る)。テストでは偽物を渡す
-    log           実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
-    start_thread  実行の本体 (引数なしの関数) を受け取って裏で起動する関数。既定では daemon スレッドで起動して待たない
-                  (テストではその場で呼ぶ関数や、呼ばずに保留する関数を渡す)
-    clock         所要時間を測る時計 (既定 time.monotonic)
-    """
+    workdir        claude -p の cwd (ch04_techniques のルート。.claude/skills がある)
+    notes_dir      ゲームの情報のディレクトリー (workdir の配下。game_notes.game_notes_dir の結果)
+    runs_dir       実行ごとのディレクトリー advisor-<連番>/ を作る場所
+    game           ゲーム名
+    timeout_s      1 回の実行の上限 (秒)。communicate の timeout に渡す
+    start_process  子プロセスを起動する関数 (subprocess.Popen と同じ引数を受け取り、Popen を返す)。テストでは偽物を渡す
+    log            実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
+    start_thread   実行の本体 (引数なしの関数) を受け取って裏で起動する関数。既定では daemon スレッドで起動して待たない
+                   (テストではその場で呼ぶ関数や、呼ばずに保留する関数を渡す)
+    clock          所要時間を測る時計 (既定 time.monotonic)
 
-    workdir: Path
-    notes_dir: Path
-    runs_dir: Path
-    game: str
-    timeout_s: float
-    run_command: Callable[..., subprocess.CompletedProcess]
-    log: Callable[[dict], None] | None
-    start_thread: Callable[[Callable[[], None]], None]
-    clock: Callable[[], float]
-    lock: threading.Lock
-    busy: bool
-    run_count: int
+    状態 (lock で守る):
+        busy       実行中なら True
+        run_count  受け付けた実行の数 (実行のディレクトリーの連番)
+        process    実行中の子プロセス。無ければ None
+        closed     close() を呼んだら True。以後は要求を受け付けず、子プロセスを起動しない
+    idle は実行中でなければ set されたイベントで、close() が advisor のスレッドの終了を待つのに使う。
+    """
 
     def __init__(
         self,
@@ -158,7 +308,7 @@ class ClaudeCodeHeadlessAdvisor:
         runs_dir: Path,
         game: str,
         timeout_s: float = DEFAULT_ADVISOR_TIMEOUT_S,
-        run_command: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        start_process: Callable[..., subprocess.Popen] = subprocess.Popen,
         log: Callable[[dict], None] | None = None,
         start_thread: Callable[[Callable[[], None]], None] = start_daemon_thread,
         clock: Callable[[], float] = time.monotonic,
@@ -167,37 +317,166 @@ class ClaudeCodeHeadlessAdvisor:
 
         notes_dir が workdir の配下でなければ ValueError にする (許可ルールを workdir からの相対パスで書くため)。
         """
-        raise NotImplementedError
+        if not notes_dir.is_relative_to(workdir):
+            raise ValueError(f"notes_dir must be under workdir: {notes_dir}")
+        self.workdir = workdir
+        self.notes_dir = notes_dir
+        self.notes_dir_relative = notes_dir.relative_to(workdir).as_posix()
+        self.runs_dir = runs_dir
+        self.game = game
+        self.timeout_s = timeout_s
+        self.start_process = start_process
+        self.log = log
+        self.start_thread = start_thread
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.busy = False
+        self.run_count = 0
+        self.process: subprocess.Popen | None = None
+        self.closed = False
+        self.idle = threading.Event()
+        self.idle.set()
 
     def request_update(self, context: AdvisorContext) -> bool:
-        """実行中 (busy) なら何もせず False を返す。そうでなければ busy にし、run_count を 1 増やして、
+        """実行中 (busy) か close() の後なら何もせず False を返す。そうでなければ busy にし、run_count を 1 増やして、
         その連番の実行の本体を start_thread に渡し、True を返す。busy の確認と変更はロックの中で行う。
 
         実行の本体 (裏のスレッド) は次を行う:
             1. run_dir = runs_dir / advisor_run_dir_name(連番) を作り、write_advisor_inputs で入力を書く
             2. build_advisor_prompt と build_claude_command (notes_dir の workdir からの相対パス) でコマンドを作り、
-               run_command(cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout_s) を実行する
-            3. run_dir / RESULT_FILE_NAME (result.json) に次の辞書を JSON (UTF-8) で書く:
+               start_process(cmd, cwd=workdir, stdin=DEVNULL, stdout=PIPE, stderr=PIPE, text=True,
+               encoding="utf-8", errors="replace") で起動して、communicate(timeout=timeout_s) で終わるのを待つ。
+               タイムアウトしたら stop_process で terminate → TERMINATE_GRACE_S 秒 → kill する。
+               close() の後なら子プロセスを起動しない
+            3. run_dir / RESULT_FILE_NAME (result.json) に次の辞書 (build_result_record) を JSON (UTF-8) で書く:
                  returncode           終了コード。タイムアウトと例外では None
                  duration_s           2 の所要時間 (clock の差、秒)
-                 timed_out            subprocess.TimeoutExpired なら True
+                 timed_out            communicate がタイムアウトしたら True
                  error                タイムアウトなら `timed out after <timeout_s> seconds`、例外 (Exception) なら
-                                      その説明 (switch2_remote.error_message.describe_error)。どちらでもなければ None
+                                      その説明 (switch2_remote.error_message.describe_error)、close() で止めたなら
+                                      `stopped by close`。どれでもなければ None
                  output               標準出力を JSON として読んだもの。読めなければ None
                  stdout               JSON として読めなかった標準出力 (読めたとき、または無いときは None)
-                 stderr               標準エラー出力 (無ければ空文字)。タイムアウトでは途中までの出力 (bytes なら UTF-8 で読む)
+                 stderr               標準エラー出力 (無ければ空文字)
                  permission_denials   output の permission_denials (output が object でないか、無ければ [])
-            4. log があれば、{"event": "advisor", "run_dir": <run_dir の文字列>, "returncode", "duration_s",
-               "timed_out", "error", "permission_denials", "result": <output の result。無ければ None>} を渡す
-            1〜4 の途中の例外 (Exception) も捕まえ、書けるなら result.json に、log があれば log に記録する。
-            最後に必ず (ロックの中で) busy を False に戻す。
+            4. log があれば、build_log_event の辞書 ({"event": "advisor", "run_dir", "returncode", "duration_s",
+               "timed_out", "error", "permission_denials", "result": <output の result。無ければ None>}) を渡す
+            1〜2 の途中の例外 (Exception) も捕まえて 3・4 で記録し、logging で標準エラー出力にトレースバックを書く。
+            result.json を書けなければ (OSError)、その説明を error に入れて 4 に進む。
+            最後に必ず (ロックの中で) busy を False に戻し、idle を set する (log の例外はスレッドの外に出る)。
         """
-        raise NotImplementedError
+        with self.lock:
+            if self.busy or self.closed:
+                return False
+            self.busy = True
+            self.run_count += 1
+            index = self.run_count
+            self.idle.clear()
+        self.start_thread(lambda: self._run(index, context))
+        return True
 
     def is_busy(self) -> bool:
         """実行中なら True を返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return self.busy
 
     def close(self) -> None:
-        """終了する。実行中の advisor の終了は待たない (プロセスは timeout_s で止まる)。"""
-        raise NotImplementedError
+        """終了する。以後の要求は受け付けない。
+
+        実行中の子プロセスがあれば terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill する。
+        そのあと、advisor のスレッドの終了を最大 CLOSE_WAIT_S 秒待つ。
+        """
+        with self.lock:
+            self.closed = True
+            process = self.process
+        if process is not None:
+            process.terminate()
+            try:
+                process.wait(timeout=TERMINATE_GRACE_S)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self.idle.wait(CLOSE_WAIT_S)
+
+    def _run(self, index: int, context: AdvisorContext) -> None:
+        """実行の本体 (request_update の docstring の 1〜4)。裏のスレッドで呼ぶ。"""
+        try:
+            self._run_and_record(index, context)
+        finally:
+            # 記録や log の失敗で busy が戻らなくならないよう、必ず最後に戻す
+            with self.lock:
+                self.busy = False
+                self.idle.set()
+
+    def _run_and_record(self, index: int, context: AdvisorContext) -> None:
+        """入力を書いて claude を実行し、result.json と log に記録する。
+
+        1〜2 の途中の例外 (Exception) は result.json と log の error に記録し、原因を追えるよう
+        logging で標準エラー出力にもトレースバックを書く。
+        """
+        run_dir = self.runs_dir / advisor_run_dir_name(index)
+        started = self.clock()
+        outcome: dict = {"returncode": None, "timed_out": False, "error": None}
+        stdout: str | None = None
+        stderr: str | None = None
+        try:
+            context_path = write_advisor_inputs(run_dir, context)
+            prompt = build_advisor_prompt(context_path, self.notes_dir, self.game)
+            cmd = build_claude_command(prompt, self.notes_dir_relative)
+            stdout, stderr = self._run_process(cmd, outcome)
+        # claude を起動できない (FileNotFoundError) など、失敗の型を問わず記録して次の要求を受け付ける
+        except Exception as e:
+            outcome["error"] = describe_error(e)
+            logger.exception("advisor run %s failed", advisor_run_dir_name(index))
+        record = build_result_record(
+            outcome["returncode"],
+            self.clock() - started,
+            outcome["timed_out"],
+            outcome["error"],
+            stdout,
+            stderr,
+        )
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / RESULT_FILE_NAME).write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            record["error"] = record["error"] or describe_error(e)
+        if self.log is not None:
+            self.log(build_log_event(run_dir, record))
+
+    def _run_process(
+        self, cmd: list[str], outcome: dict
+    ) -> tuple[str | None, str | None]:
+        """cmd を子プロセスで実行し、(標準出力, 標準エラー出力) を返す。outcome に returncode・timed_out・error を入れる。"""
+        with self.lock:
+            if self.closed:
+                outcome["error"] = "stopped by close"
+                return None, None
+            # close() が子プロセスを見つけられるよう、起動と保持を同じロックの中で行う
+            process = self.start_process(
+                cmd,
+                cwd=self.workdir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            self.process = process
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                outcome["timed_out"] = True
+                outcome["error"] = f"timed out after {self.timeout_s} seconds"
+                return stop_process(process)
+            outcome["returncode"] = process.returncode
+            with self.lock:
+                if self.closed:
+                    outcome["error"] = "stopped by close"
+            return stdout, stderr
+        finally:
+            with self.lock:
+                self.process = None

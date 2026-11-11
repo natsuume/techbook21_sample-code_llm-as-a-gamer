@@ -3,11 +3,13 @@
 Pipeline は DecisionModel の型だけに依存し、API の違いを知らない。
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
+from switch2_remote.error_message import describe_error
 
 from switch2_agent.decision_request import DecisionRequest
 
@@ -61,7 +63,24 @@ def post_json(
       DecisionModelError にする
     - 本文が JSON でないか、JSON の object (dict) でなければ DecisionModelError にする
     """
-    raise NotImplementedError
+    try:
+        response = client.post(
+            url, headers=dict(headers), json=payload, timeout=timeout_s
+        )
+    except httpx.HTTPError as e:
+        raise DecisionModelError(f"request to {url} failed: {describe_error(e)}") from e
+    if not response.is_success:
+        preview = response.text[:ERROR_BODY_PREVIEW_CHARS]
+        raise DecisionModelError(
+            f"{url} returned HTTP {response.status_code}: {preview}"
+        )
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise DecisionModelError(f"{url} returned a body that is not JSON") from e
+    if not isinstance(body, dict):
+        raise DecisionModelError(f"{url} returned JSON that is not an object")
+    return body
 
 
 def read_probability(value: object, name: str) -> float:
@@ -69,4 +88,9 @@ def read_probability(value: object, name: str) -> float:
 
     value が数 (int か float。bool は除く) でないか、有限でないか、0〜1 の範囲の外なら DecisionModelError にする。
     """
-    raise NotImplementedError
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise DecisionModelError(f"probability of {name} is not a number: {value!r}")
+    probability = float(value)
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise DecisionModelError(f"probability of {name} is out of 0..1: {value!r}")
+    return probability

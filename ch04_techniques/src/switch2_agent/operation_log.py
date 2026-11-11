@@ -7,6 +7,8 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
+from switch2_remote.controller_state import PadState, format_state
+
 from switch2_agent.action_decision import PadAction
 
 DEFAULT_OPERATION_LOG_CAPACITY = 500  # 持つ記録の数の既定値
@@ -32,7 +34,8 @@ def format_action(action: PadAction) -> str:
     held と taps はどちらも controller_state.format_state の正規化表記で書く (taps はボタンだけの PadState にする)。
     何も無ければ none (例: `押下 none / 短押し none`)。Pipeline の log の action にも使う。
     """
-    raise NotImplementedError
+    taps = format_state(PadState(buttons=action.taps))
+    return f"押下 {format_state(action.held)} / 短押し {taps}"
 
 
 class OperationLog:
@@ -41,21 +44,21 @@ class OperationLog:
     記録の received_at は add の順に増えていく前提とする。
     """
 
-    capacity: int
-    lock: threading.Lock
-    records: deque[OperationRecord]
-
     def __init__(self, capacity: int = DEFAULT_OPERATION_LOG_CAPACITY):
         """capacity 件まで持つ、空の記録を作る。"""
-        raise NotImplementedError
+        self.capacity = capacity
+        self.lock = threading.Lock()
+        self.records: deque[OperationRecord] = deque(maxlen=capacity)
 
     def add(self, record: OperationRecord) -> None:
         """record を末尾に足す。capacity を超えたら最も古い記録を捨てる。"""
-        raise NotImplementedError
+        with self.lock:
+            self.records.append(record)
 
     def since(self, time: float) -> list[OperationRecord]:
         """received_at > time (time より後) の記録を古い順に返す。"""
-        raise NotImplementedError
+        with self.lock:
+            return [record for record in self.records if record.received_at > time]
 
     def format_since(self, time: float, now: float) -> str:
         """since(time) の記録を 1 行 1 応答で並べた文を返す。記録が無ければ空文字を返す。
@@ -63,4 +66,8 @@ class OperationLog:
         各行は `<received_at - now を小数第 2 位まで> 秒: <format_action> / advisor <advisor_probability を小数第 2 位まで>`
         (例: `-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12`)。行は \\n でつなぐ。
         """
-        raise NotImplementedError
+        return "\n".join(
+            f"{record.received_at - now:.2f} 秒: {format_action(record.action)} / "
+            f"advisor {record.action.advisor_probability:.2f}"
+            for record in self.since(time)
+        )
