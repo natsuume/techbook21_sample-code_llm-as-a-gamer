@@ -19,18 +19,18 @@ def recorder(monkeypatch):
     """daemon.main が使う Bridge / BridgeSupervisor / Controller / Capture / ソケット / serve_connection を偽物に差し替える。
 
     偽の BridgeSupervisor は、受け取った start_bridge を本物と同じくコンストラクターで 1 回呼ぶ。
+    偽の Bridge と Capture は本物と同じ引数だけを受け取り、ほかの引数を渡すと TypeError になる。
     rec.bridge_error を設定すると、偽の Bridge はその例外を送出する (起動の失敗)。
     """
     rec = Recorder()
     rec.bridge_error = None
 
     class FakeBridge:
-        def __init__(self, keep_sending_neutral=False):
+        def __init__(self):
             if rec.bridge_error is not None:
                 raise rec.bridge_error
             rec.events.append("bridge created")
             rec.bridge = self
-            self.keep_sending_neutral = keep_sending_neutral
 
     class FakeSupervisor:
         def __init__(self, start_bridge, reset_radio):
@@ -57,13 +57,10 @@ def recorder(monkeypatch):
             rec.events.append("controller closed")
 
     class FakeCapture:
-        def __init__(
-            self, ffmpeg_fps, process_fps, buffer_seconds, output_width, output_height
-        ):
+        def __init__(self, ffmpeg_fps, process_fps):
             rec.events.append("capture created")
             rec.capture = self
-            self.rates = (ffmpeg_fps, process_fps, buffer_seconds)
-            self.output_size = (output_width, output_height)
+            self.rates = (ffmpeg_fps, process_fps)
 
         def close(self):
             rec.events.append("capture closed")
@@ -119,15 +116,13 @@ def test_main_builds_supervisor_with_bridge_and_radio_reset(recorder):
     assert supervisor.reset_radio is reset_bluetooth_radio
 
 
-@pytest.mark.parametrize(
-    "argv, expected", [([], False), (["--keep-sending-neutral"], True)]
-)
-def test_main_starts_every_bridge_with_keep_sending_neutral(recorder, argv, expected):
-    daemon.main(argv)
-    assert recorder.bridge.keep_sending_neutral is expected
-    # 復旧で起動し直すブリッジにも同じ指定を渡す
+def test_main_starts_every_bridge_without_arguments(recorder):
+    daemon.main([])
+    first = recorder.bridge
+    # 復旧で起動し直すブリッジも、最初のブリッジと同じく引数なしの Bridge() で起動する
     restarted = recorder.supervisor.start_bridge()
-    assert restarted.keep_sending_neutral is expected
+    assert restarted is recorder.bridge
+    assert restarted is not first
 
 
 def test_main_resets_controller_state_on_recovery(recorder):
@@ -155,9 +150,7 @@ def test_main_closes_controller_supervisor_capture_in_order(recorder):
 
 
 def test_main_closes_only_created_objects_when_capture_fails(recorder, monkeypatch):
-    def failing_capture(
-        ffmpeg_fps, process_fps, buffer_seconds, output_width, output_height
-    ):
+    def failing_capture(ffmpeg_fps, process_fps):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(daemon, "Capture", failing_capture)
@@ -180,24 +173,18 @@ def test_main_closes_supervisor_when_controller_fails(recorder, monkeypatch):
 
 def test_main_passes_default_rates_to_capture(recorder):
     daemon.main([])
-    assert recorder.capture.rates == (30, 10, 5)
-    assert recorder.capture.output_size == (1280, 720)
-
-
-def test_main_passes_given_output_size_to_capture(recorder):
-    daemon.main(["--output-size", "640x360"])
-    assert recorder.capture.output_size == (640, 360)
+    assert recorder.capture.rates == (30, 10)
 
 
 def test_main_passes_given_rates_to_capture(recorder):
-    daemon.main(["--ffmpeg-fps", "60", "--process-fps", "12", "--buffer-seconds", "10"])
-    assert recorder.capture.rates == (60, 12, 10)
+    daemon.main(["--ffmpeg-fps", "60", "--process-fps", "12"])
+    assert recorder.capture.rates == (60, 12)
 
 
 def test_main_reads_command_line_when_argv_is_none(recorder, monkeypatch):
     monkeypatch.setattr("sys.argv", ["switch2-remote-daemon", "--process-fps", "5"])
     daemon.main()
-    assert recorder.capture.rates == (30, 5, 5)
+    assert recorder.capture.rates == (30, 5)
 
 
 def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
@@ -207,74 +194,36 @@ def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
 
 
 def test_parse_args_uses_defaults():
-    args = daemon.parse_args([])
-    assert (args.ffmpeg_fps, args.process_fps, args.buffer_seconds) == (30, 10, 5)
-    assert args.output_size == (1280, 720)
-
-
-def test_parse_args_does_not_keep_sending_neutral_by_default():
-    assert daemon.parse_args([]).keep_sending_neutral is False
-
-
-def test_parse_args_accepts_keep_sending_neutral():
-    assert daemon.parse_args(["--keep-sending-neutral"]).keep_sending_neutral is True
+    # 起動引数は ffmpeg_fps と process_fps の 2 つだけ
+    assert vars(daemon.parse_args([])) == {"ffmpeg_fps": 30, "process_fps": 10}
 
 
 @pytest.mark.parametrize(
-    "text, expected",
+    "argv",
     [
-        ("1280x720", (1280, 720)),
-        ("640x360", (640, 360)),
-        ("2x2", (2, 2)),
-        ("1280x2", (1280, 2)),
+        ["--buffer-seconds", "5"],
+        ["--output-size", "1280x720"],
+        ["--keep-sending-neutral"],
     ],
 )
-def test_parse_args_accepts_output_size(text, expected):
-    assert daemon.parse_args(["--output-size", text]).output_size == expected
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "641x360",
-        "640x361",
-        "0x360",
-        "640x0",
-        "1282x720",
-        "1280x722",
-        "1920x1080",
-        "640",
-        "640x",
-        "x360",
-        "640*360",
-        "640X360",
-        "-640x360",
-        "640x360x2",
-        " 640x360",
-        "640.0x360",
-        "６４０x360",
-    ],
-)
-def test_parse_args_rejects_invalid_output_size(text, capsys):
+def test_parse_args_rejects_unknown_options(argv, capsys):
     with pytest.raises(SystemExit) as excinfo:
-        daemon.parse_args(["--output-size", text])
+        daemon.parse_args(argv)
     assert excinfo.value.code == 2
-    assert "--output-size" in capsys.readouterr().err
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "argv, expected",
     [
-        (["--ffmpeg-fps", "1", "--process-fps", "1"], (1, 1, 5)),
-        (["--ffmpeg-fps", "60", "--process-fps", "60"], (60, 60, 5)),
-        (["--ffmpeg-fps", "12", "--process-fps", "12"], (12, 12, 5)),
-        (["--buffer-seconds", "1"], (30, 10, 1)),
-        (["--buffer-seconds", "60"], (30, 10, 60)),
+        (["--ffmpeg-fps", "1", "--process-fps", "1"], (1, 1)),
+        (["--ffmpeg-fps", "60", "--process-fps", "60"], (60, 60)),
+        (["--ffmpeg-fps", "12", "--process-fps", "12"], (12, 12)),
     ],
 )
 def test_parse_args_accepts_range(argv, expected):
     args = daemon.parse_args(argv)
-    assert (args.ffmpeg_fps, args.process_fps, args.buffer_seconds) == expected
+    assert (args.ffmpeg_fps, args.process_fps) == expected
 
 
 @pytest.mark.parametrize(
@@ -285,8 +234,6 @@ def test_parse_args_accepts_range(argv, expected):
         ["--ffmpeg-fps", "abc"],
         ["--process-fps", "0"],
         ["--process-fps", "1.5"],
-        ["--buffer-seconds", "0"],
-        ["--buffer-seconds", "61"],
     ],
 )
 def test_parse_args_rejects_out_of_range_or_non_integer(argv, capsys):

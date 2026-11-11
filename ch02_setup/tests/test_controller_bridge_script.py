@@ -79,12 +79,26 @@ def test_radio_script_turns_radio_on_even_if_off_request_fails():
     assert text.count("$turnOn = $false") == 1
 
 
-def test_bridge_script_takes_keep_sending_neutral_switch():
+def test_bridge_script_takes_only_port_name():
     text = read_script(BRIDGE_SCRIPT)
-    assert 'param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)' in text
-    assert "$sender.KeepSendingNeutral = $KeepSendingNeutral.IsPresent" in text
-    # 起動引数で切り替えるため、スクリプト内で値を決め打ちしない
-    assert "$KeepSendingNeutral = $false" not in text
+    assert 'param([string]$PortName = "COM3")' in text
+
+
+def test_bridge_script_has_no_keep_sending_neutral_switch():
+    """中立を送り続けるかの指定は、起動引数にも C# の送信クラスにも持たない。
+
+    PowerShell の変数と C# のプロパティ・フィールドでは名前の大文字小文字の付け方が異なるため、
+    大文字小文字を区別せずに探す。
+    """
+    text = read_script(BRIDGE_SCRIPT)
+    assert "keepsendingneutral" not in text.lower()
+
+
+def test_bridge_script_sends_non_neutral_every_10ms_and_neutral_for_100ms():
+    """送信スレッドは中立以外を 10ms ごとに書き込み、中立に変わったら中立を 100ms 書き込んでから止める。"""
+    text = read_script(BRIDGE_SCRIPT)
+    assert "public const int SEND_INTERVAL_MS = 10;" in text
+    assert "public const int NEUTRAL_TAIL_MS = 100;" in text
 
 
 def test_radio_script_takes_off_seconds_with_default_five():

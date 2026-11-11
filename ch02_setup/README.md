@@ -1,6 +1,6 @@
-# 第1章 Switch 2 をコマンドで操作する環境を作る
+# 第2章 Switch 2 をコマンドで操作する環境を作る
 
-第1章のサンプルです。Nintendo Switch 2 の画面を WSL2 から撮影し、WSL2 からボタン入力を送れる環境を作ります。操作には共通パッケージ [`switch2_remote`](../src/switch2_remote/) の 2 つのコマンドを使います。
+第2章のサンプルです。Nintendo Switch 2 の画面を WSL2 から撮影し、WSL2 からボタン入力を送れる環境を作ります。操作には、このディレクトリーの uv プロジェクトにあるパッケージ [`switch2_remote`](./src/switch2_remote/) の 2 つのコマンドを使います。第3章の試行の指示ファイル (`../ch03_playtest/CLAUDE.md`) も、このデーモンとクライアントのコマンドを使います。
 
 - `switch2-remote-daemon`: キャプチャーとコントローラーのブリッジを起動したまま保持する常駐デーモン
 - `switch2-remote`: デーモンに 1 行のコマンドを送り、応答を表示するクライアント
@@ -10,7 +10,7 @@
 ```text
 Nintendo Switch 2
   ├─ HDMI → Elgato 4K X → USB → Windows PC
-  │                               └─ ffmpeg.exe (DirectShow, NV12, 1280x720・60fps を間引き・縮小)
+  │                               └─ ffmpeg.exe (DirectShow, NV12, 1280x720・60fps を間引き)
   │                                    │ 標準出力パイプ
   │                                    ▼
   │                             WSL2: switch2-remote-daemon ◀── Unix ソケット ── switch2-remote
@@ -63,7 +63,7 @@ COM4  着信  PlayAbility Receiver ...
 
 PC から Pico 2 W へ送信するときは、発信側の COM ポートを使います。着信側は使いません。
 
-ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、controller_bridge.ps1 の先頭にある `param([string]$PortName = "COM3", [switch]$KeepSendingNeutral)` の `"COM3"` を書き換えてください。
+ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、controller_bridge.ps1 の先頭にある `param([string]$PortName = "COM3")` の `"COM3"` を書き換えてください。
 
 ## 3. ffmpeg の導入
 
@@ -79,9 +79,10 @@ Elgato 4K X は DirectShow でプロセス排他になります。デーモン�
 
 ## 4. Python 環境の準備
 
-WSL2 側で、このリポジトリーの直下に移動して依存パッケージを導入します。
+WSL2 側で、このリポジトリーの `ch02_setup` ディレクトリーに移動して依存パッケージを導入します。以降のコマンドも、このディレクトリーで実行します。
 
 ```bash
+cd ch02_setup
 uv sync
 ```
 
@@ -95,23 +96,20 @@ uv run switch2-remote-daemon
 
 ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動が終わると、`daemon ready` と表示されます。デーモンは同時に 1 つだけ起動します。
 
-起動引数で、フレームレート、保持する時間、デーモンが受け取る映像の解像度、中立のレポートの送り方を指定できます。値を取る引数のうち、`--output-size` 以外の値は整数です。
+起動引数で、フレームの間引き方を指定できます。値はどちらも整数です。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 60fps で受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜60 |
-| `--process-fps N` | デーモンが保持するフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
-| `--buffer-seconds N` | フレームを保持する時間 (秒)。直近 N 秒分を保持します | 5 | 1〜60 |
-| `--output-size WxH` | デーモンが受け取る映像の解像度。デバイスから 1280x720 で受け取り、ffmpeg.exe の中で縮小します | 1280x720 | 幅・高さとも偶数で 1280x720 以下 |
-| `--keep-sending-neutral` | 何も押していないとき (中立) のレポートも 10 ミリ秒ごとに送り続けます。指定しなければ、中立に戻してから 100 ミリ秒送った後は送るのを止めます。接続が切れにくくなるかを比べる実験用です | 無効 | 値を取りません |
+| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 1280x720・60fps で受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜60 |
+| `--process-fps N` | デーモンが残すフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
 
 ```bash
-uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12 --buffer-seconds 5 --output-size 640x360
+uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
 範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
-保持するフレームの枚数は `--process-fps` × `--buffer-seconds` で、1 枚の大きさは幅 × 高さ × 1.5 バイト (1280x720 で約 1.38MB、640x360 で約 0.35MB) です。既定値では 50 枚、約 69MB を保持します。保持する量に上限は設けていないため、最大の指定 (60fps・60 秒・1280x720) では約 5GB になります。
+デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 
 ## 6. クライアントの使い方
 
@@ -125,7 +123,7 @@ uv run switch2-remote hold B+RIGHT 2000       # B と RIGHT を同時に 2000 �
 uv run switch2-remote down LS:0,1             # 左スティックを上に倒したままにする
 uv run switch2-remote up ALL                  # 押したままの入力をすべて離す
 uv run switch2-remote shot /tmp/screen.png    # 最新のフレームを PNG で保存する
-uv run switch2-remote fps 12                  # 保持するフレームレートを 12fps に変える
+uv run switch2-remote fps 12                  # 残すフレームレートを 12fps に変える
 uv run switch2-remote quit                    # ブリッジとキャプチャーを止めてデーモンを終了する
 ```
 
@@ -141,9 +139,9 @@ uv run switch2-remote quit                    # ブリッジとキャプチャ�
 | `hold CHORD MS` | CHORD を MS ミリ秒 (1〜60000) 押します。押し始めた時点で応答し、MS ミリ秒たつとデーモンが離します。押している間も他のコマンドを送れます |
 | `down CHORD [CHORD ...]` | `up` で離すまで押したままにします。押したままのスティックを `down` で指定し直すと、新しい値に変わります |
 | `up TARGET [TARGET ...]` | 指定したボタン、または `LS` / `RS` を離します。`LS` / `RS` はスティックの傾きを戻し、押し込み (`L3` / `R3`) は離しません。`down` と `hold` のどちらで押したものも離れます。`up ALL` はすべてを離します |
-| `shot PATH` | 保持している最新のフレームを、新しいフレームを待たずに PATH に PNG で保存します。引数は PATH 1 つだけです。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
-| `fps N` | デーモンが保持するフレームレートを N fps (1〜`--ffmpeg-fps` の値の整数) に変えます。応答は `ok fps=N` です |
-| `status` | 受信フレーム数、保持しているフレームの枚数、最新のフレームを保持してからの経過秒数 (`latest_age`)、ffmpeg.exe が出力するフレームレート、保持するフレームレート、ffmpeg.exe のフレーム落ち回数、キャプチャーの終了、ブリッジの生存・状態 (`bridge_state`)・復旧に成功した回数 (`bridge_restarts`)、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
+| `shot PATH` | デーモンが持っている最新のフレームを、新しいフレームを待たずに PATH に PNG で保存します。引数は PATH 1 つだけです。相対パスはクライアントの作業ディレクトリーを基準に絶対パスへ直して送ります |
+| `fps N` | デーモンが残すフレームレートを N fps (1〜`--ffmpeg-fps` の値の整数) に変えます。応答は `ok fps=N` です |
+| `status` | 受信フレーム数、最新のフレームを残してからの経過秒数 (`latest_age`)、ffmpeg.exe が出力するフレームレート、残すフレームレート、ffmpeg.exe のフレーム落ち回数、キャプチャーの終了、ブリッジの生存・状態 (`bridge_state`)・復旧に成功した回数 (`bridge_restarts`)、押したままの入力、`hold` の残り時間、`hold` を離すときの送信の失敗を返します |
 | `quit` | ブリッジとキャプチャーを止めてデーモンを終了します |
 
 送るレポートは、`down` で押したままの入力、`hold` で押している入力、`tap` で押している入力を重ねたものです。`tap` と `hold` が終わると、`down` で押したままの状態に戻ります。たとえば `down LS:0,1` の後に `tap X` を送ると、左スティックを上に倒したまま X を押せます。すでに押されているボタンやスティックを `tap` / `hold` で押そうとした場合や、十字キーの相反する方向が重なる場合は、何も送らずにエラーを返します。
@@ -156,12 +154,12 @@ ok held=LS:0,1
 $ uv run switch2-remote hold B 3000
 ok hold B 3000ms
 $ uv run switch2-remote status
-ok frames=1234 buffered=50 latest_age=0.05s ffmpeg_fps=30 process_fps=10 ffmpeg_drops=0 ended=False bridge_alive=True bridge_state=ok bridge_restarts=0 held=LS:0,1 holds=B:2480ms last_error=none
+ok frames=1234 latest_age=0.05s ffmpeg_fps=30 process_fps=10 ffmpeg_drops=0 ended=False bridge_alive=True bridge_state=ok bridge_restarts=0 held=LS:0,1 holds=B:2480ms last_error=none
 $ uv run switch2-remote shot /tmp/screen.png
 ok /tmp/screen.png
 ```
 
-`shot` は、デーモンの起動直後でまだフレームを保持していないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
+`shot` は、デーモンの起動直後でまだフレームを持っていないときは `error no frame yet` を、ffmpeg.exe が止まってフレームが届かなくなったときは `error capture ended` を返します。
 
 応答が `error` で始まる場合、クライアントは終了コード 1 で終わります。`tap` の途中で失敗した場合は、送信済みの入力 (`already sent`) と、届いたかどうか確認できなかった入力 (`unconfirmed`) を応答に含めます。`status` の `ended=True` は、ffmpeg.exe が止まってフレームが届かなくなったことを示します。`latest_age` が大きいまま増え続ける場合は、ffmpeg.exe からフレームが届いていません。
 

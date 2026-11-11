@@ -194,14 +194,16 @@ BRIDGE_COMMAND = [
 ]
 
 
-def test_bridge_starts_without_keep_sending_neutral_by_default(popen_calls):
+def test_bridge_starts_powershell_with_bridge_script_only(popen_calls):
     Bridge()
     assert popen_calls.args == [BRIDGE_COMMAND]
 
 
-def test_bridge_passes_keep_sending_neutral_switch(popen_calls):
-    Bridge(keep_sending_neutral=True)
-    assert popen_calls.args == [[*BRIDGE_COMMAND, "-KeepSendingNeutral"]]
+def test_bridge_does_not_take_keep_sending_neutral_option(popen_calls):
+    # ブリッジの送り方は 1 つだけで、中立を送り続けるかを選ぶ引数は持たない
+    with pytest.raises(TypeError):
+        Bridge(keep_sending_neutral=True)
+    assert popen_calls.args == []
 
 
 @pytest.mark.parametrize(

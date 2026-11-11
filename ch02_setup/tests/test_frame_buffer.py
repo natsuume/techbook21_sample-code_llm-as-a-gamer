@@ -1,7 +1,7 @@
 import pytest
 
 from switch2_remote.frame_buffer import (
-    FrameBuffer,
+    LatestFrame,
     format_latest_age,
     initial_accumulator,
     next_keep,
@@ -82,69 +82,37 @@ def test_next_keep_keeps_first_frame_after_fps_change():
     assert next_keep(acc, 30, 12) == (0, True)
 
 
-# --- FrameBuffer ---
+# --- LatestFrame ---
 
 
-def test_frame_buffer_is_empty_at_start():
-    buffer = FrameBuffer(5)
-    assert len(buffer) == 0
-    assert buffer.latest() is None
+def test_latest_frame_is_empty_at_start():
+    latest_frame = LatestFrame()
+    assert latest_frame.latest() is None
+    assert latest_frame.latest_time() is None
 
 
-def test_frame_buffer_latest_returns_last_appended_frame():
-    buffer = FrameBuffer(5)
-    buffer.append(0.0, "a")
-    buffer.append(0.1, "b")
-    assert buffer.latest() == "b"
-    assert len(buffer) == 2
+def test_latest_frame_returns_updated_frame_and_time():
+    latest_frame = LatestFrame()
+    latest_frame.update(1.0, "a")
+    assert latest_frame.latest() == "a"
+    assert latest_frame.latest_time() == 1.0
 
 
-def test_frame_buffer_drops_frames_older_than_seconds():
-    buffer = FrameBuffer(5)
-    buffer.append(0.0, "a")
-    buffer.append(3.0, "b")
-    buffer.append(6.0, "c")
-    # 6.0 - 5 = 1.0 より古い "a" だけを捨てる
-    assert len(buffer) == 2
-    assert buffer.latest() == "c"
+def test_latest_frame_replaces_frame_and_time_on_update():
+    latest_frame = LatestFrame()
+    latest_frame.update(1.0, "a")
+    latest_frame.update(1.5, "b")
+    assert latest_frame.latest() == "b"
+    assert latest_frame.latest_time() == 1.5
 
 
-def test_frame_buffer_keeps_frame_exactly_seconds_old():
-    buffer = FrameBuffer(5)
-    buffer.append(0.0, "a")
-    buffer.append(5.0, "b")
-    assert len(buffer) == 2
-    buffer.append(5.5, "c")
-    assert len(buffer) == 2
-
-
-def test_frame_buffer_keeps_newest_frame_after_long_gap():
-    buffer = FrameBuffer(5)
-    buffer.append(0.0, "a")
-    buffer.append(0.1, "b")
-    buffer.append(100.0, "c")
-    assert len(buffer) == 1
-    assert buffer.latest() == "c"
-
-
-def test_frame_buffer_holds_frames_for_seconds_regardless_of_rate():
-    # 1 秒保持で 0.25 秒おきに 20 枚 (0〜4.75 秒) 追加すると、3.75〜4.75 秒の 5 枚が残る
-    buffer = FrameBuffer(1)
+def test_latest_frame_keeps_only_newest_frame_after_many_updates():
+    # 0.25 秒おきに 20 枚 (0〜4.75 秒) 渡しても、持つのは最後の 1 枚とその時刻だけ
+    latest_frame = LatestFrame()
     for i in range(20):
-        buffer.append(i * 0.25, i)
-    assert len(buffer) == 5
-    assert buffer.latest() == 19
-
-
-def test_frame_buffer_latest_time_is_none_when_empty():
-    assert FrameBuffer(5).latest_time() is None
-
-
-def test_frame_buffer_latest_time_returns_time_of_last_appended_frame():
-    buffer = FrameBuffer(5)
-    buffer.append(1.0, "a")
-    buffer.append(1.5, "b")
-    assert buffer.latest_time() == 1.5
+        latest_frame.update(i * 0.25, i)
+    assert latest_frame.latest() == 19
+    assert latest_frame.latest_time() == 4.75
 
 
 # --- 最新フレームの経過時間 ---

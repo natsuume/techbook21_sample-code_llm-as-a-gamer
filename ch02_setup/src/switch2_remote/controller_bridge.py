@@ -8,7 +8,6 @@ controller_bridge.ps1 はこのパッケージに同梱しており、このフ�
                    不正な行には `error <理由>` を出力する
     quit           送信スレッドを止め、中立を 200ms 送り、ポートを閉じて `closed` を出力する (標準入力の EOF でも同じ)
 ブリッジは中立以外のレポートを 10ms ごとに書き込み続け、中立に変わったら中立を 100ms 書き込んでから止まる。
-起動引数 -KeepSendingNeutral を付けると、中立も 10ms ごとに書き込み続ける (Bridge(keep_sending_neutral=True))。
 書き込みに失敗したブリッジは `fatal <メッセージ>` を出力して終了する。
 ブリッジの出力は BOM なし UTF-8 で、読み取りでは念のため行頭の BOM (U+FEFF) を除く。
 """
@@ -47,8 +46,6 @@ class BridgeStartError(RuntimeError):
 class Bridge:
     """controller_bridge.ps1 を常駐させ、set コマンドでレポートを差し替えて ack を待つ。
 
-    keep_sending_neutral が True なら、PowerShell の引数に -KeepSendingNeutral を加えて起動する
-    (中立のレポートも書き込み続ける。接続維持の効果を比べる実験用)。
     起動時の最初の行が ready で始まらなければ (出力の終了も含む)、プロセスを kill して終了を待ってから
     BridgeStartError(f"controller bridge failed: {行}") を送出する。
     BRIDGE_READY_TIMEOUT 秒以内に最初の行が来なければ (queue.Empty)、同じく kill して終了を待ってから
@@ -61,7 +58,7 @@ class Bridge:
     ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
     """
 
-    def __init__(self, keep_sending_neutral: bool = False):
+    def __init__(self):
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()
@@ -73,8 +70,6 @@ class Bridge:
             "-File",
             bridge_win_path,
         ]
-        if keep_sending_neutral:
-            command.append("-KeepSendingNeutral")
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
