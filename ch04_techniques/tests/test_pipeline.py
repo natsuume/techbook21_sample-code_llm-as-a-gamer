@@ -1,0 +1,499 @@
+import threading
+
+import numpy as np
+import pytest
+from switch2_remote.bridge_supervisor import BridgeReconnectingError
+
+from switch2_agent.action_decision import PadAction, Thresholds
+from switch2_agent.advisors.base import AdvisorContext
+from switch2_agent.decision_models.base import Decision, DecisionModelError
+from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.frame_history import FrameHistory, TimedFrame
+from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
+from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
+from switch2_agent.operation_log import OperationLog, format_action
+from switch2_agent.pipeline import CaptureStoppedError, Pipeline, PipelineParts
+from switch2_agent.questions import build_questions
+
+NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
+DECISION_LOG_KEYS = {
+    "select_s",
+    "encode_s",
+    "decide_s",
+    "apply_s",
+    "images",
+    "payload_bytes",
+    "action",
+    "advisor_probability",
+    "advisor_requested",
+    "advisor_accepted",
+    "refusals",
+}
+
+
+def frame(time: float) -> TimedFrame:
+    return TimedFrame(
+        time=time,
+        nv12=np.zeros((3, 2), np.uint8),
+        gray_small=np.zeros((2, 2), np.uint8),
+        sharpness=0.0,
+    )
+
+
+def fake_encode(frame: TimedFrame) -> bytes:
+    return f"jpeg@{frame.time:.2f}".encode()
+
+
+def decision(refusals: int = 0, **overrides: float) -> Decision:
+    """すべての問いの確率を 0.0 にし、overrides の問いだけを置き換えた Decision を返す。"""
+    probabilities = {question.name: 0.0 for question in build_questions()}
+    probabilities.update(overrides)
+    return Decision(probabilities=probabilities, refusals=refusals)
+
+
+class FakeClock:
+    def __init__(self, now: float):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeModel:
+    """偽の DecisionModel。要求を記録し、clock を decide_s 進めてから outcomes の先頭を返す (例外なら送出する)。
+
+    outcomes が空なら、すべての確率が 0.0 の Decision を返す。on_decide があれば、clock を進めた後に呼ぶ
+    (キャプチャーが新しいフレームを足したことにするのに使う)。
+    """
+
+    def __init__(self, clock: FakeClock):
+        self.clock = clock
+        self.decide_s = 0.2
+        self.requests: list[DecisionRequest] = []
+        self.outcomes: list[Decision | Exception] = []
+        self.on_decide = None
+
+    def decide(self, request: DecisionRequest) -> Decision:
+        self.requests.append(request)
+        self.clock.now += self.decide_s
+        if self.on_decide is not None:
+            self.on_decide()
+        outcome = self.outcomes.pop(0) if self.outcomes else decision()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class FakeOutput:
+    """偽の PadOutput。apply と neutral の呼び出しを記録する。apply_errors の先頭を apply で送出する。"""
+
+    def __init__(self):
+        self.events: list[str] = []
+        self.applied: list[PadAction] = []
+        self.apply_errors: list[Exception] = []
+
+    def apply(self, action: PadAction) -> None:
+        if self.apply_errors:
+            raise self.apply_errors.pop(0)
+        self.applied.append(action)
+        self.events.append("apply")
+
+    def neutral(self) -> None:
+        self.events.append("neutral")
+
+
+class FakeAdvisor:
+    """偽の Advisor。受け取った文脈を記録し、answers の先頭 (空なら True) を返す。"""
+
+    def __init__(self):
+        self.contexts: list[AdvisorContext] = []
+        self.answers: list[bool] = []
+
+    def request_update(self, context: AdvisorContext) -> bool:
+        self.contexts.append(context)
+        return self.answers.pop(0) if self.answers else True
+
+    def is_busy(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
+class Env:
+    """Pipeline に渡した偽の部品と、記録を持つ。"""
+
+    def __init__(self, clock: FakeClock):
+        self.clock = clock
+        self.history = FrameHistory(60.0)
+        self.store = MeaningfulFrameStore()
+        self.model = FakeModel(clock)
+        self.output = FakeOutput()
+        self.advisor = FakeAdvisor()
+        self.operation_log = OperationLog()
+        self.logs: list[dict] = []
+        self.sleeps: list[float] = []
+        self.capture_ended = False
+
+    def add_frames(self, *times: float) -> None:
+        for t in times:
+            self.history.add(frame(t))
+
+    def events(self, name: str) -> list[dict]:
+        return [event for event in self.logs if event.get("event") == name]
+
+
+def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
+    """時刻 now で作った Pipeline と、その偽の部品を返す。kwargs は Pipeline に渡す。"""
+    env = Env(FakeClock(now))
+    parts = PipelineParts(
+        history=env.history,
+        store=env.store,
+        selector=EvenIntervalSelector(),
+        model=env.model,
+        output=env.output,
+        advisor=env.advisor,
+        read_notes=lambda: dict(NOTES),
+        questions=build_questions(),
+        thresholds=Thresholds(),
+        encode=fake_encode,
+        operation_log=env.operation_log,
+        log=env.logs.append,
+        clock=env.clock,
+        sleep=env.sleeps.append,
+        game="zelda",
+        capture_ended=lambda: env.capture_ended,
+    )
+    return Pipeline(parts, **kwargs), env
+
+
+def frame_times(request: DecisionRequest) -> list[float]:
+    return [image.frame_time for image in request.images]
+
+
+# --- 要求に載せるフレーム ---
+
+
+def test_first_request_uses_frames_just_before_now():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.0, 9.6, 9.8, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert frame_times(env.model.requests[0]) == [9.6, 9.8, 9.9]
+
+
+def test_second_request_window_starts_at_first_send_time():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.6, 9.8, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の送信時刻 (10.0) より前の時刻で遅れて届いたフレームは、2 回目の直近の区間に入らない
+    env.add_frames(9.95, 10.1, 10.3)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 2
+    assert frame_times(env.model.requests[1]) == [10.1, 10.3]
+
+
+def test_request_puts_meaningful_frames_before_recent_frames():
+    pipeline, env = make_pipeline()
+    env.store.add(frame(5.0))
+    env.add_frames(9.6, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    request = env.model.requests[0]
+    assert frame_times(request) == [5.0, 9.6, 9.9]
+    assert request.images[0].label.startswith("過去の場面")
+    assert request.images[1].label.startswith("直近")
+
+
+def test_request_contains_latest_notes_and_questions():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    request = env.model.requests[0]
+    assert "右へ進む" in request.state_text
+    assert [q.name for q in request.questions] == [q.name for q in build_questions()]
+
+
+# --- 操作 ---
+
+
+def test_applies_decided_action_and_records_operation():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(press_A=0.9, tap_B=0.8)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert len(env.output.applied) == 1
+    applied = env.output.applied[0]
+    assert applied.held.buttons == frozenset({"A"})
+    assert applied.taps == frozenset({"B"})
+    records = env.operation_log.since(0.0)
+    assert len(records) == 1
+    assert records[0].sent_at == 10.0
+    assert records[0].received_at == pytest.approx(10.2)
+    assert records[0].action == applied
+
+
+# --- advisor ---
+
+
+def test_advisor_is_requested_when_probability_exceeds_threshold():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(advisor=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert len(env.advisor.contexts) == 1
+    context = env.advisor.contexts[0]
+    request = env.model.requests[0]
+    assert context.game == "zelda"
+    assert context.images == request.images
+    assert context.current_strategy == "右へ進む"
+    assert context.trigger_probability == 0.9
+    assert context.trigger_time_text
+    # パイプラインの開始 (9.0) からの応答 1 件が操作の記録に入る
+    assert len(context.operation_log_text.splitlines()) == 1
+    assert "advisor 0.90" in context.operation_log_text
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] is True
+    assert log["advisor_accepted"] is True
+
+
+def test_advisor_is_not_requested_at_threshold():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(advisor=0.5)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.advisor.contexts == []
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] is False
+    assert log["advisor_accepted"] is False
+
+
+def run_three_requests(env: Env, pipeline: Pipeline) -> None:
+    """時刻 10.0・10.5・11.0 に、新しいフレームを足して 1 回ずつ要求する (応答は 0.2 秒後)。"""
+    for now, new_frame in [(10.0, 9.9), (10.5, 10.4), (11.0, 10.9)]:
+        env.add_frames(new_frame)
+        env.clock.now = now
+        pipeline.run_once()
+
+
+def test_advisor_operation_log_starts_after_last_accepted_request():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [
+        decision(advisor=0.9),
+        decision(advisor=0.1),
+        decision(advisor=0.9),
+    ]
+    run_three_requests(env, pipeline)
+    assert len(env.advisor.contexts) == 2
+    # 受け付けられた 1 回目の応答の後の、2 回目と 3 回目の応答だけが入る
+    assert len(env.advisor.contexts[1].operation_log_text.splitlines()) == 2
+
+
+def test_rejected_advisor_request_keeps_operation_log_start():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [
+        decision(advisor=0.9),
+        decision(advisor=0.1),
+        decision(advisor=0.9),
+    ]
+    env.advisor.answers = [False, True]
+    run_three_requests(env, pipeline)
+    assert len(env.advisor.contexts) == 2
+    # 1 回目は受け付けられなかったので、起点はパイプラインの開始のまま
+    assert len(env.advisor.contexts[1].operation_log_text.splitlines()) == 3
+    assert env.events("decision")[0]["advisor_accepted"] is False
+
+
+# --- 新しいフレームが無いとき ---
+
+
+def test_no_request_without_frames():
+    pipeline, env = make_pipeline()
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.model.requests == []
+    assert env.output.events == []
+    assert env.sleeps == [0.05]
+
+
+def test_no_request_until_new_frame_arrives_and_stops_when_stale():
+    pipeline, env = make_pipeline()
+    env.model.decide_s = 0.0
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.clock.now = 10.1
+    pipeline.run_once()
+    assert len(env.model.requests) == 1
+    assert env.sleeps == [0.05]
+    env.clock.now = 11.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 1
+    assert "neutral" not in env.output.events
+    env.clock.now = 12.2
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    assert env.output.events == ["apply", "neutral"]
+    assert len(env.model.requests) == 1
+
+
+def test_stale_time_is_measured_again_after_new_frame():
+    pipeline, env = make_pipeline()
+    env.model.decide_s = 0.0
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.clock.now = 10.1
+    pipeline.run_once()
+    env.add_frames(11.0)
+    env.clock.now = 11.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 2
+    env.clock.now = 12.0
+    pipeline.run_once()
+    # 新しいフレームが無いと最初に分かった 12.0 から 1.0 秒しかたっていないので、まだ止まらない
+    env.clock.now = 13.0
+    pipeline.run_once()
+    assert len(env.model.requests) == 2
+    assert "neutral" not in env.output.events
+
+
+def test_capture_ended_neutralizes_and_raises():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.capture_ended = True
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    assert env.output.events == ["neutral"]
+    assert env.model.requests == []
+
+
+# --- ログ ---
+
+
+def test_decision_log_has_measurement_items():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(refusals=2, press_A=0.9)]
+    env.add_frames(9.6, 9.8, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    logs = env.events("decision")
+    assert len(logs) == 1
+    log = logs[0]
+    assert DECISION_LOG_KEYS <= set(log)
+    request = env.model.requests[0]
+    # 時計が進むのは model.decide の中だけなので、ほかの時間は 0
+    assert log["decide_s"] == pytest.approx(0.2)
+    for key in ("select_s", "encode_s", "apply_s"):
+        assert log[key] == pytest.approx(0.0)
+    assert log["images"] == 3
+    assert log["payload_bytes"] == sum(len(image.jpeg) for image in request.images)
+    assert log["action"] == format_action(env.output.applied[0])
+    assert log["advisor_probability"] == 0.0
+    assert log["refusals"] == 2
+
+
+# --- run ---
+
+
+def test_run_neutralizes_waits_and_stops_after_consecutive_decision_errors():
+    pipeline, env = make_pipeline(max_consecutive_errors=3, error_backoff_s=1.0)
+    env.model.decide_s = 0.0
+    env.model.outcomes = [DecisionModelError("HTTP 500") for _ in range(10)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(RuntimeError) as excinfo:
+        pipeline.run(threading.Event())
+    assert type(excinfo.value) is RuntimeError
+    assert len(env.model.requests) == 3
+    assert env.output.events == ["neutral"] * 3
+    assert len(env.events("decision_error")) == 3
+    # 失敗のたびに待つ (止まる直前の待ちの有無は問わない)
+    assert env.sleeps[:2] == [1.0, 1.0]
+    assert set(env.sleeps) == {1.0}
+
+
+def test_run_resets_error_count_after_success():
+    pipeline, env = make_pipeline(max_consecutive_errors=2)
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    error = DecisionModelError("HTTP 500")
+    env.model.outcomes = [error, decision(), error, decision(), error, decision()]
+
+    def add_frame_and_stop_after_six_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 6:
+            stop.set()
+
+    env.model.on_decide = add_frame_and_stop_after_six_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 6
+    assert env.output.events.count("neutral") == 3
+    assert env.output.events.count("apply") == 3
+
+
+def test_run_continues_after_bridge_reconnecting():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    env.output.apply_errors = [
+        BridgeReconnectingError("controller bridge is reconnecting")
+    ]
+
+    def add_frame_and_stop_after_two_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    env.model.on_decide = add_frame_and_stop_after_two_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 2
+    assert len(env.output.applied) == 1
+    assert len(env.events("bridge_reconnecting")) == 1
+
+
+def test_run_logs_and_raises_capture_stopped():
+    pipeline, env = make_pipeline()
+    env.capture_ended = True
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run(threading.Event())
+    assert len(env.events("capture_stopped")) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("controller bridge could not be reconnected"),
+        OSError("pipe closed"),
+    ],
+)
+def test_run_logs_and_raises_other_send_errors(error):
+    pipeline, env = make_pipeline()
+    env.output.apply_errors = [error]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(type(error)) as excinfo:
+        pipeline.run(threading.Event())
+    assert excinfo.value is error
+    assert len(env.events("pipeline_error")) == 1
+
+
+def test_run_does_nothing_when_stop_is_already_set():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    stop.set()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert env.model.requests == []

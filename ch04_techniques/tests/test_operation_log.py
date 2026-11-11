@@ -1,0 +1,96 @@
+from switch2_remote.controller_state import PadState
+
+from switch2_agent.action_decision import PadAction
+from switch2_agent.operation_log import OperationLog, OperationRecord, format_action
+
+
+def make_action(
+    buttons: set[str] | None = None,
+    sticks: dict[str, tuple[float, float]] | None = None,
+    taps: set[str] | None = None,
+    advisor_probability: float = 0.0,
+) -> PadAction:
+    return PadAction(
+        held=PadState(frozenset(buttons or ()), dict(sticks or {})),
+        taps=frozenset(taps or ()),
+        advisor_requested=False,
+        advisor_probability=advisor_probability,
+    )
+
+
+def record(received_at: float, action: PadAction | None = None) -> OperationRecord:
+    return OperationRecord(
+        sent_at=received_at - 0.3,
+        received_at=received_at,
+        action=action if action is not None else make_action(),
+    )
+
+
+def received(records: list[OperationRecord]) -> list[float]:
+    return [r.received_at for r in records]
+
+
+def test_since_returns_records_received_after_time():
+    log = OperationLog()
+    for t in [1.0, 2.0, 3.0]:
+        log.add(record(t))
+    assert received(log.since(1.5)) == [2.0, 3.0]
+    assert log.since(3.5) == []
+
+
+def test_since_excludes_record_received_exactly_at_time():
+    log = OperationLog()
+    for t in [1.0, 2.0, 3.0]:
+        log.add(record(t))
+    assert received(log.since(2.0)) == [3.0]
+
+
+def test_log_drops_oldest_record_over_capacity():
+    log = OperationLog(capacity=2)
+    for t in [1.0, 2.0, 3.0]:
+        log.add(record(t))
+    assert received(log.since(0.0)) == [2.0, 3.0]
+
+
+def test_default_capacity_is_500():
+    assert OperationLog().capacity == 500
+
+
+def test_format_action_writes_held_and_taps():
+    action = make_action(buttons={"A"}, sticks={"LS": (0.8, 0.0)}, taps={"B"})
+    assert format_action(action) == "押下 A+LS:0.8,0 / 短押し B"
+
+
+def test_format_action_writes_none_for_empty_action():
+    assert format_action(make_action()) == "押下 none / 短押し none"
+
+
+def test_format_action_orders_taps_like_format_state():
+    assert format_action(make_action(taps={"UP", "A"})) == "押下 none / 短押し A+UP"
+
+
+def test_format_since_writes_one_line_per_record():
+    log = OperationLog()
+    log.add(record(1.0))
+    log.add(
+        record(
+            6.79,
+            make_action(
+                buttons={"A"},
+                sticks={"LS": (0.8, 0.0)},
+                taps={"B"},
+                advisor_probability=0.12,
+            ),
+        )
+    )
+    log.add(record(9.5, make_action(advisor_probability=0.9)))
+    assert log.format_since(2.0, 10.0) == (
+        "-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12\n"
+        "-0.50 秒: 押下 none / 短押し none / advisor 0.90"
+    )
+
+
+def test_format_since_is_empty_without_records():
+    log = OperationLog()
+    log.add(record(1.0))
+    assert log.format_since(1.0, 2.0) == ""
