@@ -246,12 +246,32 @@ def test_pending_tap_is_dropped_when_button_is_held_again():
     output.apply(action(taps={"A"}))
     clock.now = 0.05
     output.apply(action(held=pad("A")))
-    clock.now = output.pending_taps["A"]
-    output.start_due_taps()
-    # 始めずに捨てるので、何も送らない
+    # 押したままに戻したので、待ちの短押しはその時点で取り消す
     assert output.pending_taps == {}
+    clock.now = TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    # 始めないので、何も送らない
     assert output.tapping == {}
     assert sender.reports == [report("A"), NEUTRAL_REPORT, report("A")]
+
+
+def test_tap_after_holding_again_waits_release_gap_from_latest_release():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))  # 0.0 に外し、短押しを 0.1 に始める予定
+    clock.now = 0.05
+    output.apply(action(held=pad("A")))  # 押したままに戻す (待ちの短押しは取り消す)
+    clock.now = 0.08
+    output.apply(action(taps={"A"}))  # 0.08 に外し、短押しを 0.18 に始める予定
+    assert output.pending_taps == {"A": 0.08 + TAP_RELEASE_GAP_S}
+    # 最初の予定の時刻 (0.1) では、2 回目に外してから 20 ミリ秒しかたっていないので押さない
+    clock.now = TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert output.tapping == {}
+    clock.now = 0.08 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert "A" in output.tapping
+    assert sender.reports[-1] == report("A")
 
 
 def test_button_released_from_held_waits_release_gap_before_tap():

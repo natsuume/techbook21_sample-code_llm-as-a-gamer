@@ -119,7 +119,9 @@ class PadOutput:
         action.held は十字キーの相反する方向を含まない前提とする (action_decision.decide_action が保証する)。
         now = clock() として、ロックの中で次を行う:
             1. released = 古い held のボタン - action.held のボタン。released の各ボタンの last_released を now にする
-            2. held を action.held に置き換える
+            2. held を action.held に置き換える。新しい held のボタンの pending_taps は取り消す (押したままに戻した
+               ボタンは、次に外したときから離す間隔を測り直すため。取り消さないと、元の始める時刻で押してしまい、
+               次に外してからの間隔が TAP_RELEASE_GAP_S より短くなる)
             3. action.taps の各ボタンを名前の順に扱う:
                - released に含まれるボタン (押したままから外したボタン) は、次のすべてを満たせば、
                  pending_taps に始める時刻 now + TAP_RELEASE_GAP_S を入れる (今は短押しを始めない)。
@@ -146,6 +148,9 @@ class PadOutput:
             for button in released:
                 self.last_released[button] = now
             self.held = action.held
+            for button in list(self.pending_taps):
+                if button in self.held.buttons:
+                    del self.pending_taps[button]
             started: list[str] = []
             waiting: list[str] = []
             for button in sorted(action.taps):
