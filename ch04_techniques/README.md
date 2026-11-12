@@ -117,11 +117,11 @@ advisor (`claude -p`) は、次の指定で実行します。
 ```bash
 claude -p <プロンプト> --output-format json --permission-mode dontAsk \
   --setting-sources project --settings '{"disableAllHooks": true}' \
-  --allowedTools "Read(/game_notes/<ゲーム>/**),Read(/runs/<YYYYmmdd-HHMMSS>/**),Edit(/game_notes/<ゲーム>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)" \
+  --allowedTools "Read(/game_notes/<ゲーム>/**),Read(/runs/<YYYYmmdd-HHMMSS>/**),Edit(/game_notes/<ゲーム>/controls.md),Edit(/game_notes/<ゲーム>/tips.md),Edit(/game_notes/<ゲーム>/progress.md),Edit(/game_notes/<ゲーム>/strategy.md),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)" \
   --max-turns 30
 ```
 
-許可のルールで読み取りを許すのは、`game_notes/<ゲーム>/` と、その実行の `runs/<YYYYmmdd-HHMMSS>/` の下です (ほかに読める範囲は注意事項に書きます)。書き込みを許すのは `game_notes/<ゲーム>/` の下だけで、Bash は許しません。確認が要る操作のうち、許可のルールに無いものは、確認を求めずに拒否されます (`--permission-mode dontAsk`)。拒否された操作は、ログの `permission_denials` に残ります。advisor の `claude` のプロセスには、Decision Model の API キーの環境変数 (`TYPESAFE_API_KEY`・`OPENAI_API_KEY`) を渡しません。
+許可のルールで読み取りを許すのは、`game_notes/<ゲーム>/` と、その実行の `runs/<YYYYmmdd-HHMMSS>/` の下です (ほかに読める範囲は注意事項に書きます)。書き込みを許すのは `game_notes/<ゲーム>/` の 4 ファイルだけで、Bash は許しません。確認が要る操作のうち、許可のルールに無いものは、確認を求めずに拒否されます (`--permission-mode dontAsk`)。拒否された操作は、ログの `permission_denials` に残ります。advisor の `claude` のプロセスには、Decision Model の API キーの環境変数 (`TYPESAFE_API_KEY`・`OPENAI_API_KEY`) を渡しません。
 
 ## ログ
 
@@ -152,7 +152,7 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 - Jev の文脈長は、要求全体で 64k トークン、問い 1 つあたり 32k トークンです。画像 1 枚が何トークンになるかが公開されていないため、画像 10 枚と 43 の問いが収まるかは確かめていません。超えた場合は HTTP 400 (`max_tokens_exceeded`) になり、Decision Model の失敗として扱います
 - 画像の幅の既定値 1280 と JPEG の品質の既定値 85 は、判断の精度と要求の大きさの釣り合いを確かめる前の値です
 - advisor の書き込みの許可 (`Edit(...)` のルール) では、Bash や、advisor が起動したプログラムによる書き込みは止められません。そのため Bash を許していません
-- advisor はゲームの画面の画像を読むため、画面に写った文字で advisor への指示が注入されるおそれがあります。注入された指示に従うと、advisor は読んだファイルの内容をゲームの情報のファイルに書き写せます。ゲームの情報のファイルは、毎回の要求で Decision Model の API に送られます。そのため、許可のルールで読み取りを許すディレクトリーを限り、advisor に API キーを渡していません
+- advisor はゲームの画面の画像を読むため、画面に写った文字で advisor への指示が注入されるおそれがあります。注入された指示に従うと、advisor は読んだファイルの内容をゲームの情報のファイルに書き写せます。ゲームの情報のファイルは、毎回の要求で Decision Model の API に送られます。そのため、許可のルールで読み取りを許すディレクトリーと書き込みを許すファイルを限り、advisor に API キーを渡していません
 - Claude Code のドキュメントでは、作業ディレクトリー (`ch04_techniques`) の中のファイルの読み取りは、許可のルールが無くても承認されます。そのため advisor は、`ch04_techniques` の中のほかのファイルも読めると考えられます。実際に読める範囲は確かめていません
 - `--setting-sources project` で実行する人のユーザー側の設定を読まないようにしていますが、ユーザーの `~/.claude/CLAUDE.md` が読まれるかは確かめていません。advisor の動作は、実行する人の Claude Code の環境に左右されることがあります
 - 利用によって生じたアカウントの制限、データの損失、機器の故障などの不利益は、利用者の自己責任となります

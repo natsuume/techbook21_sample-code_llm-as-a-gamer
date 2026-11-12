@@ -40,6 +40,13 @@ TIMER_INTERVAL_S = 0.01
 OPPOSITE_DIRECTION = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
 
 
+class OutputStoppedError(Exception):
+    """stop_output() の後に apply を呼んだ。操作は送っていない。
+
+    送信の失敗 (RuntimeError / OSError) と区別できるよう、RuntimeError の子にはしない。
+    """
+
+
 class ReportSender(Protocol):
     """PadOutput がレポートを送る先。run では switch2_remote.bridge_supervisor.BridgeSupervisor を使う。"""
 
@@ -74,7 +81,8 @@ class PadOutput:
                           (送信が失敗したときは、3 つとも送信前の時刻から計算した値のまま)
         last_error        start_due_taps・release_due_taps・neutral・stop_output の送信の最後の失敗の説明
                           (switch2_remote.error_message.describe_error)。無ければ None
-        output_stopped    stop_output() で True にし、False には戻さない。True の間、apply は何もしない
+        output_stopped    stop_output() で True にし、False には戻さない。True の間、apply は何も送らずに
+                          OutputStoppedError を出す
         stop_timer        close() で立て、タイマースレッドを止める
         timer_thread      タイマースレッド。start_timer が False なら None
     """
@@ -126,12 +134,13 @@ class PadOutput:
                released の last_released を sent_at に置き直す
         前の apply から続く短押しの離す時刻と、待っている短押しの始める時刻は変えない。変化が無くても送る。
         送信の例外はそのまま呼び出し側に出す (状態は更新したまま。時刻は送信前の now から計算した値のまま)。
-        stop_output() の後は、状態を変えず、何も送らずに戻る (確かめるのはロックの中なので、stop_output と
-        同時に呼ばれても、止めた後に押すレポートは送らない)。
+        stop_output() の後は、状態を変えず、何も送らずに OutputStoppedError を出す (確かめるのはロックの中なので、
+        stop_output と同時に呼ばれても、止めた後に押すレポートは送らない。呼び出し側は、操作が送られなかったことを
+        例外で知る)。
         """
         with self.lock:
             if self.output_stopped:
-                return
+                raise OutputStoppedError("pad output was stopped")
             now = self.clock()
             released = self.held.buttons - action.held.buttons
             for button in released:
@@ -230,7 +239,7 @@ class PadOutput:
 
         ロックの中で output_stopped を True にし、held・tapping・pending_taps を空にして、中立のレポートを送る。
         キャプチャーが止まったと分かったときに、見張り (capture_watcher.CaptureWatcher) の on_lost から呼ぶ。
-        判断のループが止まる前に apply を呼んでも、押すレポートを送らないようにするため。
+        判断のループが止まる前に apply を呼んでも、押すレポートを送らず、OutputStoppedError で知らせるようにするため。
         送信の例外 (RuntimeError / OSError) は外に出さず、説明を last_error に記録する。
         """
         with self.lock:

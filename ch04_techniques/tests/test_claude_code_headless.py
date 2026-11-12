@@ -29,7 +29,10 @@ RUNS_DIR_RELATIVE = "runs/20261112-120000"
 EXPECTED_ALLOWED_TOOLS = [
     "Read(/game_notes/zelda/**)",
     "Read(/runs/20261112-120000/**)",
-    "Edit(/game_notes/zelda/**)",
+    "Edit(/game_notes/zelda/controls.md)",
+    "Edit(/game_notes/zelda/tips.md)",
+    "Edit(/game_notes/zelda/progress.md)",
+    "Edit(/game_notes/zelda/strategy.md)",
     "Skill(record-controls)",
     "Skill(record-tips)",
     "Skill(record-progress)",
@@ -292,13 +295,20 @@ def test_command_allowed_tools_is_one_comma_joined_string():
     assert option_value(cmd, "--allowedTools").split(",") == EXPECTED_ALLOWED_TOOLS
 
 
-def test_command_allows_writing_only_under_notes_dir():
+def test_command_allows_writing_only_the_four_note_files():
     rules = option_value(
         build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
         "--allowedTools",
     ).split(",")
     write_rules = [rule for rule in rules if rule.startswith(("Edit", "Write"))]
-    assert write_rules == ["Edit(/game_notes/zelda/**)"]
+    assert write_rules == [
+        "Edit(/game_notes/zelda/controls.md)",
+        "Edit(/game_notes/zelda/tips.md)",
+        "Edit(/game_notes/zelda/progress.md)",
+        "Edit(/game_notes/zelda/strategy.md)",
+    ]
+    # ディレクトリー全体への書き込みは許さない
+    assert "Edit(/game_notes/zelda/**)" not in rules
     assert not any(rule.startswith("Bash") for rule in rules)
 
 
@@ -319,7 +329,10 @@ def test_allowed_tools_include_reads_edit_and_four_skills():
     assert rules == [
         "Read(/game_notes/mario/**)",
         "Read(/runs/20261112-130000/**)",
-        "Edit(/game_notes/mario/**)",
+        "Edit(/game_notes/mario/controls.md)",
+        "Edit(/game_notes/mario/tips.md)",
+        "Edit(/game_notes/mario/progress.md)",
+        "Edit(/game_notes/mario/strategy.md)",
         *[f"Skill({name})" for name in ADVISOR_SKILLS],
     ]
     # パスを限らない Read は含めない

@@ -13,6 +13,7 @@ from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
 from switch2_agent.operation_log import OperationLog, format_action
+from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.pipeline import (
     CaptureStoppedError,
     OutputSendError,
@@ -745,6 +746,45 @@ def test_run_discards_decision_when_capture_ends_while_waiting_for_it():
     assert env.events("capture_stopped") == [
         {"event": "capture_stopped", "error": "capture ended"}
     ]
+
+
+def test_run_discards_decision_when_output_is_stopped_before_apply():
+    # 応答の後の確認では止まっていなかったが、apply までの間に見張りが出力を止めた場合
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(press_A=0.9, advisor=0.9)]
+    env.output.apply_errors = [OutputStoppedError("pad output was stopped")]
+    pipeline.parts.sleep = sleep_failing_the_test(env)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="pad output was stopped"):
+        pipeline.run(threading.Event())
+    # 操作は送られていないので、記録にも残さず、advisor も呼ばない。送信の失敗としても扱わない
+    assert len(env.model.requests) == 1
+    assert env.output.applied == []
+    assert env.operation_log.since(0.0) == []
+    assert env.advisor.contexts == []
+    assert env.events("decision") == []
+    assert env.events("send_error") == []
+    assert env.events("capture_stopped") == [
+        {"event": "capture_stopped", "error": "pad output was stopped"}
+    ]
+
+
+def test_output_stopped_uses_reason_from_watcher_when_available():
+    pipeline, env = make_pipeline()
+
+    class StoppingOutput(FakeOutput):
+        def apply(self, action):
+            # apply のロックを取る直前に、見張りが判定して出力を止めた
+            env.capture_lost = "no new frame for 2.0 seconds"
+            raise OutputStoppedError("pad output was stopped")
+
+    pipeline.parts.output = StoppingOutput()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run_once()
+    assert env.operation_log.since(0.0) == []
 
 
 def test_run_once_stops_without_request_when_capture_is_lost():

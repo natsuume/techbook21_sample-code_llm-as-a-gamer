@@ -8,6 +8,7 @@ from switch2_agent.pad_output import (
     TAP_PRESS_S,
     TAP_RELEASE_GAP_S,
     TIMER_INTERVAL_S,
+    OutputStoppedError,
     PadOutput,
     compose_report_state,
 )
@@ -460,13 +461,14 @@ def test_stop_output_clears_state_and_sends_neutral_report():
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
-def test_apply_after_stop_output_sends_nothing():
+def test_apply_after_stop_output_raises_and_sends_nothing():
     output, sender, clock = make_output()
     output.apply(action(held=pad("A")))
     output.stop_output()
     reports_before = list(sender.reports)
     clock.now = 1.0
-    output.apply(action(held=pad("B"), taps={"X"}))
+    with pytest.raises(OutputStoppedError):
+        output.apply(action(held=pad("B"), taps={"X"}))
     assert sender.reports == reports_before
     assert output.held == PadState()
     assert output.tapping == {}

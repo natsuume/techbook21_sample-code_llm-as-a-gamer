@@ -33,6 +33,7 @@ from switch2_agent.frame_selection.base import RecentFrameSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
 from switch2_agent.frame_selection.request_frames import select_request_frames
 from switch2_agent.operation_log import OperationLog, OperationRecord, format_action
+from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.questions import Question
 
 # Decision Model の失敗がこの回数続いたら止まる
@@ -65,7 +66,10 @@ class PadOutputLike(Protocol):
     """Pipeline が操作を送る先。run では pad_output.PadOutput を使う。"""
 
     def apply(self, action: PadAction) -> None:
-        """操作を送る。送信の失敗は例外 (RuntimeError / OSError) で出す。"""
+        """操作を送る。送信の失敗は例外 (RuntimeError / OSError) で出す。
+
+        出力が止められた後 (PadOutput.stop_output の後) は、送らずに pad_output.OutputStoppedError を出す。
+        """
         ...
 
     def neutral(self) -> None:
@@ -186,7 +190,10 @@ class Pipeline:
            reason = capture_lost() とし、None で capture_ended() が真なら reason = "capture ended"。
            reason があれば応答を捨て (操作を反映せず、operation_log にも log の decision にも残さない)、
            output.neutral() して CaptureStoppedError(reason) を出す
-        6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)
+        6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)。
+           apply が pad_output.OutputStoppedError を出したら (5 の確認の後に、見張りがキャプチャーの停止を判定して
+           出力を止めた)、5 と同じく応答を捨て、CaptureStoppedError(capture_lost() の理由。無ければ
+           "pad output was stopped") を出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
         8. action.advisor_requested なら AdvisorContext を作って advisor.request_update を呼ぶ。
            AdvisorContext は game、request.images、notes の strategy (無ければ空文字)、
@@ -260,6 +267,11 @@ class Pipeline:
         apply_started = parts.clock()
         try:
             parts.output.apply(action)
+        except OutputStoppedError:
+            # 上の確認の後に見張りが出力を止めた。操作は送られていないので、記録せずに止まる
+            raise CaptureStoppedError(
+                parts.capture_lost() or "pad output was stopped"
+            ) from None
         except (RuntimeError, OSError) as e:
             raise OutputSendError(e) from e
         applied_at = parts.clock()

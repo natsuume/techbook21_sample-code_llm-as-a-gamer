@@ -16,10 +16,13 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 コマンドの形:
     claude -p <プロンプト> --output-format json --permission-mode dontAsk
         --setting-sources project --settings '{"disableAllHooks": true}'
-        --allowedTools "Read(/<ゲームの情報のディレクトリー>/**),Read(/<入力を置くディレクトリー>/**),Edit(/<ゲームの情報のディレクトリー>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)"
+        --allowedTools "Read(/<ゲームの情報のディレクトリー>/**),Read(/<入力を置くディレクトリー>/**),Edit(/<ゲームの情報のディレクトリー>/controls.md),Edit(/<…>/tips.md),Edit(/<…>/progress.md),Edit(/<…>/strategy.md),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)"
         --max-turns 30
 - dontAsk で、許可ルールに無い操作 (確認が要る操作) を対話なしで拒否させる。Bash は許可しない
   (Edit のルールでは Bash やサブプロセスによる書き込みは止められないため、Bash を許さないことで防ぐ)
+- 書き込みは、ゲームの情報の 4 ファイルのパスだけに許す (ディレクトリー全体には許さない)。画面の文字で指示を
+  注入されても、そのディレクトリーにほかのファイル (サブディレクトリーの CLAUDE.md など、claude が指示として
+  読みうるファイル) を作れないようにするため。4 ファイルは起動時に game_notes.ensure_game_notes が作る
 - 読み取りもディレクトリーを限る。許可ルールで読み取りを許すのは、ゲームの情報のディレクトリーと、入力を置く
   ディレクトリー (runs_dir。実行ごとの advisor-<連番>/ に画像と context.md を置く) だけにする。パスを限らない
   `Read` のルールはすべての Read に一致し、作業ディレクトリーの外 (ホームディレクトリーの認証情報など) の読み取りも
@@ -179,17 +182,18 @@ def build_advisor_prompt(context_path: Path, notes_dir: Path, game: str) -> str:
 def build_allowed_tools(notes_dir_relative: str, runs_dir_relative: str) -> list[str]:
     """--allowedTools に渡す許可ルールの一覧を返す。
 
-    [`Read(/<notes_dir_relative>/**)`, `Read(/<runs_dir_relative>/**)`, `Edit(/<notes_dir_relative>/**)`,
+    [`Read(/<notes_dir_relative>/**)`, `Read(/<runs_dir_relative>/**)`,
+    game_notes.NOTE_KINDS の順に `Edit(/<notes_dir_relative>/<種別>.md)` の 4 つ,
     `Skill(record-controls)`, `Skill(record-tips)`, `Skill(record-progress)`, `Skill(record-strategy)`] の順。
     notes_dir_relative (ゲームの情報のディレクトリー) と runs_dir_relative (入力を置くディレクトリー) は
     workdir からの相対パス (例: game_notes/zelda、runs/20261112-120000)。
     読み取りの許可はこの 2 つのディレクトリーの配下だけで、パスを限らない `Read` は含めない。
-    書き込みの許可は notes_dir_relative の配下の Edit だけで、Bash は含めない。
+    書き込みの許可はゲームの情報の 4 ファイルの Edit だけで、ディレクトリー全体の Edit と Bash は含めない。
     """
     return [
         f"Read(/{notes_dir_relative}/**)",
         f"Read(/{runs_dir_relative}/**)",
-        f"Edit(/{notes_dir_relative}/**)",
+        *(f"Edit(/{notes_dir_relative}/{kind}.md)" for kind in NOTE_KINDS),
         *(f"Skill({name})" for name in ADVISOR_SKILLS),
     ]
 
