@@ -65,6 +65,14 @@ export TYPESAFE_API_KEY=...
 uv run switch2-agent --game <名前> --model jev
 ```
 
+API キーは `.env` のファイルに書くこともできます。`switch2-agent` は `.env` を自分では読まないため、`uv run` に `--env-file .env` を付けて、uv に読み込ませます。見本の `.env.sample` を `.env` に写し、使うモデルの API キーを書いてから実行します。シェルで同じ名前の環境変数を設定してある場合は、シェルの値が使われます。`.env` は Git の管理から外しています (`.gitignore`)。`.env` を `ch04_techniques` に置くと advisor から読めると考えられるため、注意事項も確かめてください。
+
+```bash
+cp .env.sample .env
+chmod 600 .env
+uv run --env-file .env switch2-agent --game <名前> --model jev
+```
+
 advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04_techniques` ディレクトリーで実行してください。別のディレクトリーで実行すると、説明を表示して終了します。
 
 起動すると、ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動の後に、速い層が要求を送り始めます。起動直後は、最初のフレームが届くまで最大 10 秒待ちます。止めるときは Ctrl+C を押します。止まるときは、押下状態を中立に戻してから、advisor、キャプチャー、ブリッジの順に止めます。実行中の advisor は止めます (`claude` のプロセスに終了を指示し、5 秒で終わらなければ強制的に終了させます)。
@@ -154,5 +162,6 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 - advisor の書き込みの許可 (`Edit(...)` のルール) では、Bash や、advisor が起動したプログラムによる書き込みは止められません。そのため Bash を許していません
 - advisor はゲームの画面の画像を読むため、画面に写った文字で advisor への指示が注入されるおそれがあります。注入された指示に従うと、advisor は読んだファイルの内容をゲームの情報のファイルに書き写せます。ゲームの情報のファイルは、毎回の要求で Decision Model の API に送られます。そのため、許可のルールで読み取りを許すディレクトリーと書き込みを許すファイルを限り、advisor に API キーを渡していません
 - Claude Code のドキュメントでは、作業ディレクトリー (`ch04_techniques`) の中のファイルの読み取りは、許可のルールが無くても承認されます。そのため advisor は、`ch04_techniques` の中のほかのファイルも読めると考えられます。実際に読める範囲は確かめていません
+- `.env` を `ch04_techniques` に置くと、advisor はそのファイルも読めると考えられます。advisor の `claude` のプロセスには API キーの環境変数を渡していませんが、`.env` を読んで、画面の文字で注入された指示に従うと、API キーをゲームの情報のファイルに書き写せます。書き写された API キーは、毎回の要求で Decision Model の API に送られます。避けるには、API キーを書いたファイルを `ch04_techniques` に置かないでください。API キーは `export` で設定するか、`.env` を `ch04_techniques` の外に置いて `--env-file` にそのパスを指定します
 - `--setting-sources project` で実行する人のユーザー側の設定を読まないようにしていますが、ユーザーの `~/.claude/CLAUDE.md` が読まれるかは確かめていません。advisor の動作は、実行する人の Claude Code の環境に左右されることがあります
 - 利用によって生じたアカウントの制限、データの損失、機器の故障などの不利益は、利用者の自己責任となります

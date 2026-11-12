@@ -3,3 +3,5 @@ game_notes/*
 !game_notes/.gitkeep
 # 実行のログと advisor の入出力
 runs/
+# API キーを書くファイル (見本の .env.sample は管理する)
+.env
