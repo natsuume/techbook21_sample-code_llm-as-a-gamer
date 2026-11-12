@@ -84,10 +84,13 @@ class CaptureWatcher:
         """キャプチャーを 1 回確かめ、止まったと判定した理由 (まだなら None) を返す。
 
         まだ止まったと判定していなければ、ロックの中で capture_lost_reason(capture_ended(), latest_frame_time(),
-        clock(), stale_timeout_s) を計算し、理由があれば lost_reason に入れる。入れたときだけ、ロックの外で
-        on_lost() を呼ぶ (1 回だけ)。on_lost の例外 (Exception) は外に出さず、logging で標準エラー出力に書く
+        clock(), stale_timeout_s) を計算する。理由があれば、同じロックの中で on_lost() を呼んでから (1 回だけ)、
+        lost_reason に入れる。出力を止めてから判定を記録するのは、lost() で判定を読めた時点で出力がもう止まって
+        いるようにするため (読めなかった Pipeline が apply しても、stop_output の後なら OutputStoppedError になる)。
+        on_lost の例外 (Exception) は外に出さず、logging で標準エラー出力に書いてから判定を記録する
         (`on_lost failed` の 1 行の後に、例外のトレースバックが続く)。
         すでに判定していれば再計算せず、記録した理由を返す (判定は取り消さない)。
+        on_lost の中から lost() や check_once を呼ばないこと (ロックは再入できない)。
         """
         with self.lock:
             if self.lost_reason is not None:
@@ -100,13 +103,13 @@ class CaptureWatcher:
             )
             if reason is None:
                 return None
+            # 中立に戻す処理の失敗で見張りのスレッドを止めないため、失敗の型を問わずに捕まえる
+            try:
+                self.on_lost()
+            except Exception:
+                logger.exception("on_lost failed")
             self.lost_reason = reason
-        # 中立に戻す処理の失敗で見張りのスレッドを止めないため、失敗の型を問わずに捕まえる
-        try:
-            self.on_lost()
-        except Exception:
-            logger.exception("on_lost failed")
-        return reason
+            return reason
 
     def lost(self) -> str | None:
         """止まったと判定した理由を返す (ロックの中で読む)。まだなら None を返す。"""

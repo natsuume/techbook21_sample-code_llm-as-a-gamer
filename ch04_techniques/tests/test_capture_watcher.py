@@ -113,6 +113,18 @@ def test_lost_reason_is_not_cleared_by_new_frames():
     assert capture.lost_calls == 1
 
 
+def test_check_once_stops_output_before_recording_reason():
+    watcher, capture, _ = make_watcher()
+    capture.ended = True
+    reasons_seen_by_on_lost: list[str | None] = []
+    # on_lost の中からは lost() を呼べない (ロックを持っている) ため、属性を直接読む
+    watcher.on_lost = lambda: reasons_seen_by_on_lost.append(watcher.lost_reason)
+    assert watcher.check_once() == "capture ended"
+    # 出力を止めた時点では、まだ判定を記録していない (lost() で読めた時点で、出力は止まっている)
+    assert reasons_seen_by_on_lost == [None]
+    assert watcher.lost() == "capture ended"
+
+
 def test_check_once_does_not_raise_on_lost_error(caplog):
     watcher, capture, _ = make_watcher()
     capture.ended = True
