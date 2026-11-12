@@ -77,6 +77,16 @@ class FakeClock:
         return self.now
 
 
+class FakePipe:
+    """子プロセスの出力のパイプの代わり。close が呼ばれたかを closed に記録する。"""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class FakeProcess:
     """subprocess.Popen の代わりの子プロセス。呼び出しを calls に記録する。
 
@@ -86,7 +96,9 @@ class FakeProcess:
         - communicate_error があれば、それを送出する
         - それ以外は (stdout, stderr) を返し、returncode を exit_code にする
     2 回目以降の communicate は、止められていれば出力を返し、止められていなければ TimeoutExpired を送出する。
+    pipes_stay_open が真なら、止められていても TimeoutExpired を送出する (子孫のプロセスがパイプを持ち続ける場合)。
     wait は、止められていれば returncode を返し、止められていなければすぐ TimeoutExpired を送出する。
+    stdout と stderr は出力のパイプの代わり (FakePipe)。
     """
 
     def __init__(self, args, clock: FakeClock, settings: "FakeStartProcess"):
@@ -97,6 +109,8 @@ class FakeProcess:
         self.returncode: int | None = None
         self.stopped = threading.Event()
         self.communicate_count = 0
+        self.stdout = FakePipe()
+        self.stderr = FakePipe()
 
     def communicate(self, timeout=None):
         self.calls.append(("communicate", timeout))
@@ -111,7 +125,7 @@ class FakeProcess:
                 raise self.settings.communicate_error
             else:
                 self.returncode = self.settings.exit_code
-        elif not self.stopped.is_set():
+        elif not self.stopped.is_set() or self.settings.pipes_stay_open:
             raise subprocess.TimeoutExpired(self.args, timeout)
         return self.settings.stdout, self.settings.stderr
 
@@ -150,6 +164,7 @@ class FakeStartProcess:
         self.timeout_first = False
         self.communicate_error: Exception | None = None
         self.terminate_works = True
+        self.pipes_stay_open = False
 
     def __call__(
         self, args, *, cwd, env, stdin, stdout, stderr, text, encoding, errors
@@ -553,7 +568,7 @@ def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path)
         "terminate",
         ("communicate", TERMINATE_GRACE_S),
         "kill",
-        ("communicate", None),
+        ("communicate", TERMINATE_GRACE_S),
     ]
     assert TERMINATE_GRACE_S == 5.0
     assert read_result(runs_dir)["timed_out"] is True
@@ -591,9 +606,35 @@ def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
         "terminate",
         ("communicate", TERMINATE_GRACE_S),
         "kill",
-        ("communicate", None),
+        ("communicate", TERMINATE_GRACE_S),
     ]
     assert "timeout value is too large" in read_result(runs_dir)["error"]
+    assert advisor.process is None
+    assert advisor.is_busy() is False
+
+
+def test_request_update_stops_reading_when_pipes_stay_open_after_kill(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_advisor(tmp_path)
+    start_process.timeout_first = True
+    start_process.terminate_works = False
+    start_process.pipes_stay_open = True
+    advisor.request_update(sample_context())
+    process = start_process.processes[0]
+    assert process.calls == [
+        ("communicate", 300.0),
+        "terminate",
+        ("communicate", TERMINATE_GRACE_S),
+        "kill",
+        ("communicate", TERMINATE_GRACE_S),
+    ]
+    assert process.stdout.closed is True
+    assert process.stderr.closed is True
+    result = read_result(runs_dir)
+    assert result["timed_out"] is True
+    assert result["error"] == "timed out after 300.0 seconds"
+    assert result["stdout"] is None
+    assert result["stderr"] == ""
+    assert len(recorder.events) == 1
     assert advisor.process is None
     assert advisor.is_busy() is False
 

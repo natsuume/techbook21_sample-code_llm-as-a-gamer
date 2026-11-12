@@ -7,7 +7,8 @@ advisor は Skill (record-controls・record-tips・record-progress・record-stra
 子プロセスの寿命: claude は subprocess.Popen で起動し、実行中の子プロセスを持っておく。
 daemon スレッドは親のプロセスの終了とともに消えるため、待ちの上限 (timeout_s) を過ぎたとき、待つ処理がほかの例外で
 失敗したとき、close() のときに、子プロセスを terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、
-子プロセスを残さない。
+子プロセスを残さない。kill の後も TERMINATE_GRACE_S 秒で出力を読み切れなければ (子孫のプロセスがパイプを持ち続ける
+など)、パイプを閉じて読むのをやめ、advisor のスレッドを終わらせる (stop_process)。
 
 フラグの綴りと許可ルールの書き方は公式ドキュメント (https://code.claude.com/docs/en/headless、
 https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/skills、2026-11-12 に確認) に合わせる。
@@ -294,16 +295,31 @@ def start_daemon_thread(job: Callable[[], None]) -> None:
 
 
 def stop_process(process: subprocess.Popen) -> tuple[str | None, str | None]:
-    """実行中の process を terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、出力を読み切る。
+    """実行中の process を止め、出力を読み切って (標準出力, 標準エラー出力) を返す。
 
-    (標準出力, 標準エラー出力) を返す。process の communicate を呼んでいるスレッドから呼ぶ。
+    terminate して TERMINATE_GRACE_S 秒まで出力を読み、終わらなければ kill して、さらに TERMINATE_GRACE_S 秒まで読む。
+    kill の後も読み切れなければ (claude が起動した子孫のプロセスがパイプを持ち続けて EOF が来ないなど)、
+    出力のパイプを閉じて (None, None) を返す (advisor のスレッドを有限の時間で終わらせるため)。
+    process の communicate を呼んでいるスレッドから呼ぶ。
     """
     process.terminate()
     try:
         return process.communicate(timeout=TERMINATE_GRACE_S)
     except subprocess.TimeoutExpired:
         process.kill()
-        return process.communicate()
+    try:
+        return process.communicate(timeout=TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "claude output pipes stayed open after kill; stopped reading them"
+        )
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+        return None, None
 
 
 class ClaudeCodeHeadlessAdvisor:
