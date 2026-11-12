@@ -283,7 +283,8 @@ def main(argv: list[str] | None = None) -> None:
            log=RunLog.write)
         7. Decision Model (JevModel / DecisionsApiModel)
         8. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
-           bridge_failed は supervisor.state == "failed"、capture_ended は capture.ended)
+           bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
+           capture_ended は capture.ended)
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを output.neutral()、output.close()、advisor.close()、capture.close()、
@@ -379,6 +380,7 @@ def main(argv: list[str] | None = None) -> None:
                 game=args.game,
                 capture_ended=lambda: running_capture.ended,
                 bridge_failed=lambda: supervisor.state == "failed",
+                bridge_recovering=lambda: supervisor.state == "recovering",
             ),
             max_consecutive_errors=args.max_consecutive_errors,
         )

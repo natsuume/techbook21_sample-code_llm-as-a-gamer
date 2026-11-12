@@ -1,6 +1,8 @@
 """判断のループ。フレームを選んで Decision Model に送り、応答から決めた操作を送ることを止まるまで繰り返す。
 
 応答待ちの要求は常に 1 つ。応答を受け取ったら操作を送り、すぐ次の要求に進む。
+コントローラーのブリッジが復旧中 (recovering) の間は要求を送らず、復旧が終わるのを待つ
+(送った操作は届かず、要求のたびに Decision Model の料金がかかるため)。
 1 回の要求 (run_once) の流れ:
     1. キャプチャーが終わっていないか、新しいフレームが届いているかを確かめる
     2. 要求に載せるフレームを選ぶ (前回の要求の送信から今までの直近の区間 + それより前の意味のあるフレーム)
@@ -38,6 +40,7 @@ DEFAULT_NO_FRAME_WAIT_S = 0.05  # 新しいフレームが無いときの待ち 
 DEFAULT_STALE_FRAME_TIMEOUT_S = 2.0
 # まだ 1 回も要求を送っていない間に、最初のフレームを待つ上限 (秒)。ffmpeg の起動に時間がかかるため長めにとる
 DEFAULT_FIRST_FRAME_TIMEOUT_S = 10.0
+DEFAULT_BRIDGE_WAIT_S = 0.1  # ブリッジの復旧を待つ間の確認の間隔 (秒)
 
 
 class CaptureStoppedError(RuntimeError):
@@ -89,6 +92,8 @@ class PipelineParts:
     capture_ended    キャプチャーが終わったら True を返す関数
     bridge_failed    コントローラーのブリッジが復旧できない状態 (failed) なら True を返す関数
                      (run では lambda: supervisor.state == "failed")
+    bridge_recovering  コントローラーのブリッジが復旧中 (recovering) なら True を返す関数
+                       (run では lambda: supervisor.state == "recovering")
     """
 
     history: FrameHistory
@@ -108,6 +113,7 @@ class PipelineParts:
     game: str
     capture_ended: Callable[[], bool]
     bridge_failed: Callable[[], bool]
+    bridge_recovering: Callable[[], bool]
 
 
 class Pipeline:
@@ -120,6 +126,7 @@ class Pipeline:
         no_frame_wait_s          新しいフレームが無いときの待ち (秒)
         stale_frame_timeout_s    最初の要求を送った後、新しいフレームが無い状態がこの秒数以上続いたら止まる
         first_frame_timeout_s    まだ 1 回も要求を送っていない間、新しいフレームが無い状態がこの秒数以上続いたら止まる
+        bridge_wait_s            ブリッジの復旧を待つ間の確認の間隔 (秒)
         started_at               パイプラインの開始時刻 (__init__ での clock())。最初の advisor の操作の記録の起点
         request_sent             1 回でも model.decide を呼んだら (要求を送ったら) True
         previous_sent_at         前回の要求の送信時刻。まだ送っていなければ None
@@ -138,6 +145,7 @@ class Pipeline:
         no_frame_wait_s: float = DEFAULT_NO_FRAME_WAIT_S,
         stale_frame_timeout_s: float = DEFAULT_STALE_FRAME_TIMEOUT_S,
         first_frame_timeout_s: float = DEFAULT_FIRST_FRAME_TIMEOUT_S,
+        bridge_wait_s: float = DEFAULT_BRIDGE_WAIT_S,
     ):
         """属性を入れる。started_at と last_advisor_at は parts.clock() の値にする。"""
         self.parts = parts
@@ -146,6 +154,7 @@ class Pipeline:
         self.no_frame_wait_s = no_frame_wait_s
         self.stale_frame_timeout_s = stale_frame_timeout_s
         self.first_frame_timeout_s = first_frame_timeout_s
+        self.bridge_wait_s = bridge_wait_s
         self.started_at = parts.clock()
         self.request_sent = False
         self.previous_sent_at: float | None = None
@@ -274,6 +283,9 @@ class Pipeline:
     def run(self, stop: threading.Event) -> None:
         """stop が立つまで run_once を繰り返す。
 
+        各回の始めに、bridge_recovering() が真なら、run_once を呼ばずに _wait_for_bridge_recovery(stop) で
+        復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を送らない)。送信の失敗で復旧が
+        始まった場合も、次の回の始めの確認で待つ。run_once の例外は次のように扱う:
         - DecisionModelError: output.neutral() し、log に {"event": "decision_error", "error": <説明>} を渡し、
           consecutive_errors を 1 増やし、sleep(error_backoff_s) する。consecutive_errors が
           max_consecutive_errors に達したら RuntimeError (DecisionModelError ではない) で止まる
@@ -285,11 +297,15 @@ class Pipeline:
             - bridge_failed() が真: log に {"event": "pipeline_error", "error": <説明>} を渡し、元の例外を
               そのまま出して止まる
         - CaptureStoppedError: log に {"event": "capture_stopped", "error": <説明>} を渡し、例外をそのまま出して止まる
-        それ以外の例外は、そのまま出して止まる。説明は switch2_remote.error_message.describe_error で作る。
+        それ以外の例外 (_wait_for_bridge_recovery の RuntimeError を含む) は、そのまま出して止まる。
+        説明は switch2_remote.error_message.describe_error で作る。
         """
         parts = self.parts
         while not stop.is_set():
             try:
+                if parts.bridge_recovering():
+                    self._wait_for_bridge_recovery(stop)
+                    continue
                 self.run_once()
             except DecisionModelError as e:
                 parts.output.neutral()
@@ -317,6 +333,28 @@ class Pipeline:
             except CaptureStoppedError as e:
                 parts.log({"event": "capture_stopped", "error": describe_error(e)})
                 raise
+
+    def _wait_for_bridge_recovery(self, stop: threading.Event) -> None:
+        """コントローラーのブリッジの復旧が終わるのを、要求を送らずに待つ。
+
+        1. output.neutral() を 1 回呼び、log に {"event": "bridge_wait"} を渡す
+        2. stop が立つか bridge_recovering() が偽になるまで、sleep(bridge_wait_s) を繰り返す
+        3. log に {"event": "bridge_wait_end", "waited_s": <1 の時点からの clock の差>} を渡す
+        4. bridge_failed() が真なら、log に {"event": "pipeline_error", "error": <説明>} を渡し、
+           RuntimeError("controller bridge failed while waiting for recovery") を出す
+        5. そうでなければ戻る (stop が立って抜けたときは、run の while の条件で run が終わる)
+        """
+        parts = self.parts
+        started = parts.clock()
+        parts.output.neutral()
+        parts.log({"event": "bridge_wait"})
+        while not stop.is_set() and parts.bridge_recovering():
+            parts.sleep(self.bridge_wait_s)
+        parts.log({"event": "bridge_wait_end", "waited_s": parts.clock() - started})
+        if parts.bridge_failed():
+            error = RuntimeError("controller bridge failed while waiting for recovery")
+            parts.log({"event": "pipeline_error", "error": describe_error(error)})
+            raise error
 
     def _wait_for_new_frame(self) -> None:
         """新しいフレームが無いときの扱い (run_once の docstring のとおり)。"""

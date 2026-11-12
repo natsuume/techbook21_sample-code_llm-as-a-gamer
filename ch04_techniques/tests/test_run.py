@@ -244,6 +244,16 @@ def test_main_passes_bridge_failed_and_capture_ended(recorder):
     assert parts.capture_ended() is True
 
 
+def test_main_passes_bridge_recovering(recorder):
+    run.main(REQUIRED)
+    parts = recorder.pipeline.parts
+    assert parts.bridge_recovering() is False
+    recorder.supervisor.state = "recovering"
+    assert parts.bridge_recovering() is True
+    recorder.supervisor.state = "failed"
+    assert parts.bridge_recovering() is False
+
+
 def test_main_keeps_meaningful_frames_from_capture(recorder):
     run.main(REQUIRED)
     on_frame = recorder.capture.on_frame

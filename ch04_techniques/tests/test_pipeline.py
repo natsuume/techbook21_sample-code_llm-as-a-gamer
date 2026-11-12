@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -140,6 +141,7 @@ class Env:
         self.sleeps: list[float] = []
         self.capture_ended = False
         self.bridge_failed = False
+        self.bridge_recovering = False
 
     def add_frames(self, *times: float) -> None:
         for t in times:
@@ -170,6 +172,7 @@ def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
         game="zelda",
         capture_ended=lambda: env.capture_ended,
         bridge_failed=lambda: env.bridge_failed,
+        bridge_recovering=lambda: env.bridge_recovering,
     )
     return Pipeline(parts, **kwargs), env
 
@@ -546,6 +549,137 @@ def test_run_continues_after_bridge_reconnecting():
     assert len(env.model.requests) == 2
     assert len(env.output.applied) == 1
     assert len(env.events("bridge_reconnecting")) == 1
+
+
+# --- ブリッジの復旧を待つ ---
+
+
+def sleep_with_new_frames(
+    env: Env, after_sleep: Callable[[int], None]
+) -> Callable[[float], None]:
+    """clock を進めてその時刻の新しいフレームを足し、after_sleep(それまでの sleep の回数) を呼ぶ sleep を返す。
+
+    秒数は env.sleeps に記録する。新しいフレームを足し続けるので、直近の区間は空にならない
+    (要求を送らないのは、フレームが無いからではないことを確かめるため)。clock が 30.0 を超えたらテストを失敗させる。
+    """
+
+    def sleep(seconds: float) -> None:
+        env.sleeps.append(seconds)
+        env.clock.now += seconds
+        if env.clock.now > 30.0:
+            pytest.fail("pipeline did not stop by 30.0")
+        env.add_frames(env.clock.now)
+        after_sleep(len(env.sleeps))
+
+    return sleep
+
+
+def test_run_sends_no_request_while_bridge_is_recovering():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    recovering_at_decide: list[bool] = []
+
+    def end_recovery_after_three_waits(count: int) -> None:
+        if count == 3:
+            env.bridge_recovering = False
+
+    def record_and_stop():
+        recovering_at_decide.append(env.bridge_recovering)
+        stop.set()
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, end_recovery_after_three_waits)
+    env.model.on_decide = record_and_stop
+    env.bridge_recovering = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 復旧中は要求を送らず、復旧が終わってから要求を再開する
+    assert recovering_at_decide == [False]
+    assert env.output.events == ["neutral", "apply"]
+    assert env.sleeps == [pytest.approx(0.1)] * 3
+    assert [event["event"] for event in env.logs] == [
+        "bridge_wait",
+        "bridge_wait_end",
+        "decision",
+    ]
+    assert env.events("bridge_wait") == [{"event": "bridge_wait"}]
+    assert env.events("bridge_wait_end")[0]["waited_s"] == pytest.approx(0.3)
+
+
+def test_run_sends_no_request_while_recovering_after_send_fails():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    env.output.apply_errors = [
+        BridgeReconnectingError("controller bridge is reconnecting")
+    ]
+    recovering_at_decide: list[bool] = []
+
+    def record_decide():
+        recovering_at_decide.append(env.bridge_recovering)
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 1:
+            # 1 回目の応答を待つ間にブリッジが壊れて復旧が始まり、操作の送信は BridgeReconnectingError になる
+            env.bridge_recovering = True
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    def end_recovery_after_five_waits(count: int) -> None:
+        if count == 5:
+            env.bridge_recovering = False
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, end_recovery_after_five_waits)
+    env.model.on_decide = record_decide
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 復旧中は要求の数が増えず、復旧が終わってから 2 回目の要求を送る
+    assert recovering_at_decide == [False, False]
+    assert len(env.events("bridge_reconnecting")) == 1
+    assert len(env.events("bridge_wait")) == 1
+    assert len(env.output.applied) == 1
+
+
+def test_run_stops_when_bridge_fails_while_waiting_for_recovery():
+    pipeline, env = make_pipeline()
+
+    def fail_bridge_after_three_waits(count: int) -> None:
+        if count == 3:
+            env.bridge_recovering = False
+            env.bridge_failed = True
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, fail_bridge_after_three_waits)
+    env.bridge_recovering = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    message = "controller bridge failed while waiting for recovery"
+    with pytest.raises(RuntimeError, match=message) as excinfo:
+        pipeline.run(threading.Event())
+    assert type(excinfo.value) is RuntimeError
+    assert env.model.requests == []
+    assert len(env.events("bridge_wait_end")) == 1
+    assert env.events("pipeline_error") == [
+        {"event": "pipeline_error", "error": message}
+    ]
+
+
+def test_run_ends_when_stop_is_set_while_waiting_for_recovery():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+
+    def stop_after_three_waits(count: int) -> None:
+        if count == 3:
+            stop.set()
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, stop_after_three_waits)
+    env.bridge_recovering = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 直近の区間に新しいフレームがあっても、stop が立ったら要求を送らずに終わる
+    assert env.model.requests == []
+    assert env.sleeps == [pytest.approx(0.1)] * 3
+    assert len(env.events("bridge_wait_end")) == 1
 
 
 def test_run_logs_and_raises_capture_stopped():

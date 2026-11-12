@@ -178,6 +178,100 @@ def test_apply_replaces_held():
     assert output.held == pad("B")
 
 
+# --- 押したままから外したボタンの短押し ---
+
+
+def test_tap_of_button_released_from_held_starts_after_release_gap():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    clock.now = 0.5
+    output.apply(action(taps={"A"}))
+    # 押したままの A を離したレポートを先に送り、短押しはまだ始めない
+    assert sender.reports == [report("A"), NEUTRAL_REPORT]
+    assert output.tapping == {}
+    assert output.pending_taps == pytest.approx({"A": 0.5 + TAP_RELEASE_GAP_S})
+    clock.now = output.pending_taps["A"]
+    output.start_due_taps()
+    assert sender.reports == [report("A"), NEUTRAL_REPORT, report("A")]
+    assert output.pending_taps == {}
+    clock.now = output.tapping["A"]
+    assert clock.now == pytest.approx(0.5 + TAP_RELEASE_GAP_S + TAP_PRESS_S)
+    output.release_due_taps()
+    assert sender.reports == [
+        report("A"),
+        NEUTRAL_REPORT,
+        report("A"),
+        NEUTRAL_REPORT,
+    ]
+
+
+def test_pending_tap_is_not_started_before_start_time():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    clock.now = TAP_RELEASE_GAP_S / 2
+    output.start_due_taps()
+    assert sender.reports == [report("A"), NEUTRAL_REPORT]
+    assert output.tapping == {}
+    assert "A" in output.pending_taps
+
+
+def test_pending_tap_is_dropped_when_button_is_held_again():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    clock.now = 0.05
+    output.apply(action(held=pad("A")))
+    clock.now = output.pending_taps["A"]
+    output.start_due_taps()
+    # 始めずに捨てるので、何も送らない
+    assert output.pending_taps == {}
+    assert output.tapping == {}
+    assert sender.reports == [report("A"), NEUTRAL_REPORT, report("A")]
+
+
+def test_button_released_from_held_waits_release_gap_before_tap():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    clock.now = 0.5
+    output.apply(action())
+    assert sender.reports == [report("A"), NEUTRAL_REPORT]
+    assert output.last_released == {"A": 0.5}
+    # 押したままから外してから 0.05 秒 (TAP_RELEASE_GAP_S 未満) では、短押しを始めない
+    clock.now = 0.55
+    output.apply(action(taps={"A"}))
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    assert "A" not in output.tapping
+    # 外してから 0.15 秒たてば始める
+    clock.now = 0.65
+    output.apply(action(taps={"A"}))
+    assert sender.reports[-1] == report("A")
+
+
+def test_tap_is_not_started_while_opposite_direction_is_pending():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("UP")))
+    output.apply(action(taps={"UP"}))
+    clock.now = 0.05
+    output.apply(action(taps={"DOWN"}))
+    assert "DOWN" not in output.tapping
+    assert "DOWN" not in output.pending_taps
+    assert sender.reports == [report("UP"), NEUTRAL_REPORT, NEUTRAL_REPORT]
+    # 待っていた UP の短押しは、始める時刻に始める
+    clock.now = output.pending_taps["UP"]
+    output.start_due_taps()
+    assert sender.reports[-1] == report("UP")
+
+
+def test_released_direction_does_not_wait_while_opposite_direction_is_tapped():
+    output, _, clock = make_output()
+    output.apply(action(held=pad("UP"), taps={"DOWN"}))
+    clock.now = 0.05
+    output.apply(action(taps={"UP"}))
+    assert output.pending_taps == {}
+    assert "UP" not in output.tapping
+
+
 # --- 十字キーの相反 ---
 
 
@@ -230,6 +324,18 @@ def test_neutral_clears_held_and_taps_and_sends_neutral_report():
     assert len(sender.reports) == 2
 
 
+def test_neutral_clears_pending_taps():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    output.neutral()
+    assert output.pending_taps == {}
+    clock.now = 1.0
+    output.start_due_taps()
+    assert output.tapping == {}
+    assert sender.reports == [report("A"), NEUTRAL_REPORT, NEUTRAL_REPORT]
+
+
 # --- 送信の失敗 ---
 
 
@@ -246,6 +352,17 @@ def test_release_records_send_error_without_raising():
     sender.fail_with = RuntimeError("bridge failed")
     clock.now = 0.12
     output.release_due_taps()
+    assert output.last_error is not None
+    assert "bridge failed" in output.last_error
+
+
+def test_start_due_taps_records_send_error_without_raising():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    sender.fail_with = RuntimeError("bridge failed")
+    clock.now = output.pending_taps["A"]
+    output.start_due_taps()
     assert output.last_error is not None
     assert "bridge failed" in output.last_error
 
@@ -278,6 +395,27 @@ def test_timer_thread_releases_tap():
                 pytest.fail(f"tap was not released within {WAIT_TIMEOUT} seconds")
             time.sleep(POLL_INTERVAL)
         assert sender.reports == [report("A"), NEUTRAL_REPORT]
+    finally:
+        output.close()
+
+
+def test_timer_thread_starts_pending_tap_and_releases_it():
+    sender = FakeSender()
+    output = PadOutput(sender)
+    try:
+        output.apply(action(held=pad("A")))
+        output.apply(action(taps={"A"}))
+        deadline = time.monotonic() + WAIT_TIMEOUT
+        while len(sender.reports) < 4:
+            if time.monotonic() >= deadline:
+                pytest.fail(f"tap was not started within {WAIT_TIMEOUT} seconds")
+            time.sleep(POLL_INTERVAL)
+        assert sender.reports == [
+            report("A"),
+            NEUTRAL_REPORT,
+            report("A"),
+            NEUTRAL_REPORT,
+        ]
     finally:
         output.close()
 
