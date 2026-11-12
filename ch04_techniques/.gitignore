@@ -1,0 +1,5 @@
+# ゲームの情報のファイルは advisor が実行のたびに書き換えるため、置き場所 (.gitkeep) だけを管理する
+game_notes/*
+!game_notes/.gitkeep
+# 実行のログと advisor の入出力
+runs/
