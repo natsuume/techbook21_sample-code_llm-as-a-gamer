@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import threading
 import time
@@ -14,6 +15,7 @@ from switch2_agent.advisors.claude_code_headless import (
     advisor_run_dir_name,
     build_advisor_prompt,
     build_allowed_tools,
+    build_child_env,
     build_claude_command,
     image_file_name,
     start_daemon_thread,
@@ -23,8 +25,10 @@ from switch2_agent.decision_request import LabeledImage
 from switch2_agent.safety import SAFETY_RULES
 
 NOTES_DIR_RELATIVE = "game_notes/zelda"
+RUNS_DIR_RELATIVE = "runs/20261112-120000"
 EXPECTED_ALLOWED_TOOLS = [
-    "Read",
+    "Read(/game_notes/zelda/**)",
+    "Read(/runs/20261112-120000/**)",
     "Edit(/game_notes/zelda/**)",
     "Skill(record-controls)",
     "Skill(record-tips)",
@@ -79,6 +83,7 @@ class FakeProcess:
     最初の communicate は、clock を duration 進めてから、次のどれかになる:
         - block が真なら、terminate (terminate_works が真のとき) か kill が呼ばれるまで待ってから出力を返す
         - timeout_first が真なら TimeoutExpired を送出する
+        - communicate_error があれば、それを送出する
         - それ以外は (stdout, stderr) を返し、returncode を exit_code にする
     2 回目以降の communicate は、止められていれば出力を返し、止められていなければ TimeoutExpired を送出する。
     wait は、止められていれば returncode を返し、止められていなければすぐ TimeoutExpired を送出する。
@@ -102,6 +107,8 @@ class FakeProcess:
                 self.stopped.wait(WAIT_TIMEOUT)
             elif self.settings.timeout_first:
                 raise subprocess.TimeoutExpired(self.args, timeout)
+            elif self.settings.communicate_error is not None:
+                raise self.settings.communicate_error
             else:
                 self.returncode = self.settings.exit_code
         elif not self.stopped.is_set():
@@ -141,14 +148,18 @@ class FakeStartProcess:
         self.exit_code = 0
         self.block = False
         self.timeout_first = False
+        self.communicate_error: Exception | None = None
         self.terminate_works = True
 
-    def __call__(self, args, *, cwd, stdin, stdout, stderr, text, encoding, errors):
+    def __call__(
+        self, args, *, cwd, env, stdin, stdout, stderr, text, encoding, errors
+    ):
         self.calls.append(
             (
                 list(args),
                 {
                     "cwd": cwd,
+                    "env": env,
                     "stdin": stdin,
                     "stdout": stdout,
                     "stderr": stderr,
@@ -232,18 +243,18 @@ def test_run_dir_and_image_file_names():
 
 
 def test_command_starts_with_claude_print_and_prompt():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE)
+    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
     assert cmd[:3] == ["claude", "-p", "プロンプト"]
 
 
 def test_command_uses_json_output_and_dont_ask_mode():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE)
+    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
     assert option_value(cmd, "--output-format") == "json"
     assert option_value(cmd, "--permission-mode") == "dontAsk"
 
 
 def test_command_reads_only_project_settings_and_disables_hooks():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE)
+    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
     assert option_value(cmd, "--setting-sources") == "project"
     assert json.loads(option_value(cmd, "--settings")) == {"disableAllHooks": True}
     assert "--bare" not in cmd
@@ -251,40 +262,82 @@ def test_command_reads_only_project_settings_and_disables_hooks():
 
 def test_command_limits_turns():
     assert (
-        option_value(build_claude_command("p", NOTES_DIR_RELATIVE), "--max-turns")
+        option_value(
+            build_claude_command("p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+            "--max-turns",
+        )
         == "30"
     )
-    cmd = build_claude_command("p", NOTES_DIR_RELATIVE, max_turns=10)
+    cmd = build_claude_command("p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, max_turns=10)
     assert option_value(cmd, "--max-turns") == "10"
 
 
 def test_command_allowed_tools_is_one_comma_joined_string():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE)
+    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
     assert option_value(cmd, "--allowedTools").split(",") == EXPECTED_ALLOWED_TOOLS
 
 
 def test_command_allows_writing_only_under_notes_dir():
     rules = option_value(
-        build_claude_command("プロンプト", NOTES_DIR_RELATIVE), "--allowedTools"
+        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+        "--allowedTools",
     ).split(",")
     write_rules = [rule for rule in rules if rule.startswith(("Edit", "Write"))]
     assert write_rules == ["Edit(/game_notes/zelda/**)"]
     assert not any(rule.startswith("Bash") for rule in rules)
 
 
-def test_allowed_tools_include_read_and_four_skills():
-    rules = build_allowed_tools("game_notes/mario")
+def test_command_allows_reading_only_under_notes_dir_and_runs_dir():
+    rules = option_value(
+        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+        "--allowedTools",
+    ).split(",")
+    read_rules = [rule for rule in rules if rule.startswith("Read")]
+    assert read_rules == [
+        "Read(/game_notes/zelda/**)",
+        "Read(/runs/20261112-120000/**)",
+    ]
+
+
+def test_allowed_tools_include_reads_edit_and_four_skills():
+    rules = build_allowed_tools("game_notes/mario", "runs/20261112-130000")
     assert rules == [
-        "Read",
+        "Read(/game_notes/mario/**)",
+        "Read(/runs/20261112-130000/**)",
         "Edit(/game_notes/mario/**)",
         *[f"Skill({name})" for name in ADVISOR_SKILLS],
     ]
+    # パスを限らない Read は含めない
+    assert "Read" not in rules
     assert ADVISOR_SKILLS == (
         "record-controls",
         "record-tips",
         "record-progress",
         "record-strategy",
     )
+
+
+# --- build_child_env ---
+
+
+def test_child_env_removes_only_hidden_names():
+    environ = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/player",
+        "TYPESAFE_API_KEY": "test-key-not-a-secret",
+        "OPENAI_API_KEY": "test-key-not-a-secret",
+    }
+    env = build_child_env(environ, ("TYPESAFE_API_KEY", "OPENAI_API_KEY"))
+    assert env == {"PATH": "/usr/bin", "HOME": "/home/player"}
+    # 元の辞書は変えない
+    assert set(environ) == {"PATH", "HOME", "TYPESAFE_API_KEY", "OPENAI_API_KEY"}
+
+
+def test_child_env_keeps_all_variables_without_hidden_names():
+    environ = {"PATH": "/usr/bin", "HOME": "/home/player"}
+    env = build_child_env(environ, ())
+    assert env == environ
+    assert env is not environ
 
 
 # --- build_advisor_prompt ---
@@ -342,10 +395,22 @@ def test_write_advisor_inputs_marks_empty_strategy_and_log(tmp_path):
 
 
 def test_advisor_rejects_notes_dir_outside_workdir(tmp_path):
-    with pytest.raises(ValueError):
+    workdir = tmp_path / "ch04_techniques"
+    with pytest.raises(ValueError, match="notes_dir must be under workdir"):
         ClaudeCodeHeadlessAdvisor(
-            tmp_path / "ch04_techniques",
+            workdir,
             tmp_path / "elsewhere",
+            workdir / "runs",
+            "zelda",
+        )
+
+
+def test_advisor_rejects_runs_dir_outside_workdir(tmp_path):
+    workdir = tmp_path / "ch04_techniques"
+    with pytest.raises(ValueError, match="runs_dir must be under workdir"):
+        ClaudeCodeHeadlessAdvisor(
+            workdir,
+            workdir / "game_notes" / "zelda",
             tmp_path / "runs",
             "zelda",
         )
@@ -373,6 +438,8 @@ def test_request_update_starts_claude_in_workdir_and_waits_with_timeout(tmp_path
     cmd, kwargs = start_process.calls[0]
     assert kwargs == {
         "cwd": tmp_path / "ch04_techniques",
+        # hidden_env_names を渡さなければ、環境変数をすべて渡す
+        "env": dict(os.environ),
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -389,6 +456,23 @@ def test_request_update_passes_given_timeout(tmp_path):
     advisor, start_process, _, _ = make_advisor(tmp_path, timeout_s=42.0)
     advisor.request_update(sample_context())
     assert start_process.processes[0].calls == [("communicate", 42.0)]
+
+
+def test_request_update_hides_api_keys_from_claude(tmp_path, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-not-a-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-a-secret")
+    monkeypatch.setenv("SWITCH2_AGENT_TEST_VARIABLE", "kept")
+    advisor, start_process, _, _ = make_advisor(
+        tmp_path, hidden_env_names=("TYPESAFE_API_KEY", "OPENAI_API_KEY")
+    )
+    advisor.request_update(sample_context())
+    env = start_process.calls[0][1]["env"]
+    assert "TYPESAFE_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["SWITCH2_AGENT_TEST_VARIABLE"] == "kept"
+    assert env == build_child_env(os.environ, ("TYPESAFE_API_KEY", "OPENAI_API_KEY"))
+    # 親のプロセスの環境変数は変えない
+    assert os.environ["TYPESAFE_API_KEY"] == "test-key-not-a-secret"
 
 
 def test_request_update_writes_inputs_in_numbered_run_dir(tmp_path):
@@ -473,6 +557,44 @@ def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path)
     ]
     assert TERMINATE_GRACE_S == 5.0
     assert read_result(runs_dir)["timed_out"] is True
+    assert advisor.is_busy() is False
+
+
+def test_request_update_terminates_claude_when_waiting_fails(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_advisor(tmp_path)
+    start_process.communicate_error = OverflowError("timeout value is too large")
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("communicate", 300.0),
+        "terminate",
+        ("communicate", TERMINATE_GRACE_S),
+    ]
+    result = read_result(runs_dir)
+    assert result["timed_out"] is False
+    assert result["returncode"] is None
+    assert "timeout value is too large" in result["error"]
+    assert len(recorder.events) == 1
+    assert "timeout value is too large" in recorder.events[0]["error"]
+    assert advisor.process is None
+    assert advisor.is_busy() is False
+
+
+def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
+    tmp_path,
+):
+    advisor, start_process, _, runs_dir = make_advisor(tmp_path)
+    start_process.communicate_error = OverflowError("timeout value is too large")
+    start_process.terminate_works = False
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("communicate", 300.0),
+        "terminate",
+        ("communicate", TERMINATE_GRACE_S),
+        "kill",
+        ("communicate", None),
+    ]
+    assert "timeout value is too large" in read_result(runs_dir)["error"]
+    assert advisor.process is None
     assert advisor.is_busy() is False
 
 

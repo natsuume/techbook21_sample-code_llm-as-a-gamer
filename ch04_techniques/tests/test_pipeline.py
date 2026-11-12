@@ -493,6 +493,39 @@ def test_run_resets_error_count_after_success():
     assert env.output.events.count("apply") == 3
 
 
+def test_run_waits_for_next_frame_after_first_request_fails():
+    pipeline, env = make_pipeline()
+    stop = threading.Event()
+    # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の後は、1 秒間隔のフレームが最初の区間 (0.5 秒) に入らない
+    env.model.decide_s = 0.6
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    # 起動 (10.0) から 3 秒 (stale_frame_timeout_s より長く first_frame_timeout_s より短い) フレームが無く、
+    # その後 13.0 から 1 秒間隔でフレームが届く
+    next_frame_time = 13.0
+
+    def sleep_and_receive_frames(seconds: float) -> None:
+        nonlocal next_frame_time
+        env.clock.now += seconds
+        if env.clock.now > 30.0:
+            pytest.fail("pipeline did not stop by 30.0")
+        while next_frame_time <= env.clock.now:
+            env.add_frames(next_frame_time)
+            next_frame_time += 1.0
+
+    def stop_after_two_requests():
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    pipeline.parts.sleep = sleep_and_receive_frames
+    env.model.on_decide = stop_after_two_requests
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 2
+    assert env.events("capture_stopped") == []
+    assert len(env.events("decision_error")) == 1
+    assert len(env.events("decision")) == 1
+
+
 def test_run_continues_after_bridge_reconnecting():
     pipeline, env = make_pipeline()
     stop = threading.Event()

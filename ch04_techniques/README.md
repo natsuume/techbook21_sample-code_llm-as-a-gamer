@@ -83,7 +83,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--model {jev,decisions}` | Decision Model (必須)。`jev` は TypeSafe Jev、`decisions` は OpenAI Decisions API です | なし | `jev`、`decisions` |
 | `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート | 30 | 1〜60 の整数 |
 | `--process-fps N` | 間引いて残すフレームレート | 10 | 1〜`--ffmpeg-fps` の値の整数 |
-| `--history-seconds S` | フレームの履歴を持つ秒数 | 5.0 | 0 より大きい値 |
+| `--history-seconds S` | フレームの履歴を持つ秒数 | 5.0 | 0 より大きい有限の値 |
 | `--image-width N` | 要求に載せる画像の幅。縦横比を保って縮小します | 1280 | 498〜1280 の整数 |
 | `--jpeg-quality N` | 要求に載せる画像の JPEG の品質 | 85 | 1〜100 の整数 |
 | `--threshold-press P` | `press_*` の問いのしきい値 | 0.5 | 0〜1 |
@@ -92,7 +92,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--threshold-advisor P` | `advisor` の問いのしきい値 | 0.5 | 0〜1 |
 | `--valley-ratio R` | 鮮明度が場面の山の何倍まで下がったら場面の切り替わり (谷) とみなすか | 0.5 | 0 と 1 を含まない範囲 |
 | `--similarity-threshold D` | 意味のあるフレームが直前に残したものと似ているとみなす差分 (縮小したグレー画像の画素の差の平均) の上限 | 0.15 | 0〜255 |
-| `--advisor-timeout S` | advisor の 1 回の実行の上限 (秒) | 300 | 0 より大きい値 |
+| `--advisor-timeout S` | advisor の 1 回の実行の上限 (秒) | 300 | 0 より大きい有限の値 |
 | `--max-consecutive-errors N` | Decision Model の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |
 
 範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。しきい値は「確率がこの値を超えたら真」の値で、ちょうど同じ値は偽です。`--image-width` の下限の 498 は、Jev が受け付ける画像の各辺の下限 (280 ピクセル) を 16:9 の高さで満たす幅です。
@@ -117,11 +117,11 @@ advisor (`claude -p`) は、次の指定で実行します。
 ```bash
 claude -p <プロンプト> --output-format json --permission-mode dontAsk \
   --setting-sources project --settings '{"disableAllHooks": true}' \
-  --allowedTools "Read,Edit(/game_notes/<ゲーム>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)" \
+  --allowedTools "Read(/game_notes/<ゲーム>/**),Read(/runs/<YYYYmmdd-HHMMSS>/**),Edit(/game_notes/<ゲーム>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)" \
   --max-turns 30
 ```
 
-書き込みを許すのは `game_notes/<ゲーム>/` の下だけで、Bash は許しません。許していない操作は、確認を求めずに拒否されます (`--permission-mode dontAsk`)。拒否された操作は、ログの `permission_denials` に残ります。
+許可のルールで読み取りを許すのは、`game_notes/<ゲーム>/` と、その実行の `runs/<YYYYmmdd-HHMMSS>/` の下です (ほかに読める範囲は注意事項に書きます)。書き込みを許すのは `game_notes/<ゲーム>/` の下だけで、Bash は許しません。確認が要る操作のうち、許可のルールに無いものは、確認を求めずに拒否されます (`--permission-mode dontAsk`)。拒否された操作は、ログの `permission_denials` に残ります。advisor の `claude` のプロセスには、Decision Model の API キーの環境変数 (`TYPESAFE_API_KEY`・`OPENAI_API_KEY`) を渡しません。
 
 ## ログ
 
@@ -152,5 +152,7 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 - Jev の文脈長は、要求全体で 64k トークン、問い 1 つあたり 32k トークンです。画像 1 枚が何トークンになるかが公開されていないため、画像 10 枚と 43 の問いが収まるかは確かめていません。超えた場合は HTTP 400 (`max_tokens_exceeded`) になり、Decision Model の失敗として扱います
 - 画像の幅の既定値 1280 と JPEG の品質の既定値 85 は、判断の精度と要求の大きさの釣り合いを確かめる前の値です
 - advisor の書き込みの許可 (`Edit(...)` のルール) では、Bash や、advisor が起動したプログラムによる書き込みは止められません。そのため Bash を許していません
+- advisor はゲームの画面の画像を読むため、画面に写った文字で advisor への指示が注入されるおそれがあります。注入された指示に従うと、advisor は読んだファイルの内容をゲームの情報のファイルに書き写せます。ゲームの情報のファイルは、毎回の要求で Decision Model の API に送られます。そのため、許可のルールで読み取りを許すディレクトリーを限り、advisor に API キーを渡していません
+- Claude Code のドキュメントでは、作業ディレクトリー (`ch04_techniques`) の中のファイルの読み取りは、許可のルールが無くても承認されます。そのため advisor は、`ch04_techniques` の中のほかのファイルも読めると考えられます。実際に読める範囲は確かめていません
 - `--setting-sources project` で実行する人のユーザー側の設定を読まないようにしていますが、ユーザーの `~/.claude/CLAUDE.md` が読まれるかは確かめていません。advisor の動作は、実行する人の Claude Code の環境に左右されることがあります
 - 利用によって生じたアカウントの制限、データの損失、機器の故障などの不利益は、利用者の自己責任となります

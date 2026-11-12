@@ -9,7 +9,7 @@ Ctrl+C で止まる。
     --model {jev,decisions}      Decision Model (必須)。jev は TypeSafe Jev、decisions は OpenAI Decisions API
     --ffmpeg-fps N               ffmpeg の出力のフレームレート (整数 1〜60、既定 30)
     --process-fps N              間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)
-    --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい値、既定 5.0)
+    --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
     --jpeg-quality N             要求に載せる画像の JPEG の品質 (整数 1〜100、既定 85)
     --threshold-press P          押下状態の問いのしきい値 (0〜1、既定 0.5)
@@ -18,7 +18,7 @@ Ctrl+C で止まる。
     --threshold-advisor P        advisor の問いのしきい値 (0〜1、既定 0.5)
     --valley-ratio R             鮮明度の谷とみなす比 (0 と 1 を含まない範囲、既定 0.5)
     --similarity-threshold D     意味のあるフレームが似ているとみなす差分の上限 (0〜255、既定 0.15)
-    --advisor-timeout S          advisor の 1 回の実行の上限 (秒。0 より大きい値、既定 300)
+    --advisor-timeout S          advisor の 1 回の実行の上限 (秒。0 より大きい有限の値、既定 300)
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
@@ -27,6 +27,7 @@ Ctrl+C で止まる。
 """
 
 import argparse
+import math
 import os
 import threading
 import time
@@ -141,7 +142,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--history-seconds",
         type=float,
         default=DEFAULT_HISTORY_SECONDS,
-        help="フレームの履歴を持つ秒数 (0 より大きい値)",
+        help="フレームの履歴を持つ秒数 (0 より大きい有限の値)",
     )
     parser.add_argument(
         "--image-width",
@@ -181,7 +182,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--advisor-timeout",
         type=float,
         default=DEFAULT_ADVISOR_TIMEOUT_S,
-        help="advisor の 1 回の実行の上限 (秒。0 より大きい値)",
+        help="advisor の 1 回の実行の上限 (秒。0 より大きい有限の値)",
     )
     parser.add_argument(
         "--max-consecutive-errors",
@@ -198,7 +199,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def range_errors(args: argparse.Namespace) -> list[str]:
     """parse_args の結果の範囲の誤りを、起動引数の名前を含むメッセージのリストにする (誤りが無ければ空)。
 
-    nan は、どの範囲にも入らないものとして扱う。
+    nan は、どの範囲にも入らないものとして扱う。--history-seconds と --advisor-timeout は有限の値に限り、inf も誤りにする。
     """
     errors = []
     if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
@@ -217,8 +218,11 @@ def range_errors(args: argparse.Namespace) -> list[str]:
         if args.process_fps == DEFAULT_PROCESS_FPS:
             message += f". --process-fps defaults to {DEFAULT_PROCESS_FPS}"
         errors.append(message)
-    if not args.history_seconds > 0:
-        errors.append(f"--history-seconds must be more than 0: {args.history_seconds}")
+    if not (math.isfinite(args.history_seconds) and args.history_seconds > 0):
+        errors.append(
+            "--history-seconds must be a finite number more than 0: "
+            f"{args.history_seconds}"
+        )
     if not IMAGE_WIDTH_MIN <= args.image_width <= IMAGE_WIDTH_MAX:
         errors.append(
             f"--image-width must be {IMAGE_WIDTH_MIN}..{IMAGE_WIDTH_MAX}: {args.image_width}"
@@ -245,8 +249,11 @@ def range_errors(args: argparse.Namespace) -> list[str]:
             f"--similarity-threshold must be {SIMILARITY_THRESHOLD_MIN:g}.."
             f"{SIMILARITY_THRESHOLD_MAX:g}: {args.similarity_threshold}"
         )
-    if not args.advisor_timeout > 0:
-        errors.append(f"--advisor-timeout must be more than 0: {args.advisor_timeout}")
+    if not (math.isfinite(args.advisor_timeout) and args.advisor_timeout > 0):
+        errors.append(
+            "--advisor-timeout must be a finite number more than 0: "
+            f"{args.advisor_timeout}"
+        )
     if args.max_consecutive_errors < 1:
         errors.append(
             f"--max-consecutive-errors must be 1 or more: {args.max_consecutive_errors}"
@@ -271,7 +278,9 @@ def main(argv: list[str] | None = None) -> None:
            と保管 (MeaningfulFrameStore)
         5. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
            判定の feed が返したフレームを保管に add する
-        6. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout, log=RunLog.write)
+        6. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
+           hidden_env_names=API_KEY_ENVS の値 (Decision Model の API キーの環境変数。advisor の子プロセスに渡さない),
+           log=RunLog.write)
         7. Decision Model (JevModel / DecisionsApiModel)
         8. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、capture_ended は capture.ended)
@@ -333,6 +342,7 @@ def main(argv: list[str] | None = None) -> None:
             run_dir,
             args.game,
             args.advisor_timeout,
+            hidden_env_names=tuple(API_KEY_ENVS.values()),
             log=run_log.write,
         )
         model: DecisionModel = (

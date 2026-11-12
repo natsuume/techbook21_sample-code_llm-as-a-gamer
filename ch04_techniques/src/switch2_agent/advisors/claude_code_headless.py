@@ -5,8 +5,9 @@ advisor は Skill (record-controls・record-tips・record-progress・record-stra
 実行ごとに runs_dir/advisor-<連番>/ を作り、入力 (画像と context.md) と結果 (result.json) を残す。
 
 子プロセスの寿命: claude は subprocess.Popen で起動し、実行中の子プロセスを持っておく。
-daemon スレッドは親のプロセスの終了とともに消えるため、待ちの上限 (timeout_s) を過ぎたときと close() のときに、
-子プロセスを terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、子プロセスを残さない。
+daemon スレッドは親のプロセスの終了とともに消えるため、待ちの上限 (timeout_s) を過ぎたとき、待つ処理がほかの例外で
+失敗したとき、close() のときに、子プロセスを terminate し、TERMINATE_GRACE_S 秒たっても終わらなければ kill して、
+子プロセスを残さない。
 
 フラグの綴りと許可ルールの書き方は公式ドキュメント (https://code.claude.com/docs/en/headless、
 https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/skills、2026-11-12 に確認) に合わせる。
@@ -14,10 +15,19 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 コマンドの形:
     claude -p <プロンプト> --output-format json --permission-mode dontAsk
         --setting-sources project --settings '{"disableAllHooks": true}'
-        --allowedTools "Read,Edit(/<ゲームの情報のディレクトリー>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)"
+        --allowedTools "Read(/<ゲームの情報のディレクトリー>/**),Read(/<入力を置くディレクトリー>/**),Edit(/<ゲームの情報のディレクトリー>/**),Skill(record-controls),Skill(record-tips),Skill(record-progress),Skill(record-strategy)"
         --max-turns 30
 - dontAsk で、許可ルールに無い操作 (確認が要る操作) を対話なしで拒否させる。Bash は許可しない
   (Edit のルールでは Bash やサブプロセスによる書き込みは止められないため、Bash を許さないことで防ぐ)
+- 読み取りもディレクトリーを限る。許可ルールで読み取りを許すのは、ゲームの情報のディレクトリーと、入力を置く
+  ディレクトリー (runs_dir。実行ごとの advisor-<連番>/ に画像と context.md を置く) だけにする。パスを限らない
+  `Read` のルールはすべての Read に一致し、作業ディレクトリーの外 (ホームディレクトリーの認証情報など) の読み取りも
+  承認してしまう。なお、作業ディレクトリーの中の読み取りは、dontAsk でも許可ルールなしで承認される
+  (https://code.claude.com/docs/en/permission-modes)。
+  advisor はゲームの画面の画像を読むため、画面の文字で指示を注入されると、読んだ内容をゲームの情報のファイルに
+  写すおそれがあり、そのファイルは毎回の要求で Decision Model の API に送られる
+- 子プロセスには Decision Model の API キーを渡さない。環境変数から hidden_env_names の名前の変数を除いて渡す
+  (build_child_env)。ほかの変数は claude 自身の認証や HOME・PATH に使われるため、すべて残す
 - `/path` の形のルールは、CLI のフラグで渡すと primary working directory (cwd) が基準になる。
   cwd は workdir (ch04_techniques のルート) にする (.claude/settings.json と .claude/skills は cwd から読まれるため)
 - `Write(...)` のルールはパスと照合されないため、書き込みの許可は Edit のルールで渡す
@@ -35,10 +45,11 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 
 from switch2_remote.error_message import describe_error
@@ -164,15 +175,19 @@ def build_advisor_prompt(context_path: Path, notes_dir: Path, game: str) -> str:
 {SAFETY_RULES}"""
 
 
-def build_allowed_tools(notes_dir_relative: str) -> list[str]:
+def build_allowed_tools(notes_dir_relative: str, runs_dir_relative: str) -> list[str]:
     """--allowedTools に渡す許可ルールの一覧を返す。
 
-    [`Read`, `Edit(/<notes_dir_relative>/**)`, `Skill(record-controls)`, `Skill(record-tips)`,
-    `Skill(record-progress)`, `Skill(record-strategy)`] の順。notes_dir_relative は workdir からの
-    相対パス (例: game_notes/zelda)。書き込みの許可は notes_dir_relative の配下の Edit だけで、Bash は含めない。
+    [`Read(/<notes_dir_relative>/**)`, `Read(/<runs_dir_relative>/**)`, `Edit(/<notes_dir_relative>/**)`,
+    `Skill(record-controls)`, `Skill(record-tips)`, `Skill(record-progress)`, `Skill(record-strategy)`] の順。
+    notes_dir_relative (ゲームの情報のディレクトリー) と runs_dir_relative (入力を置くディレクトリー) は
+    workdir からの相対パス (例: game_notes/zelda、runs/20261112-120000)。
+    読み取りの許可はこの 2 つのディレクトリーの配下だけで、パスを限らない `Read` は含めない。
+    書き込みの許可は notes_dir_relative の配下の Edit だけで、Bash は含めない。
     """
     return [
-        "Read",
+        f"Read(/{notes_dir_relative}/**)",
+        f"Read(/{runs_dir_relative}/**)",
         f"Edit(/{notes_dir_relative}/**)",
         *(f"Skill({name})" for name in ADVISOR_SKILLS),
     ]
@@ -181,6 +196,7 @@ def build_allowed_tools(notes_dir_relative: str) -> list[str]:
 def build_claude_command(
     prompt: str,
     notes_dir_relative: str,
+    runs_dir_relative: str,
     max_turns: int = DEFAULT_MAX_TURNS,
     executable: str = CLAUDE_EXECUTABLE,
 ) -> list[str]:
@@ -188,7 +204,7 @@ def build_claude_command(
 
     [executable, "-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk",
      "--setting-sources", "project", "--settings", DISABLE_HOOKS_SETTINGS,
-     "--allowedTools", <build_allowed_tools(notes_dir_relative) をカンマでつないだ 1 つの文字列>,
+     "--allowedTools", <build_allowed_tools(notes_dir_relative, runs_dir_relative) をカンマでつないだ 1 つの文字列>,
      "--max-turns", str(max_turns)]
     --bare は付けない。
     """
@@ -205,7 +221,7 @@ def build_claude_command(
         "--settings",
         DISABLE_HOOKS_SETTINGS,
         "--allowedTools",
-        ",".join(build_allowed_tools(notes_dir_relative)),
+        ",".join(build_allowed_tools(notes_dir_relative, runs_dir_relative)),
         "--max-turns",
         str(max_turns),
     ]
@@ -261,6 +277,17 @@ def build_log_event(run_dir: Path, record: dict) -> dict:
     }
 
 
+def build_child_env(
+    environ: Mapping[str, str], hidden_names: Collection[str]
+) -> dict[str, str]:
+    """子プロセスに渡す環境変数の辞書を返す (純粋な関数)。
+
+    environ から hidden_names にある名前の変数を除いた新しい辞書を返す (environ は変えない)。
+    ほかの変数は claude 自身の認証や HOME・PATH に使われるため、すべて残す。
+    """
+    return {name: value for name, value in environ.items() if name not in hidden_names}
+
+
 def start_daemon_thread(job: Callable[[], None]) -> None:
     """job を daemon スレッドで起動し、終わるのを待たずに戻る。"""
     threading.Thread(target=job, daemon=True).start()
@@ -284,9 +311,10 @@ class ClaudeCodeHeadlessAdvisor:
 
     workdir        claude -p の cwd (ch04_techniques のルート。.claude/skills がある)
     notes_dir      ゲームの情報のディレクトリー (workdir の配下。game_notes.game_notes_dir の結果)
-    runs_dir       実行ごとのディレクトリー advisor-<連番>/ を作る場所
+    runs_dir       実行ごとのディレクトリー advisor-<連番>/ を作る場所 (workdir の配下)
     game           ゲーム名
     timeout_s      1 回の実行の上限 (秒)。communicate の timeout に渡す
+    hidden_env_names  子プロセスに渡さない環境変数の名前 (run では Decision Model の API キーの環境変数)
     start_process  子プロセスを起動する関数 (subprocess.Popen と同じ引数を受け取り、Popen を返す)。テストでは偽物を渡す
     log            実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
     start_thread   実行の本体 (引数なしの関数) を受け取って裏で起動する関数。既定では daemon スレッドで起動して待たない
@@ -308,6 +336,7 @@ class ClaudeCodeHeadlessAdvisor:
         runs_dir: Path,
         game: str,
         timeout_s: float = DEFAULT_ADVISOR_TIMEOUT_S,
+        hidden_env_names: Collection[str] = (),
         start_process: Callable[..., subprocess.Popen] = subprocess.Popen,
         log: Callable[[dict], None] | None = None,
         start_thread: Callable[[Callable[[], None]], None] = start_daemon_thread,
@@ -315,16 +344,21 @@ class ClaudeCodeHeadlessAdvisor:
     ):
         """属性を入れ、busy を False、run_count を 0 にする。
 
-        notes_dir が workdir の配下でなければ ValueError にする (許可ルールを workdir からの相対パスで書くため)。
+        notes_dir か runs_dir が workdir の配下でなければ ValueError にする
+        (許可ルールを workdir からの相対パスで書くため)。
         """
         if not notes_dir.is_relative_to(workdir):
             raise ValueError(f"notes_dir must be under workdir: {notes_dir}")
+        if not runs_dir.is_relative_to(workdir):
+            raise ValueError(f"runs_dir must be under workdir: {runs_dir}")
         self.workdir = workdir
         self.notes_dir = notes_dir
         self.notes_dir_relative = notes_dir.relative_to(workdir).as_posix()
         self.runs_dir = runs_dir
+        self.runs_dir_relative = runs_dir.relative_to(workdir).as_posix()
         self.game = game
         self.timeout_s = timeout_s
+        self.hidden_env_names = hidden_env_names
         self.start_process = start_process
         self.log = log
         self.start_thread = start_thread
@@ -343,10 +377,12 @@ class ClaudeCodeHeadlessAdvisor:
 
         実行の本体 (裏のスレッド) は次を行う:
             1. run_dir = runs_dir / advisor_run_dir_name(連番) を作り、write_advisor_inputs で入力を書く
-            2. build_advisor_prompt と build_claude_command (notes_dir の workdir からの相対パス) でコマンドを作り、
-               start_process(cmd, cwd=workdir, stdin=DEVNULL, stdout=PIPE, stderr=PIPE, text=True,
-               encoding="utf-8", errors="replace") で起動して、communicate(timeout=timeout_s) で終わるのを待つ。
+            2. build_advisor_prompt と build_claude_command (notes_dir と runs_dir の workdir からの相対パス) で
+               コマンドを作り、start_process(cmd, cwd=workdir, env=build_child_env(os.environ, hidden_env_names),
+               stdin=DEVNULL, stdout=PIPE, stderr=PIPE, text=True, encoding="utf-8", errors="replace") で起動して、
+               communicate(timeout=timeout_s) で終わるのを待つ。
                タイムアウトしたら stop_process で terminate → TERMINATE_GRACE_S 秒 → kill する。
+               communicate がほかの例外 (Exception) を出したら、同じく stop_process で止めてから、その例外を 3・4 で記録する。
                close() の後なら子プロセスを起動しない
             3. run_dir / RESULT_FILE_NAME (result.json) に次の辞書 (build_result_record) を JSON (UTF-8) で書く:
                  returncode           終了コード。タイムアウトと例外では None
@@ -421,7 +457,9 @@ class ClaudeCodeHeadlessAdvisor:
         try:
             context_path = write_advisor_inputs(run_dir, context)
             prompt = build_advisor_prompt(context_path, self.notes_dir, self.game)
-            cmd = build_claude_command(prompt, self.notes_dir_relative)
+            cmd = build_claude_command(
+                prompt, self.notes_dir_relative, self.runs_dir_relative
+            )
             stdout, stderr = self._run_process(cmd, outcome)
         # claude を起動できない (FileNotFoundError) など、失敗の型を問わず記録して次の要求を受け付ける
         except Exception as e:
@@ -448,7 +486,11 @@ class ClaudeCodeHeadlessAdvisor:
     def _run_process(
         self, cmd: list[str], outcome: dict
     ) -> tuple[str | None, str | None]:
-        """cmd を子プロセスで実行し、(標準出力, 標準エラー出力) を返す。outcome に returncode・timed_out・error を入れる。"""
+        """cmd を子プロセスで実行し、(標準出力, 標準エラー出力) を返す。outcome に returncode・timed_out・error を入れる。
+
+        communicate がタイムアウト以外の例外 (Exception) を出したら、stop_process で子プロセスを止めてから、
+        その例外をそのまま出す。
+        """
         with self.lock:
             if self.closed:
                 outcome["error"] = "stopped by close"
@@ -457,6 +499,7 @@ class ClaudeCodeHeadlessAdvisor:
             process = self.start_process(
                 cmd,
                 cwd=self.workdir,
+                env=build_child_env(os.environ, self.hidden_env_names),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -472,6 +515,10 @@ class ClaudeCodeHeadlessAdvisor:
                 outcome["timed_out"] = True
                 outcome["error"] = f"timed out after {self.timeout_s} seconds"
                 return stop_process(process)
+            except Exception:
+                # 待つ処理の失敗で子プロセスを残さないよう、止めてから出し直す
+                stop_process(process)
+                raise
             outcome["returncode"] = process.returncode
             with self.lock:
                 if self.closed:

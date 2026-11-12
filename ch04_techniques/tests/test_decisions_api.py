@@ -207,6 +207,13 @@ def test_parse_rejects_malformed_body(body):
         parse_decisions_response(body, ["press_A"])
 
 
+@pytest.mark.parametrize("name", [["press_A"], {"name": "press_A"}, 1])
+def test_parse_rejects_answer_with_non_string_name(name):
+    answers = [*ALL_ANSWERS, {"type": "predicate", "name": name, "probability": 0.5}]
+    with pytest.raises(DecisionModelError, match="name that is not a string"):
+        parse_decisions_response(decision_body(answers), NAMES)
+
+
 # --- HTTP ---
 
 

@@ -91,8 +91,9 @@ def parse_decisions_response(
     body["answers"] の各 answer を name で照合する (answers の並びには頼らない)。
     - type が "predicate" の answer は probability を確率にする (base.read_probability で検証する)
     - type が "refusal" の answer は確率 0.0 とし、refusals に数える
-    names のうち answer が無い問い、answers がリストでない応答、answer が object でないか type が
-    predicate / refusal 以外のものは DecisionModelError にする。names に無い name の answer は無視する。
+    names のうち answer が無い問い、answers がリストでない応答、answer が object でないもの、name が文字列でない
+    (name が無いものを含む) か type が predicate / refusal 以外の answer は DecisionModelError にする。
+    names に無い name の answer は無視する。
     """
     answers = body.get("answers")
     if not isinstance(answers, list):
@@ -104,6 +105,10 @@ def parse_decisions_response(
         if not isinstance(answer, dict):
             raise DecisionModelError(f"decisions answer is not an object: {answer!r}")
         name = answer.get("name")
+        if not isinstance(name, str):
+            raise DecisionModelError(
+                f"decisions answer has a name that is not a string: {name!r}"
+            )
         answer_type = answer.get("type")
         if answer_type not in ("predicate", "refusal"):
             raise DecisionModelError(

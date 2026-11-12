@@ -125,7 +125,8 @@ class Pipeline:
         previous_sent_at         前回の要求の送信時刻。まだ送っていなければ None
         last_sent_frame_time     前回の要求に載せた最新のフレームの time。まだ送っていなければ None
         last_advisor_at          操作の記録の起点 (advisor が受け付けた要求の received_at。最初は started_at)
-        no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。新しいフレームで要求を送れたら None に戻す
+        no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。直近の区間に新しいフレームがあると
+                                 分かったら、要求を送る前に None に戻す (要求の成否によらない)
         consecutive_errors       Decision Model の連続の失敗の回数。model.decide が成功したら 0 に戻す
     """
 
@@ -160,7 +161,9 @@ class Pipeline:
         2. history.latest() が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
            このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る
         3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now) で選ぶ。
-           直近の区間 (recent) が空なら、2 と同じく要求を送らず「新しいフレームが無いときの扱い」をして戻る
+           直近の区間 (recent) が空なら、2 と同じく要求を送らず「新しいフレームが無いときの扱い」をして戻る。
+           空でなければ、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
+           それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
         4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode)
         5. request_sent = True、sent_at = now、decision = model.decide(request)、received_at = clock()。
            成功したら consecutive_errors = 0
@@ -171,8 +174,8 @@ class Pipeline:
            operation_log.format_since(last_advisor_at, received_at)、action.advisor_probability、
            time.strftime("%H:%M:%S") の壁時計の時刻からなる。
            受け付けられたら (True)、last_advisor_at = received_at (次の操作の記録の起点)
-        9. previous_sent_at = sent_at、last_sent_frame_time = 載せた直近の区間の最新のフレームの time、
-           no_new_frame_since = None。log に次の辞書を渡す:
+        9. previous_sent_at = sent_at、last_sent_frame_time = 載せた直近の区間の最新のフレームの time。
+           log に次の辞書を渡す:
              {"event": "decision", "select_s": 3 の時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
               (HTTP を含む), "apply_s": output.apply の時間, "images": 画像の枚数,
               "payload_bytes": 画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
@@ -206,6 +209,7 @@ class Pipeline:
         if not frames.recent:
             self._wait_for_new_frame()
             return
+        self.no_new_frame_since = None
         selected_at = parts.clock()
 
         notes = parts.read_notes()
@@ -250,7 +254,6 @@ class Pipeline:
 
         self.previous_sent_at = sent_at
         self.last_sent_frame_time = max(frame.time for frame in frames.recent)
-        self.no_new_frame_since = None
         parts.log(
             {
                 "event": "decision",
