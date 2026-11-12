@@ -63,6 +63,29 @@ def make_output(now: float = 0.0):
     return output, sender, clock
 
 
+SEND_S = 0.2  # 遅いブリッジで、1 回の送信 (ack が返るまで) にかかる時間 (秒)
+
+
+class SlowSender(FakeSender):
+    """送信に SEND_S 秒かかるブリッジの代わり。set_report の中で偽の時計を進めてから、FakeSender と同じく扱う。"""
+
+    def __init__(self, clock: FakeClock):
+        super().__init__()
+        self.clock = clock
+
+    def set_report(self, report: bytes) -> str:
+        self.clock.now += SEND_S
+        return super().set_report(report)
+
+
+def make_slow_output():
+    """送信に SEND_S 秒かかる、タイマースレッドを起動しない PadOutput と、偽の sender・clock を返す。"""
+    clock = FakeClock(0.0)
+    sender = SlowSender(clock)
+    output = PadOutput(sender, clock=clock, start_timer=False)
+    return output, sender, clock
+
+
 def test_constants_match_chapter2_tap():
     assert TAP_PRESS_S == 0.12
     assert TAP_RELEASE_GAP_S == 0.1
@@ -261,6 +284,92 @@ def test_tap_is_not_started_while_opposite_direction_is_pending():
     clock.now = output.pending_taps["UP"]
     output.start_due_taps()
     assert sender.reports[-1] == report("UP")
+
+
+# --- 送信に時間がかかるとき ---
+
+
+def test_tap_from_apply_is_released_press_time_after_send_returns():
+    output, sender, clock = make_slow_output()
+    output.apply(action(taps={"A"}))
+    sent_at = clock.now
+    assert sent_at == pytest.approx(SEND_S)
+    assert output.tapping == pytest.approx({"A": sent_at + TAP_PRESS_S})
+    # 送信前の時刻 (0.0) + TAP_PRESS_S はもう過ぎているが、送信が戻ってから TAP_PRESS_S たつまでは離さない
+    output.release_due_taps()
+    assert sender.reports == [report("A")]
+    clock.now = output.tapping["A"]
+    output.release_due_taps()
+    assert sender.reports == [report("A"), NEUTRAL_REPORT]
+
+
+def test_tap_from_start_due_taps_is_released_press_time_after_send_returns():
+    output, sender, clock = make_slow_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    clock.now = output.pending_taps["A"]
+    output.start_due_taps()
+    sent_at = clock.now
+    assert output.tapping == pytest.approx({"A": sent_at + TAP_PRESS_S})
+    output.release_due_taps()
+    assert sender.reports[-1] == report("A")
+
+
+def test_release_due_taps_records_release_time_after_send_returns():
+    output, _, clock = make_slow_output()
+    output.apply(action(taps={"A"}))
+    clock.now = output.tapping["A"]
+    output.release_due_taps()
+    assert output.last_released == pytest.approx({"A": clock.now})
+
+
+def test_times_for_button_released_from_held_are_from_send_return():
+    output, _, clock = make_slow_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    sent_at = clock.now
+    assert output.last_released == pytest.approx({"A": sent_at})
+    assert output.pending_taps == pytest.approx({"A": sent_at + TAP_RELEASE_GAP_S})
+
+
+def test_apply_keeps_release_time_of_tap_started_before():
+    output, _, clock = make_slow_output()
+    output.apply(action(taps={"A"}))
+    release_at = output.tapping["A"]
+    # 後の apply は、その apply で始めた短押しの時刻だけを置き直す
+    output.apply(action(taps={"A", "B"}))
+    assert output.tapping == pytest.approx(
+        {"A": release_at, "B": clock.now + TAP_PRESS_S}
+    )
+
+
+def test_apply_keeps_times_before_send_when_send_fails():
+    output, sender, clock = make_slow_output()
+    output.apply(action(held=pad("A")))
+    before_send = clock.now
+    sender.fail_with = RuntimeError("bridge failed")
+    with pytest.raises(RuntimeError, match="bridge failed"):
+        output.apply(action(taps={"A", "B"}))
+    assert output.last_released == pytest.approx({"A": before_send})
+    assert output.pending_taps == pytest.approx({"A": before_send + TAP_RELEASE_GAP_S})
+    assert output.tapping == pytest.approx({"B": before_send + TAP_PRESS_S})
+
+
+def test_timer_sends_keep_times_before_send_when_send_fails():
+    output, sender, clock = make_slow_output()
+    output.apply(action(held=pad("A")))
+    output.apply(action(taps={"A"}))
+    sender.fail_with = RuntimeError("bridge failed")
+    clock.now = output.pending_taps["A"]
+    before_start = clock.now
+    output.start_due_taps()
+    assert output.tapping == pytest.approx({"A": before_start + TAP_PRESS_S})
+    assert output.last_error is not None
+    assert "bridge failed" in output.last_error
+    clock.now = output.tapping["A"]
+    before_release = clock.now
+    output.release_due_taps()
+    assert output.last_released == pytest.approx({"A": before_release})
 
 
 def test_released_direction_does_not_wait_while_opposite_direction_is_tapped():

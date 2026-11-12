@@ -7,6 +7,7 @@ advisor (headless の Claude Code) を持つ。映像の受け取りと入力の
     image_metrics          画像の縮小・鮮明度・差分・JPEG への変換 (純粋な関数)
     frame_history          時刻つきのフレームの履歴
     capture_with_history   第2章の Capture に、フレームの履歴と鮮明度の計算を足したもの
+    capture_watcher        キャプチャーが止まったことを別のスレッドで見張り、押下状態を中立に戻す
     frame_selection        要求に載せるフレームの選び方 (等間隔の選択、意味のあるフレームの判定と保管)
     questions              Decision Model に送る問いの一覧
     safety                 Decision Model と advisor に毎回入れる安全のための規則

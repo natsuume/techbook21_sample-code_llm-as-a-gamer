@@ -1,9 +1,11 @@
 """押下状態 (held) と短押し (tapping) を合わせたレポートを、ブリッジ (BridgeSupervisor) に送る。
 
 第2章の Controller の tap / hold の層は使わず、判断のたびに押下状態をまるごと置き換える。
-短押しは押してから TAP_PRESS_S 秒後に、タイマースレッドが離す。
-押したままから外したボタンを同じ判断で短押しにするときは、すぐには押さず、離したレポートを送ってから
+短押しは、押すレポートの送信が戻ってから TAP_PRESS_S 秒後に、タイマースレッドが離す。
+押したままから外したボタンを同じ判断で短押しにするときは、すぐには押さず、離したレポートの送信が戻ってから
 TAP_RELEASE_GAP_S 秒後にタイマースレッドが短押しを始める (押したまま続くと、ゲームから見て新しい押下にならないため)。
+時刻を送信が戻った後から測るのは、送信 (ブリッジの ack まで) に時間がかかっても、届いてからの時間を保つため
+(第2章の Controller.tap も、押すレポートの送信が戻ってから待つ)。送信が失敗したら、送信前の時刻の値のままにする。
 
 押下状態の 2 層:
     held      apply で置き換える、押したままの状態 (ボタンとスティック)
@@ -64,10 +66,12 @@ class PadOutput:
         clock             現在時刻 (秒) を返す関数。短押しの離す時刻と間隔の判定に使う
         lock              状態の変更と送信を守るロック
         held              押したままの状態 (apply で置き換える)
-        tapping           短押しの最中のボタン → 離す時刻 (clock の値)
-        pending_taps      始める時刻を待っている短押しのボタン → 始める時刻 (clock の値)。
-                          押したままから外したボタンを、同じ判断で短押しにするときに使う
-        last_released     ボタン → 前回離した時刻 (clock の値)。短押しを離した時刻と、押したままから外した時刻
+        tapping           短押しの最中のボタン → 離す時刻 (clock の値。押すレポートの送信が戻った時刻 + TAP_PRESS_S)
+        pending_taps      始める時刻を待っている短押しのボタン → 始める時刻 (clock の値。離すレポートの送信が
+                          戻った時刻 + TAP_RELEASE_GAP_S)。押したままから外したボタンを、同じ判断で短押しにするときに使う
+        last_released     ボタン → 前回離した時刻 (clock の値。離すレポートの送信が戻った時刻)。
+                          短押しを離した時刻と、押したままから外した時刻
+                          (送信が失敗したときは、3 つとも送信前の時刻から計算した値のまま)
         last_error        start_due_taps・release_due_taps・neutral の送信の最後の失敗の説明
                           (switch2_remote.error_message.describe_error)。無ければ None
         stop_timer        close() で立て、タイマースレッドを止める
@@ -115,8 +119,11 @@ class PadOutput:
                - それ以外のボタンは、_can_start_tap の条件をすべて満たせば短押しとして始める
                  (離す時刻 = now + TAP_PRESS_S)
             4. compose_report_state(held, tapping のボタン) の build_report を送る (pending_taps は含めない)
-        短押しの最中のボタンの離す時刻と、待っている短押しの始める時刻は変えない。変化が無くても送る。
-        送信の例外はそのまま呼び出し側に出す (状態は更新したまま)。
+            5. 送信が成功したら、sent_at = clock() (送信が戻った後) として、この apply で始めた短押しの離す時刻を
+               sent_at + TAP_PRESS_S に、この apply で決めた pending_taps の始める時刻を sent_at + TAP_RELEASE_GAP_S に、
+               released の last_released を sent_at に置き直す
+        前の apply から続く短押しの離す時刻と、待っている短押しの始める時刻は変えない。変化が無くても送る。
+        送信の例外はそのまま呼び出し側に出す (状態は更新したまま。時刻は送信前の now から計算した値のまま)。
         """
         with self.lock:
             now = self.clock()
@@ -124,13 +131,24 @@ class PadOutput:
             for button in released:
                 self.last_released[button] = now
             self.held = action.held
+            started: list[str] = []
+            waiting: list[str] = []
             for button in sorted(action.taps):
                 if button in released:
                     if self._can_wait_for_tap(button):
                         self.pending_taps[button] = now + TAP_RELEASE_GAP_S
+                        waiting.append(button)
                 elif self._can_start_tap(button, now):
                     self.tapping[button] = now + TAP_PRESS_S
+                    started.append(button)
             self._send_locked()
+            sent_at = self.clock()
+            for button in started:
+                self.tapping[button] = sent_at + TAP_PRESS_S
+            for button in waiting:
+                self.pending_taps[button] = sent_at + TAP_RELEASE_GAP_S
+            for button in released:
+                self.last_released[button] = sent_at
 
     def start_due_taps(self) -> None:
         """始める時刻を過ぎた (始める時刻 <= clock()) pending_taps を取り出し、始められるものを短押しとして始める。
@@ -140,8 +158,10 @@ class PadOutput:
             - そのときの held のボタンに含まれない
             - 短押しの最中ではない (tapping に無い)
             - 十字キーの方向なら、その反対の方向を短押ししている最中ではない
-        tapping に入れたものがあるときだけ、合成したレポートを送る。
+        tapping に入れたものがあるときだけ、合成したレポートを送る。送信が成功したら、この呼び出しで始めた短押しの
+        離す時刻を、送信が戻った後の clock() + TAP_PRESS_S に置き直す。
         送信の例外 (RuntimeError / OSError) は外に出さず、説明を last_error に記録する (タイマースレッドから呼ぶため)。
+        このとき離す時刻は送信前の値のまま。
         タイマースレッドから TIMER_INTERVAL_S ごとに呼ぶ。テストから直接呼べるよう公開している。
         """
         with self.lock:
@@ -151,20 +171,24 @@ class PadOutput:
                 for button, start_at in self.pending_taps.items()
                 if start_at <= now
             )
-            started = False
+            started: list[str] = []
             for button in due:
                 del self.pending_taps[button]
                 if self._can_start_due_tap(button):
                     self.tapping[button] = now + TAP_PRESS_S
-                    started = True
-            if started:
-                self._send_quietly_locked()
+                    started.append(button)
+            if started and self._send_quietly_locked():
+                sent_at = self.clock()
+                for button in started:
+                    self.tapping[button] = sent_at + TAP_PRESS_S
 
     def release_due_taps(self) -> None:
         """離す時刻を過ぎた (離す時刻 <= clock()) 短押しを tapping から外し、外したときだけ合成したレポートを送る。
 
         外したボタンの last_released に clock() の値を入れる。外すものが無ければ何も送らない。
+        送信が成功したら、外したボタンの last_released を、送信が戻った後の clock() に置き直す。
         送信の例外 (RuntimeError / OSError) は外に出さず、説明を last_error に記録する (タイマースレッドから呼ぶため)。
+        このとき last_released は送信前の値のまま。
         タイマースレッドから TIMER_INTERVAL_S ごとに呼ぶ。テストから直接呼べるよう公開している。
         """
         with self.lock:
@@ -179,7 +203,10 @@ class PadOutput:
             for button in due:
                 del self.tapping[button]
                 self.last_released[button] = now
-            self._send_quietly_locked()
+            if self._send_quietly_locked():
+                sent_at = self.clock()
+                for button in due:
+                    self.last_released[button] = sent_at
 
     def neutral(self) -> None:
         """held・tapping・pending_taps を空にし、中立のレポート (controller_state.NEUTRAL_REPORT) を送る。
@@ -250,12 +277,17 @@ class PadOutput:
         state = compose_report_state(self.held, frozenset(self.tapping))
         self.sender.set_report(build_report(state))
 
-    def _send_quietly_locked(self) -> None:
-        """_send_locked を呼び、送信の失敗 (RuntimeError / OSError) を last_error に記録する。呼び出し側がロックを持つ。"""
+    def _send_quietly_locked(self) -> bool:
+        """_send_locked を呼び、送信できたら True を返す。呼び出し側がロックを持つ。
+
+        送信の失敗 (RuntimeError / OSError) は外に出さず、説明を last_error に記録して False を返す。
+        """
         try:
             self._send_locked()
         except (RuntimeError, OSError) as e:
             self.last_error = describe_error(e)
+            return False
+        return True
 
     def _run_timer(self) -> None:
         """close() まで、TIMER_INTERVAL_S ごとに start_due_taps を呼んでから release_due_taps を呼ぶ (タイマースレッドの本体)。"""

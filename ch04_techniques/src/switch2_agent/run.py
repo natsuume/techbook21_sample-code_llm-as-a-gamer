@@ -1,7 +1,8 @@
 """第4章のエージェント (switch2-agent) を起動する。
 
-1 つのプロセスで、キャプチャー (CaptureWithHistory)、コントローラーのブリッジ (BridgeSupervisor)、
-押下状態の送信 (PadOutput)、advisor (ClaudeCodeHeadlessAdvisor)、Decision Model、判断のループ (Pipeline) を動かす。
+1 つのプロセスで、キャプチャー (CaptureWithHistory) とその見張り (CaptureWatcher)、コントローラーのブリッジ
+(BridgeSupervisor)、押下状態の送信 (PadOutput)、advisor (ClaudeCodeHeadlessAdvisor)、Decision Model、
+判断のループ (Pipeline) を動かす。
 Ctrl+C で止まる。
 
 起動引数:
@@ -43,6 +44,7 @@ from switch2_agent.advisors.claude_code_headless import (
     DEFAULT_ADVISOR_TIMEOUT_S,
     ClaudeCodeHeadlessAdvisor,
 )
+from switch2_agent.capture_watcher import CaptureWatcher
 from switch2_agent.capture_with_history import CaptureWithHistory
 from switch2_agent.decision_models import decisions_api, jev
 from switch2_agent.decision_models.base import DecisionModel
@@ -64,6 +66,7 @@ from switch2_agent.operation_log import OperationLog
 from switch2_agent.pad_output import PadOutput
 from switch2_agent.pipeline import (
     DEFAULT_MAX_CONSECUTIVE_ERRORS,
+    DEFAULT_STALE_FRAME_TIMEOUT_S,
     Pipeline,
     PipelineParts,
 )
@@ -278,17 +281,19 @@ def main(argv: list[str] | None = None) -> None:
            と保管 (MeaningfulFrameStore)
         5. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
            判定の feed が返したフレームを保管に add する
-        6. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
+        6. CaptureWatcher(capture_ended=capture.ended を返す関数, latest_frame_time=history.latest() の time
+           (無ければ None) を返す関数, on_lost=output.neutral, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
+        7. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
            hidden_env_names=API_KEY_ENVS の値 (Decision Model の API キーの環境変数。advisor の子プロセスに渡さない),
            log=RunLog.write)
-        7. Decision Model (JevModel / DecisionsApiModel)
-        8. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
+        8. Decision Model (JevModel / DecisionsApiModel)
+        9. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
-           capture_ended は capture.ended)
+           capture_ended は capture.ended、capture_lost は watcher.lost)
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
-    終了時は、作れた部品だけを output.neutral()、output.close()、advisor.close()、capture.close()、
-    supervisor.close() の順に閉じる。
+    終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、advisor.close()、capture.close()、
+    supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を呼ばないよう、見張りを最初に止める)。
     """
     args = parse_args(argv)
     workdir = Path.cwd()
@@ -319,6 +324,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(str(e)) from None
     output = None
     capture = None
+    watcher = None
     advisor = None
     stop = threading.Event()
     try:
@@ -336,6 +342,18 @@ def main(argv: list[str] | None = None) -> None:
         history = FrameHistory(args.history_seconds)
         capture = CaptureWithHistory(
             args.ffmpeg_fps, args.process_fps, history, keep_meaningful_frame
+        )
+        running_capture = capture
+
+        def latest_frame_time() -> float | None:
+            latest = history.latest()
+            return latest.time if latest is not None else None
+
+        watcher = CaptureWatcher(
+            capture_ended=lambda: running_capture.ended,
+            latest_frame_time=latest_frame_time,
+            on_lost=output.neutral,
+            stale_timeout_s=DEFAULT_STALE_FRAME_TIMEOUT_S,
         )
         advisor = ClaudeCodeHeadlessAdvisor(
             workdir,
@@ -355,7 +373,6 @@ def main(argv: list[str] | None = None) -> None:
                 frame.nv12, DEVICE_HEIGHT, args.image_width, args.jpeg_quality
             )
 
-        running_capture = capture
         pipeline = Pipeline(
             PipelineParts(
                 history=history,
@@ -381,6 +398,7 @@ def main(argv: list[str] | None = None) -> None:
                 capture_ended=lambda: running_capture.ended,
                 bridge_failed=lambda: supervisor.state == "failed",
                 bridge_recovering=lambda: supervisor.state == "recovering",
+                capture_lost=watcher.lost,
             ),
             max_consecutive_errors=args.max_consecutive_errors,
         )
@@ -398,6 +416,8 @@ def main(argv: list[str] | None = None) -> None:
             stop.set()
             run_log.write({"event": "interrupted"})
     finally:
+        if watcher is not None:
+            watcher.close()
         if output is not None:
             output.neutral()
             output.close()

@@ -74,6 +74,22 @@ def recorder(tmp_path, monkeypatch):
         def close(self):
             rec.events.append("capture closed")
 
+    class FakeCaptureWatcher:
+        def __init__(self, capture_ended, latest_frame_time, on_lost, stale_timeout_s):
+            self.capture_ended = capture_ended
+            self.latest_frame_time = latest_frame_time
+            self.on_lost = on_lost
+            self.stale_timeout_s = stale_timeout_s
+            self.lost_reason: str | None = None
+            rec.watcher = self
+            rec.events.append("watcher created")
+
+        def lost(self):
+            return self.lost_reason
+
+        def close(self):
+            rec.events.append("watcher closed")
+
     class FakeAdvisor:
         def __init__(
             self, workdir, notes_dir, runs_dir, game, timeout_s, hidden_env_names, log
@@ -115,6 +131,7 @@ def recorder(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "BridgeSupervisor", FakeSupervisor)
     monkeypatch.setattr(run, "PadOutput", FakePadOutput)
     monkeypatch.setattr(run, "CaptureWithHistory", FakeCapture)
+    monkeypatch.setattr(run, "CaptureWatcher", FakeCaptureWatcher)
     monkeypatch.setattr(run, "ClaudeCodeHeadlessAdvisor", FakeAdvisor)
     monkeypatch.setattr(run, "JevModel", FakeJevModel)
     monkeypatch.setattr(run, "DecisionsApiModel", FakeDecisionsApiModel)
@@ -149,6 +166,7 @@ def test_main_starts_parts_in_order(recorder):
         "supervisor created",
         "output created",
         "capture created",
+        "watcher created",
         "advisor created",
         "FakeJevModel created",
         "pipeline created",
@@ -159,6 +177,7 @@ def test_main_starts_parts_in_order(recorder):
 def test_main_closes_parts_in_order(recorder):
     run.main(REQUIRED)
     assert closed(recorder) == [
+        "watcher closed",
         "output neutral",
         "output closed",
         "advisor closed",
@@ -244,6 +263,31 @@ def test_main_passes_bridge_failed_and_capture_ended(recorder):
     assert parts.capture_ended() is True
 
 
+def test_main_watches_capture_and_neutralizes_on_lost(recorder):
+    run.main(REQUIRED)
+    watcher = recorder.watcher
+    assert watcher.stale_timeout_s == 2.0
+    assert watcher.capture_ended() is False
+    recorder.capture.ended = True
+    assert watcher.capture_ended() is True
+    # 最新のフレームの time を返す (まだ無ければ None)
+    assert watcher.latest_frame_time() is None
+    recorder.capture.history.add(frame(3.5, 0.0, gray=0))
+    assert watcher.latest_frame_time() == 3.5
+    # 止まったと判定したら、押下状態を中立に戻す
+    events_before = len(recorder.events)
+    watcher.on_lost()
+    assert recorder.events[events_before:] == ["output neutral"]
+
+
+def test_main_passes_capture_lost_from_watcher(recorder):
+    run.main(REQUIRED)
+    parts = recorder.pipeline.parts
+    assert parts.capture_lost() is None
+    recorder.watcher.lost_reason = "capture ended"
+    assert parts.capture_lost() == "capture ended"
+
+
 def test_main_passes_bridge_recovering(recorder):
     run.main(REQUIRED)
     parts = recorder.pipeline.parts
@@ -290,6 +334,7 @@ def test_main_closes_parts_and_raises_pipeline_error(recorder):
     with pytest.raises(RuntimeError, match="could not be reconnected"):
         run.main(REQUIRED)
     assert closed(recorder) == [
+        "watcher closed",
         "output neutral",
         "output closed",
         "advisor closed",

@@ -3,11 +3,14 @@
 応答待ちの要求は常に 1 つ。応答を受け取ったら操作を送り、すぐ次の要求に進む。
 コントローラーのブリッジが復旧中 (recovering) の間は要求を送らず、復旧が終わるのを待つ
 (送った操作は届かず、要求のたびに Decision Model の料金がかかるため)。
+Decision Model の応答は同期で待つ。その間にキャプチャーが止まったら、別のスレッドの見張り
+(capture_watcher.CaptureWatcher) が押下状態を中立に戻し、Pipeline は capture_lost でその判定を読んで止まる。
 1 回の要求 (run_once) の流れ:
-    1. キャプチャーが終わっていないか、新しいフレームが届いているかを確かめる
+    1. キャプチャーが終わっていないか (見張りが止まったと判定していないか)、新しいフレームが届いているかを確かめる
     2. 要求に載せるフレームを選ぶ (前回の要求の送信から今までの直近の区間 + それより前の意味のあるフレーム)
     3. ゲームの情報の 4 ファイルの最新の内容を読み、要求を組み立てる
-    4. Decision Model に送り、問いごとの確率から操作を決めて PadOutput に渡す (すぐ戻る)
+    4. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
+       そうでなければ、問いごとの確率から操作を決めて PadOutput に渡す (すぐ戻る)
     5. advisor を呼ぶ答えなら、Advisor.request_update を呼ぶ (すぐ戻る)
 時間はすべて clock の差で測る。
 """
@@ -94,6 +97,8 @@ class PipelineParts:
                      (run では lambda: supervisor.state == "failed")
     bridge_recovering  コントローラーのブリッジが復旧中 (recovering) なら True を返す関数
                        (run では lambda: supervisor.state == "recovering")
+    capture_lost     キャプチャーが止まったと見張り (capture_watcher.CaptureWatcher) が判定していれば、その理由を
+                     返す関数。まだなら None (run では watcher.lost)
     """
 
     history: FrameHistory
@@ -114,6 +119,7 @@ class PipelineParts:
     capture_ended: Callable[[], bool]
     bridge_failed: Callable[[], bool]
     bridge_recovering: Callable[[], bool]
+    capture_lost: Callable[[], str | None]
 
 
 class Pipeline:
@@ -166,7 +172,8 @@ class Pipeline:
     def run_once(self) -> None:
         """1 回の要求と応答を行う。
 
-        1. capture_ended() が真なら、output.neutral() して CaptureStoppedError を出す
+        1. capture_ended() が真なら、output.neutral() して CaptureStoppedError("capture ended") を出す。
+           続けて reason = capture_lost() が None でなければ、output.neutral() して CaptureStoppedError(reason) を出す
         2. history.latest() が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
            このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る
         3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now) で選ぶ。
@@ -175,7 +182,10 @@ class Pipeline:
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
         4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode)
         5. request_sent = True、sent_at = now、decision = model.decide(request)、received_at = clock()。
-           成功したら consecutive_errors = 0
+           成功したら consecutive_errors = 0。続けて、応答を待つ間にキャプチャーが止まっていないかを確かめる:
+           reason = capture_lost() とし、None で capture_ended() が真なら reason = "capture ended"。
+           reason があれば応答を捨て (操作を反映せず、operation_log にも log の decision にも残さない)、
+           output.neutral() して CaptureStoppedError(reason) を出す
         6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
         8. action.advisor_requested なら AdvisorContext を作って advisor.request_update を呼ぶ。
@@ -203,6 +213,10 @@ class Pipeline:
         if parts.capture_ended():
             parts.output.neutral()
             raise CaptureStoppedError("capture ended")
+        lost_reason = parts.capture_lost()
+        if lost_reason is not None:
+            parts.output.neutral()
+            raise CaptureStoppedError(lost_reason)
         latest = parts.history.latest()
         if latest is None or (
             self.last_sent_frame_time is not None
@@ -232,6 +246,13 @@ class Pipeline:
         decision = parts.model.decide(request)
         received_at = parts.clock()
         self.consecutive_errors = 0
+        # 応答を待つ間にキャプチャーが止まっていたら、古い画面への応答なので操作を反映しない
+        lost_reason = parts.capture_lost()
+        if lost_reason is None and parts.capture_ended():
+            lost_reason = "capture ended"
+        if lost_reason is not None:
+            parts.output.neutral()
+            raise CaptureStoppedError(lost_reason)
 
         action = decide_action(
             decision.probabilities, parts.questions, parts.thresholds
@@ -283,9 +304,10 @@ class Pipeline:
     def run(self, stop: threading.Event) -> None:
         """stop が立つまで run_once を繰り返す。
 
-        各回の始めに、bridge_recovering() が真なら、run_once を呼ばずに _wait_for_bridge_recovery(stop) で
-        復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を送らない)。送信の失敗で復旧が
-        始まった場合も、次の回の始めの確認で待つ。run_once の例外は次のように扱う:
+        各回の始めに、bridge_recovering() が真で capture_lost() が None なら、run_once を呼ばずに
+        _wait_for_bridge_recovery(stop) で復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を
+        送らない)。送信の失敗で復旧が始まった場合も、次の回の始めの確認で待つ。capture_lost() が理由を返すときは、
+        復旧中でも待たずに run_once を呼び、その始めの確認で止まる。run_once の例外は次のように扱う:
         - DecisionModelError: output.neutral() し、log に {"event": "decision_error", "error": <説明>} を渡し、
           consecutive_errors を 1 増やし、sleep(error_backoff_s) する。consecutive_errors が
           max_consecutive_errors に達したら RuntimeError (DecisionModelError ではない) で止まる
@@ -303,7 +325,7 @@ class Pipeline:
         parts = self.parts
         while not stop.is_set():
             try:
-                if parts.bridge_recovering():
+                if parts.bridge_recovering() and parts.capture_lost() is None:
                     self._wait_for_bridge_recovery(stop)
                     continue
                 self.run_once()
@@ -338,17 +360,23 @@ class Pipeline:
         """コントローラーのブリッジの復旧が終わるのを、要求を送らずに待つ。
 
         1. output.neutral() を 1 回呼び、log に {"event": "bridge_wait"} を渡す
-        2. stop が立つか bridge_recovering() が偽になるまで、sleep(bridge_wait_s) を繰り返す
+        2. stop が立つか、bridge_recovering() が偽になるか、capture_lost() が理由を返すまで、
+           sleep(bridge_wait_s) を繰り返す
         3. log に {"event": "bridge_wait_end", "waited_s": <1 の時点からの clock の差>} を渡す
         4. bridge_failed() が真なら、log に {"event": "pipeline_error", "error": <説明>} を渡し、
            RuntimeError("controller bridge failed while waiting for recovery") を出す
-        5. そうでなければ戻る (stop が立って抜けたときは、run の while の条件で run が終わる)
+        5. そうでなければ戻る (stop が立って抜けたときは、run の while の条件で run が終わる。
+           キャプチャーが止まって抜けたときは、次の回の run_once の始めの確認で止まる)
         """
         parts = self.parts
         started = parts.clock()
         parts.output.neutral()
         parts.log({"event": "bridge_wait"})
-        while not stop.is_set() and parts.bridge_recovering():
+        while (
+            not stop.is_set()
+            and parts.bridge_recovering()
+            and parts.capture_lost() is None
+        ):
             parts.sleep(self.bridge_wait_s)
         parts.log({"event": "bridge_wait_end", "waited_s": parts.clock() - started})
         if parts.bridge_failed():

@@ -142,6 +142,7 @@ class Env:
         self.capture_ended = False
         self.bridge_failed = False
         self.bridge_recovering = False
+        self.capture_lost: str | None = None
 
     def add_frames(self, *times: float) -> None:
         for t in times:
@@ -173,6 +174,7 @@ def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
         capture_ended=lambda: env.capture_ended,
         bridge_failed=lambda: env.bridge_failed,
         bridge_recovering=lambda: env.bridge_recovering,
+        capture_lost=lambda: env.capture_lost,
     )
     return Pipeline(parts, **kwargs), env
 
@@ -680,6 +682,107 @@ def test_run_ends_when_stop_is_set_while_waiting_for_recovery():
     assert env.model.requests == []
     assert env.sleeps == [pytest.approx(0.1)] * 3
     assert len(env.events("bridge_wait_end")) == 1
+
+
+# --- 見張りが判定したキャプチャーの停止 ---
+
+
+def sleep_failing_the_test(env: Env) -> Callable[[float], None]:
+    """呼ばれたらテストを失敗させる sleep を返す (止まるべき Pipeline が、止まらずに待とうとしたとき)。"""
+
+    def sleep(seconds: float) -> None:
+        pytest.fail(
+            f"pipeline slept {seconds} seconds instead of stopping "
+            f"(applied {len(env.output.applied)} actions)"
+        )
+
+    return sleep
+
+
+def test_run_discards_decision_when_capture_is_lost_while_waiting_for_it():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(press_A=0.9, advisor=0.9)]
+
+    def lose_capture():
+        env.capture_lost = "no new frame for 2.0 seconds"
+
+    env.model.on_decide = lose_capture
+    pipeline.parts.sleep = sleep_failing_the_test(env)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run(threading.Event())
+    # 応答は捨て、操作を送らず、記録にも残さずに、中立に戻して止まる
+    assert len(env.model.requests) == 1
+    assert env.output.applied == []
+    assert env.output.events == ["neutral"]
+    assert env.operation_log.since(0.0) == []
+    assert env.advisor.contexts == []
+    assert env.events("decision") == []
+    assert env.events("capture_stopped") == [
+        {"event": "capture_stopped", "error": "no new frame for 2.0 seconds"}
+    ]
+
+
+def test_run_discards_decision_when_capture_ends_while_waiting_for_it():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(press_A=0.9)]
+
+    def end_capture():
+        env.capture_ended = True
+
+    env.model.on_decide = end_capture
+    pipeline.parts.sleep = sleep_failing_the_test(env)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="capture ended"):
+        pipeline.run(threading.Event())
+    assert len(env.model.requests) == 1
+    assert env.output.applied == []
+    assert env.output.events == ["neutral"]
+    assert env.operation_log.since(0.0) == []
+    assert env.events("decision") == []
+    assert env.events("capture_stopped") == [
+        {"event": "capture_stopped", "error": "capture ended"}
+    ]
+
+
+def test_run_once_stops_without_request_when_capture_is_lost():
+    pipeline, env = make_pipeline()
+    env.capture_lost = "no new frame for 2.0 seconds"
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run_once()
+    assert env.model.requests == []
+    assert env.output.events == ["neutral"]
+
+
+def test_run_stops_when_capture_is_lost_while_waiting_for_bridge_recovery():
+    pipeline, env = make_pipeline()
+
+    def lose_capture_after_three_waits(count: int) -> None:
+        if count == 3:
+            env.capture_lost = "no new frame for 2.0 seconds"
+
+    def log_with_limit(event: dict) -> None:
+        env.logs.append(event)
+        if len(env.logs) > 50:
+            pytest.fail("pipeline kept logging without stopping")
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, lose_capture_after_three_waits)
+    pipeline.parts.log = log_with_limit
+    # ブリッジは最後まで復旧中のまま
+    env.bridge_recovering = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run(threading.Event())
+    assert env.model.requests == []
+    assert env.sleeps == [pytest.approx(0.1)] * 3
+    assert len(env.events("bridge_wait")) == 1
+    assert len(env.events("bridge_wait_end")) == 1
+    assert len(env.events("capture_stopped")) == 1
 
 
 def test_run_logs_and_raises_capture_stopped():
