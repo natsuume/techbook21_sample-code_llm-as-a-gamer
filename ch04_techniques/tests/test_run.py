@@ -59,6 +59,9 @@ def recorder(tmp_path, monkeypatch):
         def neutral(self):
             rec.events.append("output neutral")
 
+        def stop_output(self):
+            rec.events.append("output stopped")
+
         def close(self):
             rec.events.append("output closed")
 
@@ -274,10 +277,10 @@ def test_main_watches_capture_and_neutralizes_on_lost(recorder):
     assert watcher.latest_frame_time() is None
     recorder.capture.history.add(frame(3.5, 0.0, gray=0))
     assert watcher.latest_frame_time() == 3.5
-    # 止まったと判定したら、押下状態を中立に戻す
+    # 止まったと判定したら、以後の apply を止めて押下状態を中立に戻す
     events_before = len(recorder.events)
     watcher.on_lost()
-    assert recorder.events[events_before:] == ["output neutral"]
+    assert recorder.events[events_before:] == ["output stopped"]
 
 
 def test_main_passes_capture_lost_from_watcher(recorder):

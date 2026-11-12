@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         5. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
            判定の feed が返したフレームを保管に add する
         6. CaptureWatcher(capture_ended=capture.ended を返す関数, latest_frame_time=history.latest() の time
-           (無ければ None) を返す関数, on_lost=output.neutral, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
+           (無ければ None) を返す関数, on_lost=output.stop_output, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
         7. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
            hidden_env_names=API_KEY_ENVS の値 (Decision Model の API キーの環境変数。advisor の子プロセスに渡さない),
            log=RunLog.write)
@@ -352,7 +352,7 @@ def main(argv: list[str] | None = None) -> None:
         watcher = CaptureWatcher(
             capture_ended=lambda: running_capture.ended,
             latest_frame_time=latest_frame_time,
-            on_lost=output.neutral,
+            on_lost=output.stop_output,
             stale_timeout_s=DEFAULT_STALE_FRAME_TIMEOUT_S,
         )
         advisor = ClaudeCodeHeadlessAdvisor(

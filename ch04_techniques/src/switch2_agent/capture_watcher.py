@@ -2,7 +2,7 @@
 
 Pipeline は Decision Model の応答 (model.decide) を同期で待つため、その間はキャプチャーを確かめられない。
 応答を待つ間もキャプチャーが止まったことに気づいて押下状態を中立に戻せるよう、別のスレッドで interval_s ごとに
-確かめ、止まったら on_lost (run では PadOutput.neutral) を呼ぶ。
+確かめ、止まったら on_lost (run では PadOutput.stop_output。以後の apply も送らない) を呼ぶ。
 止まったという判定は取り消さない (Pipeline は capture_lost で判定を読み、次の確認で止まる)。
 判定は純粋な関数 capture_lost_reason に分け、テストはこの関数と、スレッドを起動しない CaptureWatcher で行う。
 """
@@ -42,7 +42,7 @@ class CaptureWatcher:
     属性:
         capture_ended       キャプチャーが終わったら True を返す関数
         latest_frame_time   最新のフレームの time を返す関数。まだフレームが無ければ None
-        on_lost             止まったと判定したときに 1 回だけ呼ぶ関数 (run では PadOutput.neutral)
+        on_lost             止まったと判定したときに 1 回だけ呼ぶ関数 (run では PadOutput.stop_output)
         stale_timeout_s     最新のフレームがこの秒数以上古ければ、止まったとみなす
         clock               現在時刻 (秒) を返す関数 (フレームの time と同じ時計)
         interval_s          スレッドが check_once を呼ぶ間隔 (秒)

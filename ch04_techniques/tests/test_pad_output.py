@@ -445,6 +445,53 @@ def test_neutral_clears_pending_taps():
     assert sender.reports == [report("A"), NEUTRAL_REPORT, NEUTRAL_REPORT]
 
 
+# --- stop_output ---
+
+
+def test_stop_output_clears_state_and_sends_neutral_report():
+    output, sender, _ = make_output()
+    output.apply(action(held=pad("B"), taps={"A"}))
+    output.apply(action(taps={"B"}))
+    output.stop_output()
+    assert output.output_stopped is True
+    assert output.held == PadState()
+    assert output.tapping == {}
+    assert output.pending_taps == {}
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_apply_after_stop_output_sends_nothing():
+    output, sender, clock = make_output()
+    output.apply(action(held=pad("A")))
+    output.stop_output()
+    reports_before = list(sender.reports)
+    clock.now = 1.0
+    output.apply(action(held=pad("B"), taps={"X"}))
+    assert sender.reports == reports_before
+    assert output.held == PadState()
+    assert output.tapping == {}
+    output.start_due_taps()
+    output.release_due_taps()
+    assert sender.reports == reports_before
+
+
+def test_neutral_after_stop_output_still_sends_neutral_report():
+    output, sender, _ = make_output()
+    output.stop_output()
+    output.neutral()
+    assert sender.reports == [NEUTRAL_REPORT, NEUTRAL_REPORT]
+    assert output.output_stopped is True
+
+
+def test_stop_output_records_send_error_without_raising():
+    output, sender, _ = make_output()
+    sender.fail_with = OSError("pipe closed")
+    output.stop_output()
+    assert output.output_stopped is True
+    assert output.last_error is not None
+    assert "pipe closed" in output.last_error
+
+
 # --- 送信の失敗 ---
 
 
