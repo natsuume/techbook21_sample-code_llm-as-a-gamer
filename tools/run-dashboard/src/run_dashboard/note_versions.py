@@ -5,10 +5,15 @@ state_text は第4章の switch2_agent.game_notes.format_game_notes の書式で
 1 つの版とし、変わったファイルの種類と、それを書き換えた advisor の実行を求める。I/O を持たない。
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
+
+from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 
 from run_dashboard.advisor_runs import AdvisorRun
+from run_dashboard.jsonl_lines import is_json_number
 
 # 書き換えた advisor の実行が見つからない変更の by
 EXTERNAL_CHANGE = "external"
@@ -45,7 +50,20 @@ def split_state_text(state_text: str) -> dict[str, str] | None:
     中身の行に `## ` の見出しがあっても (strategy.md の節など)、4 つの見出しの文字列と一致しなければ区切りにしない。
     見出しが順に見つからなければ None を返す。
     """
-    raise NotImplementedError
+    first_heading = f"## {NOTE_TITLES[NOTE_KINDS[0]]}\n"
+    if not state_text.startswith(first_heading):
+        return None
+    files: dict[str, str] = {}
+    content_start = len(first_heading)
+    for kind, next_kind in pairwise(NOTE_KINDS):
+        separator = f"\n\n## {NOTE_TITLES[next_kind]}\n"
+        separator_start = state_text.find(separator, content_start)
+        if separator_start < 0:
+            return None
+        files[kind] = state_text[content_start:separator_start]
+        content_start = separator_start + len(separator)
+    files[NOTE_KINDS[-1]] = state_text[content_start:]
+    return files
 
 
 def build_note_versions(
@@ -66,7 +84,82 @@ def build_note_versions(
     終了の後に何秒まで書き換えとみなすか、という固定の猶予は使わない (応答に時間のかかった要求の後でも、
     その間に終わった advisor の書き換えとみなせるようにするため)。
     """
-    raise NotImplementedError
+    versions: list[NoteVersion] = []
+    previous_text: str | None = None
+    previous_t_sent = 0.0
+    for request in requests:
+        state_text = request.get("state_text")
+        t_sent = request.get("t_sent")
+        if not isinstance(state_text, str) or not is_json_number(t_sent):
+            continue
+        if previous_text is None or state_text != previous_text:
+            files = split_state_text(state_text)
+            changed = (
+                []
+                if previous_text is None
+                else _changed_kinds(
+                    versions[-1].files,
+                    files,
+                    previous_t_sent,
+                    float(t_sent),
+                    advisor_runs,
+                )
+            )
+            versions.append(
+                NoteVersion(
+                    version=len(versions),
+                    t=float(t_sent),
+                    request=request.get("number"),
+                    initial=previous_text is None,
+                    changed=changed,
+                    files=files,
+                )
+            )
+            previous_text = state_text
+        previous_t_sent = float(t_sent)
+    return versions
+
+
+def _changed_kinds(
+    previous_files: Mapping[str, str] | None,
+    files: Mapping[str, str] | None,
+    previous_t_sent: float,
+    t_sent: float,
+    advisor_runs: Sequence[AdvisorRun],
+) -> list[dict]:
+    """前の版の files と新しい版の files で中身が違う種類ごとの {"kind", "by"} を、NOTE_KINDS の順に返す。
+
+    previous_t_sent は前の版の内容を読んだ最後の行の t_sent (tp)、t_sent は変わった行の t_sent (ts)。
+    どちらかの files が None (分けられなかった) なら空のリストを返す。
+    """
+    if previous_files is None or files is None:
+        return []
+    return [
+        {"kind": kind, "by": _changed_by(kind, previous_t_sent, t_sent, advisor_runs)}
+        for kind in NOTE_KINDS
+        if files[kind] != previous_files[kind]
+    ]
+
+
+def _changed_by(
+    kind: str,
+    previous_t_sent: float,
+    t_sent: float,
+    advisor_runs: Sequence[AdvisorRun],
+) -> str:
+    """種類 kind のファイルを、previous_t_sent (tp) から t_sent (ts) までの間に書き換えた advisor の実行の名前を返す。
+
+    build_note_versions の docstring の by の決め方。当てはまる実行が無ければ EXTERNAL_CHANGE を返す。
+    """
+    role_names = {role.name for role in ADVISOR_ROLES if role.note_kind == kind}
+    for run in advisor_runs:
+        if run.role not in role_names or not is_json_number(run.t_start):
+            continue
+        if run.t_start <= t_sent and (
+            run.t_end is None or run.t_end >= previous_t_sent
+        ):
+            return run.name
+    return EXTERNAL_CHANGE
 
 
 def note_version_of_request(
@@ -77,4 +170,16 @@ def note_version_of_request(
     requests (ファイルの順) の中で number の要求の行より前 (その行を含む) に始まった版のうち、最後の版の version。
     number の要求の行が requests に無いか、当てはまる版が無ければ None を返す。
     """
-    raise NotImplementedError
+    # 要求の number → requests の中の位置 (同じ number の行が複数あれば最初の行)
+    positions: dict[object, int] = {}
+    for position, request in enumerate(requests):
+        positions.setdefault(request.get("number"), position)
+    request_position = positions.get(number)
+    if request_position is None:
+        return None
+    version_number = None
+    for version in versions:
+        start_position = positions.get(version.request)
+        if start_position is not None and start_position <= request_position:
+            version_number = version.version
+    return version_number

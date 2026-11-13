@@ -8,7 +8,13 @@
 I/O を持たない。
 """
 
+import re
+
+from run_dashboard.jsonl_lines import is_json_number
+
 SECONDS_PER_DAY = 86400.0
+# 壁時計の時刻 HH:MM:SS.mmm (\d は全角などの数字にも一致するため、[0-9] で書く)
+WALL_TIME_PATTERN = re.compile(r"([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]{3})")
 # start の行の時刻との前後のずれとして、日付をまたいだとみなさずにそのまま返す差の上限 (秒)。
 # 第4章の RunLog.write は時刻をロックの外で取るため、start と同時に別のスレッドが書いた行は、ファイルの順と
 # 時刻の順が数ミリ秒食い違うことがある。その食い違いを十分に含む幅にする
@@ -21,7 +27,15 @@ def parse_wall_time(value: object) -> float | None:
     例: "23:59:50.250" は 86390.25、"00:00:01.500" は 1.5。
     value が文字列でない、この形に fullmatch しない、範囲の外 (時は 0〜23、分と秒は 0〜59) なら None を返す。
     """
-    raise NotImplementedError
+    if not isinstance(value, str):
+        return None
+    match = WALL_TIME_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    hours, minutes, seconds, milliseconds = (int(part) for part in match.groups())
+    if hours > 23 or minutes > 59 or seconds > 59:
+        return None
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
 
 
 def run_log_elapsed(line_time: float, start_time: float, after_start: bool) -> float:
@@ -37,7 +51,12 @@ def run_log_elapsed(line_time: float, start_time: float, after_start: bool) -> f
           引く。それ以外 (負の差と、+DAY_WRAP_TOLERANCE_S 以下の正の差) はそのまま返す
     24 時間 - DAY_WRAP_TOLERANCE_S より長い実行の行は、正しく直せない。
     """
-    raise NotImplementedError
+    difference = line_time - start_time
+    if after_start and difference < -DAY_WRAP_TOLERANCE_S:
+        return difference + SECONDS_PER_DAY
+    if not after_start and difference > DAY_WRAP_TOLERANCE_S:
+        return difference - SECONDS_PER_DAY
+    return difference
 
 
 def mono_elapsed(mono: object, origin_mono: float | None) -> float | None:
@@ -46,4 +65,6 @@ def mono_elapsed(mono: object, origin_mono: float | None) -> float | None:
     mono が数 (int か float。bool は除く) で、origin_mono が None でなければ mono - origin_mono。
     それ以外は None を返す。
     """
-    raise NotImplementedError
+    if not is_json_number(mono) or origin_mono is None:
+        return None
+    return float(mono - origin_mono)

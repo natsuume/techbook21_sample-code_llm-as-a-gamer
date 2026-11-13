@@ -5,8 +5,10 @@
 JSON として読めない行は読み飛ばし、その数を数える。
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,20 @@ class ParsedLines:
     next_offset: int
 
 
+def is_json_number(value: object) -> TypeGuard[int | float]:
+    """JSON から読んだ値 value が数 (int か float。真偽値の bool は除く) なら True を返す。
+
+    json.loads は true・false を bool (int の派生の型) にするため、数かどうかを isinstance(value, int) だけで
+    判定すると、真偽値も数とみなしてしまう。それを除くための判定。
+    """
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def number_or_none(value: object) -> float | None:
+    """JSON から読んだ値 value が数 (is_json_number) なら float にして返し、そうでなければ None を返す。"""
+    return float(value) if is_json_number(value) else None
+
+
 def read_complete_lines(path: Path, offset: int = 0) -> LineChunk:
     """path をバイナリで開き、バイトの位置 offset から最後の \\n までにある行を読む。
 
@@ -44,7 +60,14 @@ def read_complete_lines(path: Path, offset: int = 0) -> LineChunk:
     各行は末尾の \\n を除き、さらにその直前に \\r があれば除く (\\r\\n の行も読める)。空の行もそのまま入れる。
     ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す。
     """
-    raise NotImplementedError
+    with path.open("rb") as file:
+        file.seek(offset)
+        data = file.read()
+    last_newline = data.rfind(b"\n")
+    if last_newline < 0:
+        return LineChunk(lines=[], next_offset=offset)
+    lines = [line.removesuffix(b"\r") for line in data[:last_newline].split(b"\n")]
+    return LineChunk(lines=lines, next_offset=offset + last_newline + 1)
 
 
 def parse_lines(chunk: LineChunk) -> ParsedLines:
@@ -57,7 +80,28 @@ def parse_lines(chunk: LineChunk) -> ParsedLines:
         - 読んだ値が object (dict) でない行 (配列や数など) は読み飛ばし、skipped に数える
     next_offset は chunk.next_offset をそのまま入れる。
     """
-    raise NotImplementedError
+    records: list[dict] = []
+    skipped = 0
+    for line in chunk.lines:
+        # 空白だけかどうかは文字列にしてから判定するため、先に UTF-8 として読む
+        # (UTF-8 として読めない行は、空白だけの行ではない)
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped += 1
+            continue
+        if not text.strip():
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError:
+            skipped += 1
+            continue
+        if not isinstance(value, dict):
+            skipped += 1
+            continue
+        records.append(value)
+    return ParsedLines(records=records, skipped=skipped, next_offset=chunk.next_offset)
 
 
 def read_json_lines(path: Path, offset: int = 0) -> ParsedLines:
@@ -65,4 +109,4 @@ def read_json_lines(path: Path, offset: int = 0) -> ParsedLines:
 
     ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す。
     """
-    raise NotImplementedError
+    return parse_lines(read_complete_lines(path, offset))

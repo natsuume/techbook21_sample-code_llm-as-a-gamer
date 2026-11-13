@@ -36,6 +36,7 @@ from run_dashboard.run_directory import (
 from run_dashboard.run_records import (
     RunRecords,
     load_run,
+    load_run_overview,
     read_advisor_stream,
     read_result_json,
 )
@@ -128,10 +129,11 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
         items = []
+        # 一覧では実行ごとに run.jsonl だけを読む (requests.jsonl・frames.jsonl などの大きなファイルは読まない)
         for name in list_run_names(runs_dir):
-            records = load_run(runs_dir, name)
-            if records is not None:
-                items.append(build_run_list_item(records))
+            overview = load_run_overview(runs_dir, name)
+            if overview is not None:
+                items.append(build_run_list_item(overview))
         return items
 
     @app.get("/api/runs/{run}")

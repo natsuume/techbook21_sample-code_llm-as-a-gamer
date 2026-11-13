@@ -44,7 +44,12 @@ def list_run_names(runs_dir: Path) -> list[str]:
     入れるのは、ディレクトリー (シンボリックリンクではないもの) で、名前が `.` で始まらないものだけ。
     ファイルと、ディレクトリーを指すシンボリックリンクは入れない。
     """
-    raise NotImplementedError
+    names = [
+        entry.name
+        for entry in runs_dir.iterdir()
+        if entry.is_dir() and not entry.is_symlink() and not entry.name.startswith(".")
+    ]
+    return sorted(names, reverse=True)
 
 
 def find_run_dir(runs_dir: Path, run: str) -> Path | None:
@@ -52,7 +57,9 @@ def find_run_dir(runs_dir: Path, run: str) -> Path | None:
 
     一致しなければ (`..`、`a/b`、無い名前など) None を返す。run でパスを組み立てるのは、一覧と照合した後だけにする。
     """
-    raise NotImplementedError
+    if run not in list_run_names(runs_dir):
+        return None
+    return runs_dir / run
 
 
 def list_advisor_run_dirs(run_dir: Path) -> list[AdvisorRunDir]:
@@ -61,16 +68,41 @@ def list_advisor_run_dirs(run_dir: Path) -> list[AdvisorRunDir]:
     並びは advisor_roles.ADVISOR_ROLES の役割の順で、同じ役割の中は連番の昇順。
     役割を持たない形の名前 (advisor-001 など) と、ファイルは入れない。
     """
-    raise NotImplementedError
+    role_order = {role.name: position for position, role in enumerate(ADVISOR_ROLES)}
+    found: list[AdvisorRunDir] = []
+    for entry in run_dir.iterdir():
+        match = ADVISOR_RUN_DIR_PATTERN.fullmatch(entry.name)
+        if match is None or not entry.is_dir():
+            continue
+        role, index = match.groups()
+        found.append(AdvisorRunDir(entry.name, role, int(index), entry))
+    # 連番は数として並べる (advisor-strategy-999 の次が advisor-strategy-1000)。同じ連番 (001 と 0001) は名前の順
+    return sorted(
+        found, key=lambda item: (role_order[item.role], item.index, item.name)
+    )
 
 
 def list_advisor_files(advisor_dir: AdvisorRunDir) -> list[dict]:
     """advisor_dir.path の下のファイル (サブディレクトリーの中も含む) の一覧を返す。
 
     各項目は {"path": "<advisor_dir.name>/<advisor_dir.path からの相対パス (/ 区切り)>", "bytes": ファイルの大きさ}。
-    並びは path の昇順。入れるのは Path.is_file() が真のものだけ。ディレクトリーが無ければ空のリストを返す。
+    並びは path の昇順。入れるのは Path.is_file() が真のものだけ。大きさを読めない (stat の OSError。一覧を取った後に
+    消されたファイルなど) ファイルは入れない。ディレクトリーが無ければ空のリストを返す。
     """
-    raise NotImplementedError
+    if not advisor_dir.path.is_dir():
+        return []
+    files = []
+    for path in advisor_dir.path.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+        # 一覧を取った後に消されたファイルは入れない
+        except OSError:
+            continue
+        relative = path.relative_to(advisor_dir.path).as_posix()
+        files.append({"path": f"{advisor_dir.name}/{relative}", "bytes": size})
+    return sorted(files, key=lambda item: item["path"])
 
 
 def resolve_run_file(run_dir: Path, relative: str) -> Path | None:
@@ -82,8 +114,29 @@ def resolve_run_file(run_dir: Path, relative: str) -> Path | None:
         - 最初の部分が FILE_TOP_DIRS のどれでもなく、ADVISOR_FILE_TOP_DIR_PATTERN にも fullmatch しない
           (例: run.jsonl、game_notes/x)
         - 部分が 1 つだけ (thumbs など、ディレクトリーそのもの)
-        - (run_dir / relative).resolve(strict=True) が失敗する (OSError。無いファイルなど)
+        - (run_dir / relative).resolve(strict=True) が失敗する (OSError。無いファイルなど。シンボリックリンクの
+          循環で出る RuntimeError も含む)
         - resolve したパスが run_dir.resolve() の中にない (シンボリックリンクで外に出る場合)
         - resolve したパスがファイルでない
     """
-    raise NotImplementedError
+    if (
+        not relative
+        or relative.startswith(("/", "\\"))
+        or "\\" in relative
+        or "\x00" in relative
+    ):
+        return None
+    parts = relative.split("/")
+    if any(part in ("", ".", "..") for part in parts) or len(parts) < 2:
+        return None
+    top = parts[0]
+    if top not in FILE_TOP_DIRS and ADVISOR_FILE_TOP_DIR_PATTERN.fullmatch(top) is None:
+        return None
+    try:
+        resolved = (run_dir / relative).resolve(strict=True)
+    # シンボリックリンクの循環は、Python 3.12 では RuntimeError、3.13 以降では OSError になる
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_relative_to(run_dir.resolve()) or not resolved.is_file():
+        return None
+    return resolved

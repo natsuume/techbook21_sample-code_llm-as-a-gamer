@@ -7,11 +7,20 @@ from run_dashboard.run_directory import AdvisorRunDir
 from run_dashboard.run_records import (
     RECORD_KINDS,
     load_run,
+    load_run_overview,
     read_advisor_stream,
     read_result_json,
 )
 
 NO_SKIPPED_LINES = {"run": 0, "requests": 0, "frames": 0, "pad": 0, "advisor_steps": 0}
+SYNTHETIC_RUN_ATTRIBUTES = (
+    "dashboard",
+    "no_dashboard",
+    "save_requests",
+    "broken",
+    "no_answer_type",
+    "single_advisor_question",
+)
 
 
 def test_record_kinds():
@@ -21,6 +30,35 @@ def test_record_kinds():
 @pytest.mark.parametrize("name", ["20991231-000000", "..", "", "a/b"])
 def test_load_run_returns_none_for_unknown_run(runs, name):
     assert load_run(runs.runs_dir, name) is None
+
+
+@pytest.mark.parametrize("name", ["20991231-000000", "..", "", "a/b"])
+def test_load_run_overview_returns_none_for_unknown_run(runs, name):
+    assert load_run_overview(runs.runs_dir, name) is None
+
+
+@pytest.mark.parametrize("attribute", SYNTHETIC_RUN_ATTRIBUTES)
+def test_load_run_overview_matches_overview_of_load_run(runs, attribute):
+    run = getattr(runs, attribute)
+    records = load_run(runs.runs_dir, run.name)
+    assert records is not None
+    assert load_run_overview(runs.runs_dir, run.name) == records.overview
+
+
+def test_load_run_overview_of_run_without_requests_file(runs):
+    overview = load_run_overview(runs.runs_dir, runs.no_dashboard.name)
+    assert overview is not None
+    assert overview.has_requests_file is False
+    assert overview.origin_mono is None
+    assert overview.start is not None
+
+
+def test_load_run_overview_of_dashboard_run(runs):
+    overview = load_run_overview(runs.runs_dir, runs.dashboard.name)
+    assert overview is not None
+    assert overview.has_requests_file is True
+    assert overview.origin_mono == 1000.0
+    assert overview.start["time"] == "23:59:50.000"
 
 
 def test_load_dashboard_run(runs):

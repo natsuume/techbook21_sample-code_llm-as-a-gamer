@@ -8,11 +8,16 @@ advisor_accepted にその役割を含む k 番目の行の要求に対応する
 result.json を読む関数は外から受け取る (build_advisor_runs の read_result_json)。ほかに I/O を持たない。
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from switch2_agent.advisors.claude_code_headless import RESULT_FILE_NAME
+from switch2_agent.advisors.stream_json_log import RESULT_MESSAGE_TYPE
+
+from run_dashboard.elapsed_time import mono_elapsed
+from run_dashboard.jsonl_lines import number_or_none
 from run_dashboard.run_directory import AdvisorRunDir
 from run_dashboard.run_records import RunEvent
 
@@ -85,7 +90,145 @@ def build_advisor_runs(
         - status: result.json があれば "done"、無ければ "running"。result_json はその中身 (無ければ None)
         - denied_tool_use_ids: result.json の permission_denials の各要素の tool_use_id (文字列のもの)
     """
-    raise NotImplementedError
+    accepted_numbers = _accepted_request_numbers(run_events)
+    requests_by_number: dict[int, dict] = {}
+    for request in requests:
+        number = request.get("number")
+        if _is_int(number):
+            requests_by_number.setdefault(number, request)
+    return [
+        _build_advisor_run(
+            advisor_dir,
+            accepted_numbers.get(advisor_dir.role, []),
+            requests_by_number,
+            run_events,
+            read_result_json,
+        )
+        for advisor_dir in advisor_dirs
+    ]
+
+
+def _is_int(value: object) -> bool:
+    """value が int (真偽値の bool は除く) なら True を返す。要求の number と終了コードの判定に使う。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _accepted_request_numbers(
+    run_events: Sequence[RunEvent],
+) -> dict[str, list[object]]:
+    """役割の name → その役割を受け付けた decision の行の number のリスト (ファイルの順) を返す。
+
+    advisor_accepted がリストでない decision の行は数えない。
+    """
+    numbers: dict[str, list[object]] = {}
+    for event in run_events:
+        record = event.record
+        if record.get("event") != "decision":
+            continue
+        accepted = record.get("advisor_accepted")
+        if not isinstance(accepted, list):
+            continue
+        for role_name in accepted:
+            if isinstance(role_name, str):
+                numbers.setdefault(role_name, []).append(record.get("number"))
+    return numbers
+
+
+def _advisor_line(name: str, run_events: Sequence[RunEvent]) -> RunEvent | None:
+    """run_events のうち、event が "advisor" で run_dir のディレクトリー名が name の最初の行を返す。無ければ None。"""
+    for event in run_events:
+        record = event.record
+        run_dir = record.get("run_dir")
+        if (
+            record.get("event") == "advisor"
+            and isinstance(run_dir, str)
+            and Path(run_dir).name == name
+        ):
+            return event
+    return None
+
+
+def _tool_use_ids(permission_denials: object) -> frozenset[str]:
+    """permission_denials (リスト) の各要素の tool_use_id (文字列のもの) の集合を返す。リストでなければ空の集合。"""
+    if not isinstance(permission_denials, list):
+        return frozenset()
+    return frozenset(
+        denial["tool_use_id"]
+        for denial in permission_denials
+        if isinstance(denial, Mapping) and isinstance(denial.get("tool_use_id"), str)
+    )
+
+
+def _build_advisor_run(
+    advisor_dir: AdvisorRunDir,
+    accepted_numbers: Sequence[object],
+    requests_by_number: Mapping[int, dict],
+    run_events: Sequence[RunEvent],
+    read_result_json: Callable[[Path], dict | None],
+) -> AdvisorRun:
+    """1 つの advisor の実行の AdvisorRun を作る (build_advisor_runs の docstring の各実行の値)。
+
+    accepted_numbers は、その役割を受け付けた decision の行の number のリスト (ファイルの順)。
+    """
+    number = (
+        accepted_numbers[advisor_dir.index - 1]
+        if 1 <= advisor_dir.index <= len(accepted_numbers)
+        else None
+    )
+    request = number if _is_int(number) else None
+    result_json = read_result_json(advisor_dir.path / RESULT_FILE_NAME)
+    advisor_line = _advisor_line(advisor_dir.name, run_events)
+
+    # 所要時間と結果は result.json から。無ければ run.jsonl の advisor の行から
+    source: Mapping | None = result_json
+    if source is None and advisor_line is not None:
+        source = advisor_line.record
+    duration_s = number_or_none(source.get("duration_s")) if source else None
+    returncode = source.get("returncode") if source else None
+    denials = source.get("permission_denials") if source else None
+    if result_json is not None:
+        output = result_json.get("output")
+        result = output.get("result") if isinstance(output, Mapping) else None
+    else:
+        result = source.get("result") if source else None
+
+    request_line = requests_by_number.get(request) if request is not None else None
+    if request_line is not None:
+        t_start = number_or_none(request_line.get("t_received"))
+        t_end = (
+            t_start + duration_s
+            if t_start is not None and duration_s is not None
+            else None
+        )
+    else:
+        t_end = advisor_line.t if advisor_line is not None else None
+        t_start = (
+            t_end - duration_s if t_end is not None and duration_s is not None else None
+        )
+
+    return AdvisorRun(
+        name=advisor_dir.name,
+        role=advisor_dir.role,
+        request=request,
+        t_start=t_start,
+        t_end=t_end,
+        returncode=returncode if _is_int(returncode) else None,
+        denials=len(denials) if isinstance(denials, list) else None,
+        result=result if isinstance(result, str) else None,
+        status="done" if result_json is not None else "running",
+        result_json=result_json,
+        denied_tool_use_ids=(
+            _tool_use_ids(result_json.get("permission_denials"))
+            if result_json is not None
+            else frozenset()
+        ),
+    )
+
+
+def _first_line_of(text: str, limit: int) -> str:
+    """text の 1 行目 (str.splitlines の最初の行。空文字なら空文字) を、先頭から limit 文字までにして返す。"""
+    lines = text.splitlines()
+    return lines[0][:limit] if lines else ""
 
 
 def summarize_tool_input(tool_input: object) -> str:
@@ -95,7 +238,13 @@ def summarize_tool_input(tool_input: object) -> str:
     (str.splitlines の最初の行。空文字なら空文字) を、先頭から SUMMARY_MAX_CHARS 文字までにして返す。
     当てはまるキーが無いか、object でなければ空文字を返す。
     """
-    raise NotImplementedError
+    if not isinstance(tool_input, Mapping):
+        return ""
+    for key in SUMMARY_INPUT_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str):
+            return _first_line_of(value, SUMMARY_MAX_CHARS)
+    return ""
 
 
 def first_line(text: object, limit: int = SUMMARY_MAX_CHARS) -> str:
@@ -105,7 +254,17 @@ def first_line(text: object, limit: int = SUMMARY_MAX_CHARS) -> str:
     {"type": "text", "text": <文字列>} の項目を含むリストなら、最初のその項目の text の 1 行目を limit 文字まで。
     それ以外は空文字を返す。
     """
-    raise NotImplementedError
+    if isinstance(text, str):
+        return _first_line_of(text, limit)
+    if isinstance(text, list):
+        for item in text:
+            if (
+                isinstance(item, Mapping)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            ):
+                return _first_line_of(item["text"], limit)
+    return ""
 
 
 def build_steps(
@@ -129,4 +288,74 @@ def build_steps(
     tool_use_id が拒否の id に入っている tool_result を "permission_denied" にし、それ以外は "tool_result" にする
     (result の行も result.json も無い実行中の実行では、すべて "tool_result" のまま)。
     """
-    raise NotImplementedError
+    result_messages = [
+        data
+        for data in (record.get("data") for record in stream_records)
+        if isinstance(data, Mapping) and data.get("type") == RESULT_MESSAGE_TYPE
+    ]
+    denied = (
+        _tool_use_ids(result_messages[-1].get("permission_denials"))
+        if result_messages
+        else denied_from_result_json
+    )
+    # tool_use の id → ツールの名前 (それより前の tool_use から、tool_result のツールの名前を引く)
+    tool_names: dict[str, object] = {}
+    steps: list[dict] = []
+    for record in stream_records:
+        data = record.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        t = mono_elapsed(record.get("mono"), origin_mono)
+        message_type = data.get("type")
+        if message_type == "assistant":
+            for item in _message_content(data, "tool_use"):
+                tool_use_id = item.get("id")
+                if isinstance(tool_use_id, str):
+                    tool_names[tool_use_id] = item.get("name")
+                steps.append(
+                    {
+                        "t": t,
+                        "kind": "tool_use",
+                        "tool": item.get("name"),
+                        "summary": summarize_tool_input(item.get("input")),
+                    }
+                )
+        elif message_type == "user":
+            for item in _message_content(data, "tool_result"):
+                tool_use_id = item.get("tool_use_id")
+                is_known_id = isinstance(tool_use_id, str)
+                steps.append(
+                    {
+                        "t": t,
+                        "kind": (
+                            "permission_denied"
+                            if is_known_id and tool_use_id in denied
+                            else "tool_result"
+                        ),
+                        "tool": tool_names.get(tool_use_id) if is_known_id else None,
+                        "summary": first_line(item.get("content")),
+                    }
+                )
+        elif message_type == RESULT_MESSAGE_TYPE:
+            steps.append(
+                {
+                    "t": t,
+                    "kind": "result",
+                    "tool": None,
+                    "summary": first_line(data.get("result")),
+                }
+            )
+    return steps
+
+
+def _message_content(data: Mapping, item_type: str) -> list[Mapping]:
+    """stream-json の行 data の message.content のリストのうち、type が item_type の項目を返す (無ければ空)。"""
+    message = data.get("message")
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        item
+        for item in content
+        if isinstance(item, Mapping) and item.get("type") == item_type
+    ]
