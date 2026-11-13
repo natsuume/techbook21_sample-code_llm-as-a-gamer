@@ -1303,3 +1303,23 @@ def test_record_steps_reports_stream_file_that_cannot_be_opened(tmp_path):
     result = read_result(runs_dir)
     assert result["error"] is None
     assert result["output"] == CLAUDE_OUTPUT
+
+
+def test_record_steps_continues_when_logging_record_error_fails(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+
+    def log_failing_on_record_error(event: dict) -> None:
+        if event["event"] == "record_error":
+            raise OSError("No space left on device")
+        recorder.events.append(event)
+
+    advisor.log = log_failing_on_record_error
+    (runs_dir / "advisor-001" / STREAM_FILE_NAME).mkdir(parents=True)
+    advisor.request_update(sample_context())
+    # record_error の行を log に渡せなくても、claude は起動して実行を続ける
+    assert len(start_process.calls) == 1
+    assert [event["event"] for event in recorder.events] == ["advisor"]
+    result = read_result(runs_dir)
+    assert result["error"] is None
+    assert result["output"] == CLAUDE_OUTPUT
+    assert advisor.is_busy() is False

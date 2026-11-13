@@ -201,6 +201,19 @@ def test_log_writes_non_ascii_text_as_is(tmp_path):
     assert "戦略を更新した" in (tmp_path / STREAM_FILE_NAME).read_text(encoding="utf-8")
 
 
+def test_log_writes_lone_surrogate_as_json_escape(tmp_path):
+    log, _, errors = make_log(tmp_path)
+    # JSON のエスケープで表された、対になっていないサロゲート (UTF-8 に符号化できない文字)
+    log.add_line('{"type": "assistant", "text": "\\ud800"}\n')
+    log.add_line('{"type": "system"}\n')
+    log.stop()
+    assert read_records(tmp_path / STREAM_FILE_NAME) == [
+        {"mono": 10.0, "data": {"type": "assistant", "text": "\ud800"}},
+        {"mono": 10.0, "data": {"type": "system"}},
+    ]
+    assert errors.errors == []
+
+
 def test_log_keeps_last_result_line(tmp_path):
     log, _, _ = make_log(tmp_path)
     assert log.last_result is None
@@ -296,6 +309,24 @@ def test_reader_stops_reading_on_closed_pipe():
     assert reader.join(WAIT_TIMEOUT) is True
     assert lines == ["first\n"]
     assert reader.stderr_text is None
+
+
+def test_reader_keeps_reading_stdout_when_on_line_fails():
+    lines: list[str] = []
+
+    def on_line(line: str) -> None:
+        if line == "bad\n":
+            raise RuntimeError("log failed")
+        lines.append(line)
+
+    reader = ProcessOutputReader(
+        io.StringIO("first\nbad\nlast\n"), io.StringIO(""), on_line
+    )
+    reader.start()
+    assert reader.join(WAIT_TIMEOUT) is True
+    # 1 行の失敗で読むのをやめると、子プロセスがパイプへの書き込みで止まるため、最後まで読む
+    assert lines == ["first\n", "last\n"]
+    assert reader.stderr_text == ""
 
 
 def test_reader_threads_are_daemon_threads():

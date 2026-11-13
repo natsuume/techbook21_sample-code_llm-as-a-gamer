@@ -496,7 +496,9 @@ class ClaudeCodeHeadlessAdvisor:
                タイムアウトしたら stop_streaming_process で止める。待つ処理がほかの例外 (Exception) を出したら、
                同じく stop_streaming_process で止めてから、その例外を 3・4 で記録する。
                stream.jsonl を開けない・書けないとき (StreamJsonLog の on_error) は、logging で警告を書き、log があれば
-               build_record_error_event の辞書を渡して、実行を続ける (log の行は 1 回の実行につき最大 1 件)
+               build_record_error_event の辞書を渡して、実行を続ける (log の行は 1 回の実行につき最大 1 件)。
+               この log が例外 (Exception) を出しても、logging で警告を書いて実行を続ける (on_error は標準出力の
+               読み取りスレッドか StreamJsonLog の作成の中で呼ばれ、例外を出すと読み取りや claude の起動が止まるため)
             3. result.json には build_stream_result_record の辞書を書く (output は StreamJsonLog.last_result、
                stderr は ProcessOutputReader.stderr_text)。書く前に StreamJsonLog.stop を呼び、以後に届いた行
                (kill の後も読み終わらなかった読み取りスレッドの行) を書かない

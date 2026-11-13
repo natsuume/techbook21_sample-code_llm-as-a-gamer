@@ -46,8 +46,13 @@ def is_result_message(data: object) -> bool:
 
 
 def open_for_writing(path: Path) -> TextIO:
-    """path を UTF-8 の書き込み用 (上書き) に開く。StreamJsonLog の既定の open_file。"""
-    return path.open("w", encoding="utf-8")
+    """path を UTF-8 の書き込み用 (上書き) に開く。StreamJsonLog の既定の open_file。
+
+    UTF-8 に符号化できない文字 (行の JSON のエスケープ `\\ud800` などから読んだ、対になっていないサロゲート) は、
+    errors="backslashreplace" で `\\ud800` の形のまま書く。JSON の文字列の中では同じエスケープになるため、
+    書いた行は JSON として読め、読むと元の文字に戻る。
+    """
+    return path.open("w", encoding="utf-8", errors="backslashreplace")
 
 
 class StreamJsonLog:
@@ -112,6 +117,8 @@ class ProcessOutputReader:
 
     読む途中で OSError か ValueError (パイプが閉じられたときなど) が起きたら、そのストリームの読み取りをやめる。
     そこまでに読んだ標準出力の行は on_line に渡し済みで、標準エラー出力はそこまでに読めた分を持たない (None のまま)。
+    on_line が例外 (Exception) を出したら、logging で警告を書き、その行を飛ばして標準出力を最後まで読み続ける
+    (読むのをやめると、子プロセスがパイプへの書き込みで止まり、実行の上限まで終わらないため)。
     """
 
     def __init__(
