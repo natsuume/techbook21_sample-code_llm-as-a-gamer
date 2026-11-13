@@ -24,6 +24,8 @@ Ctrl+C で止まる。
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
     --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を
                                  runs/<実行>/requests.jsonl と frames/ に書く (容量が大きくなるため既定はオフ)
+    --record-dashboard           ダッシュボードが読む記録 (advisor の途中経過 runs/<実行>/advisor-<役割>-<連番>/stream.jsonl) を書く
+                                 (既定はオフ)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方 (ch04_techniques ディレクトリーで実行する):
@@ -108,7 +110,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     history_seconds (float、既定 5.0)、image_width (int、既定 1280)、jpeg_quality (int、既定 85)、
     threshold_advisor (float、既定 0.5)、
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
-    max_consecutive_errors (int、既定 5)、save_requests (bool、既定 False。--save-requests を付けたら True)。
+    max_consecutive_errors (int、既定 5)、save_requests (bool、既定 False。--save-requests を付けたら True)、
+    record_dashboard (bool、既定 False。--record-dashboard を付けたら True)。
 
     argv が None なら sys.argv[1:] を使う。--game と --model は必須。範囲 (モジュールの docstring の起動引数) の外の値、
     数として読めない値、--process-fps が --ffmpeg-fps より大きい組み合わせは、第2章の daemon.parse_args と同じく
@@ -198,6 +201,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を "
             "runs/<実行>/requests.jsonl と frames/ に書く。容量が大きくなるため既定はオフ"
+        ),
+    )
+    parser.add_argument(
+        "--record-dashboard",
+        action="store_true",
+        help=(
+            "ダッシュボードが読む記録 (advisor の途中経過 "
+            "runs/<実行>/advisor-<役割>-<連番>/stream.jsonl) を書く。既定はオフ"
         ),
     )
     args = parser.parse_args(argv)
@@ -290,8 +301,9 @@ def main(argv: list[str] | None = None) -> None:
            (無ければ None) を返す関数, on_lost=output.stop_output, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
         7. advisor_roles.ADVISOR_ROLES の順に、役割ごとに ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー,
            実行のディレクトリー, game, role, advisor_timeout, hidden_env_names=API_KEY_ENVS の値 (Decision Model の
-           API キーの環境変数。advisor の子プロセスに渡さない), log=RunLog.write) を 1 つずつ作る。advisor_timeout と
-           hidden_env_names は全役割で共通。役割の name → advisor の辞書を Pipeline の advisors に渡す
+           API キーの環境変数。advisor の子プロセスに渡さない), log=RunLog.write, record_steps=--record-dashboard の値)
+           を 1 つずつ作る。advisor_timeout、hidden_env_names、record_steps は全役割で共通。役割の name → advisor の
+           辞書を Pipeline の advisors に渡す
         8. Decision Model (JevModel / DecisionsApiModel)
         9. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
@@ -302,6 +314,7 @@ def main(argv: list[str] | None = None) -> None:
            Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
     --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。
+    --record-dashboard が付いていれば、advisor の途中経過も同じ実行のディレクトリーの advisor-<役割>-<連番>/stream.jsonl に書く。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、作れた advisor の close()
     (close_advisors ですべてを同時に)、capture.close()、supervisor.close() の順に閉じる (見張りが片付けの途中で
@@ -378,6 +391,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.advisor_timeout,
                 hidden_env_names=tuple(API_KEY_ENVS.values()),
                 log=run_log.write,
+                record_steps=args.record_dashboard,
             )
         model: DecisionModel = (
             JevModel(api_key) if args.model == "jev" else DecisionsApiModel(api_key)

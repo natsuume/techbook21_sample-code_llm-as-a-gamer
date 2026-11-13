@@ -20,10 +20,13 @@ from switch2_agent.advisors.claude_code_headless import (
     build_child_env,
     build_claude_command,
     build_log_event,
+    build_record_error_event,
+    build_stream_result_record,
     image_file_name,
     start_daemon_thread,
     write_advisor_inputs,
 )
+from switch2_agent.advisors.stream_json_log import STREAM_FILE_NAME
 from switch2_agent.decision_request import LabeledImage
 from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 from switch2_agent.safety import SAFETY_RULES
@@ -906,3 +909,606 @@ def test_close_prevents_starting_claude_for_pending_request(tmp_path):
     assert not closer.is_alive()
     assert start_process.calls == []
     assert read_result(runs_dir)["error"] == "stopped by close"
+
+
+# --- 途中経過の記録 (record_steps) ---
+
+STREAM_LINES = [
+    (101.0, json.dumps({"type": "system", "subtype": "init"})),
+    (
+        102.0,
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "context.md"},
+                        }
+                    ]
+                },
+            }
+        ),
+    ),
+    (103.0, "not json"),
+    (104.0, json.dumps(CLAUDE_OUTPUT, ensure_ascii=False)),
+]
+EXPECTED_STREAM_RECORDS = [
+    {"mono": 101.0, "data": {"type": "system", "subtype": "init"}},
+    {"mono": 102.0, "data": json.loads(STREAM_LINES[1][1])},
+    {"mono": 103.0, "raw": "not json"},
+    {"mono": 104.0, "data": CLAUDE_OUTPUT},
+]
+# 待ちが実際に時間切れになるテストで、TERMINATE_GRACE_S の代わりに使う秒数
+SHORT_GRACE_S = 0.05
+# 止めても終わらないパイプ (pipes_stay_open) が、テストの後に終わるまでの秒数
+PIPES_OPEN_S = 10.0
+
+
+class FakeStreamingStdout:
+    """FakeStreamingProcess の標準出力。1 行ずつ返す。"""
+
+    def __init__(self, process: "FakeStreamingProcess"):
+        self.process = process
+
+    def __iter__(self):
+        return self.process.deliver_lines()
+
+
+class FakeStreamingStderr:
+    """FakeStreamingProcess の標準エラー出力。標準出力が終わるまで read が待つ。"""
+
+    def __init__(self, process: "FakeStreamingProcess"):
+        self.process = process
+
+    def read(self) -> str:
+        self.process.output_closed.wait(PIPES_OPEN_S + WAIT_TIMEOUT)
+        return self.process.settings.stderr
+
+
+class FakeStreamingProcess:
+    """途中経過を記録するとき (record_steps) の subprocess.Popen の代わり。呼び出しを calls に記録する。
+
+    communicate は持たない (stream の経路では呼ばない)。
+    stdout は settings.lines の各 (時刻, 文字列) について、clock を時刻に進めてから「文字列 + 改行」を 1 行ずつ返す
+    (settings.last_line_without_newline が真なら、最後の行は改行なし)。
+    settings.hold_after 行を返した後は held を set し、settings.release() か、止められる (terminate が効くか kill)
+    まで待つ。止められたら残りの行を返さずに終わる (EOF)。すべての行を返したら、終了コード settings.exit_code で終わる。
+    settings.pipes_stay_open が真なら、止められても stdout と stderr は pipes_released が set されるか PIPES_OPEN_S 秒
+    たつまで終わらない (子孫のプロセスがパイプを持ち続ける場合)。
+    wait は、最初の呼び出しで settings.wait_timeout_first が真なら TimeoutExpired を、settings.wait_error があれば
+    それを、held を待ってから送出する。それ以外は、終わるまで最大 timeout 秒 (WAIT_TIMEOUT を上限) 待ち、終わって
+    いれば returncode を返し、終わっていなければ TimeoutExpired を送出する。
+    """
+
+    def __init__(self, args, clock: FakeClock, settings: "FakeStreamingStartProcess"):
+        self.args = args
+        self.clock = clock
+        self.settings = settings
+        self.calls: list = []
+        self.returncode: int | None = None
+        self.wait_count = 0
+        self.stopped = threading.Event()
+        self.wake = threading.Event()
+        self.held = threading.Event()
+        self.ended = threading.Event()
+        self.output_closed = threading.Event()
+        self.pipes_released = threading.Event()
+        self.stdout = FakeStreamingStdout(self)
+        self.stderr = FakeStreamingStderr(self)
+
+    def deliver_lines(self):
+        settings = self.settings
+        count = len(settings.lines)
+        for index in range(count + 1):
+            if index == settings.hold_after:
+                self.held.set()
+                self.wake.wait(WAIT_TIMEOUT)
+            if self.stopped.is_set() or index == count:
+                break
+            mono, text = settings.lines[index]
+            self.clock.now = mono
+            last = index == count - 1
+            yield text if last and settings.last_line_without_newline else text + "\n"
+        if self.stopped.is_set() and settings.pipes_stay_open:
+            self.pipes_released.wait(PIPES_OPEN_S)
+        elif not self.stopped.is_set():
+            self.returncode = settings.exit_code
+            self.ended.set()
+        self.output_closed.set()
+
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        self.wait_count += 1
+        if self.wait_count == 1 and self.settings.wait_timeout_first:
+            self.held.wait(WAIT_TIMEOUT)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        if self.wait_count == 1 and self.settings.wait_error is not None:
+            self.held.wait(WAIT_TIMEOUT)
+            raise self.settings.wait_error
+        if self.ended.wait(min(timeout, WAIT_TIMEOUT)):
+            return self.returncode
+        raise subprocess.TimeoutExpired(self.args, timeout)
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self.settings.terminate_works:
+            self._stop(-15)
+
+    def kill(self):
+        self.calls.append("kill")
+        self._stop(-9)
+
+    def _stop(self, returncode: int) -> None:
+        if not self.ended.is_set():
+            self.returncode = returncode
+        self.stopped.set()
+        self.ended.set()
+        self.wake.set()
+
+
+class FakeStreamingStartProcess:
+    """subprocess.Popen の代わりに FakeStreamingProcess を作る。引数は Popen と同じキーワードだけを受け付ける。"""
+
+    def __init__(self, clock: FakeClock):
+        self.clock = clock
+        self.calls: list[tuple[list[str], dict]] = []
+        self.processes: list[FakeStreamingProcess] = []
+        self.started = threading.Event()
+        self.error: BaseException | None = None
+        self.lines = list(STREAM_LINES)
+        self.last_line_without_newline = False
+        self.hold_after: int | None = None
+        self.stderr = ""
+        self.exit_code = 0
+        self.wait_timeout_first = False
+        self.wait_error: Exception | None = None
+        self.terminate_works = True
+        self.pipes_stay_open = False
+
+    def __call__(
+        self, args, *, cwd, env, stdin, stdout, stderr, text, encoding, errors
+    ):
+        self.calls.append(
+            (
+                list(args),
+                {
+                    "cwd": cwd,
+                    "env": env,
+                    "stdin": stdin,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "text": text,
+                    "encoding": encoding,
+                    "errors": errors,
+                },
+            )
+        )
+        if self.error is not None:
+            raise self.error
+        process = FakeStreamingProcess(list(args), self.clock, self)
+        self.processes.append(process)
+        self.started.set()
+        return process
+
+    def release(self) -> None:
+        """hold_after 行で止まっている子プロセスに、残りの行を返させる。"""
+        for process in self.processes:
+            process.wake.set()
+
+
+def make_streaming_advisor(
+    tmp_path: Path, start_thread=None, role: AdvisorRole = ROLE, **kwargs
+):
+    """make_advisor と同じだが、record_steps=True の役割 role の advisor と FakeStreamingStartProcess を返す。"""
+    workdir = tmp_path / "ch04_techniques"
+    notes_dir = workdir / "game_notes" / "zelda"
+    notes_dir.mkdir(parents=True)
+    runs_dir = workdir / "runs" / "20261112-120000"
+    clock = FakeClock(100.0)
+    start_process = FakeStreamingStartProcess(clock)
+    recorder = Recorder()
+    advisor = ClaudeCodeHeadlessAdvisor(
+        workdir,
+        notes_dir,
+        runs_dir,
+        "zelda",
+        role,
+        start_process=start_process,
+        log=recorder.log,
+        start_thread=start_thread if start_thread is not None else (lambda job: job()),
+        clock=clock,
+        record_steps=True,
+        **kwargs,
+    )
+    return advisor, start_process, recorder, runs_dir
+
+
+def read_stream(runs_dir: Path, index: int = 1, role: AdvisorRole = ROLE) -> list[dict]:
+    path = runs_dir / advisor_run_dir_name(role.name, index) / STREAM_FILE_NAME
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_stream_command_differs_only_in_output_format_and_verbose():
+    json_cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
+    stream_cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE, stream_json=True
+    )
+    assert option_value(stream_cmd, "--output-format") == "stream-json"
+    assert stream_cmd.count("--verbose") == 1
+    index = json_cmd.index("--output-format")
+    assert stream_cmd == [
+        *json_cmd[:index],
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        *json_cmd[index + 2 :],
+    ]
+
+
+def test_json_command_has_no_verbose():
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
+    assert "--verbose" not in cmd
+
+
+def test_stream_result_record_takes_output_from_last_result():
+    record = build_stream_result_record(0, 4.0, False, None, CLAUDE_OUTPUT, "warning")
+    assert record == {
+        "returncode": 0,
+        "duration_s": 4.0,
+        "timed_out": False,
+        "error": None,
+        "output": CLAUDE_OUTPUT,
+        "stdout": None,
+        "stderr": "warning",
+        "permission_denials": CLAUDE_OUTPUT["permission_denials"],
+    }
+
+
+def test_stream_result_record_without_result_line():
+    record = build_stream_result_record(
+        None, 1.0, True, "timed out after 300.0 seconds", None, None
+    )
+    assert record["output"] is None
+    assert record["stdout"] is None
+    assert record["stderr"] == ""
+    assert record["permission_denials"] == []
+
+
+def test_stream_result_record_ignores_denials_that_are_not_a_list():
+    record = build_stream_result_record(
+        0, 1.0, False, None, {"type": "result", "permission_denials": "Bash"}, ""
+    )
+    assert record["permission_denials"] == []
+
+
+def test_stream_result_record_has_same_keys_as_json_result_record():
+    stream_record = build_stream_result_record(0, 1.0, False, None, None, "")
+    json_record = claude_code_headless.build_result_record(
+        0, 1.0, False, None, "{}", ""
+    )
+    assert list(stream_record) == list(json_record)
+
+
+def test_record_error_event():
+    run_dir = Path("/work/runs/20261112-120000/advisor-strategy-001")
+    assert build_record_error_event(run_dir, "No space left on device") == {
+        "event": "record_error",
+        "kind": "advisor_steps",
+        "run_dir": str(run_dir),
+        "error": "No space left on device",
+    }
+
+
+def test_record_steps_off_writes_no_stream_file(tmp_path):
+    advisor, start_process, _, runs_dir = make_advisor(tmp_path)
+    advisor.request_update(sample_context())
+    assert option_value(start_process.calls[0][0], "--output-format") == "json"
+    assert not (runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME).exists()
+
+
+def test_record_steps_starts_claude_with_stream_json_and_same_options(tmp_path):
+    advisor, start_process, _, _ = make_streaming_advisor(tmp_path)
+    advisor.request_update(sample_context())
+    assert len(start_process.calls) == 1
+    cmd, kwargs = start_process.calls[0]
+    assert kwargs == {
+        "cwd": tmp_path / "ch04_techniques",
+        "env": dict(os.environ),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    assert cmd[:2] == ["claude", "-p"]
+    assert option_value(cmd, "--output-format") == "stream-json"
+    assert "--verbose" in cmd
+    assert option_value(cmd, "--allowedTools").split(",") == EXPECTED_ALLOWED_TOOLS
+    assert start_process.processes[0].calls == [("wait", 300.0)]
+
+
+def test_record_steps_writes_each_line_with_read_time(tmp_path):
+    advisor, _, _, runs_dir = make_streaming_advisor(tmp_path)
+    advisor.request_update(sample_context())
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS
+
+
+def test_record_steps_writes_result_json_from_last_result_line(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.stderr = "warning"
+    advisor.request_update(sample_context())
+    result = read_result(runs_dir)
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["error"] is None
+    assert result["output"] == CLAUDE_OUTPUT
+    assert result["stdout"] is None
+    assert result["stderr"] == "warning"
+    assert result["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert set(event) == {
+        "event",
+        "role",
+        "run_dir",
+        "returncode",
+        "duration_s",
+        "timed_out",
+        "error",
+        "permission_denials",
+        "result",
+    }
+    assert event["event"] == "advisor"
+    assert event["role"] == ROLE.name
+    assert event["run_dir"] == str(runs_dir / "advisor-strategy-001")
+    assert event["result"] == "戦略を更新した"
+    assert event["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
+    assert advisor.is_busy() is False
+
+
+def test_record_steps_uses_last_of_several_result_lines(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.lines = [
+        (101.0, json.dumps({"type": "result", "result": "first"})),
+        (102.0, json.dumps(CLAUDE_OUTPUT, ensure_ascii=False)),
+    ]
+    advisor.request_update(sample_context())
+    assert read_result(runs_dir)["output"] == CLAUDE_OUTPUT
+    assert recorder.events[0]["result"] == "戦略を更新した"
+
+
+def test_record_steps_without_result_line_records_no_output(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.lines = STREAM_LINES[:3]
+    start_process.exit_code = 1
+    advisor.request_update(sample_context())
+    result = read_result(runs_dir)
+    assert result["returncode"] == 1
+    assert result["output"] is None
+    assert result["stdout"] is None
+    assert result["permission_denials"] == []
+    assert recorder.events[0]["result"] is None
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:3]
+
+
+def test_record_steps_keeps_last_line_without_newline_as_raw(tmp_path):
+    advisor, start_process, _, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.lines = [
+        (101.0, json.dumps({"type": "system", "subtype": "init"})),
+        (102.0, '{"type": "assis'),
+    ]
+    start_process.last_line_without_newline = True
+    advisor.request_update(sample_context())
+    assert read_stream(runs_dir) == [
+        {"mono": 101.0, "data": {"type": "system", "subtype": "init"}},
+        {"mono": 102.0, "raw": '{"type": "assis'},
+    ]
+
+
+def test_record_steps_lines_are_readable_while_claude_runs(tmp_path):
+    advisor, start_process, _, runs_dir = make_streaming_advisor(
+        tmp_path, start_thread=start_daemon_thread
+    )
+    start_process.hold_after = 2
+    advisor.request_update(sample_context())
+    stream_path = runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME
+    wait_until(
+        lambda: (
+            stream_path.is_file()
+            and len(stream_path.read_text(encoding="utf-8").splitlines()) == 2
+        ),
+        "stream.jsonl did not have the first 2 lines while claude was running",
+    )
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
+    assert advisor.is_busy() is True
+    start_process.release()
+    assert advisor.idle.wait(WAIT_TIMEOUT)
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS
+    assert read_result(runs_dir)["output"] == CLAUDE_OUTPUT
+
+
+def test_record_steps_terminates_claude_on_timeout_and_keeps_lines(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.hold_after = 2
+    start_process.wait_timeout_first = True
+    start_process.stderr = "still running"
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("wait", 300.0),
+        "terminate",
+        ("wait", TERMINATE_GRACE_S),
+    ]
+    result = read_result(runs_dir)
+    assert result["timed_out"] is True
+    assert result["returncode"] is None
+    assert result["error"] == "timed out after 300.0 seconds"
+    assert result["output"] is None
+    assert result["stdout"] is None
+    assert result["stderr"] == "still running"
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
+    assert len(recorder.events) == 1
+    assert recorder.events[0]["timed_out"] is True
+    assert advisor.busy is False
+
+
+def test_record_steps_kills_claude_that_ignores_terminate_on_timeout(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(claude_code_headless, "TERMINATE_GRACE_S", SHORT_GRACE_S)
+    advisor, start_process, _, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.hold_after = 2
+    start_process.wait_timeout_first = True
+    start_process.terminate_works = False
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("wait", 300.0),
+        "terminate",
+        ("wait", SHORT_GRACE_S),
+        "kill",
+        ("wait", SHORT_GRACE_S),
+    ]
+    assert read_result(runs_dir)["timed_out"] is True
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
+    assert advisor.busy is False
+
+
+def test_record_steps_stops_claude_when_waiting_fails(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.hold_after = 2
+    start_process.wait_error = OverflowError("timeout value is too large")
+    advisor.request_update(sample_context())
+    assert start_process.processes[0].calls == [
+        ("wait", 300.0),
+        "terminate",
+        ("wait", TERMINATE_GRACE_S),
+    ]
+    result = read_result(runs_dir)
+    assert result["timed_out"] is False
+    assert result["returncode"] is None
+    assert "timeout value is too large" in result["error"]
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
+    assert len(recorder.events) == 1
+    assert advisor.process is None
+    assert advisor.busy is False
+
+
+def test_record_steps_gives_up_pipes_that_stay_open_after_kill(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_code_headless, "TERMINATE_GRACE_S", SHORT_GRACE_S)
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.hold_after = 2
+    start_process.wait_timeout_first = True
+    start_process.pipes_stay_open = True
+    started = time.monotonic()
+    advisor.request_update(sample_context())
+    # パイプが閉じなくても、advisor のスレッドは有限の時間で終わる
+    assert time.monotonic() - started < WAIT_TIMEOUT
+    process = start_process.processes[0]
+    assert process.calls == [
+        ("wait", 300.0),
+        "terminate",
+        ("wait", SHORT_GRACE_S),
+        "kill",
+        ("wait", SHORT_GRACE_S),
+    ]
+    result = read_result(runs_dir)
+    assert result["timed_out"] is True
+    assert result["error"] == "timed out after 300.0 seconds"
+    assert result["output"] is None
+    assert result["stderr"] == ""
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
+    assert len(recorder.events) == 1
+    assert advisor.process is None
+    assert advisor.busy is False
+    process.pipes_released.set()
+
+
+def test_record_steps_close_terminates_claude_and_keeps_lines(tmp_path):
+    advisor, start_process, _, runs_dir = make_streaming_advisor(
+        tmp_path, start_thread=start_daemon_thread
+    )
+    start_process.hold_after = 1
+    advisor.request_update(sample_context())
+    assert start_process.started.wait(WAIT_TIMEOUT)
+    assert start_process.processes[0].held.wait(WAIT_TIMEOUT)
+    advisor.close()
+    process = start_process.processes[0]
+    assert "terminate" in process.calls
+    assert "kill" not in process.calls
+    assert advisor.busy is False
+    result = read_result(runs_dir)
+    assert result["returncode"] == -15
+    assert result["error"] == "stopped by close"
+    assert result["output"] is None
+    assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:1]
+
+
+def test_record_steps_close_prevents_starting_claude_for_pending_request(tmp_path):
+    recorder_box = Recorder()
+    advisor, start_process, _, runs_dir = make_streaming_advisor(
+        tmp_path, start_thread=recorder_box.hold
+    )
+    advisor.request_update(sample_context())
+    closer = threading.Thread(target=advisor.close)
+    closer.start()
+    wait_until(lambda: advisor.closed, "close() did not mark the advisor closed")
+    recorder_box.held_jobs[0]()
+    closer.join(WAIT_TIMEOUT)
+    assert not closer.is_alive()
+    assert start_process.calls == []
+    assert read_result(runs_dir)["error"] == "stopped by close"
+
+
+def test_record_steps_records_start_failure(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    start_process.error = FileNotFoundError("claude not found")
+    advisor.request_update(sample_context())
+    result = read_result(runs_dir)
+    assert result["returncode"] is None
+    assert "claude not found" in result["error"]
+    assert [event["event"] for event in recorder.events] == ["advisor"]
+    assert advisor.busy is False
+
+
+def test_record_steps_reports_stream_file_that_cannot_be_opened(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+    run_dir = runs_dir / "advisor-strategy-001"
+    (run_dir / STREAM_FILE_NAME).mkdir(parents=True)
+    advisor.request_update(sample_context())
+    # 記録だけをやめ、claude は起動して実行を続ける
+    assert len(start_process.calls) == 1
+    assert [event["event"] for event in recorder.events] == ["record_error", "advisor"]
+    error_event = recorder.events[0]
+    assert error_event["kind"] == "advisor_steps"
+    assert error_event["run_dir"] == str(run_dir)
+    assert isinstance(error_event["error"], str) and error_event["error"]
+    result = read_result(runs_dir)
+    assert result["error"] is None
+    assert result["output"] == CLAUDE_OUTPUT
+
+
+def test_record_steps_continues_when_logging_record_error_fails(tmp_path):
+    advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
+
+    def log_failing_on_record_error(event: dict) -> None:
+        if event["event"] == "record_error":
+            raise OSError("No space left on device")
+        recorder.events.append(event)
+
+    advisor.log = log_failing_on_record_error
+    (runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME).mkdir(parents=True)
+    advisor.request_update(sample_context())
+    # record_error の行を log に渡せなくても、claude は起動して実行を続ける
+    assert len(start_process.calls) == 1
+    assert [event["event"] for event in recorder.events] == ["advisor"]
+    result = read_result(runs_dir)
+    assert result["error"] is None
+    assert result["output"] == CLAUDE_OUTPUT
+    assert advisor.is_busy() is False

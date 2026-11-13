@@ -116,6 +116,7 @@ def recorder(tmp_path, monkeypatch):
             timeout_s,
             hidden_env_names,
             log,
+            record_steps=False,
         ):
             if role.name in rec.advisor_errors:
                 raise rec.advisor_errors[role.name]
@@ -123,6 +124,7 @@ def recorder(tmp_path, monkeypatch):
             self.role = role
             self.hidden_env_names = hidden_env_names
             self.log = log
+            self.record_steps = record_steps
             rec.advisors[role.name] = self
             rec.events.append(f"advisor {role.name} created")
 
@@ -256,6 +258,19 @@ def test_main_creates_game_notes_and_run_log(recorder):
         for line in run_logs[0].read_text(encoding="utf-8").splitlines()
     ]
     assert events[0] == "start"
+
+
+def test_main_records_advisor_steps_of_every_role_only_with_record_dashboard(
+    recorder,
+):
+    run.main(REQUIRED)
+    assert [advisor.record_steps for advisor in recorder.advisors.values()] == [
+        False
+    ] * len(ADVISOR_ROLES)
+    run.main([*REQUIRED, "--record-dashboard"])
+    assert [advisor.record_steps for advisor in recorder.advisors.values()] == [
+        True
+    ] * len(ADVISOR_ROLES)
 
 
 def test_main_creates_one_advisor_for_each_role(recorder):
@@ -608,11 +623,16 @@ def test_parse_args_uses_defaults():
         "advisor_timeout": 300.0,
         "max_consecutive_errors": 5,
         "save_requests": False,
+        "record_dashboard": False,
     }
 
 
 def test_parse_args_accepts_save_requests():
     assert run.parse_args([*REQUIRED, "--save-requests"]).save_requests is True
+
+
+def test_parse_args_accepts_record_dashboard():
+    assert run.parse_args([*REQUIRED, "--record-dashboard"]).record_dashboard is True
 
 
 def test_parse_args_accepts_decisions_model():
