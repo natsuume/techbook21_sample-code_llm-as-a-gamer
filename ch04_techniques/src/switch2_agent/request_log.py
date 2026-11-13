@@ -123,6 +123,11 @@ class RequestLog:
                         "name": question.name,
                         "text": question.text,
                         "kind": question.kind,
+                        "answer_type": question.answer_type,
+                        "choices": [
+                            {"name": choice.name, "description": choice.description}
+                            for choice in question.choices
+                        ],
                     }
                     for question in questions
                 ],
@@ -212,6 +217,7 @@ def build_request_record(entry: RequestLogEntry, wall_time: str) -> dict[str, ob
         "history_text": request.history_text,
         "previous_operation_text": request.previous_operation_text,
         "probabilities": decision.probabilities if decision is not None else None,
+        "choices": decision.choices if decision is not None else None,
         "refusals": decision.refusals if decision is not None else None,
         "raw_response": (
             dict(decision.raw_response)

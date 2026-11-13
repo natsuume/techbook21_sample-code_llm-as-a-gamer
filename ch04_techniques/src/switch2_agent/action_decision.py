@@ -11,7 +11,15 @@ from dataclasses import dataclass
 
 from switch2_remote.controller_state import PadState
 
-from switch2_agent.questions import ADVISOR_QUESTION_NAME, Question
+from switch2_agent.questions import (
+    ADVISOR_QUESTION_NAME,
+    HOLD_CHOICE,
+    NONE_CHOICE,
+    STICK_AXIS_DIRECTIONS,
+    STICK_STRENGTH_LEVELS,
+    TAP_CHOICE,
+    Question,
+)
 
 DEFAULT_THRESHOLD = 0.5  # advisor の問いのしきい値の既定値
 # 十字キーの相反する方向の組
@@ -83,54 +91,74 @@ def decide_action(
     5. advisor: advisor_requested = probabilities["advisor"] > thresholds.advisor (同じ値なら偽)、
        advisor_probability = probabilities["advisor"]
     """
-    missing = [q.name for q in questions if q.name not in probabilities]
-    if missing:
-        raise ValueError(f"missing probabilities: {' '.join(missing)}")
-    adopted = adopt_buttons(probabilities, questions)
+    check_answers(probabilities, choices, questions)
+    adopted = adopt_buttons(choices, questions)
     remove_opposite_dpad(adopted)
-    held_buttons = frozenset(b for b, (kind, _) in adopted.items() if kind == "press")
-    taps = frozenset(b for b, (kind, _) in adopted.items() if kind == "tap")
+    held_buttons = frozenset(
+        b for b, (kind, _) in adopted.items() if kind == HOLD_CHOICE
+    )
+    taps = frozenset(b for b, (kind, _) in adopted.items() if kind == TAP_CHOICE)
     advisor_probability = probabilities[ADVISOR_QUESTION_NAME]
     return PadAction(
-        held=PadState(held_buttons, decide_sticks(probabilities, questions)),
+        held=PadState(held_buttons, decide_sticks(probabilities, choices, questions)),
         taps=taps,
         advisor_requested=advisor_probability > thresholds.advisor,
         advisor_probability=advisor_probability,
     )
 
 
-def adopt_buttons(
+def check_answers(
     probabilities: Mapping[str, float],
+    choices: Mapping[str, Mapping[str, float]],
+    questions: Sequence[Question],
+) -> None:
+    """questions のすべての問いの答えがあるかを確かめ、足りなければ ValueError にする (decide_action の docstring)。"""
+    missing: list[str] = []
+    for question in questions:
+        if question.answer_type == "probability":
+            if question.name not in probabilities:
+                missing.append(question.name)
+            continue
+        values = choices.get(question.name)
+        if values is None:
+            missing.append(question.name)
+            continue
+        missing.extend(
+            f"{question.name}.{choice.name}"
+            for choice in question.choices
+            if choice.name not in values
+        )
+    if missing:
+        raise ValueError(f"missing answers: {' '.join(missing)}")
+
+
+def adopt_buttons(
+    choices: Mapping[str, Mapping[str, float]],
     questions: Sequence[Question],
 ) -> dict[str, tuple[str, float]]:
-    """kind が press / tap の問いのうち、確率が DEFAULT_THRESHOLD を超えた問いから、
-    ボタン → (採った種類 "press" / "tap", その問いの確率) を返す。
+    """ボタンの問いの答えから、押すボタン → (HOLD_CHOICE か TAP_CHOICE, 押す側の合計) を返す (decide_action の 1)。
 
-    同じボタンで両方が超えたら、確率の高いほうを採る (同じ値なら press)。
+    押す側の合計 p_hold + p_tap が p_none より大きいボタンだけを入れる。p_hold >= p_tap なら HOLD_CHOICE、
+    そうでなければ TAP_CHOICE。
     """
     adopted: dict[str, tuple[str, float]] = {}
     for question in questions:
-        if question.kind not in ("press", "tap"):
+        if question.kind != "button":
             continue
-        probability = probabilities[question.name]
-        if probability <= DEFAULT_THRESHOLD:
-            continue
-        current = adopted.get(question.target)
-        if current is None:
-            adopted[question.target] = (question.kind, probability)
-            continue
-        _, current_probability = current
-        if probability > current_probability or (
-            probability == current_probability and question.kind == "press"
-        ):
-            adopted[question.target] = (question.kind, probability)
+        values = choices[question.name]
+        hold = values[HOLD_CHOICE]
+        tap = values[TAP_CHOICE]
+        press_side = hold + tap
+        if press_side > values[NONE_CHOICE]:
+            kind = HOLD_CHOICE if hold >= tap else TAP_CHOICE
+            adopted[question.target] = (kind, press_side)
     return adopted
 
 
 def remove_opposite_dpad(adopted: dict[str, tuple[str, float]]) -> None:
-    """adopted (adopt_buttons の結果) で十字キーの相反する方向が両方とも採られていたら、確率の低いほうを外す。
+    """adopted (adopt_buttons の結果) で十字キーの相反する方向が両方とも採られていたら、押す側の合計が低いほうを外す。
 
-    同じ確率なら両方とも外す。adopted をその場で書き換える。
+    同じ値なら両方とも外す。adopted をその場で書き換える (decide_action の 2)。
     """
     for first, second in OPPOSITE_DPAD_PAIRS:
         if first not in adopted or second not in adopted:
@@ -143,27 +171,69 @@ def remove_opposite_dpad(adopted: dict[str, tuple[str, float]]) -> None:
             del adopted[first]
 
 
+def choose_direction(question: Question, values: Mapping[str, float]) -> str:
+    """スティックの方向の問いの答え values から、確率が最も高い選択肢の name を返す (decide_action の 3)。
+
+    最大の確率の選択肢が 2 つ以上あれば NONE_CHOICE を返す。question.choices に無い name は見ない。
+    """
+    probabilities = {choice.name: values[choice.name] for choice in question.choices}
+    highest = max(probabilities.values())
+    top = [
+        name for name, probability in probabilities.items() if probability == highest
+    ]
+    return top[0] if len(top) == 1 else NONE_CHOICE
+
+
+def stick_strength(p50: float, p75: float, p100: float) -> float:
+    """強さの問いの 50・75・100 の確率から、傾きの大きさ (0.25〜1.0) を返す (decide_action の 4)。
+
+    上の段階が下の段階を超えないよう切り下げ (q50 = p50、q75 = min(p75, q50)、q100 = min(p100, q75))、
+    STICK_MIN_STRENGTH + STICK_STRENGTH_STEP × (q50 + q75 + q100) を返す。
+    """
+    q50 = p50
+    q75 = min(p75, q50)
+    q100 = min(p100, q75)
+    return STICK_MIN_STRENGTH + STICK_STRENGTH_STEP * (q50 + q75 + q100)
+
+
 def decide_sticks(
     probabilities: Mapping[str, float],
+    choices: Mapping[str, Mapping[str, float]],
     questions: Sequence[Question],
 ) -> dict[str, tuple[float, float]]:
-    """kind が stick の問いから、スティック名 → (x, y) を返す。x と y の両方が 0 のスティックは含めない。
+    """スティックの方向と強さの問いから、スティック名 → (x, y) を返す (decide_action の 3 と 4)。
 
-    確率が DEFAULT_THRESHOLD を超えた方向の確率だけを使い、
-    x = RIGHT の確率 − LEFT の確率、y = UP の確率 − DOWN の確率 (超えなかった方向は 0 として扱う) とする。
+    x と y の両方が 0 のスティックは含めない。
     """
-    true_probabilities: dict[str, dict[str, float]] = {}
+    # 軸 (例: LS_x) → 段階 → その強さの問いの確率
+    levels: dict[str, dict[int, float]] = {}
     for question in questions:
-        if question.kind != "stick":
+        if question.kind == "stick_strength":
+            axis_target, level = question.target.rsplit("_", 1)
+            levels.setdefault(axis_target, {})[int(level)] = probabilities[
+                question.name
+            ]
+    values: dict[str, dict[str, float]] = {}
+    for question in questions:
+        if question.kind != "stick_direction":
             continue
-        stick, direction = question.target.split("_", 1)
-        probability = probabilities[question.name]
-        directions = true_probabilities.setdefault(stick, {})
-        directions[direction] = probability if probability > DEFAULT_THRESHOLD else 0.0
+        stick, axis = question.target.split("_")
+        direction = choose_direction(question, choices[question.name])
+        value = 0.0
+        if direction != NONE_CHOICE:
+            strengths = levels[question.target]
+            magnitude = stick_strength(
+                strengths[STICK_STRENGTH_LEVELS[0]],
+                strengths[STICK_STRENGTH_LEVELS[1]],
+                strengths[STICK_STRENGTH_LEVELS[2]],
+            )
+            _, positive = STICK_AXIS_DIRECTIONS[axis]
+            value = magnitude if direction == positive else -magnitude
+        values.setdefault(stick, {})[axis] = value
     sticks: dict[str, tuple[float, float]] = {}
-    for stick, directions in true_probabilities.items():
-        x = directions.get("RIGHT", 0.0) - directions.get("LEFT", 0.0)
-        y = directions.get("UP", 0.0) - directions.get("DOWN", 0.0)
+    for stick, axes in values.items():
+        x = axes.get("x", 0.0)
+        y = axes.get("y", 0.0)
         if x != 0.0 or y != 0.0:
             sticks[stick] = (x, y)
     return sticks

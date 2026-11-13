@@ -121,4 +121,13 @@ def read_choice_probabilities(
     name は `<問いの name>.<選択肢の name>`)。values にどれかの選択肢の name が無ければ DecisionModelError にする。
     question.choices に無い name は無視する。確率の合計は検証しない。
     """
-    raise NotImplementedError
+    probabilities: dict[str, float] = {}
+    for choice in question.choices:
+        if choice.name not in values:
+            raise DecisionModelError(
+                f"answer of {question.name} has no probability for: {choice.name}"
+            )
+        probabilities[choice.name] = read_probability(
+            values[choice.name], f"{question.name}.{choice.name}"
+        )
+    return probabilities

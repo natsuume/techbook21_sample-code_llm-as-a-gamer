@@ -52,10 +52,11 @@ from switch2_agent.decision_models.base import (
     Decision,
     DecisionModelError,
     post_json,
+    read_choice_probabilities,
     read_probability,
 )
 from switch2_agent.decision_request import DecisionRequest
-from switch2_agent.questions import Question
+from switch2_agent.questions import NONE_CHOICE, Question
 
 DECISIONS_URL = "https://api.openai.com/v1/decisions"
 DEFAULT_DECISIONS_MODEL = "gpt-6-luna"  # Decisions API で使える唯一のモデル
@@ -116,10 +117,24 @@ def build_decisions_payload(
         "model": model,
         "input": [{"role": "user", "content": content}],
         "questions": [
-            {"type": "predicate", "name": question.name, "instructions": question.text}
-            for question in request.questions
+            build_decisions_question(question) for question in request.questions
         ],
     }
+
+
+def build_decisions_question(question: Question) -> dict[str, object]:
+    """問い 1 つを、Decisions API の要求の questions の要素 (build_decisions_payload の docstring の形) にする。"""
+    if question.answer_type == "choice":
+        return {
+            "type": "choice",
+            "name": question.name,
+            "instructions": question.text,
+            "choices": [
+                {"value": choice.name, "description": choice.description}
+                for choice in question.choices
+            ],
+        }
+    return {"type": "predicate", "name": question.name, "instructions": question.text}
 
 
 def parse_decisions_response(
@@ -141,12 +156,12 @@ def parse_decisions_response(
     その要素が object でないか value が文字列でないものは DecisionModelError にする。
     questions に無い name の answer は無視する。raw_response は None (DecisionsApiModel.decide が応答の本文を入れる)。
     """
-    names = [question.name for question in questions]
     answers = body.get("answers")
     if not isinstance(answers, list):
         raise DecisionModelError("decisions response has no answers list")
-    requested = set(names)
+    requested = {question.name: question for question in questions}
     probabilities: dict[str, float] = {}
+    choices: dict[str, dict[str, float]] = {}
     refusals = 0
     for answer in answers:
         if not isinstance(answer, dict):
@@ -157,23 +172,72 @@ def parse_decisions_response(
                 f"decisions answer has a name that is not a string: {name!r}"
             )
         answer_type = answer.get("type")
-        if answer_type not in ("predicate", "refusal"):
+        if answer_type not in ("predicate", "choice", "refusal"):
             raise DecisionModelError(
                 f"decisions answer of {name} has unexpected type: {answer_type!r}"
             )
-        if name not in requested:
+        question = requested.get(name)
+        if question is None:
             continue
         if answer_type == "refusal":
-            probabilities[name] = 0.0
             refusals += 1
+            if question.answer_type == "choice":
+                choices[name] = refused_choice_probabilities(question)
+            else:
+                probabilities[name] = 0.0
+        elif question.answer_type == "choice":
+            if answer_type != "choice":
+                raise DecisionModelError(
+                    f"decisions answer of choice question {name} is {answer_type!r}"
+                )
+            choices[name] = read_choice_probabilities(
+                choice_values(answer, name), question
+            )
         else:
+            if answer_type != "predicate":
+                raise DecisionModelError(
+                    f"decisions answer of probability question {name} is {answer_type!r}"
+                )
             probabilities[name] = read_probability(answer.get("probability"), name)
-    missing = [name for name in names if name not in probabilities]
+    missing = [
+        question.name
+        for question in questions
+        if question.name not in probabilities and question.name not in choices
+    ]
     if missing:
         raise DecisionModelError(
             f"decisions response has no answer for: {' '.join(missing)}"
         )
-    return Decision(probabilities=probabilities, choices={}, refusals=refusals)
+    return Decision(probabilities=probabilities, choices=choices, refusals=refusals)
+
+
+def choice_values(answer: Mapping[str, object], name: str) -> dict[str, object]:
+    """choice の answer の probabilities (value と probability を持つ object のリスト) を、value → probability の辞書にする。
+
+    probabilities がリストでないか、その要素が object でないか value が文字列でなければ DecisionModelError にする。
+    name は例外のメッセージに使う問いの name。
+    """
+    items = answer.get("probabilities")
+    if not isinstance(items, list):
+        raise DecisionModelError(
+            f"decisions answer of {name} has no probabilities list: {items!r}"
+        )
+    values: dict[str, object] = {}
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("value"), str):
+            raise DecisionModelError(
+                f"decisions answer of {name} has a malformed probability: {item!r}"
+            )
+        values[item["value"]] = item.get("probability")
+    return values
+
+
+def refused_choice_probabilities(question: Question) -> dict[str, float]:
+    """回答を拒否された選択肢の問いの答えとして、NONE_CHOICE を 1.0、ほかの選択肢を 0.0 にした辞書を返す。"""
+    return {
+        choice.name: 1.0 if choice.name == NONE_CHOICE else 0.0
+        for choice in question.choices
+    }
 
 
 class DecisionsApiModel:

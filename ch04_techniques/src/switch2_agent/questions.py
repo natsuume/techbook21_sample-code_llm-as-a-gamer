@@ -51,8 +51,8 @@ BUTTON_LABELS = {
 }
 # スティック名 → 問いの文で使う呼び名。並びは問いの順でもある
 STICK_LABELS = {"LS": "左スティック", "RS": "右スティック"}
-# スティックを倒す方向 → 問いの文で使う呼び名。並びは問いの順でもある
-STICK_DIRECTION_LABELS = {"UP": "上", "DOWN": "下", "LEFT": "左", "RIGHT": "右"}
+# スティックの軸 → 問いの文で使う倒す向きの呼び名。並びは問いの順でもある
+STICK_AXIS_LABELS = {"x": "左右", "y": "上下"}
 # advisor の問いの name
 ADVISOR_QUESTION_NAME = "advisor"
 ADVISOR_QUESTION_TEXT = (
@@ -97,6 +97,27 @@ class Question:
     choices: tuple[Choice, ...]
 
 
+# ボタンの問いの選択肢 (この順)
+BUTTON_CHOICES = (
+    Choice(NONE_CHOICE, "押さない"),
+    Choice(HOLD_CHOICE, "押した状態にする。押した状態は次の判断まで続く"),
+    Choice(TAP_CHOICE, "1 回だけ短く押す"),
+)
+# スティックの軸 → その軸の方向の問いの選択肢 (この順)
+STICK_DIRECTION_CHOICES = {
+    "x": (
+        Choice(NONE_CHOICE, "左右には倒さない"),
+        Choice("left", "左に倒す"),
+        Choice("right", "右に倒す"),
+    ),
+    "y": (
+        Choice(NONE_CHOICE, "上下には倒さない"),
+        Choice("up", "上に倒す"),
+        Choice("down", "下に倒す"),
+    ),
+}
+
+
 def build_questions() -> list[Question]:
     """問いの一覧 (34 問) を次の順で返す。
 
@@ -124,42 +145,10 @@ def build_questions() -> list[Question]:
     4. advisor の問い 1 問。name が ADVISOR_QUESTION_NAME、文が ADVISOR_QUESTION_TEXT、kind が advisor、
        target が空文字の、確率の問い
     """
-    questions: list[Question] = []
-    for button in BUTTON_ORDER:
-        label = BUTTON_LABELS[button]
-        questions.append(
-            Question(
-                name=f"press_{button}",
-                text=f"今、{label}を押した状態にするべきか。押した状態は次の判断まで続く。",
-                kind="press",
-                target=button,
-                answer_type="probability",
-                choices=(),
-            )
-        )
-        questions.append(
-            Question(
-                name=f"tap_{button}",
-                text=f"今、{label}を 1 回だけ短く押すべきか。",
-                kind="tap",
-                target=button,
-                answer_type="probability",
-                choices=(),
-            )
-        )
-    for stick, stick_label in STICK_LABELS.items():
-        for direction, direction_label in STICK_DIRECTION_LABELS.items():
-            questions.append(
-                Question(
-                    name=f"stick_{stick}_{direction}",
-                    text=f"今、{stick_label}を{direction_label}に倒すべきか。",
-                    kind="stick",
-                    target=f"{stick}_{direction}",
-                    answer_type="probability",
-                    choices=(),
-                )
-            )
-    questions.append(
+    return [
+        *build_button_questions(),
+        *build_stick_direction_questions(),
+        *build_stick_strength_questions(),
         Question(
             name=ADVISOR_QUESTION_NAME,
             text=ADVISOR_QUESTION_TEXT,
@@ -167,6 +156,65 @@ def build_questions() -> list[Question]:
             target="",
             answer_type="probability",
             choices=(),
+        ),
+    ]
+
+
+def build_button_questions() -> list[Question]:
+    """ボタンの問い 17 問 (build_questions の 1) を返す。"""
+    return [
+        Question(
+            name=f"button_{button}",
+            text=f"今、{BUTTON_LABELS[button]}をどうするか。",
+            kind="button",
+            target=button,
+            answer_type="choice",
+            choices=BUTTON_CHOICES,
         )
-    )
-    return questions
+        for button in BUTTON_ORDER
+    ]
+
+
+def build_stick_direction_questions() -> list[Question]:
+    """スティックの方向の問い 4 問 (build_questions の 2) を返す。"""
+    return [
+        Question(
+            name=f"stick_{stick}_{axis}",
+            text=f"今、{stick_label}を{axis_label}に倒すか。",
+            kind="stick_direction",
+            target=f"{stick}_{axis}",
+            answer_type="choice",
+            choices=STICK_DIRECTION_CHOICES[axis],
+        )
+        for stick, stick_label in STICK_LABELS.items()
+        for axis, axis_label in STICK_AXIS_LABELS.items()
+    ]
+
+
+def build_stick_strength_questions() -> list[Question]:
+    """スティックの強さの問い 12 問 (build_questions の 3) を返す。"""
+    return [
+        Question(
+            name=f"stick_{stick}_{axis}_at_least_{level}",
+            text=stick_strength_text(stick_label, axis_label, level),
+            kind="stick_strength",
+            target=f"{stick}_{axis}_{level}",
+            answer_type="probability",
+            choices=(),
+        )
+        for stick, stick_label in STICK_LABELS.items()
+        for axis, axis_label in STICK_AXIS_LABELS.items()
+        for level in STICK_STRENGTH_LEVELS
+    ]
+
+
+def stick_strength_text(stick_label: str, axis_label: str, level: int) -> str:
+    """スティックの強さの問いの文を返す (build_questions の 3)。
+
+    level が 100 なら「傾きをいっぱい (100%) にするべきか」、それ以外は「傾きを <level>% 以上にするべきか」とする。
+    """
+    if level == 100:
+        strength = "傾きをいっぱい (100%) にするべきか。"
+    else:
+        strength = f"傾きを {level}% 以上にするべきか。"
+    return f"{stick_label}を{axis_label}に倒す場合、{strength}"

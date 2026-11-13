@@ -352,7 +352,16 @@ def test_main_with_save_requests_passes_request_log_and_writes_header(recorder):
     assert header["model"] == "jev"
     assert header["instructions"] == build_instructions()
     assert header["questions"] == [
-        {"name": q.name, "text": q.text, "kind": q.kind} for q in build_questions()
+        {
+            "name": q.name,
+            "text": q.text,
+            "kind": q.kind,
+            "answer_type": q.answer_type,
+            "choices": [
+                {"name": c.name, "description": c.description} for c in q.choices
+            ],
+        }
+        for q in build_questions()
     ]
 
 

@@ -51,6 +51,7 @@ from switch2_agent.decision_models.base import (
     Decision,
     DecisionModelError,
     post_json,
+    read_choice_probabilities,
     read_probability,
 )
 from switch2_agent.decision_request import DecisionRequest
@@ -127,13 +128,26 @@ def build_jev_payload(
         "model": model,
         "state": state,
         "questions": {
-            question.name: {"type": "noul", "instructions": question.text}
+            question.name: build_jev_question(question)
             for question in request.questions
         },
     }
     if assets:
         payload["assets"] = assets
     return payload
+
+
+def build_jev_question(question: Question) -> dict[str, object]:
+    """問い 1 つを、Jev の要求の questions の値 (build_jev_payload の docstring の形) にする。"""
+    if question.answer_type == "choice":
+        return {
+            "type": "choice",
+            "instructions": question.text,
+            "criteria": {
+                choice.name: choice.description for choice in question.choices
+            },
+        }
+    return {"type": "noul", "instructions": question.text}
 
 
 def parse_jev_response(
@@ -155,14 +169,34 @@ def parse_jev_response(
     if not isinstance(answers, dict):
         raise DecisionModelError("jev response has no answers object")
     probabilities: dict[str, float] = {}
-    for name in [question.name for question in questions]:
+    choices: dict[str, dict[str, float]] = {}
+    for question in questions:
+        name = question.name
         if name not in answers:
             raise DecisionModelError(f"jev response has no answer for: {name}")
         answer = answers[name]
-        if not isinstance(answer, dict) or answer.get("type") != "noul":
-            raise DecisionModelError(f"jev answer of {name} is not a noul: {answer!r}")
-        probabilities[name] = read_probability(answer.get("noul"), name)
-    return Decision(probabilities=probabilities, choices={}, refusals=0)
+        if not isinstance(answer, dict):
+            raise DecisionModelError(
+                f"jev answer of {name} is not an object: {answer!r}"
+            )
+        if question.answer_type == "choice":
+            if answer.get("type") != "choice":
+                raise DecisionModelError(
+                    f"jev answer of {name} is not a choice: {answer!r}"
+                )
+            values = answer.get("probabilities")
+            if not isinstance(values, dict):
+                raise DecisionModelError(
+                    f"jev answer of {name} has no probabilities object: {answer!r}"
+                )
+            choices[name] = read_choice_probabilities(values, question)
+        else:
+            if answer.get("type") != "noul":
+                raise DecisionModelError(
+                    f"jev answer of {name} is not a noul: {answer!r}"
+                )
+            probabilities[name] = read_probability(answer.get("noul"), name)
+    return Decision(probabilities=probabilities, choices=choices, refusals=0)
 
 
 class JevModel:

@@ -95,13 +95,6 @@ DEFAULT_IMAGE_WIDTH = DEVICE_WIDTH
 DEFAULT_JPEG_QUALITY = 85
 # --model ごとの API キーの環境変数の名前
 API_KEY_ENVS = {"jev": jev.API_KEY_ENV, "decisions": decisions_api.API_KEY_ENV}
-# しきい値の種類 → 起動引数の説明で使う呼び名
-THRESHOLD_TITLES = {
-    "press": "押下状態",
-    "tap": "短押し",
-    "stick": "スティック",
-    "advisor": "advisor",
-}
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -162,13 +155,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_JPEG_QUALITY,
         help=f"要求に載せる画像の JPEG の品質 ({JPEG_QUALITY_MIN}〜{JPEG_QUALITY_MAX})",
     )
-    for kind, title in THRESHOLD_TITLES.items():
-        parser.add_argument(
-            f"--threshold-{kind}",
-            type=float,
-            default=DEFAULT_THRESHOLD,
-            help=f"{title}の問いのしきい値 (0〜1)。確率がこれを超えたら真",
-        )
+    parser.add_argument(
+        "--threshold-advisor",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help="advisor の問いのしきい値 (0〜1)。確率がこれを超えたら真",
+    )
     parser.add_argument(
         "--valley-ratio",
         type=float,
@@ -246,10 +238,8 @@ def range_errors(args: argparse.Namespace) -> list[str]:
             f"--jpeg-quality must be {JPEG_QUALITY_MIN}..{JPEG_QUALITY_MAX}: "
             f"{args.jpeg_quality}"
         )
-    for kind in ("press", "tap", "stick", "advisor"):
-        value = getattr(args, f"threshold_{kind}")
-        if not 0.0 <= value <= 1.0:
-            errors.append(f"--threshold-{kind} must be 0..1: {value}")
+    if not 0.0 <= args.threshold_advisor <= 1.0:
+        errors.append(f"--threshold-advisor must be 0..1: {args.threshold_advisor}")
     if not 0.0 < args.valley_ratio < 1.0:
         errors.append(
             f"--valley-ratio must be between 0 and 1 (exclusive): {args.valley_ratio}"
