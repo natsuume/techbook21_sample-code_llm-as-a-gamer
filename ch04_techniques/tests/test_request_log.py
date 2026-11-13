@@ -82,6 +82,7 @@ def ok_entry(**overrides) -> RequestLogEntry:
         number=3,
         origin=ORIGIN,
         sent_at=103.0,
+        encoded_at=103.25,
         received_at=103.5,
         request=sample_request(),
         decision=sample_decision(),
@@ -199,9 +200,11 @@ def test_write_ok_entry_writes_request_line(tmp_path):
     line = lines[0]
     assert TIME_PATTERN.fullmatch(line["time"])
     assert line["number"] == 3
+    # t_sent は要求の時刻 (sent_at) の経過秒、decide_s は model.decide を呼ぶ直前 (encoded_at) から
+    # 応答を受け取るまで (received_at) の時間で、選択と符号化の時間 (sent_at から encoded_at まで) を含まない
     assert line["t_sent"] == pytest.approx(3.0)
     assert line["t_received"] == pytest.approx(3.5)
-    assert line["decide_s"] == pytest.approx(0.5)
+    assert line["decide_s"] == pytest.approx(0.25)
     assert line["result"] == "ok"
     assert line["error"] is None
     assert line["state_text"] == "## 戦略\n右へ進む"

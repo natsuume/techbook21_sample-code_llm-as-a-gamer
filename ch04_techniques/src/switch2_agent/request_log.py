@@ -43,7 +43,9 @@ class RequestLogEntry:
 
     number             要求の通し番号 (1 始まり。Pipeline.request_count)。run.jsonl の decision の number と同じ
     origin             経過秒の起点 (Pipeline.started_at)
-    sent_at            要求を送った時刻 (clock の値。OperationRecord.sent_at と同じ)
+    sent_at            要求の時刻 (clock の値。Pipeline.run_once の now で、フレームを選ぶ前の時刻。
+                       OperationRecord.sent_at と同じ)
+    encoded_at         要求を組み立て終えて model.decide を呼ぶ直前の時刻 (clock の値。Pipeline.run_once の encoded_at)
     received_at        応答を受け取った時刻 (clock の値)。応答が無い (model.decide が失敗した) ときは None
     request            送った要求
     decision           Decision Model の応答。応答が無いときは None
@@ -57,6 +59,7 @@ class RequestLogEntry:
     number: int
     origin: float
     sent_at: float
+    encoded_at: float
     received_at: float | None
     request: DecisionRequest
     decision: Decision | None
@@ -102,9 +105,12 @@ class RequestLog:
             event                     "request"
             number                    entry.number
             time                      壁時計の時刻
-            t_sent                    entry.sent_at - entry.origin
-            t_received                entry.received_at - entry.origin (received_at が None なら null)
-            decide_s                  entry.received_at - entry.sent_at (received_at が None なら null)
+            t_sent                    要求の時刻の経過秒 entry.sent_at - entry.origin (フレームを選ぶ前の時刻)
+            t_received                応答を受け取った時刻の経過秒 entry.received_at - entry.origin
+                                      (received_at が None なら null)
+            decide_s                  model.decide の時間 (HTTP を含む) entry.received_at - entry.encoded_at。
+                                      フレームの選択と符号化の時間は含まず、run.jsonl の decision の decide_s と同じ
+                                      (received_at が None なら null)
             result / error            entry.result / entry.error
             images                    entry.request.images の順に {"label": label, "t": frame_time - origin,
                                       "file": "frames/<frame_file_name の名前>", "bytes": JPEG のバイト数,

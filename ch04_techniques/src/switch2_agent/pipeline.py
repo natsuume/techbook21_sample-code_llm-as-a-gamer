@@ -205,7 +205,8 @@ class Pipeline:
            空でなければ、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
         4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode,
-           origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT))
+           origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT))。
+           組み立て終えたら encoded_at = clock() (model.decide を呼ぶ直前の時刻)
         5. request_sent = True、request_count を 1 増やす (増やした後の値 number がこの要求の通し番号)。
            sent_at = now、decision = model.decide(request)、received_at = clock()。
            model.decide が DecisionModelError を出したら、要求のログに result="error"、error=例外の文字列 (str)、
@@ -213,13 +214,15 @@ class Pipeline:
            成功したら consecutive_errors = 0。続けて、応答を待つ間にキャプチャーが止まっていないかを確かめる:
            reason = capture_lost() とし、None で capture_ended() が真なら reason = "capture ended"。
            reason があれば応答を捨て (操作を反映せず、operation_log にも log の decision にも残さない)、
-           要求のログに result="discarded"、error=reason、decision は応答、action は None の記録を書き、
-           output.neutral() して CaptureStoppedError(reason) を出す
+           まず output.neutral() し (要求のログの書き込みで、中立に戻すのを遅らせないため)、その後に要求のログに
+           result="discarded"、error=reason、decision は応答、action は None の記録を書いてから、
+           CaptureStoppedError(reason) を出す
         6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)。
            apply が pad_output.OutputStoppedError を出したら (5 の確認の後に、見張りがキャプチャーの停止を判定して
            出力を止めた)、5 と同じく応答を捨て、要求のログに result="discarded"、error=止まった理由、decision は応答、
-           action は決めた操作の記録を書き、CaptureStoppedError(止まった理由。capture_lost() の理由で、無ければ
-           "pad output was stopped") を出す。
+           action は決めた操作の記録を書いてから、CaptureStoppedError(止まった理由。capture_lost() の理由で、無ければ
+           "pad output was stopped") を出す。5 と違って中立に戻すのを待たずにログを書いてよいのは、見張りが出力を
+           止めたときに、PadOutput.stop_output が既に中立を送っているため。
            apply が送信の例外 (RuntimeError / OSError) を出したら、要求のログに result="error"、
            error=describe_error(例外)、decision は応答、action は決めた操作の記録を書き、OutputSendError に包んで出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
@@ -240,7 +243,7 @@ class Pipeline:
               (呼ばなければ False), "refusals": decision.refusals}
 
         要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
-        (number、origin=started_at、sent_at、received_at、request、decision、action、advisor_accepted
+        (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
         (ok 以外は False)、result、error) を request_log.write に渡す。write が OSError を出したら、判断のループを
         止めないよう捕まえ、log に {"event": "request_log_error", "error": describe_error(例外)} を渡して続ける
         (write が失敗しても、5・6 で出す例外は 5・6 のとおりに出す)。

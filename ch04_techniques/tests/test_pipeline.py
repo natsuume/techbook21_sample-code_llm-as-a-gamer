@@ -574,6 +574,29 @@ def test_request_log_records_successful_request(accepted):
     assert entry.error is None
 
 
+def test_request_log_entry_has_time_just_before_decide():
+    pipeline, env, request_log = make_pipeline_with_request_log(now=9.0)
+
+    def read_notes_taking_time() -> dict[str, str]:
+        # 要求を組み立てる間に 0.1 秒かかったことにする
+        env.clock.now += 0.1
+        return dict(NOTES)
+
+    pipeline.parts.read_notes = read_notes_taking_time
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    entry = request_log.entries[0]
+    # sent_at は要求の時刻 (フレームを選ぶ前)、encoded_at は model.decide を呼ぶ直前の時刻
+    assert entry.sent_at == 10.0
+    assert entry.encoded_at == pytest.approx(10.1)
+    assert entry.received_at == pytest.approx(10.3)
+    # run.jsonl の decide_s と同じく、encoded_at から received_at までが model.decide の時間
+    assert env.events("decision")[0]["decide_s"] == pytest.approx(
+        entry.received_at - entry.encoded_at
+    )
+
+
 def test_request_numbers_count_every_sent_request():
     pipeline, env, request_log = make_pipeline_with_request_log()
     env.model.outcomes = [DecisionModelError("HTTP 500"), decision()]
@@ -619,6 +642,7 @@ def test_request_log_records_decision_error_and_raises():
     assert entry.error == "HTTP 500"
     assert entry.request is env.model.requests[0]
     assert entry.sent_at == 10.0
+    assert entry.encoded_at == 10.0
     assert entry.received_at is None
     assert entry.decision is None
     assert entry.action is None
@@ -663,6 +687,38 @@ def test_request_log_records_discarded_decision_when_capture_ends():
     assert [(e.result, e.error) for e in request_log.entries] == [
         ("discarded", "capture ended")
     ]
+
+
+def mark_capture_lost(env: Env) -> None:
+    env.capture_lost = "no new frame for 2.0 seconds"
+
+
+def mark_capture_ended(env: Env) -> None:
+    env.capture_ended = True
+
+
+@pytest.mark.parametrize("stop_capture", [mark_capture_lost, mark_capture_ended])
+def test_neutralizes_before_writing_request_log_when_capture_stops_while_waiting(
+    stop_capture,
+):
+    pipeline, env = make_pipeline()
+    # 偽の output の neutral / apply と、偽の RequestLog の write を、呼ばれた順に 1 つのリストに記録する
+    calls: list[str] = []
+    env.output.events = calls
+
+    class OrderRecordingRequestLog(FakeRequestLog):
+        def write(self, entry: RequestLogEntry) -> None:
+            calls.append(f"write {entry.result}")
+            super().write(entry)
+
+    pipeline.parts.request_log = OrderRecordingRequestLog()
+    env.model.on_decide = lambda: stop_capture(env)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    # 要求のログの書き込みで中立に戻すのを遅らせないよう、先に中立に戻してからログを書く
+    assert calls == ["neutral", "write discarded"]
 
 
 def test_request_log_records_discarded_decision_when_output_is_stopped():
