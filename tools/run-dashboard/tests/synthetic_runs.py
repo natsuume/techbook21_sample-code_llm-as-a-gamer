@@ -151,14 +151,25 @@ def append_json_line(path: Path, record: Mapping) -> None:
 
 
 def write_run_log(
-    run_dir: Path, start_seconds: float, events: Sequence[tuple[float, dict]]
+    run_dir: Path,
+    start_seconds: float,
+    events: Sequence[tuple[float, dict]],
+    right_after_start: Sequence[tuple[float, dict]] = (),
 ) -> None:
     """run.jsonl に、(経過秒, 行の辞書) の events を経過秒の順に {"time": 壁時計の時刻, **行の辞書} で書く。
 
     壁時計の時刻は、start の行の時刻 start_seconds (0 時からの秒) に経過秒を足したもの (24 時を過ぎたら 0 時に戻る)。
+    right_after_start の行は、経過秒によらず、start の行のすぐ後に (この順で) 書く。第4章の RunLog.write は
+    時刻をロックの外で取るため、start と同時に別のスレッドが書いた行は、ファイルでは start の行より後でも
+    時刻がわずかに前になることがある。その行を表すのに使う。
     """
-    path = run_dir / RUN_LOG_FILE_NAME
+    lines: list[tuple[float, dict]] = []
     for t, event in sorted(events, key=lambda pair: pair[0]):
+        lines.append((t, event))
+        if event.get("event") == "start":
+            lines.extend(right_after_start)
+    path = run_dir / RUN_LOG_FILE_NAME
+    for t, event in lines:
         append_json_line(path, {"time": format_clock(start_seconds + t), **event})
 
 
@@ -324,12 +335,15 @@ DASHBOARD_PAD_REPORTS: tuple[
         None,
     ),
     (2.125, "neutral", PadState(), False, "pipe closed"),
-    (6.0625, "apply", PadState(frozenset({"RIGHT"}), {"RS": (0.0, -1.0)}), True, None),
+    (6.8125, "apply", PadState(frozenset({"RIGHT"}), {"RS": (0.0, -1.0)}), True, None),
     (12.8125, "apply", PadState(), True, None),
 )
 DASHBOARD_DROPPED = {"frames": 1, "pad": 0}
 # 起動直後 (start の行より前) の record_error の行の経過秒
 EARLY_RECORD_ERROR_T = -0.5
+# start の行のすぐ後に書いた、時刻が start よりわずかに前 (3 ミリ秒) の record_error の行の経過秒
+# (第4章の RunLog.write は時刻をロックの外で取るため、別のスレッドが start と同時に書くと起こる)
+SLIGHTLY_BEFORE_START_T = -0.003
 ADVISOR_STEPS_RECORD_ERROR_T = 7.0
 CAPTURE_STOPPED_T = 14.5
 RECORD_END_T = 15.0
@@ -395,7 +409,8 @@ class DashboardRun:
                                   advisor が受け付けた
         error_request             応答が無い要求 (result が error、decision が無い)
         controls_request          controls の advisor を受け付けた要求 (その実行は result.json の無い実行中)
-        strategy_changed_request  strategy の advisor の実行の終了の 1 秒以内に strategy が変わった要求
+        strategy_changed_request  strategy の advisor の実行の終了から 1 秒を超えて後に strategy が変わった要求。
+                                  直前の要求 (controls_request) は、その実行の終了より前に送った
         tips_changed_request      どの advisor の実行にも入らない時刻に tips が変わった要求 (00:00 台)
         discarded_request         キャプチャーが止まって応答を捨てた要求 (result が discarded)
     """
@@ -496,9 +511,9 @@ def dashboard_request_specs() -> list[RequestSpec]:
         ),
         RequestSpec(
             4,
-            5.75,
-            5.875,
-            6.0,
+            6.5,
+            6.625,
+            6.75,
             5.5,
             STRATEGY_CHANGED_NOTES,
             strategy_changed,
@@ -875,9 +890,10 @@ def write_dashboard_run(runs_dir: Path, name: str = DASHBOARD_RUN_NAME) -> Dashb
     """--record-dashboard の記録がそろった実行を runs_dir / name に書き、期待値の DashboardRun を返す。
 
     run.jsonl: start より前の record_error (dashboard_records の build_record_error_event)、start (args と
-    origin_mono つき。args は第4章の run.parse_args の結果)、decision、decision_error、advisor、
-    advisor_steps の record_error、capture_stopped、record_end (build_record_end_event)。start の time は 23:59:50.000
-    で、経過秒 10 秒より後の行は 00:00 台 (日付をまたぐ)。
+    origin_mono つき。args は第4章の run.parse_args の結果)、start のすぐ後に書いた時刻がわずかに前の
+    record_error、decision (Pipeline.run_once の docstring のキー。number と advisor_accepted を含む)、
+    decision_error、advisor、advisor_steps の record_error、capture_stopped、record_end (build_record_end_event)。
+    start の time は 23:59:50.000 で、経過秒 10 秒より後の行は 00:00 台 (日付をまたぐ)。
     requests.jsonl・frames.jsonl・thumbs/・pad.jsonl・advisor の 2 つの実行のディレクトリーも書く。
     """
     run_dir = runs_dir / name
@@ -909,7 +925,17 @@ def write_dashboard_run(runs_dir: Path, name: str = DASHBOARD_RUN_NAME) -> Dashb
     ]
     events += write_dashboard_requests(run_dir, origin_mono, frames)
     events += write_dashboard_advisors(run_dir, origin_mono)
-    write_run_log(run_dir, DASHBOARD_START_SECONDS, events)
+    write_run_log(
+        run_dir,
+        DASHBOARD_START_SECONDS,
+        events,
+        right_after_start=[
+            (
+                SLIGHTLY_BEFORE_START_T,
+                build_record_error_event("frames", RECORD_ERROR_MESSAGE),
+            )
+        ],
+    )
     specs = dashboard_request_specs()
     return DashboardRun(
         name=name,
@@ -929,7 +955,7 @@ def write_dashboard_run(runs_dir: Path, name: str = DASHBOARD_RUN_NAME) -> Dashb
         t_sent={spec.number: spec.sent for spec in specs},
         t_received={spec.number: spec.received for spec in specs},
         note_version_requests=[1, 4, 5],
-        note_version_t=[1.0, 5.75, 12.375],
+        note_version_t=[1.0, 6.5, 12.375],
         strategy_run=STRATEGY_RUN_NAME,
         controls_run=CONTROLS_RUN_NAME,
         strategy_duration_s=STRATEGY_DURATION_S,
@@ -988,11 +1014,13 @@ TIPS_DURATION_S = 6.5
 # tips の実行の advisor の行の経過秒 (要求の記録が無いため、この行から開始と終了の時刻を求める)
 TIPS_ADVISOR_LINE_T = 20.0
 INTERRUPTED_T = 21.0
+# tips の advisor を受け付けた要求の number (その decision の行の advisor_accepted に tips がある)
+TIPS_REQUEST = 3
 # decision の行 (経過秒, number, decide_s, advisor を受け付けた役割)
 NO_DASHBOARD_DECISIONS = (
     (1.0, 1, 0.5, frozenset()),
     (2.0, 2, 0.25, frozenset()),
-    (13.5, 3, 0.75, frozenset({"tips"})),
+    (13.5, TIPS_REQUEST, 0.75, frozenset({"tips"})),
 )
 TIPS_CLAUDE_OUTPUT = {
     "type": "result",
@@ -1008,6 +1036,8 @@ class NoDashboardRun:
     """write_no_dashboard_run が書いた実行。
 
     tips_run は advisor の実行のディレクトリー名 (result.json はあり、stream.jsonl は無い)。
+    tips_request は、その実行を受け付けた要求の number (run.jsonl の decision の行の advisor_accepted に tips がある。
+    requests.jsonl が無いので、その要求の行は無い)。
     tips_t_end は run.jsonl の advisor の行の経過秒、tips_duration_s は result.json の所要時間。
     decide_s は run.jsonl の decision の行の decide_s (ファイルの順)。
     """
@@ -1016,6 +1046,7 @@ class NoDashboardRun:
     run_dir: Path
     start_time: str
     tips_run: str
+    tips_request: int
     tips_t_end: float
     tips_duration_s: float
     decide_s: list[float]
@@ -1025,9 +1056,10 @@ class NoDashboardRun:
 def write_no_dashboard_run(runs_dir: Path) -> NoDashboardRun:
     """--record-dashboard も --save-requests も付けていない実行を runs_dir / NO_DASHBOARD_RUN_NAME に書く。
 
-    run.jsonl (start は args と origin_mono を持たない。decision、advisor、interrupted の行) と、advisor の実行の
-    ディレクトリー (write_advisor_inputs の入力と build_result_record の result.json。stream.jsonl は無い) だけを書く。
-    requests.jsonl・frames.jsonl・pad.jsonl は無い。
+    run.jsonl (start は args と origin_mono を持たない。decision、advisor、interrupted の行。decision の行は
+    Pipeline.run_once の docstring のキーで、TIPS_REQUEST の行の advisor_accepted に tips を入れる) と、advisor の
+    実行のディレクトリー (write_advisor_inputs の入力と build_result_record の result.json。stream.jsonl は無い)
+    だけを書く。requests.jsonl・frames.jsonl・pad.jsonl は無い。
     """
     run_dir = runs_dir / NO_DASHBOARD_RUN_NAME
     run_dir.mkdir(parents=True)
@@ -1102,6 +1134,7 @@ def write_no_dashboard_run(runs_dir: Path) -> NoDashboardRun:
         run_dir=run_dir,
         start_time=NO_DASHBOARD_START_TIME,
         tips_run=TIPS_RUN_NAME,
+        tips_request=TIPS_REQUEST,
         tips_t_end=TIPS_ADVISOR_LINE_T,
         tips_duration_s=TIPS_DURATION_S,
         decide_s=[decide_s for _, _, decide_s, _ in NO_DASHBOARD_DECISIONS],

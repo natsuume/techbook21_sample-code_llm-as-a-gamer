@@ -10,9 +10,6 @@ from dataclasses import dataclass
 
 from run_dashboard.advisor_runs import AdvisorRun
 
-# advisor の実行が終わった後も、その実行の書き換えとみなす時間 (秒)。advisor がファイルを書いてから
-# 実行の終了が記録されるまでの間や、書いた直後の要求で、変わった内容が読まれることがあるため
-NOTE_CHANGE_GRACE_S = 1.0
 # 書き換えた advisor の実行が見つからない変更の by
 EXTERNAL_CHANGE = "external"
 
@@ -61,10 +58,13 @@ def build_note_versions(
     request はその行の number、files はその行の state_text の split_state_text)。
     changed は、NOTE_KINDS の順に、分けた中身が直前の版と違う種類ごとに 1 件。どちらかの版を分けられなければ
     (split_state_text が None)、changed は空のリストにする。
-    各件の by は、その種類を受け持つ役割 (advisor_roles.ADVISOR_ROLES の note_kind がその種類の役割) の
-    advisor_runs の実行のうち、t_start が数で、t_start <= t_sent かつ (t_end が None か
-    t_sent <= t_end + NOTE_CHANGE_GRACE_S) の実行の名前。当てはまる実行が複数あれば advisor_runs の順で最初の実行。
-    無ければ EXTERNAL_CHANGE ("external")。
+    各件の by は次のように決める。変わった行の t_sent を ts、その直前に使った行 (前の版の内容を読んだ最後の行。
+    state_text が文字列で t_sent が数の行) の t_sent を tp とする。ファイルは tp から ts までの間に書き換えられた。
+    その種類を受け持つ役割 (advisor_roles.ADVISOR_ROLES の note_kind がその種類の役割) の advisor_runs の実行のうち、
+    t_start が数で t_start <= ts、かつ (t_end が None か t_end >= tp) の実行 (その間に動いていた実行) の名前。
+    当てはまる実行が複数あれば advisor_runs の順で最初の実行。無ければ EXTERNAL_CHANGE ("external")。
+    終了の後に何秒まで書き換えとみなすか、という固定の猶予は使わない (応答に時間のかかった要求の後でも、
+    その間に終わった advisor の書き換えとみなせるようにするため)。
     """
     raise NotImplementedError
 

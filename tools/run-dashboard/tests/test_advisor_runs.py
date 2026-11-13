@@ -78,7 +78,20 @@ def test_summary_constants():
 # --- build_advisor_runs ---
 
 
-def test_kth_run_of_each_role_is_matched_with_kth_accepting_request(tmp_path):
+def decision_line_event(t: float, number: int, advisor_accepted: object) -> RunEvent:
+    """run.jsonl の decision の行 (対応づけに使う number と advisor_accepted を持つもの) の RunEvent を返す。"""
+    return RunEvent(
+        t=t,
+        record={
+            "time": "10:00:00.000",
+            "event": "decision",
+            "number": number,
+            "advisor_accepted": advisor_accepted,
+        },
+    )
+
+
+def test_kth_run_of_each_role_is_matched_with_kth_accepting_decision_line(tmp_path):
     strategy_1 = advisor_dir(tmp_path, "strategy", 1)
     strategy_2 = advisor_dir(tmp_path, "strategy", 2)
     tips_1 = advisor_dir(tmp_path, "tips", 1)
@@ -90,14 +103,23 @@ def test_kth_run_of_each_role_is_matched_with_kth_accepting_request(tmp_path):
         ),
     }
     read_result_json = FakeResultFiles(records)
+    run_events = [
+        decision_line_event(1.25, 1, ["strategy"]),
+        decision_line_event(2.5, 2, []),
+        RunEvent(t=2.75, record={"time": "10:00:02.750", "event": "decision_error"}),
+        decision_line_event(3.5, 3, ["strategy", "tips"]),
+        # advisor_accepted がリストでない (役割を持たない形の真偽値の) 行は数えない
+        decision_line_event(4.0, 4, True),
+    ]
     requests = [
-        {"number": 1, "t_received": 1.25, "advisor_accepted": ["strategy"]},
-        {"number": 2, "t_received": 2.5, "advisor_accepted": []},
-        {"number": 3, "t_received": 3.5, "advisor_accepted": ["strategy", "tips"]},
-        {"number": 4, "t_received": None, "advisor_accepted": None},
+        {"number": 1, "t_received": 1.25},
+        # requests.jsonl の advisor_accepted は対応づけに使わない
+        {"number": 2, "t_received": 2.5, "advisor_accepted": ["strategy"]},
+        {"number": 3, "t_received": 3.5},
+        {"number": 4, "t_received": None},
     ]
     runs = build_advisor_runs(
-        [strategy_1, strategy_2, tips_1], requests, [], read_result_json
+        [strategy_1, strategy_2, tips_1], requests, run_events, read_result_json
     )
     assert runs == [
         AdvisorRun(
@@ -143,6 +165,41 @@ def test_kth_run_of_each_role_is_matched_with_kth_accepting_request(tmp_path):
     assert sorted(read_result_json.calls) == sorted(records)
 
 
+def test_run_index_is_used_even_when_earlier_run_dir_is_missing(tmp_path):
+    # advisor-strategy-001 が無くても、advisor-strategy-002 は 2 番目に strategy を受け付けた行に対応する
+    strategy_2 = advisor_dir(tmp_path, "strategy", 2)
+    record = result_record(2.0)
+    run_events = [
+        decision_line_event(1.25, 1, ["strategy"]),
+        decision_line_event(5.5, 5, ["strategy"]),
+    ]
+    requests = [
+        {"number": 1, "t_received": 1.25},
+        {"number": 5, "t_received": 5.5},
+    ]
+    runs = build_advisor_runs(
+        [strategy_2],
+        requests,
+        run_events,
+        FakeResultFiles({strategy_2.path / "result.json": record}),
+    )
+    assert runs == [
+        AdvisorRun(
+            name="advisor-strategy-002",
+            role="strategy",
+            request=5,
+            t_start=5.5,
+            t_end=7.5,
+            returncode=0,
+            denials=0,
+            result="更新した",
+            status="done",
+            result_json=record,
+            denied_tool_use_ids=frozenset(),
+        )
+    ]
+
+
 def advisor_line_event(t: float, directory: AdvisorRunDir, record: dict) -> RunEvent:
     """run.jsonl の advisor の行 (第4章の build_log_event に time を足したもの) の RunEvent を返す。"""
     line = {
@@ -150,6 +207,38 @@ def advisor_line_event(t: float, directory: AdvisorRunDir, record: dict) -> RunE
         **build_log_event(directory.path, record, ROLES_BY_NAME[directory.role]),
     }
     return RunEvent(t=t, record=line)
+
+
+def test_run_whose_request_line_is_missing_takes_times_from_advisor_line(tmp_path):
+    # decision の行で要求の番号は分かるが、requests.jsonl にその要求の行が無い
+    tips_1 = advisor_dir(tmp_path, "tips", 1)
+    record = result_record(6.5, result="Tips を更新した")
+    run_events = [
+        decision_line_event(13.5, 3, ["tips"]),
+        advisor_line_event(20.0, tips_1, record),
+    ]
+    requests = [{"number": 1, "t_received": 1.25}, {"number": 2, "t_received": 2.5}]
+    runs = build_advisor_runs(
+        [tips_1],
+        requests,
+        run_events,
+        FakeResultFiles({tips_1.path / "result.json": record}),
+    )
+    assert runs == [
+        AdvisorRun(
+            name="advisor-tips-001",
+            role="tips",
+            request=3,
+            t_start=13.5,
+            t_end=20.0,
+            returncode=0,
+            denials=0,
+            result="Tips を更新した",
+            status="done",
+            result_json=record,
+            denied_tool_use_ids=frozenset(),
+        )
+    ]
 
 
 def test_run_without_request_takes_times_from_advisor_line(tmp_path):
@@ -207,8 +296,11 @@ def test_run_without_result_json_takes_values_from_advisor_line(tmp_path):
 def test_running_run_without_result_json_or_advisor_line(tmp_path):
     controls_1 = advisor_dir(tmp_path, "controls", 1)
     tips_1 = advisor_dir(tmp_path, "tips", 1)
-    requests = [{"number": 3, "t_received": 3.5, "advisor_accepted": ["controls"]}]
-    runs = build_advisor_runs([controls_1, tips_1], requests, [], FakeResultFiles({}))
+    run_events = [decision_line_event(3.5, 3, ["controls"])]
+    requests = [{"number": 3, "t_received": 3.5}]
+    runs = build_advisor_runs(
+        [controls_1, tips_1], requests, run_events, FakeResultFiles({})
+    )
     assert runs == [
         # 要求があれば開始は分かるが、終了は分からない
         AdvisorRun(

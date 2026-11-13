@@ -43,13 +43,46 @@ def test_write_all_runs_writes_six_runs_with_expected_records(runs):
     assert not (dashboard / "advisor-controls-001" / "result.json").exists()
     assert not (dashboard / "frames").exists()
 
-    # run.jsonl: start より前の record_error、start、日付をまたいだ 00:00 台の行
+    # run.jsonl: start より前の record_error、start、start のすぐ後に書いた時刻がわずかに前の record_error、
+    # 日付をまたいだ 00:00 台の行
     run_lines = read_lines(dashboard / "run.jsonl")
-    assert [line["event"] for line in run_lines[:2]] == ["record_error", "start"]
+    assert [line["event"] for line in run_lines[:3]] == [
+        "record_error",
+        "start",
+        "record_error",
+    ]
     assert run_lines[0]["time"] == "23:59:49.500"
     assert run_lines[1]["time"] == DASHBOARD_START_TIME
+    assert run_lines[2]["time"] == "23:59:49.997"
+    assert run_lines[2]["kind"] == "frames"
     assert run_lines[-1]["event"] == "record_end"
     assert run_lines[-1]["time"] == "00:00:05.000"
+    # decision の行は number と advisor_accepted を持ち、strategy と controls を受け付けた要求がある
+    decisions = [line for line in run_lines if line["event"] == "decision"]
+    assert [(line["number"], line["advisor_accepted"]) for line in decisions] == [
+        (1, ["strategy"]),
+        (3, ["controls"]),
+        (4, []),
+        (5, []),
+    ]
+    # strategy が変わった要求は、strategy の実行の終了 (1.25 + 4.0 秒) から 1 秒を超えて後に送り、
+    # その直前の要求は終了より前に送った
+    strategy_end = 1.25 + runs.dashboard.strategy_duration_s
+    t_sent = runs.dashboard.t_sent
+    assert t_sent[runs.dashboard.strategy_changed_request] > strategy_end + 1.0
+    assert t_sent[runs.dashboard.controls_request] < strategy_end
+    # 記録の無い実行も、tips の advisor を受け付けた decision の行を持つ
+    no_dashboard_decisions = [
+        line
+        for line in read_lines(runs.no_dashboard.run_dir / "run.jsonl")
+        if line["event"] == "decision"
+    ]
+    assert [line["advisor_accepted"] for line in no_dashboard_decisions] == [
+        [],
+        [],
+        ["tips"],
+    ]
+    assert no_dashboard_decisions[2]["number"] == runs.no_dashboard.tips_request
 
     # frames.jsonl: 第4章の SharpnessValleyDetector で、1.0 秒に谷に向かい始め (fall)、1.25 秒に 0.75 秒の
     # 山を残して谷を確定する (close)

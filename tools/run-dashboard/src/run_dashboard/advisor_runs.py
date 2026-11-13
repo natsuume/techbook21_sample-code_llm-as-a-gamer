@@ -1,7 +1,8 @@
 """advisor の実行 (advisor-<役割>-<連番>/) と、それを呼んだ要求の対応づけと、実行の途中経過 (steps)。
 
-対応づけ: 役割ごとに、k 番目の実行 (連番の昇順) は、requests.jsonl の advisor_accepted にその役割を含む
-k 番目の要求に対応する (第4章の advisor は、受け付けた要求ごとに連番を 1 つ進めるため)。
+対応づけ: 役割ごとに、連番 k の実行 (advisor-<役割>-<k>/) は、run.jsonl の decision の行のうち
+advisor_accepted にその役割を含む k 番目の行の要求に対応する (第4章の advisor は、受け付けた要求ごとに連番を
+1 つ進め、Pipeline はその要求の decision の行に受け付けた役割を書くため)。
 途中経過: stream.jsonl の行 (claude -p の stream-json の出力) から、ツールの呼び出し・ツールの結果・
 拒否された操作・最後の結果を、時刻の順に並べる。
 result.json を読む関数は外から受け取る (build_advisor_runs の read_result_json)。ほかに I/O を持たない。
@@ -65,16 +66,20 @@ def build_advisor_runs(
     (advisor_dir.path / switch2_agent.advisors.claude_code_headless.RESULT_FILE_NAME) を受け取り、その中身の辞書か
     None (無い、読めない) を返す関数 (run_records.read_result_json。テストでは偽物を渡す)。
 
-    役割ごとに、advisor_dirs の中のその役割の k 番目の実行を、requests (ファイルの順) のうち advisor_accepted
-    (リスト) にその役割の name を含む k 番目の要求に対応づける。各実行の値:
+    連番 k (AdvisorRunDir.index。advisor_dirs の中の位置ではない) の実行を、run_events (ファイルの順) のうち
+    record の event が "decision" で、advisor_accepted (リスト) にその役割の name を含む k 番目の行に対応づける
+    (requests.jsonl の書き込みの失敗や、advisor のディレクトリーの欠けで、対応がずれないようにするため。
+    advisor_accepted がリストでない行は数えない)。requests は対応づけには使わず、t_start を求めるためだけに使う。
+    各実行の値:
+        - request: 対応する decision の行の number (int のとき)。対応する行が無ければ None
         - duration_s・returncode・denials・result: result.json があれば、その duration_s、returncode、
           permission_denials の件数、output が object ならその result から。result.json が無ければ、run_events の
           advisor の行 (下) の duration_s、returncode、permission_denials の件数、result から。
           どちらも無ければ None。duration_s は数 (bool を除く)、returncode は int (bool を除く)、denials は
           permission_denials がリストのときの件数、result は文字列のときだけ使い、それ以外は None
-        - 対応する要求があるとき: request はその number、t_start はその t_received (数でなければ None)、
-          t_end は t_start + duration_s (どちらかが None なら None)
-        - 対応する要求が無いとき: request は None。run_events のうち record の event が "advisor" で、
+        - requests (ファイルの順) に number が request の要求の行があるとき: t_start はその t_received
+          (数でなければ None)、t_end は t_start + duration_s (どちらかが None なら None)
+        - その要求の行が無いとき (request が None のときを含む): run_events のうち record の event が "advisor" で、
           Path(record の run_dir).name が実行のディレクトリー名と同じ最初の行の t を t_end にし、
           t_start は t_end - duration_s (どちらかが None なら None)。その行が無ければ t_end も t_start も None
         - status: result.json があれば "done"、無ければ "running"。result_json はその中身 (無ければ None)

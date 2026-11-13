@@ -1,6 +1,7 @@
 """6 つの合成の実行 (synthetic_runs) に対する各 API の応答。"""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from synthetic_runs import (
 )
 
 from run_dashboard.app import (
+    ALLOWED_HOSTS,
     BUILD_INSTRUCTIONS_TEXT,
     DEFAULT_WEB_DIST_DIR,
     create_app,
@@ -75,10 +77,19 @@ def values_of(names_to_values: dict, default: object) -> list:
     return [names_to_values.get(name, default) for name in QUESTION_NAMES]
 
 
+# TestClient の要求の宛先。既定の testserver は ALLOWED_HOSTS に無く 400 になるため、待ち受けるアドレスにする
+BASE_URL = "http://127.0.0.1:8765"
+
+
+def make_client(runs_dir: Path, web_dist_dir: Path | None) -> TestClient:
+    """create_app(runs_dir, web_dist_dir) のアプリに BASE_URL で要求を送る TestClient を返す。"""
+    return TestClient(create_app(runs_dir, web_dist_dir), base_url=BASE_URL)
+
+
 @pytest.fixture
 def client(runs) -> TestClient:
     """6 つの合成の実行を読むアプリ (画面のビルドの出力なし) の TestClient。"""
-    return TestClient(create_app(runs.runs_dir, None))
+    return make_client(runs.runs_dir, None)
 
 
 def get_json(client: TestClient, url: str):
@@ -170,11 +181,13 @@ def test_summary_of_dashboard_run(client, runs):
             "result": "戦略を更新した\n次は穴を越える",
         },
     ]
+    # strategy の版 1 は、実行の終了 (5.25 秒) から 1 秒を超えた後 (6.5 秒) に送った要求で変わったが、
+    # その直前の要求 (3.0 秒) は終了より前に送ったので、その実行の書き換え
     assert summary["note_versions"] == [
         {"version": 0, "t": 1.0, "request": 1, "initial": True, "changed": []},
         {
             "version": 1,
-            "t": 5.75,
+            "t": 6.5,
             "request": 4,
             "initial": False,
             "changed": [{"kind": "strategy", "by": "advisor-strategy-001"}],
@@ -211,12 +224,13 @@ def test_summary_of_run_without_dashboard_records(client, runs):
     assert summary["t_end"] == pytest.approx(21.0)
     assert summary["counts"] == {"requests": 0, "frames": 0, "pad": 0}
     assert summary["decide_s_median"] == pytest.approx(0.5)
-    # 対応する要求が無いので、run.jsonl の advisor の行 (20.0 秒) と所要時間 (6.5 秒) から時刻を求める
+    # run.jsonl の decision の行で要求の番号は分かるが、requests.jsonl が無いので、run.jsonl の advisor の行
+    # (20.0 秒) と所要時間 (6.5 秒) から時刻を求める
     assert summary["advisor_runs"] == [
         {
             "name": "advisor-tips-001",
             "role": "tips",
-            "request": None,
+            "request": 3,
             "t_start": 13.5,
             "t_end": 20.0,
             "returncode": 0,
@@ -327,7 +341,8 @@ def test_requests_of_dashboard_run(client, runs):
 @pytest.mark.parametrize(
     "query, numbers",
     [
-        ("?from=2&to=6", [2, 3, 4]),
+        ("?from=2&to=6.5", [2, 3, 4]),
+        ("?from=2&to=6", [2, 3]),
         ("?from=12.375", [5, 6]),
         ("?to=1", [1]),
         ("?from=1&to=1", [1]),
@@ -599,7 +614,7 @@ def test_pad_of_dashboard_run(client, runs):
                 "error": "pipe closed",
             },
             {
-                "t": 6.0625,
+                "t": 6.8125,
                 "source": "apply",
                 "state": "RIGHT+RS:0,-1",
                 "ok": True,
@@ -617,8 +632,8 @@ def test_pad_of_dashboard_run(client, runs):
 
 
 def test_pad_in_range(client, runs):
-    body = get_json(client, f"/api/runs/{runs.dashboard.name}/pad?from=1.4&to=6.5")
-    assert [item["t"] for item in body["items"]] == [1.4375, 2.125, 6.0625]
+    body = get_json(client, f"/api/runs/{runs.dashboard.name}/pad?from=1.4&to=7")
+    assert [item["t"] for item in body["items"]] == [1.4375, 2.125, 6.8125]
 
 
 # --- GET /api/runs/{run}/events ---
@@ -633,15 +648,17 @@ def test_events_of_dashboard_run(client, runs):
     assert [item["event"] for item in items] == [
         "record_error",
         "start",
+        "record_error",
         "decision_error",
         "advisor",
         "record_error",
         "capture_stopped",
         "record_end",
     ]
-    # start の行より前の行は負の秒、00:00 台の行は日付をまたいだ経過秒
+    # start の行より前の行は負の秒。start の行より後でも時刻がわずかに前の行は負の秒のまま。
+    # 00:00 台の行は日付をまたいだ経過秒
     assert [item["t"] for item in items] == pytest.approx(
-        [-0.5, 0.0, 2.125, 5.25, 7.0, 14.5, 15.0]
+        [-0.5, 0.0, -0.003, 2.125, 5.25, 7.0, 14.5, 15.0]
     )
     # 壁時計の time は返さない
     assert all("time" not in item for item in items)
@@ -660,17 +677,23 @@ def test_events_of_dashboard_run(client, runs):
         "args": run.args,
         "origin_mono": 1000.0,
     }
-    assert items[2] == {"t": 2.125, "event": "decision_error", "error": "HTTP 500"}
-    assert items[3]["role"] == "strategy"
-    assert items[3]["duration_s"] == 4.0
-    assert items[4] == {
+    assert items[2] == {
+        "t": pytest.approx(-0.003),
+        "event": "record_error",
+        "kind": "frames",
+        "error": "No space left on device",
+    }
+    assert items[3] == {"t": 2.125, "event": "decision_error", "error": "HTTP 500"}
+    assert items[4]["role"] == "strategy"
+    assert items[4]["duration_s"] == 4.0
+    assert items[5] == {
         "t": 7.0,
         "event": "record_error",
         "kind": "advisor_steps",
         "run_dir": str(run.run_dir / "advisor-controls-001"),
         "error": "No space left on device",
     }
-    assert items[6] == {
+    assert items[7] == {
         "t": 15.0,
         "event": "record_end",
         "written": {"frames": 7, "pad": 5},
@@ -681,8 +704,9 @@ def test_events_of_dashboard_run(client, runs):
 @pytest.mark.parametrize(
     "query, events",
     [
-        ("?from=-1&to=0", ["record_error", "start"]),
+        ("?from=-1&to=0", ["record_error", "start", "record_error"]),
         ("?to=-0.5", ["record_error"]),
+        ("?from=0&to=3", ["start", "decision_error"]),
         ("?from=12&to=15", ["capture_stopped", "record_end"]),
     ],
 )
@@ -707,7 +731,7 @@ def test_events_without_start_line_are_unavailable(runs):
     (run_dir / "run.jsonl").write_text(
         '{"time": "10:00:00.000", "event": "bridge_wait"}\n', encoding="utf-8"
     )
-    client = TestClient(create_app(runs.runs_dir, None))
+    client = make_client(runs.runs_dir, None)
     body = get_json(client, "/api/runs/20261101-000000/events")
     assert body == {"available": False, "items": []}
 
@@ -740,7 +764,7 @@ def test_notes_of_each_version(client, runs):
     }
     assert get_json(client, f"/api/runs/{name}/notes/1") == {
         "version": 1,
-        "t": 5.75,
+        "t": 6.5,
         "changed": [{"kind": "strategy", "by": "advisor-strategy-001"}],
         "files": {**FIRST_FILES, "strategy": STRATEGY_NOTE_SECOND},
     }
@@ -859,7 +883,13 @@ def test_advisor_without_stream(client, runs):
     advisor_dir = run.run_dir / run.tips_run
     body = get_json(client, f"/api/runs/{run.name}/advisor/{run.tips_run}")
     assert body["status"] == "done"
-    assert (body["request"], body["t_start"], body["t_end"]) == (None, 13.5, 20.0)
+    # 要求の番号は run.jsonl の decision の行から、時刻は run.jsonl の advisor の行から求める
+    assert (body["request"], body["t_start"], body["t_end"]) == (
+        run.tips_request,
+        13.5,
+        20.0,
+    )
+    assert run.tips_request == 3
     assert body["steps_available"] is False
     assert body["steps"] == []
     assert body["files"] == expected_files(
@@ -884,21 +914,33 @@ def test_files_returns_thumb_jpeg(client, runs):
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
     assert response.content == JPEG
+    assert int(response.headers["content-length"]) == len(JPEG)
+
+
+def assert_file_body(response, path: Path) -> None:
+    """応答の本文が path のファイルのバイト列と同じで、content-length がその長さであることを確かめる。"""
+    content = path.read_bytes()
+    assert response.content == content
+    assert int(response.headers["content-length"]) == len(content)
 
 
 def test_files_returns_text_of_advisor_dir(client, runs):
     name = runs.dashboard.name
+    advisor_dir = runs.dashboard.run_dir / "advisor-strategy-001"
     context = client.get(f"/api/runs/{name}/files/advisor-strategy-001/context.md")
     assert context.status_code == 200
     assert context.headers["content-type"] == "text/markdown; charset=utf-8"
     assert context.text.startswith("# advisor への文脈")
+    assert_file_body(context, advisor_dir / "context.md")
     result = client.get(f"/api/runs/{name}/files/advisor-strategy-001/result.json")
     assert result.status_code == 200
     assert result.headers["content-type"] == "application/json"
     assert result.json()["duration_s"] == 4.0
+    assert_file_body(result, advisor_dir / "result.json")
     stream = client.get(f"/api/runs/{name}/files/advisor-strategy-001/stream.jsonl")
     assert stream.status_code == 200
     assert stream.headers["content-type"] == "text/plain; charset=utf-8"
+    assert_file_body(stream, advisor_dir / "stream.jsonl")
 
 
 def test_files_returns_request_image_and_old_advisor_dir(client, runs):
@@ -908,11 +950,24 @@ def test_files_returns_request_image_and_old_advisor_dir(client, runs):
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
+    assert_file_body(response, save_requests.run_dir / save_requests.request_files[1])
     old = client.get(
         f"/api/runs/{runs.no_answer_type.name}/files/advisor-001/result.json"
     )
     assert old.status_code == 200
     assert old.json()["returncode"] == 0
+    assert_file_body(old, runs.no_answer_type.run_dir / "advisor-001" / "result.json")
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root はモードを 000 にしたファイルも読めるため"
+)
+def test_files_unreadable_file_is_404(client, runs):
+    (runs.dashboard.run_dir / "thumbs" / "1000750000.jpg").chmod(0)
+    response = client.get(
+        f"/api/runs/{runs.dashboard.name}/files/thumbs/1000750000.jpg"
+    )
+    assert response.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -941,7 +996,7 @@ def test_files_rejects_symlink_to_outside(runs, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("secret", encoding="utf-8")
     (runs.dashboard.run_dir / "thumbs" / "link.jpg").symlink_to(secret)
-    client = TestClient(create_app(runs.runs_dir, None))
+    client = make_client(runs.runs_dir, None)
     response = client.get(f"/api/runs/{runs.dashboard.name}/files/thumbs/link.jpg")
     assert response.status_code == 404
 
@@ -1048,7 +1103,7 @@ def test_root_without_web_dist_returns_build_instructions(client):
 
 
 def test_root_with_missing_web_dist_dir_returns_build_instructions(runs, tmp_path):
-    client = TestClient(create_app(runs.runs_dir, tmp_path / "missing-dist"))
+    client = make_client(runs.runs_dir, tmp_path / "missing-dist")
     response = client.get("/")
     assert response.status_code == 200
     assert response.text == BUILD_INSTRUCTIONS_TEXT
@@ -1059,7 +1114,7 @@ def test_root_with_web_dist_returns_index_html(runs, tmp_path):
     dist.mkdir()
     index = "<!doctype html><title>run-dashboard</title>"
     (dist / "index.html").write_text(index, encoding="utf-8")
-    client = TestClient(create_app(runs.runs_dir, dist))
+    client = make_client(runs.runs_dir, dist)
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
@@ -1070,7 +1125,7 @@ def test_api_is_served_with_web_dist(runs, tmp_path):
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
-    client = TestClient(create_app(runs.runs_dir, dist))
+    client = make_client(runs.runs_dir, dist)
     items = get_json(client, "/api/runs")
     assert [item["run"] for item in items] == RUN_NAMES_NEWEST_FIRST
 
@@ -1078,3 +1133,23 @@ def test_api_is_served_with_web_dist(runs, tmp_path):
 def test_default_web_dist_dir_is_under_project():
     project_dir = Path(__file__).resolve().parents[1]
     assert DEFAULT_WEB_DIST_DIR == project_dir / "web" / "dist"
+
+
+# --- Host の検査 ---
+
+
+def test_allowed_hosts():
+    assert ALLOWED_HOSTS == ("127.0.0.1", "localhost")
+
+
+@pytest.mark.parametrize("url", ["/", "/api/runs"])
+def test_request_with_other_host_is_400(client, url):
+    response = client.get(url, headers={"host": "evil.example"})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["localhost:5173", "127.0.0.1:8765"])
+def test_request_with_allowed_host_is_served(client, host):
+    response = client.get("/", headers={"host": host})
+    assert response.status_code == 200
+    assert response.text == BUILD_INSTRUCTIONS_TEXT

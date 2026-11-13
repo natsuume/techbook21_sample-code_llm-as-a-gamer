@@ -12,15 +12,18 @@
     GET /api/runs/{run}/advisor/{name}         advisor の実行
     GET /api/runs/{run}/files/{path}           実行のディレクトリーの thumbs/・frames/・advisor-*/ の下のファイル
     GET /                                      画面 (web/dist/ があれば配信し、無ければ画面のビルドの手順の文)
-知らない実行、許していないパス、無い番号・版・名前は 404。from・to が数でない、有限でない (nan・inf) ときと、
-from が to より大きいときは 422。リクエストごとに記録を読み直し (キャッシュしない)、runs/ には何も書かない。
+Host の名前 (ポートを除く) が ALLOWED_HOSTS 以外の要求は、どのルートも 400。
+知らない実行、許していないパス、読めないファイル、無い番号・版・名前は 404。from・to が数でない、
+有限でない (nan・inf) ときと、from が to より大きいときは 422。リクエストごとに記録を読み直し (キャッシュしない)、
+runs/ には何も書かない。
 """
 
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from run_dashboard.advisor_runs import AdvisorRun, build_advisor_runs
@@ -50,6 +53,10 @@ from run_dashboard.run_views import (
 
 # 画面のビルドの出力 (tools/run-dashboard/web/dist)。このファイル (src/run_dashboard/app.py) からの相対で求める
 DEFAULT_WEB_DIST_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+# 受け付ける要求の Host の名前 (ポートを除く)。これ以外の Host の要求は 400 にする。DNS rebinding で、
+# ほかのサイトのページから記録を読まれないようにするため (待ち受けは 127.0.0.1 だけでも、ブラウザーは
+# 攻撃者のドメインの名前を 127.0.0.1 に向け直されると、そのドメインの Host で要求を送る)
+ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 # files の API の、ファイルの拡張子 (小文字にしたもの) → content-type
 FILE_MEDIA_TYPES = {
     ".jpg": "image/jpeg",
@@ -105,11 +112,18 @@ def load_advisor_runs(records: RunRecords) -> list[AdvisorRun]:
 def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     """runs_dir の実行の記録を返す API のルートを登録した FastAPI のアプリを返す。
 
+    Starlette の TrustedHostMiddleware(allowed_hosts=ALLOWED_HOSTS) を足し、Host の名前が ALLOWED_HOSTS 以外の
+    要求は、どのルートも 400 にする。
     web_dist_dir があってディレクトリーなら、API のルートの後に、/ に StaticFiles(directory=web_dist_dir,
     html=True) を mount して画面を配信する (/ では index.html を返す)。無ければ (None か、ディレクトリーでなければ)、
     GET / で BUILD_INSTRUCTIONS_TEXT を text/plain で返す。CORS の設定は足さない。
+    files の API は、ファイルを 1 回で読んだバイト列を Response(content=..., media_type=file_media_type(...)) で
+    返す (Content-Length は返す本文の長さ)。FileResponse は Content-Length を stat の大きさで決めた後に
+    ファイルの終わりまで読むため、送る間に伸びるファイル (書いている途中の stream.jsonl など) では、
+    宣言した長さと本文の長さがずれる。読めなければ (OSError) 404。
     """
     app = FastAPI(title="run-dashboard")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
@@ -181,14 +195,18 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
         return detail
 
     @app.get("/api/runs/{run}/files/{path:path}")
-    def get_run_file(run: str, path: str) -> FileResponse:
+    def get_run_file(run: str, path: str) -> Response:
         run_dir = find_run_dir(runs_dir, run)
         if run_dir is None:
             raise HTTPException(status_code=404, detail=f"unknown run: {run}")
         file_path = resolve_run_file(run_dir, path)
         if file_path is None:
             raise HTTPException(status_code=404, detail="file not found")
-        return FileResponse(file_path, media_type=file_media_type(file_path))
+        try:
+            content = file_path.read_bytes()
+        except OSError:
+            raise HTTPException(status_code=404, detail="file not readable") from None
+        return Response(content=content, media_type=file_media_type(file_path))
 
     if web_dist_dir is not None and web_dist_dir.is_dir():
         # API のルートより後に mount する (先に登録したルートが優先される)

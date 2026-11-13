@@ -1,6 +1,7 @@
 import pytest
 
 from run_dashboard.elapsed_time import (
+    DAY_WRAP_THRESHOLD_S,
     SECONDS_PER_DAY,
     mono_elapsed,
     parse_wall_time,
@@ -8,8 +9,9 @@ from run_dashboard.elapsed_time import (
 )
 
 
-def test_seconds_per_day():
+def test_seconds_per_day_and_day_wrap_threshold():
     assert SECONDS_PER_DAY == 86400.0
+    assert DAY_WRAP_THRESHOLD_S == 43200.0
 
 
 # --- parse_wall_time ---
@@ -68,14 +70,33 @@ def test_run_log_elapsed_of_start_line_itself_is_zero():
     assert run_log_elapsed(86390.0, 86390.0, after_start=True) == 0.0
 
 
-def test_run_log_elapsed_after_start_adds_a_day_when_negative():
-    # start が 23:59:50.000、その後の行が 00:00:02.750 (日付をまたいだ)
+def test_run_log_elapsed_after_start_adds_a_day_when_below_minus_twelve_hours():
+    # start が 23:59:50.000、その後の行が 00:00:02.750 (日付をまたいだ。差は -86387.25 秒)
     assert run_log_elapsed(2.75, 86390.0, after_start=True) == pytest.approx(12.75)
+    # 差が -12 時間を 1 秒下回る
+    assert run_log_elapsed(43189.0, 86390.0, after_start=True) == pytest.approx(43199.0)
+
+
+def test_run_log_elapsed_after_start_keeps_small_negative_difference():
+    # start と同時に別のスレッドが書いた行は、start の行より後でも時刻がわずかに前のことがある
+    assert run_log_elapsed(86389.998, 86390.0, after_start=True) == pytest.approx(
+        -0.002
+    )
+
+
+def test_run_log_elapsed_after_start_keeps_difference_of_exactly_minus_twelve_hours():
+    assert run_log_elapsed(43190.0, 86390.0, after_start=True) == pytest.approx(
+        -43200.0
+    )
 
 
 def test_run_log_elapsed_before_start_keeps_negative_difference():
     # start の行より前の行 (起動直後の record_error など) は負の秒のまま
     assert run_log_elapsed(86389.5, 86390.0, after_start=False) == pytest.approx(-0.5)
+
+
+def test_run_log_elapsed_before_start_keeps_difference_below_minus_twelve_hours():
+    assert run_log_elapsed(2.75, 86390.0, after_start=False) == pytest.approx(-86387.25)
 
 
 def test_run_log_elapsed_before_start_keeps_positive_difference():

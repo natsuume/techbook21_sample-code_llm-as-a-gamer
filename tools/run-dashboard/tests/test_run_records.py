@@ -38,6 +38,7 @@ def test_load_dashboard_run(runs):
     assert [event.record["event"] for event in records.run_events] == [
         "record_error",
         "start",
+        "record_error",
         "decision",
         "decision_error",
         "decision",
@@ -48,9 +49,10 @@ def test_load_dashboard_run(runs):
         "capture_stopped",
         "record_end",
     ]
-    # start の行より前の record_error は負の秒、00:00 台の行 (12.75 秒以降) は日付をまたいで 24 時間を足す
+    # start の行より前の record_error は負の秒。start の行より後でも、時刻がわずかに前 (3 ミリ秒) の行は
+    # 負の秒のまま。00:00 台の行 (12.75 秒以降) は日付をまたいで 24 時間を足す
     assert [event.t for event in records.run_events] == pytest.approx(
-        [-0.5, 0.0, 1.25, 2.125, 3.5, 5.25, 6.0, 7.0, 12.75, 14.5, 15.0]
+        [-0.5, 0.0, -0.003, 1.25, 2.125, 3.5, 5.25, 6.75, 7.0, 12.75, 14.5, 15.0]
     )
     # 行の辞書は time を含めて読んだまま
     assert records.run_events[0].record == {
@@ -156,7 +158,7 @@ def test_load_run_with_broken_lines_counts_skipped_lines(runs):
         "advisor_steps": 1,
     }
     # 読めた行は記録がそろった実行と同じ。改行で終わっていない frames.jsonl の最後の行は読まない
-    assert len(records.run_events) == 11
+    assert len(records.run_events) == 12
     assert [request["number"] for request in records.requests] == [1, 2, 3, 4, 5, 6]
     assert records.frames is not None
     assert len(records.frames) == 7
