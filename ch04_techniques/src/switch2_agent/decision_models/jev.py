@@ -26,7 +26,7 @@ state のキーは instructions、game_notes、operation_history、frames の順
 
 画像の制約: PNG か JPEG の静止画、各辺 280〜1568 px。1280x720 は範囲に収まる。
 未確認 (公式ドキュメントに記載なし): 画像 1 枚が何トークンになるか。文脈長は要求全体で 64k トークン、
-問い 1 つあたり 32k トークンで、画像 10 枚と 43 問が収まるかは未確認。超えると 400 (max_tokens_exceeded)。
+問い 1 つあたり 32k トークンで、画像 1 枚と 43 問が収まるかは未確認。超えると 400 (max_tokens_exceeded)。
 """
 
 import base64
@@ -51,6 +51,8 @@ API_KEY_ENV = "TYPESAFE_API_KEY"  # API キーを読む環境変数の名前
 IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 JPEG_ASSET_FORMAT = "jpg"  # asset の format。"jpeg" は "jpg" の別名
 DEFAULT_TIMEOUT_S = 10.0  # 1 回の要求の HTTP のタイムアウト (秒)
+# 直前の応答が返ってから次の要求を送るまでに空ける時間 (秒)。run が Pipeline の min_request_interval_s に渡す
+JEV_MIN_REQUEST_INTERVAL_S = 0.2
 
 
 def new_asset_reference() -> str:

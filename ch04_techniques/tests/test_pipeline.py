@@ -9,7 +9,7 @@ from switch2_remote.error_message import describe_error
 from switch2_agent.action_decision import PadAction, Thresholds
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.decision_models.base import Decision, DecisionModelError
-from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.decision_request import DecisionRequest, LabeledImage
 from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
@@ -28,6 +28,7 @@ NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy":
 HISTORY_HEADING = "## 直近の応答と送った操作 (古い順、最大 5 回)"
 DECISION_LOG_KEYS = {
     "number",
+    "interval_wait_s",
     "select_s",
     "encode_s",
     "decide_s",
@@ -114,18 +115,19 @@ class FakeOutput:
 
 
 class FakeAdvisor:
-    """偽の Advisor。受け取った文脈を記録し、answers の先頭 (空なら True) を返す。"""
+    """偽の Advisor。受け取った文脈を記録し、answers の先頭 (空なら True) を返す。is_busy は busy を返す。"""
 
     def __init__(self):
         self.contexts: list[AdvisorContext] = []
         self.answers: list[bool] = []
+        self.busy = False
 
     def request_update(self, context: AdvisorContext) -> bool:
         self.contexts.append(context)
         return self.answers.pop(0) if self.answers else True
 
     def is_busy(self) -> bool:
-        return False
+        return self.busy
 
     def close(self) -> None:
         pass
@@ -214,37 +216,72 @@ def frame_times(request: DecisionRequest) -> list[float]:
 # --- 要求に載せるフレーム ---
 
 
-def test_first_request_uses_frames_just_before_now():
+def test_request_has_only_latest_frame_of_history():
     pipeline, env = make_pipeline()
     env.add_frames(9.0, 9.6, 9.8, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
-    assert frame_times(env.model.requests[0]) == [9.6, 9.8, 9.9]
+    assert frame_times(env.model.requests[0]) == [9.9]
+    assert pipeline.last_sent_frame_time == 9.9
 
 
-def test_second_request_window_starts_at_first_send_time():
+def test_first_request_sends_latest_frame_even_if_it_is_not_just_before_now():
+    # 最新のフレーム (9.0) が今 (10.0) より 1 秒前でも、まだ送っていないフレームなので送る
+    pipeline, env = make_pipeline()
+    env.add_frames(8.0, 9.0)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert len(env.model.requests) == 1
+    assert frame_times(env.model.requests[0]) == [9.0]
+
+
+def test_second_request_has_latest_frame_after_first_request():
     pipeline, env = make_pipeline()
     env.add_frames(9.6, 9.8, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
-    # 1 回目の送信時刻 (10.0) より前の時刻で遅れて届いたフレームは、2 回目の直近の区間に入らない
-    env.add_frames(9.95, 10.1, 10.3)
+    env.add_frames(10.1, 10.3)
     env.clock.now = 10.5
     pipeline.run_once()
     assert len(env.model.requests) == 2
-    assert frame_times(env.model.requests[1]) == [10.1, 10.3]
+    assert frame_times(env.model.requests[1]) == [10.3]
+    assert pipeline.last_sent_frame_time == 10.3
 
 
-def test_request_puts_meaningful_frames_before_recent_frames():
+def test_late_frame_newer_than_last_sent_frame_is_sent():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の送信時刻 (10.0) より前の時刻で遅れて届いたフレームでも、前回の要求のフレーム (9.9) より新しいので送る
+    env.add_frames(9.95)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 2
+    assert frame_times(env.model.requests[1]) == [9.95]
+
+
+def test_no_request_when_latest_frame_was_already_sent():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 最新のフレームの time (9.9) が last_sent_frame_time 以下なので、新しいフレームが無いときの扱いをする
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 1
+    assert env.sleeps == [0.05]
+
+
+def test_request_does_not_include_meaningful_frames():
     pipeline, env = make_pipeline()
     env.store.add(frame(5.0))
     env.add_frames(9.6, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
     request = env.model.requests[0]
-    assert frame_times(request) == [5.0, 9.6, 9.9]
-    assert request.images[0].label.startswith("過去の場面")
-    assert request.images[1].label.startswith("直近")
+    assert frame_times(request) == [9.9]
+    assert request.images[0].label.startswith("最新 ")
 
 
 def test_request_contains_latest_notes_and_questions():
@@ -267,15 +304,29 @@ def test_first_request_has_elapsed_labels_and_no_previous_operation():
     env.clock.now = 10.0
     pipeline.run_once()
     request = env.model.requests[0]
-    assert [image.label for image in request.images] == [
-        "直近 1/1 (t=0.90 秒、0.10 秒前)"
-    ]
+    assert [image.label for image in request.images] == ["最新 (t=0.90 秒、0.10 秒前)"]
     assert [image.after_previous_operation for image in request.images] == [False]
     assert request.history_text == f"{HISTORY_HEADING}\n(まだ操作を送っていない)"
     assert request.previous_operation_text is None
 
 
-def test_second_request_marks_frames_before_and_after_previous_operation():
+def test_second_request_marks_latest_frame_before_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [decision(tap_UP=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答は 10.2 に受け取り、その直後に操作を送った。最新のフレーム (10.1) はそれより前
+    env.add_frames(10.1)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    request = env.model.requests[1]
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=1.10 秒、0.40 秒前、前回の操作の前)", False)]
+
+
+def test_second_request_marks_latest_frame_after_previous_operation():
     pipeline, env = make_pipeline(now=9.0)
     env.model.outcomes = [decision(tap_UP=0.9)]
     env.add_frames(9.9)
@@ -286,14 +337,9 @@ def test_second_request_marks_frames_before_and_after_previous_operation():
     env.clock.now = 10.5
     pipeline.run_once()
     request = env.model.requests[1]
-    assert [image.label for image in request.images] == [
-        "直近 1/2 (t=1.10 秒、0.40 秒前、前回の操作の前)",
-        "直近 2/2 (t=1.30 秒、0.20 秒前、前回の操作の後)",
-    ]
-    assert [image.after_previous_operation for image in request.images] == [
-        False,
-        True,
-    ]
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=1.30 秒、0.20 秒前、前回の操作の後)", True)]
     assert request.history_text == (
         f"{HISTORY_HEADING}\n- t=1.20 秒 (0.30 秒前): 押下 none / 短押し UP (前回の操作)"
     )
@@ -350,9 +396,7 @@ def test_advisor_is_requested_when_probability_exceeds_threshold():
     pipeline.run_once()
     assert len(env.advisor.contexts) == 1
     context = env.advisor.contexts[0]
-    request = env.model.requests[0]
     assert context.game == "zelda"
-    assert context.images == request.images
     assert context.current_strategy == "右へ進む"
     assert context.trigger_probability == 0.9
     assert context.trigger_time_text
@@ -364,13 +408,77 @@ def test_advisor_is_requested_when_probability_exceeds_threshold():
     assert log["advisor_accepted"] is True
 
 
+def test_advisor_context_has_images_selected_for_advisor():
+    # 経過秒の起点は 4.0。意味のあるフレームは、フレームの履歴から選んだ最初のフレーム (9.1) より前の 5.0 だけ
+    pipeline, env = make_pipeline(now=4.0)
+    env.model.outcomes = [decision(advisor=0.9)]
+    env.store.add(frame(5.0))
+    env.store.add(frame(9.2))
+    env.add_frames(9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.8, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 要求には最新のフレームだけを載せる
+    assert frame_times(env.model.requests[0]) == [9.9]
+    # advisor の画像は、応答を受け取った後の 10.2 を今の時刻として選ぶ。フレームの履歴 (9 枚) からは等間隔に 5 枚
+    expected = [
+        ("過去の場面 1/1 (t=1.00 秒、5.20 秒前)", 5.0),
+        ("直近 1/5 (t=5.10 秒、1.10 秒前)", 9.1),
+        ("直近 2/5 (t=5.30 秒、0.90 秒前)", 9.3),
+        ("直近 3/5 (t=5.50 秒、0.70 秒前)", 9.5),
+        ("直近 4/5 (t=5.70 秒、0.50 秒前)", 9.7),
+        ("直近 5/5 (t=5.90 秒、0.30 秒前)", 9.9),
+    ]
+    assert env.advisor.contexts[0].images == [
+        LabeledImage(
+            label=label,
+            jpeg=fake_encode(frame(time)),
+            frame_time=time,
+            after_previous_operation=False,
+        )
+        for label, time in expected
+    ]
+
+
+def recording_encode(encoded: list[float]) -> Callable[[TimedFrame], bytes]:
+    """符号化したフレームの time を encoded に足してから、fake_encode の結果を返す encode を返す。"""
+
+    def encode(frame: TimedFrame) -> bytes:
+        encoded.append(frame.time)
+        return fake_encode(frame)
+
+    return encode
+
+
+def test_advisor_is_not_requested_while_busy():
+    pipeline, env = make_pipeline()
+    encoded: list[float] = []
+    pipeline.parts.encode = recording_encode(encoded)
+    env.advisor.busy = True
+    env.model.outcomes = [decision(advisor=0.9)]
+    env.store.add(frame(5.0))
+    env.add_frames(9.5, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # advisor の実行中は request_update を呼ばず、advisor の画像も符号化しない (要求の画像だけを符号化する)
+    assert env.advisor.contexts == []
+    assert encoded == [9.9]
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] is True
+    assert log["advisor_accepted"] is False
+
+
 def test_advisor_is_not_requested_at_threshold():
     pipeline, env = make_pipeline()
+    encoded: list[float] = []
+    pipeline.parts.encode = recording_encode(encoded)
     env.model.outcomes = [decision(advisor=0.5)]
-    env.add_frames(9.9)
+    env.store.add(frame(5.0))
+    env.add_frames(9.5, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
     assert env.advisor.contexts == []
+    # advisor を呼ばない要求では、advisor の画像を選ばず、要求の画像だけを符号化する
+    assert encoded == [9.9]
     log = env.events("decision")[0]
     assert log["advisor_requested"] is False
     assert log["advisor_accepted"] is False
@@ -536,16 +644,160 @@ def test_decision_log_has_measurement_items():
     log = logs[0]
     assert DECISION_LOG_KEYS <= set(log)
     request = env.model.requests[0]
-    # 時計が進むのは model.decide の中だけなので、ほかの時間は 0
+    # 時計が進むのは model.decide の中だけなので、ほかの時間は 0。最初の要求は間隔を空けずに送る
     assert log["decide_s"] == pytest.approx(0.2)
     for key in ("select_s", "encode_s", "apply_s"):
         assert log[key] == pytest.approx(0.0)
-    assert log["images"] == 3
+    assert log["interval_wait_s"] == 0.0
+    assert log["images"] == 1
     assert log["payload_bytes"] == sum(len(image.jpeg) for image in request.images)
     assert log["action"] == format_action(env.output.applied[0])
     assert log["advisor_probability"] == 0.0
     assert log["refusals"] == 2
     assert log["number"] == 1
+
+
+# --- 直前の応答からの間隔 ---
+
+
+def test_min_request_interval_defaults_to_zero():
+    pipeline, _ = make_pipeline()
+    assert pipeline.min_request_interval_s == 0.0
+    assert pipeline.last_response_at is None
+
+
+def test_last_response_at_is_time_when_decide_returns():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert pipeline.last_response_at == pytest.approx(10.2)
+
+
+def test_last_response_at_is_time_when_decide_fails():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    assert pipeline.last_response_at == pytest.approx(10.2)
+
+
+def test_waits_rest_of_interval_after_response_before_choosing_frame():
+    pipeline, env = make_pipeline(now=9.0, min_request_interval_s=0.2)
+    # 待つ間に clock を進め、待ち終わりの時刻のフレームを足す
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答は 10.2 に受け取った。10.3 の時点では、間隔 (0.2 秒) の残りは 0.1 秒
+    env.add_frames(10.25)
+    env.clock.now = 10.3
+    pipeline.run_once()
+    assert env.sleeps == [pytest.approx(0.1)]
+    # 待った後にフレームを選ぶので、待つ前の最新のフレーム (10.25) ではなく、待つ間に届いたフレーム (10.4) を載せる。
+    # 要求の時刻 (秒前の起点) も、待った後の時刻になる
+    request = env.model.requests[1]
+    assert frame_times(request) == pytest.approx([10.4])
+    assert [image.label for image in request.images] == [
+        "最新 (t=1.40 秒、0.00 秒前、前回の操作の後)"
+    ]
+    assert [log["interval_wait_s"] for log in env.events("decision")] == [
+        0.0,
+        pytest.approx(0.1),
+    ]
+
+
+def test_waits_rest_of_interval_after_decision_error():
+    pipeline, env = make_pipeline(min_request_interval_s=0.2)
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    # 失敗の応答も 10.2 に返った。run の失敗の後の待ちを挟まずに、10.25 に次の要求を始める
+    env.clock.now = 10.25
+    pipeline.run_once()
+    assert env.sleeps == [pytest.approx(0.15)]
+    assert frame_times(env.model.requests[1]) == pytest.approx([10.4])
+    assert env.events("decision")[0]["interval_wait_s"] == pytest.approx(0.15)
+
+
+def test_does_not_wait_when_interval_has_passed():
+    pipeline, env = make_pipeline(min_request_interval_s=0.2)
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答 (10.2) から 0.3 秒たっているので待たない
+    env.add_frames(10.5)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert env.sleeps == []
+    assert frame_times(env.model.requests[1]) == [10.5]
+    assert [log["interval_wait_s"] for log in env.events("decision")] == [0.0, 0.0]
+
+
+def test_does_not_wait_when_interval_has_just_passed():
+    # 応答 (10.25) から間隔 (0.25 秒) ちょうどの 10.5 では、残りが 0 なので待たない
+    pipeline, env = make_pipeline(min_request_interval_s=0.25)
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.model.decide_s = 0.25
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.add_frames(10.4)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert env.sleeps == []
+    assert len(env.model.requests) == 2
+    assert env.events("decision")[1]["interval_wait_s"] == 0.0
+
+
+def test_capture_end_during_interval_wait_stops_without_request():
+    pipeline, env = make_pipeline(min_request_interval_s=0.2)
+
+    def end_capture(count: int) -> None:
+        env.capture_ended = True
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, end_capture)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.add_frames(10.25)
+    env.clock.now = 10.3
+    # 待った後にキャプチャーの状態を確かめるので、待つ間に終わったら要求を送らずに止まる
+    with pytest.raises(CaptureStoppedError, match="capture ended"):
+        pipeline.run_once()
+    assert env.sleeps == [pytest.approx(0.1)]
+    assert len(env.model.requests) == 1
+    assert env.output.events == ["apply", "neutral"]
+
+
+def test_run_waits_interval_before_each_request_after_first():
+    pipeline, env = make_pipeline(min_request_interval_s=0.2)
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+
+    def stop_after_three_requests():
+        if len(env.model.requests) == 3:
+            stop.set()
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.model.on_decide = stop_after_three_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 応答 (10.1、10.4) のたびに 0.2 秒待ち、待つ間に届いたフレーム (10.3、10.6) で次の要求を送る
+    assert len(env.model.requests) == 3
+    assert env.sleeps == [pytest.approx(0.2), pytest.approx(0.2)]
+    assert [frame_times(request) for request in env.model.requests] == [
+        [9.9],
+        [pytest.approx(10.3)],
+        [pytest.approx(10.6)],
+    ]
 
 
 # --- 要求のログ ---
@@ -925,11 +1177,12 @@ def test_run_resets_error_count_after_success():
     assert env.output.events.count("apply") == 3
 
 
-def test_run_waits_for_next_frame_after_first_request_fails():
+def test_run_resends_latest_frame_after_first_request_fails():
     pipeline, env = make_pipeline()
     stop = threading.Event()
     # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の間 (中立に戻した 13.6 から 14.6 まで) は、
-    # 2 秒間隔のフレームが届かないので、次のフレーム (15.0) を待つ
+    # 2 秒間隔のフレームが届かない。失敗した要求では last_sent_frame_time を進めないため、
+    # 次のフレーム (15.0) を待たずに、同じフレーム (13.0) で 2 回目の要求を送る
     env.model.decide_s = 0.6
     env.model.outcomes = [DecisionModelError("HTTP 500")]
     # 起動 (10.0) から 3 秒 (stale_frame_timeout_s より長く first_frame_timeout_s より短い) フレームが無く、
@@ -954,6 +1207,10 @@ def test_run_waits_for_next_frame_after_first_request_fails():
     env.clock.now = 10.0
     pipeline.run(stop)
     assert len(env.model.requests) == 2
+    assert [frame_times(request) for request in env.model.requests] == [
+        [13.0],
+        [13.0],
+    ]
     assert env.events("capture_stopped") == []
     assert len(env.events("decision_error")) == 1
     assert len(env.events("decision")) == 1
@@ -989,7 +1246,7 @@ def sleep_with_new_frames(
 ) -> Callable[[float], None]:
     """clock を進めてその時刻の新しいフレームを足し、after_sleep(それまでの sleep の回数) を呼ぶ sleep を返す。
 
-    秒数は env.sleeps に記録する。新しいフレームを足し続けるので、直近の区間は空にならない
+    秒数は env.sleeps に記録する。新しいフレームを足し続けるので、新しいフレームが無い状態にはならない
     (要求を送らないのは、フレームが無いからではないことを確かめるため)。clock が 30.0 を超えたらテストを失敗させる。
     """
 
@@ -1106,7 +1363,7 @@ def test_run_ends_when_stop_is_set_while_waiting_for_recovery():
     env.add_frames(9.9)
     env.clock.now = 10.0
     pipeline.run(stop)
-    # 直近の区間に新しいフレームがあっても、stop が立ったら要求を送らずに終わる
+    # 新しいフレームがあっても、stop が立ったら要求を送らずに終わる
     assert env.model.requests == []
     assert env.sleeps == [pytest.approx(0.1)] * 3
     assert len(env.events("bridge_wait_end")) == 1
@@ -1377,15 +1634,13 @@ def test_request_after_decision_error_shows_neutral_as_previous_operation():
     assert request.previous_operation_text == (
         "── t=1.70 秒 (0.30 秒前) に、中立に戻した (Decision Model の失敗) ──"
     )
-    # 中立に戻した時刻 (10.7) が、前回の操作の前と後の境目になる
-    assert [image.label for image in request.images] == [
-        "直近 1/3 (t=1.40 秒、0.60 秒前、前回の操作の前)",
-        "直近 2/3 (t=1.60 秒、0.40 秒前、前回の操作の前)",
-        "直近 3/3 (t=1.80 秒、0.20 秒前、前回の操作の後)",
-    ]
+    # 中立に戻した時刻 (10.7) が、前回の操作の前と後の境目になる。最新のフレーム (10.8) はその後
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=1.80 秒、0.20 秒前、前回の操作の後)", True)]
 
 
-def test_meaningful_frames_are_before_neutral_after_first_request_fails():
+def test_request_after_first_request_fails_marks_latest_frame_after_neutral():
     pipeline, env = make_pipeline(now=9.0)
     env.model.outcomes = [DecisionModelError("HTTP 500")]
     env.add_frames(9.9)
@@ -1400,16 +1655,31 @@ def test_meaningful_frames_are_before_neutral_after_first_request_fails():
     env.clock.now = 11.2
     pipeline.run_once()
     request = env.model.requests[1]
-    neutralized_at = neutral_records(env)[0].neutralized_at
-    meaningful = [
-        image for image in request.images if image.label.startswith("過去の場面")
-    ]
-    recent = [image for image in request.images if image.label.startswith("直近")]
-    # 中立に戻した後のフレームは、過去の場面ではなく直近の区間の「前回の操作の後」の画像として載る
-    assert [image.frame_time for image in meaningful] == [9.6]
-    assert all(image.frame_time < neutralized_at for image in meaningful)
-    assert [image.frame_time for image in recent] == [10.5, 11.0]
-    assert all(image.after_previous_operation for image in recent)
+    # 意味のあるフレームは載せず、中立に戻した後の最新のフレーム (11.0) を「前回の操作の後」の画像として載せる
+    assert [
+        (image.frame_time, image.label, image.after_previous_operation)
+        for image in request.images
+    ] == [(11.0, "最新 (t=2.00 秒、0.20 秒前、前回の操作の後)", True)]
+
+
+def test_request_after_decision_error_resends_latest_frame_without_new_frame():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 最初の要求は 10.2 に失敗し、中立に戻した
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    # 失敗した要求では last_sent_frame_time を進めないため、新しいフレームが届いていなくても、
+    # 同じフレーム (9.9) を「前回の操作 (中立に戻したこと) の前」の画像として次の要求に載せる
+    assert pipeline.last_sent_frame_time is None
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.model.requests) == 2
+    assert [
+        (image.frame_time, image.label, image.after_previous_operation)
+        for image in env.model.requests[1].images
+    ] == [(9.9, "最新 (t=0.90 秒、0.60 秒前、前回の操作の前)", False)]
 
 
 def test_run_records_neutral_once_for_each_decision_error():
@@ -1483,14 +1753,11 @@ def test_request_after_bridge_wait_shows_neutral_as_previous_operation():
     assert request.previous_operation_text == (
         "── t=1.20 秒 (0.20 秒前) に、中立に戻した (コントローラーの接続の復旧待ち) ──"
     )
-    # 中立に戻す前のフレーム (10.1) だけが「前回の操作の前」になる
-    assert frame_times(request) == pytest.approx([10.1, 10.2, 10.3, 10.4])
-    assert [image.after_previous_operation for image in request.images] == [
-        False,
-        True,
-        True,
-        True,
-    ]
+    # 最新のフレーム (10.4) は、中立に戻した後 (復旧を待つ間) に撮ったフレーム
+    assert frame_times(request) == pytest.approx([10.4])
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=1.40 秒、0.00 秒前、前回の操作の後)", True)]
 
 
 def test_advisor_operation_log_includes_neutral_after_decision_error():

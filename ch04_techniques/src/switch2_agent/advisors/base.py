@@ -11,7 +11,8 @@ class AdvisorContext:
     """advisor に渡す文脈。
 
     game                  ゲーム名 (game_notes.GAME_NAME_PATTERN に一致する)
-    images                直近の要求の画像 (要求と同じ順)
+    images                advisor 用に選んだ画像 (意味のあるフレーム → フレームの履歴から等間隔に選んだもの、
+                          どちらも古い順。advisor_images.build_advisor_images)
     current_strategy      今の戦略 (ゲームの情報の strategy の中身)
     operation_log_text    前回 advisor を呼んでからの応答と送った操作 (OperationLog.format_since)
     trigger_probability   呼んだきっかけの advisor の問いの確率

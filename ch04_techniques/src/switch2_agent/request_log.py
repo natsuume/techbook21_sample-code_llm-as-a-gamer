@@ -7,7 +7,7 @@
     run_dir/requests.jsonl      write_header の header の行 (モデル・役割の説明と安全のための規則・問いの一覧) と、
                                 要求 1 回ごとの write の request の行。1 行 1 件の JSON
     run_dir/frames/<名前>.jpg   要求に載せた画像。名前は経過秒 (origin からの秒) をマイクロ秒にして 12 桁の 0 埋めにしたもの
-                                (frame_file_name)。意味のあるフレームは要求をまたいで同じものが載るため、同じ名前の
+                                (frame_file_name)。同じフレームが複数の要求に載ることがあるため、同じ名前の
                                 ファイルは 1 回だけ書き、request の行からは名前で参照する
 Pipeline のスレッドだけから呼ぶため、ロックは持たない。書き込みの OSError はそのまま呼び出し側に出す
 (Pipeline が捕まえて run.jsonl に記録し、判断のループは止めない)。
