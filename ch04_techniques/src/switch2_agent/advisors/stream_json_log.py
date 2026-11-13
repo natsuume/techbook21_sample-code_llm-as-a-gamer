@@ -80,7 +80,7 @@ def _close_ignoring_errors(file: TextIO) -> None:
 class StreamJsonLog:
     """stream.jsonl への書き込みと、最後に届いた result の行の保持。
 
-    path        書き込むファイル (advisor-<連番>/stream.jsonl。親のディレクトリーは呼び出し側が作る)
+    path        書き込むファイル (advisor-<役割>-<連番>/stream.jsonl。親のディレクトリーは呼び出し側が作る)
     clock       行を読んだ時刻を測る時計 (advisor の clock)
     on_error    書き込みの失敗の説明 (switch2_remote.error_message.describe_error) を受け取る関数。1 つの StreamJsonLog に
                 つき最大 1 回だけ呼ぶ
