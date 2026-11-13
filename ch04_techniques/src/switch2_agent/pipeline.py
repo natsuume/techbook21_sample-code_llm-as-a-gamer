@@ -41,7 +41,12 @@ from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.base import RecentFrameSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
 from switch2_agent.frame_selection.request_frames import select_request_frames
-from switch2_agent.operation_log import OperationLog, OperationRecord, format_action
+from switch2_agent.operation_log import (
+    NeutralRecord,
+    OperationLog,
+    OperationRecord,
+    format_action,
+)
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.questions import Question
 from switch2_agent.request_log import RequestLogEntry
@@ -55,6 +60,9 @@ DEFAULT_STALE_FRAME_TIMEOUT_S = 2.0
 # まだ 1 回も要求を送っていない間に、最初のフレームを待つ上限 (秒)。ffmpeg の起動に時間がかかるため長めにとる
 DEFAULT_FIRST_FRAME_TIMEOUT_S = 10.0
 DEFAULT_BRIDGE_WAIT_S = 0.1  # ブリッジの復旧を待つ間の確認の間隔 (秒)
+# 判断のループを続けたまま中立に戻したときに、operation_log の NeutralRecord に書く理由
+DECISION_ERROR_NEUTRAL_REASON = "Decision Model の失敗"
+BRIDGE_WAIT_NEUTRAL_REASON = "コントローラーの接続の復旧待ち"
 
 
 class CaptureStoppedError(RuntimeError):
@@ -109,7 +117,7 @@ class PipelineParts:
     questions        問いの一覧 (questions.build_questions)
     thresholds       問いの種類ごとのしきい値
     encode           フレームを JPEG にする関数 (run では decision_request.JpegCache を渡す)
-    operation_log    応答と送った操作の記録
+    operation_log    応答と送った操作の記録と、判断のループを続けたまま中立に戻した記録
     log              ログの辞書を 1 件ずつ受け取る関数 (run では RunLog.write)
     clock            現在時刻 (秒) を返す関数 (フレームの time と同じ時計)
     sleep            秒数を受け取って待つ関数
@@ -215,9 +223,11 @@ class Pipeline:
         5. request_sent = True、request_count を 1 増やす (増やした後の値 number がこの要求の通し番号)。
            sent_at = now、decision = model.decide(request)、received_at = clock()。
            model.decide が DecisionModelError を出したら、まず output.neutral() し (要求のログの書き込みで、
-           中立に戻すのを遅らせないため)、その後に要求のログに result="error"、error=例外の文字列 (str)、
-           received_at・decision・action は None の記録を書いてから、その例外をそのまま出す
-           (run の DecisionModelError の扱いでも、もう一度 output.neutral() を呼ぶ)。
+           中立に戻すのを遅らせないため)、operation_log.add(NeutralRecord(clock(), DECISION_ERROR_NEUTRAL_REASON))
+           で中立に戻したことを記録する (次の要求の履歴に出し、画像のラベルの前回の操作の時刻にするため)。
+           その後に要求のログに result="error"、error=例外の文字列 (str)、received_at・decision・action は None の
+           記録を書いてから、その例外をそのまま出す (run の DecisionModelError の扱いでも、もう一度
+           output.neutral() を呼ぶが、記録は足さない)。
            成功したら consecutive_errors = 0。続けて、応答を待つ間にキャプチャーが止まっていないかを確かめる:
            reason = capture_lost() とし、None で capture_ended() が真なら reason = "capture ended"。
            reason があれば応答を捨て (操作を反映せず、operation_log にも log の decision にも残さない)、
@@ -308,8 +318,11 @@ class Pipeline:
         try:
             decision = parts.model.decide(request)
         except DecisionModelError as e:
-            # 中立に戻してから要求のログを書き、例外は run に任せる
+            # 中立に戻し、そのことを操作の記録に足してから要求のログを書く。例外は run に任せる
             parts.output.neutral()
+            parts.operation_log.add(
+                NeutralRecord(parts.clock(), DECISION_ERROR_NEUTRAL_REASON)
+            )
             self._write_request_log(
                 number, sent_at, encoded_at, request, result="error", error=str(e)
             )
@@ -428,7 +441,8 @@ class Pipeline:
         _wait_for_bridge_recovery(stop) で復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を
         送らない)。送信の失敗で復旧が始まった場合も、次の回の始めの確認で待つ。capture_lost() が理由を返すときは、
         復旧中でも待たずに run_once を呼び、その始めの確認で止まる。run_once の例外は次のように扱う:
-        - DecisionModelError: output.neutral() し、log に {"event": "decision_error", "error": <説明>} を渡し、
+        - DecisionModelError: output.neutral() し (中立に戻したことは run_once が operation_log に記録済みのため、
+          記録は足さない)、log に {"event": "decision_error", "error": <説明>} を渡し、
           consecutive_errors を 1 増やし、sleep(error_backoff_s) する。consecutive_errors が
           max_consecutive_errors に達したら RuntimeError (DecisionModelError ではない) で止まる
         - OutputSendError (apply の送信の失敗) は、元の例外で次のように扱う:
@@ -479,7 +493,9 @@ class Pipeline:
     def _wait_for_bridge_recovery(self, stop: threading.Event) -> None:
         """コントローラーのブリッジの復旧が終わるのを、要求を送らずに待つ。
 
-        1. output.neutral() を 1 回呼び、log に {"event": "bridge_wait"} を渡す
+        1. output.neutral() を 1 回呼び、operation_log.add(NeutralRecord(<neutral を呼ぶ直前の clock の値>,
+           BRIDGE_WAIT_NEUTRAL_REASON)) で中立に戻したことを記録して (復旧後の要求の履歴に出し、画像のラベルの
+           前回の操作の時刻にするため)、log に {"event": "bridge_wait"} を渡す
         2. stop が立つか、bridge_recovering() が偽になるか、capture_lost() が理由を返すまで、
            sleep(bridge_wait_s) を繰り返す
         3. log に {"event": "bridge_wait_end", "waited_s": <1 の時点からの clock の差>} を渡す
@@ -491,6 +507,7 @@ class Pipeline:
         parts = self.parts
         started = parts.clock()
         parts.output.neutral()
+        parts.operation_log.add(NeutralRecord(started, BRIDGE_WAIT_NEUTRAL_REASON))
         parts.log({"event": "bridge_wait"})
         while (
             not stop.is_set()

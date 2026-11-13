@@ -17,7 +17,7 @@ from switch2_agent.decision_request import (
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.request_frames import RequestFrames
 from switch2_agent.game_notes import format_game_notes
-from switch2_agent.operation_log import OperationRecord
+from switch2_agent.operation_log import NeutralRecord, OperationRecord
 from switch2_agent.questions import Question
 from switch2_agent.safety import SAFETY_RULES
 
@@ -85,6 +85,13 @@ def operation(received_at: float, taps: set[str] | None = None) -> OperationReco
             advisor_probability=0.0,
         ),
     )
+
+
+def neutral(
+    neutralized_at: float, reason: str = "Decision Model の失敗"
+) -> NeutralRecord:
+    """neutralized_at に、reason の理由でコントローラーを中立に戻した記録を返す。"""
+    return NeutralRecord(neutralized_at=neutralized_at, reason=reason)
 
 
 # --- label_frames ---
@@ -175,6 +182,35 @@ def test_format_previous_operation_is_none_without_record():
     assert format_previous_operation(None, 230.85, 100.0) is None
 
 
+def test_format_operation_history_marks_neutral_record_as_previous_operation():
+    records = [operation(228.1, {"UP"}), neutral(230.3)]
+    assert format_operation_history(records, 230.85, 100.0) == (
+        f"{HISTORY_HEADING}\n"
+        "- t=128.10 秒 (2.75 秒前): 押下 none / 短押し UP\n"
+        "- t=130.30 秒 (0.55 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+
+
+def test_format_operation_history_writes_neutral_record_between_operations():
+    records = [
+        operation(228.1, {"UP"}),
+        neutral(229.0, "コントローラーの接続の復旧待ち"),
+        operation(230.3, {"HOME"}),
+    ]
+    assert format_operation_history(records, 230.85, 100.0) == (
+        f"{HISTORY_HEADING}\n"
+        "- t=128.10 秒 (2.75 秒前): 押下 none / 短押し UP\n"
+        "- t=129.00 秒 (1.85 秒前): 中立に戻した (コントローラーの接続の復旧待ち)\n"
+        "- t=130.30 秒 (0.55 秒前): 押下 none / 短押し HOME (前回の操作)"
+    )
+
+
+def test_format_previous_operation_writes_time_of_neutral_record():
+    assert format_previous_operation(neutral(230.3), 230.85, 100.0) == (
+        "── t=130.30 秒 (0.55 秒前) に、中立に戻した (Decision Model の失敗) ──"
+    )
+
+
 # --- build_instructions / build_decision_request ---
 
 
@@ -247,6 +283,25 @@ def test_build_decision_request_uses_latest_record_as_previous_operation():
     ]
     assert request.images[2].label.endswith("、前回の操作の前)")
     assert request.images[4].label.endswith("、前回の操作の後)")
+
+
+def test_build_decision_request_uses_neutral_record_as_previous_operation():
+    # 操作を送った (99.0) 後に中立に戻した (99.95) なら、前回の操作の時刻は中立に戻した時刻
+    records = [operation(99.0, {"UP"}), neutral(99.95)]
+    request = build_decision_request(
+        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, records
+    )
+    assert [image.label for image in request.images][2:] == [
+        "直近 1/3 (t=59.79 秒、0.21 秒前、前回の操作の前)",
+        "直近 2/3 (t=59.90 秒、0.10 秒前、前回の操作の前)",
+        "直近 3/3 (t=60.00 秒、0.00 秒前、前回の操作の後)",
+    ]
+    assert request.history_text.endswith(
+        "\n- t=59.95 秒 (0.05 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=59.95 秒 (0.05 秒前) に、中立に戻した (Decision Model の失敗) ──"
+    )
 
 
 def test_build_decision_request_has_history_and_previous_operation_text():

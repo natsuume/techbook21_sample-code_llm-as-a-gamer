@@ -1,7 +1,14 @@
 from switch2_remote.controller_state import PadState
 
 from switch2_agent.action_decision import PadAction
-from switch2_agent.operation_log import OperationLog, OperationRecord, format_action
+from switch2_agent.operation_log import (
+    NeutralRecord,
+    OperationLog,
+    OperationRecord,
+    format_action,
+    format_record,
+    record_time,
+)
 
 
 def make_action(
@@ -24,6 +31,12 @@ def record(received_at: float, action: PadAction | None = None) -> OperationReco
         received_at=received_at,
         action=action if action is not None else make_action(),
     )
+
+
+def neutral(
+    neutralized_at: float, reason: str = "Decision Model の失敗"
+) -> NeutralRecord:
+    return NeutralRecord(neutralized_at=neutralized_at, reason=reason)
 
 
 def received(records: list[OperationRecord]) -> list[float]:
@@ -128,3 +141,52 @@ def test_format_since_is_empty_without_records():
     log = OperationLog()
     log.add(record(1.0))
     assert log.format_since(1.0, 2.0) == ""
+
+
+# --- 中立に戻した記録 ---
+
+
+def test_record_time_is_received_at_or_neutralized_at():
+    assert record_time(record(3.0)) == 3.0
+    assert record_time(neutral(4.5)) == 4.5
+
+
+def test_format_record_writes_action_or_neutral_reason():
+    action = make_action(buttons={"RIGHT"})
+    assert format_record(record(1.0, action)) == format_action(action)
+    assert format_record(neutral(2.0)) == "中立に戻した (Decision Model の失敗)"
+    assert (
+        format_record(neutral(2.0, "コントローラーの接続の復旧待ち"))
+        == "中立に戻した (コントローラーの接続の復旧待ち)"
+    )
+
+
+def test_since_and_recent_order_neutral_records_by_neutralized_at():
+    log = OperationLog()
+    log.add(record(1.0))
+    log.add(neutral(2.0))
+    log.add(record(3.0))
+    assert log.since(1.5) == [neutral(2.0), record(3.0)]
+    # 中立に戻した時刻ちょうどの time では、その記録を含めない
+    assert log.since(2.0) == [record(3.0)]
+    assert log.recent(2) == [neutral(2.0), record(3.0)]
+
+
+def test_format_since_writes_neutral_record_without_advisor_probability():
+    log = OperationLog()
+    log.add(
+        record(
+            6.79,
+            make_action(
+                buttons={"A"},
+                sticks={"LS": (0.8, 0.0)},
+                taps={"B"},
+                advisor_probability=0.12,
+            ),
+        )
+    )
+    log.add(neutral(8.95))
+    assert log.format_since(2.0, 10.0) == (
+        "-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12\n"
+        "-1.05 秒: 中立に戻した (Decision Model の失敗)"
+    )

@@ -2,9 +2,11 @@
 
 要求は、役割の説明と安全のための規則 (instructions)、ゲームの情報の 4 ファイルの内容 (state_text)、
 ラベル付きの画像 (古い順)、問いの一覧、直近の応答と送った操作の履歴 (history_text)、
-前回の操作を送った時点を表す区切りの文 (previous_operation_text) からなる。
+前回の操作の時点を表す区切りの文 (previous_operation_text) からなる。
+前回の操作は OperationLog の最新の記録で、前回の判断で決めた操作か、その後にコントローラーを中立に戻したこと。
+履歴には、中立に戻したことも 1 行として書く。
 画像のラベルには、実行を始めてからの経過秒 (t) と何秒前の画像かを書き、直近の区間の画像には、
-前回の判断で決めた操作を送る前の画像か、送った後の画像かも書く。
+前回の操作の前の画像か、後の画像かも書く。
 API ごとの形への変換は decision_models が行う。
 """
 
@@ -14,7 +16,12 @@ from dataclasses import dataclass
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.request_frames import RequestFrames
 from switch2_agent.game_notes import format_game_notes
-from switch2_agent.operation_log import OperationRecord, format_action
+from switch2_agent.operation_log import (
+    NeutralRecord,
+    OperationLogRecord,
+    format_record,
+    record_time,
+)
 from switch2_agent.questions import Question
 from switch2_agent.safety import SAFETY_RULES
 
@@ -66,9 +73,10 @@ class DecisionRequest:
     state_text                ゲームの情報の 4 ファイルの内容 (game_notes.format_game_notes)
     images                    ラベル付きの画像。意味のあるフレーム (古い順) → 直近の区間のフレーム (古い順) の順
     questions                 問いの一覧
-    history_text              直近の応答と送った操作の履歴 (format_operation_history)。空文字なら履歴を入れない
-    previous_operation_text   前回の操作を送った時点を表す区切りの文 (format_previous_operation)。
-                              前回の操作が無ければ None
+    history_text              直近の応答と送った操作の履歴 (format_operation_history。中立に戻したことの行も含む)。
+                              空文字なら履歴を入れない
+    previous_operation_text   前回の操作 (送った操作か、中立に戻したこと) の時点を表す区切りの文
+                              (format_previous_operation)。前回の操作が無ければ None
     """
 
     instructions: str
@@ -103,8 +111,9 @@ def label_frames(
     """要求に載せるフレームを並べ、(ラベル, フレーム, 前回の操作の後か) のリストにする。
 
     並びは意味のあるフレーム (frames.meaningful、古い順) → 直近の区間のフレーム (frames.recent、古い順)。
-    origin は経過秒の起点 (Pipeline.started_at)、previous_operation_at は前回の操作を送った時刻
-    (OperationLog の最新の OperationRecord の received_at。まだ操作を送っていなければ None)。
+    origin は経過秒の起点 (Pipeline.started_at)、previous_operation_at は前回の操作の時刻
+    (OperationLog の最新の記録の operation_log.record_time。最新の記録が NeutralRecord なら中立に戻した時刻。
+    記録が無ければ None)。
     k はその種類の中での 1 始まりの番号、n はその種類のフレームの数。t は frame.time - origin、
     秒前は now - frame.time で、どちらも小数第 2 位まで書く。
     - 意味のあるフレーム: `過去の場面 <k>/<n> (t=<t> 秒、<秒前> 秒前)`。3 つ目の値は常に False
@@ -138,46 +147,55 @@ def label_frames(
 
 
 def format_operation_history(
-    records: Sequence[OperationRecord], now: float, origin: float
+    records: Sequence[OperationLogRecord], now: float, origin: float
 ) -> str:
     """直近の応答と送った操作の履歴の文 (DecisionRequest.history_text) を返す。
 
     1 行目は見出し `## 直近の応答と送った操作 (古い順、最大 <DEFAULT_HISTORY_COUNT> 回)`。
-    続けて records (古い順) を 1 行 1 応答で `- t=<t> 秒 (<秒前> 秒前): <operation_log.format_action>` と書く。
-    t は record.received_at - origin、秒前は now - record.received_at で、どちらも小数第 2 位まで書く。
+    続けて records (古い順) を 1 行 1 件で `- t=<t> 秒 (<秒前> 秒前): <operation_log.format_record>` と書く
+    (応答と送った操作の記録は format_action の文、中立に戻した記録は `中立に戻した (<理由>)`)。
+    t は record_time(記録) - origin、秒前は now - record_time(記録) で、どちらも小数第 2 位まで書く。
     最後の行 (前回の操作) の末尾には ` (前回の操作)` を付ける。records が空なら、見出しの次に
     `(まだ操作を送っていない)` の 1 行を書く。行は \\n でつなぎ、末尾に改行を付けない。例:
         ## 直近の応答と送った操作 (古い順、最大 5 回)
         - t=128.10 秒 (2.75 秒前): 押下 none / 短押し UP
         - t=130.30 秒 (0.55 秒前): 押下 none / 短押し HOME (前回の操作)
+    最新の記録が中立に戻した記録なら、最後の行は次のようになる:
+        - t=130.30 秒 (0.55 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)
     """
     if not records:
         return f"{HISTORY_HEADING}\n{NO_OPERATION_TEXT}"
     lines = [HISTORY_HEADING]
     for record in records:
+        time = record_time(record)
         lines.append(
-            f"- t={record.received_at - origin:.2f} 秒 "
-            f"({now - record.received_at:.2f} 秒前): {format_action(record.action)}"
+            f"- t={time - origin:.2f} 秒 "
+            f"({now - time:.2f} 秒前): {format_record(record)}"
         )
     lines[-1] += " (前回の操作)"
     return "\n".join(lines)
 
 
 def format_previous_operation(
-    record: OperationRecord | None, now: float, origin: float
+    record: OperationLogRecord | None, now: float, origin: float
 ) -> str | None:
-    """前回の操作を送った時点を表す区切りの文 (DecisionRequest.previous_operation_text) を返す。
+    """前回の操作の時点を表す区切りの文 (DecisionRequest.previous_operation_text) を返す。
 
-    record (前回の応答と送った操作) があれば `── t=<t> 秒 (<秒前> 秒前) に、前回の応答の操作を送った ──`
-    を返す。t は record.received_at - origin、秒前は now - record.received_at で、どちらも小数第 2 位まで書く
-    (例: `── t=130.30 秒 (0.55 秒前) に、前回の応答の操作を送った ──`)。record が None なら None を返す。
+    record (前回の操作の記録) が応答と送った操作の記録 (OperationRecord) なら
+    `── t=<t> 秒 (<秒前> 秒前) に、前回の応答の操作を送った ──`、
+    中立に戻した記録 (NeutralRecord) なら `── t=<t> 秒 (<秒前> 秒前) に、中立に戻した (<理由>) ──` を返す。
+    t は record_time(record) - origin、秒前は now - record_time(record) で、どちらも小数第 2 位まで書く
+    (例: `── t=130.30 秒 (0.55 秒前) に、前回の応答の操作を送った ──`、
+    `── t=130.30 秒 (0.55 秒前) に、中立に戻した (Decision Model の失敗) ──`)。record が None なら None を返す。
     """
     if record is None:
         return None
-    return (
-        f"── t={record.received_at - origin:.2f} 秒 "
-        f"({now - record.received_at:.2f} 秒前) に、前回の応答の操作を送った ──"
-    )
+    if isinstance(record, NeutralRecord):
+        operation = format_record(record)
+    else:
+        operation = "前回の応答の操作を送った"
+    time = record_time(record)
+    return f"── t={time - origin:.2f} 秒 ({now - time:.2f} 秒前) に、{operation} ──"
 
 
 def build_decision_request(
@@ -187,13 +205,14 @@ def build_decision_request(
     questions: Sequence[Question],
     encode: Callable[[TimedFrame], bytes],
     origin: float,
-    recent_operations: Sequence[OperationRecord],
+    recent_operations: Sequence[OperationLogRecord],
 ) -> DecisionRequest:
     """要求を組み立てる。
 
-    origin は経過秒の起点 (Pipeline.started_at)。recent_operations は直近の応答と送った操作の記録 (古い順。
-    Pipeline は OperationLog.recent(DEFAULT_HISTORY_COUNT) を渡す)。前回の操作の時刻 previous_operation_at は
-    recent_operations の最後の記録の received_at (空なら None)。
+    origin は経過秒の起点 (Pipeline.started_at)。recent_operations は直近の応答と送った操作の記録と、
+    中立に戻した記録 (古い順。Pipeline は OperationLog.recent(DEFAULT_HISTORY_COUNT) を渡す)。
+    前回の操作の時刻 previous_operation_at は recent_operations の最後の記録の operation_log.record_time
+    (中立に戻した記録なら中立に戻した時刻。空なら None)。
     instructions = build_instructions()、state_text = game_notes.format_game_notes(notes)。
     images は label_frames(frames, now, origin, previous_operation_at) の順に、各フレームを encode で JPEG にした
     LabeledImage (frame_time はフレームの time、after_previous_operation は label_frames の 3 つ目の値)。
@@ -203,7 +222,7 @@ def build_decision_request(
     """
     previous_operation = recent_operations[-1] if recent_operations else None
     previous_operation_at = (
-        previous_operation.received_at if previous_operation is not None else None
+        record_time(previous_operation) if previous_operation is not None else None
     )
     images = [
         LabeledImage(

@@ -13,7 +13,7 @@ from switch2_agent.decision_request import DecisionRequest
 from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
-from switch2_agent.operation_log import OperationLog, format_action
+from switch2_agent.operation_log import NeutralRecord, OperationLog, format_action
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.pipeline import (
     CaptureStoppedError,
@@ -1316,3 +1316,146 @@ def test_run_does_nothing_when_stop_is_already_set():
     env.clock.now = 10.0
     pipeline.run(stop)
     assert env.model.requests == []
+
+
+# --- 判断のループを続けたまま中立に戻したことの記録 ---
+
+
+def neutral_records(env: Env) -> list[NeutralRecord]:
+    """env の operation_log にある、中立に戻した記録を古い順に返す。"""
+    return [
+        record
+        for record in env.operation_log.since(0.0)
+        if isinstance(record, NeutralRecord)
+    ]
+
+
+def test_request_after_decision_error_shows_neutral_as_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [decision(press_RIGHT=0.9), DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答は 10.2 に受け取り、RIGHT を押した。2 回目の要求は 10.7 に失敗し、中立に戻した
+    env.add_frames(10.4)
+    env.clock.now = 10.5
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    env.add_frames(10.6, 10.8)
+    env.clock.now = 11.0
+    pipeline.run_once()
+    request = env.model.requests[2]
+    assert request.history_text == (
+        f"{HISTORY_HEADING}\n"
+        "- t=1.20 秒 (0.80 秒前): 押下 RIGHT / 短押し none\n"
+        "- t=1.70 秒 (0.30 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=1.70 秒 (0.30 秒前) に、中立に戻した (Decision Model の失敗) ──"
+    )
+    # 中立に戻した時刻 (10.7) が、前回の操作の前と後の境目になる
+    assert [image.label for image in request.images] == [
+        "直近 1/3 (t=1.40 秒、0.60 秒前、前回の操作の前)",
+        "直近 2/3 (t=1.60 秒、0.40 秒前、前回の操作の前)",
+        "直近 3/3 (t=1.80 秒、0.20 秒前、前回の操作の後)",
+    ]
+
+
+def test_run_records_neutral_once_for_each_decision_error():
+    pipeline, env = make_pipeline(now=9.0, error_backoff_s=1.0)
+    stop = threading.Event()
+    env.model.outcomes = [decision(press_RIGHT=0.9), DecisionModelError("HTTP 500")]
+
+    def add_frame_and_stop_after_three_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 3:
+            stop.set()
+
+    # 失敗の後の待ち (1.0 秒) で clock を進め、待ち終わりの時刻のフレームを足す
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.model.on_decide = add_frame_and_stop_after_three_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 3
+    # run_once と run の扱いで 2 回中立に戻すが、記録は 1 件だけ (2 回目の要求が失敗した 10.4 の記録)
+    assert env.output.events == ["apply", "neutral", "neutral", "apply"]
+    records = neutral_records(env)
+    assert len(records) == 1
+    assert records[0].neutralized_at == pytest.approx(10.4)
+    assert records[0].reason == "Decision Model の失敗"
+    assert len(env.operation_log.since(0.0)) == 3
+    assert env.model.requests[2].history_text.splitlines()[-1] == (
+        "- t=1.40 秒 (1.00 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+
+
+def test_request_after_bridge_wait_shows_neutral_as_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    env.model.outcomes = [decision(press_RIGHT=0.9)]
+
+    def add_frame_and_break_bridge_on_second_request():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 2:
+            # 2 回目の応答を待つ間にブリッジが壊れて復旧が始まり、操作の送信は BridgeReconnectingError になる
+            env.bridge_recovering = True
+            env.output.apply_errors = [
+                BridgeReconnectingError("controller bridge is reconnecting")
+            ]
+        if len(env.model.requests) == 3:
+            stop.set()
+
+    def end_recovery_after_two_waits(count: int) -> None:
+        if count == 2:
+            env.bridge_recovering = False
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, end_recovery_after_two_waits)
+    env.model.on_decide = add_frame_and_break_bridge_on_second_request
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 3
+    # 1 回目の操作 (10.1 に RIGHT を押した) の後、10.2 に復旧を待ち始めて中立に戻し、10.4 に 3 回目の要求を送った
+    assert env.output.events == ["apply", "neutral", "apply"]
+    records = neutral_records(env)
+    assert len(records) == 1
+    assert records[0].neutralized_at == pytest.approx(10.2)
+    assert records[0].reason == "コントローラーの接続の復旧待ち"
+    request = env.model.requests[2]
+    assert request.history_text == (
+        f"{HISTORY_HEADING}\n"
+        "- t=1.10 秒 (0.30 秒前): 押下 RIGHT / 短押し none\n"
+        "- t=1.20 秒 (0.20 秒前): 中立に戻した (コントローラーの接続の復旧待ち) (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=1.20 秒 (0.20 秒前) に、中立に戻した (コントローラーの接続の復旧待ち) ──"
+    )
+    # 中立に戻す前のフレーム (10.1) だけが「前回の操作の前」になる
+    assert frame_times(request) == pytest.approx([10.1, 10.2, 10.3, 10.4])
+    assert [image.after_previous_operation for image in request.images] == [
+        False,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_advisor_operation_log_includes_neutral_after_decision_error():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [DecisionModelError("HTTP 500"), decision(advisor=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 1 回目の要求は 10.2 に失敗し、中立に戻した
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    env.add_frames(10.4)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.advisor.contexts) == 1
+    # advisor に渡す記録にも、中立に戻したことの行が入る (advisor の確率は書かない)
+    assert env.advisor.contexts[0].operation_log_text == (
+        "-0.50 秒: 中立に戻した (Decision Model の失敗)\n"
+        "0.00 秒: 押下 none / 短押し none / advisor 0.90"
+    )
