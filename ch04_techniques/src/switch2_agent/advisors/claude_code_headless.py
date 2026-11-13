@@ -435,7 +435,8 @@ class ClaudeCodeHeadlessAdvisor:
     notes_dir      ゲームの情報のディレクトリー (workdir の配下。game_notes.game_notes_dir の結果)
     runs_dir       実行ごとのディレクトリー advisor-<連番>/ を作る場所 (workdir の配下)
     game           ゲーム名
-    timeout_s      1 回の実行の上限 (秒)。communicate の timeout に渡す
+    timeout_s      1 回の実行の上限 (秒)。communicate の timeout (record_steps のときは wait_for_exit_and_output の
+                   timeout_s) に渡す
     hidden_env_names  子プロセスに渡さない環境変数の名前 (run では Decision Model の API キーの環境変数)
     start_process  子プロセスを起動する関数 (subprocess.Popen と同じ引数を受け取り、Popen を返す)。テストでは偽物を渡す
     log            実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
