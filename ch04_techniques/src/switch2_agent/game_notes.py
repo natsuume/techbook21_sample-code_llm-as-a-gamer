@@ -6,6 +6,7 @@ note_kind) が Skill の手順で書き換え、Pipeline は要求のたびに�
 起動時に、無いファイルと、空か空白だけのファイルには、default_notes の既定の内容 (controls と strategy) を書く。
 """
 
+import contextlib
 import re
 import sys
 from collections.abc import Mapping
@@ -46,10 +47,10 @@ def ensure_game_notes(
     """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を用意し、種別 → パスの辞書を返す。
 
     ディレクトリーは親を含めて作る。<種別>.md は種別ごとに次のようにする:
-        - 無ければ作る。中身は defaults にその種別があればその内容、無ければ空にする
-        - あって、中身が空か空白だけで、defaults にその種別があれば、その内容で書き直す
-        - あって、中身が空白以外を含むなら変えない。読めない (OSError、UnicodeDecodeError) ときも変えない
-        - 空のファイルを書き直せない (OSError) ときは、警告を標準エラー出力に 1 行書き、変えずに続ける
+        - 無ければ空で作る
+        - 中身が空か空白だけで、defaults にその種別があれば、その内容を書く (いま作ったファイルも含む)
+        - 中身が空白以外を含むなら変えない。読めない (OSError、UnicodeDecodeError) ときも変えない
+        - 既定の内容を書けない (OSError) ときの扱いは write_default_note のとおりで、起動は続ける
     defaults の既定値は default_notes.DEFAULT_NOTES (controls と strategy の既定の内容)。
     NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は作らず、あっても変えず、
     返す辞書にも入れない。game が不正なら game_notes_dir と同じく ValueError にする。
@@ -59,24 +60,34 @@ def ensure_game_notes(
     paths = {kind: notes_dir / f"{kind}.md" for kind in NOTE_KINDS}
     for kind, path in paths.items():
         default = defaults.get(kind, "")
-        # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)
+        # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)。作ったファイルは空で、既定の内容は下で書く
         try:
-            with path.open("x", encoding="utf-8") as file:
-                file.write(default)
-            continue
+            with path.open("x", encoding="utf-8"):
+                pass
         except FileExistsError:
             pass
         if default and is_blank_file(path):
-            try:
-                path.write_text(default, encoding="utf-8")
-            except OSError as e:
-                # 書き直せない空のファイルは、読めないファイルと同じく変えずに起動を続ける
-                print(
-                    f"warning: could not write default notes to {path}: {describe_error(e)}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            write_default_note(path, default)
     return paths
+
+
+def write_default_note(path: Path, default: str) -> None:
+    """中身が空か空白だけのファイル path に、既定の内容 default を書く。
+
+    書けない (OSError) ときは、警告を標準エラー出力に 1 行書いて戻る (例外を投げない)。途中まで書けていても
+    次の起動でもう一度書けるよう、中身を空に戻す。空に戻せないときは、そのままにする。
+    """
+    try:
+        path.write_text(default, encoding="utf-8")
+    except OSError as e:
+        print(
+            f"warning: could not write default notes to {path}: {describe_error(e)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        # 書く前の中身も空か空白だけなので、空にしても書かれていた内容は失われない
+        with contextlib.suppress(OSError):
+            path.write_text("", encoding="utf-8")
 
 
 def is_blank_file(path: Path) -> bool:

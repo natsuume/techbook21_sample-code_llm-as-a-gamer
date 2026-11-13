@@ -1,3 +1,6 @@
+import errno
+from pathlib import Path
+
 import pytest
 
 from switch2_agent.default_notes import (
@@ -99,6 +102,29 @@ def test_ensure_game_notes_warns_and_continues_when_blank_file_cannot_be_written
     err = capsys.readouterr().err.splitlines()
     assert len(err) == 1
     assert "controls.md" in err[0]
+
+
+def test_ensure_game_notes_empties_new_file_when_default_notes_fail_partway(
+    tmp_path, capsys, monkeypatch
+):
+    original_write_text = Path.write_text
+
+    def write_text_failing_partway(self, data, *args, **kwargs):
+        # 既定の内容は途中まで書いてから、ディスクの空きが無いときの OSError にする。空の書き込みはそのまま通す
+        if data:
+            original_write_text(self, data[:10], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text_failing_partway)
+    paths = ensure_game_notes(tmp_path, "zelda")
+    # 新しく作ったファイルも起動を止めず、途中まで書けた中身は、次の起動でもう一度書けるよう空に戻す
+    assert paths["controls"].read_text(encoding="utf-8") == ""
+    assert paths["strategy"].read_text(encoding="utf-8") == ""
+    err = capsys.readouterr().err.splitlines()
+    assert len(err) == 2
+    assert "controls.md" in err[0]
+    assert "strategy.md" in err[1]
 
 
 def test_ensure_game_notes_keeps_unreadable_existing_file(tmp_path):
