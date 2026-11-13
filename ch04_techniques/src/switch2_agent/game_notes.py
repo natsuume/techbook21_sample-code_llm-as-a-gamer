@@ -3,6 +3,7 @@
 ファイルは <root>/<ゲーム名>/<種別>.md に置く。種別ごとに受け持ちの advisor (advisor_roles.ADVISOR_ROLES の
 note_kind) が Skill の手順で書き換え、Pipeline は要求のたびに最新の内容を読む (advisor の出力は戦略の受け渡しに
 使わない)。NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は、作らず、読まず、変えない。
+起動時に、無いファイルと、空か空白だけのファイルには、default_notes の既定の内容 (controls と strategy) を書く。
 """
 
 import re
@@ -55,14 +56,29 @@ def ensure_game_notes(
     notes_dir = game_notes_dir(root, game)
     notes_dir.mkdir(parents=True, exist_ok=True)
     paths = {kind: notes_dir / f"{kind}.md" for kind in NOTE_KINDS}
-    for path in paths.values():
+    for kind, path in paths.items():
+        default = defaults.get(kind, "")
         # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)
         try:
-            with path.open("x", encoding="utf-8"):
-                pass
+            with path.open("x", encoding="utf-8") as file:
+                file.write(default)
+            continue
         except FileExistsError:
             pass
+        if default and is_blank_file(path):
+            path.write_text(default, encoding="utf-8")
     return paths
+
+
+def is_blank_file(path: Path) -> bool:
+    """path のファイルの中身が空か空白だけなら True を返す。
+
+    読めない (OSError、UnicodeDecodeError) ときは False を返す (中身のわからないファイルを書き直さないため)。
+    """
+    try:
+        return not path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def read_game_notes(paths: Mapping[str, Path]) -> dict[str, str]:
