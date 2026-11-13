@@ -65,7 +65,11 @@ from pathlib import Path
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.advisors.base import AdvisorContext
-from switch2_agent.advisors.stream_json_log import ProcessOutputReader
+from switch2_agent.advisors.stream_json_log import (
+    STREAM_FILE_NAME,
+    ProcessOutputReader,
+    StreamJsonLog,
+)
 from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 from switch2_agent.safety import SAFETY_RULES
 
@@ -224,14 +228,13 @@ def build_claude_command(
     stream_json が真なら、"--output-format", "json" の代わりに "--output-format", "stream-json", "--verbose" を
     同じ位置に置く (ほかの引数と順は同じ)。--bare は付けない。
     """
-    if stream_json:
-        raise NotImplementedError
+    output_format = ["stream-json", "--verbose"] if stream_json else ["json"]
     return [
         executable,
         "-p",
         prompt,
         "--output-format",
-        "json",
+        *output_format,
         "--permission-mode",
         "dontAsk",
         "--setting-sources",
@@ -243,6 +246,12 @@ def build_claude_command(
         "--max-turns",
         str(max_turns),
     ]
+
+
+def _permission_denials_of(output: object) -> list:
+    """output が object で、その permission_denials がリストならそれを、そうでなければ [] を返す (純粋な関数)。"""
+    denials = output.get("permission_denials") if isinstance(output, dict) else None
+    return denials if isinstance(denials, list) else []
 
 
 def build_result_record(
@@ -267,7 +276,6 @@ def build_result_record(
             raw_stdout = None
         except ValueError:
             output = None
-    denials = output.get("permission_denials") if isinstance(output, dict) else None
     return {
         "returncode": returncode,
         "duration_s": duration_s,
@@ -276,7 +284,7 @@ def build_result_record(
         "output": output,
         "stdout": raw_stdout,
         "stderr": stderr or "",
-        "permission_denials": denials if isinstance(denials, list) else [],
+        "permission_denials": _permission_denials_of(output),
     }
 
 
@@ -294,7 +302,16 @@ def build_stream_result_record(
     stdout は常に None。permission_denials は output が object で、その permission_denials がリストならそれ、
     そうでなければ []。stderr が None なら空文字にする。
     """
-    raise NotImplementedError
+    return {
+        "returncode": returncode,
+        "duration_s": duration_s,
+        "timed_out": timed_out,
+        "error": error,
+        "output": last_result,
+        "stdout": None,
+        "stderr": stderr or "",
+        "permission_denials": _permission_denials_of(last_result),
+    }
 
 
 def build_record_error_event(run_dir: Path, error: str) -> dict:
@@ -302,7 +319,12 @@ def build_record_error_event(run_dir: Path, error: str) -> dict:
 
     {"event": "record_error", "kind": RECORD_ERROR_KIND ("advisor_steps"), "run_dir": str(run_dir), "error": error}
     """
-    raise NotImplementedError
+    return {
+        "event": "record_error",
+        "kind": RECORD_ERROR_KIND,
+        "run_dir": str(run_dir),
+        "error": error,
+    }
 
 
 def build_log_event(run_dir: Path, record: dict) -> dict:
@@ -373,7 +395,10 @@ def wait_for_exit_and_output(
     どちらかが間に合わなければ subprocess.TimeoutExpired を出す (process.wait の例外はそのまま出す)。
     communicate(timeout) が終了と EOF をまとめて待つのと同じ意味の待ち方 (途中経過を記録するときに使う)。
     """
-    raise NotImplementedError
+    deadline = time.monotonic() + timeout_s
+    process.wait(timeout=timeout_s)
+    if not reader.join(deadline - time.monotonic()):
+        raise subprocess.TimeoutExpired(process.args, timeout_s)
 
 
 def stop_streaming_process(
@@ -386,7 +411,21 @@ def stop_streaming_process(
     kill の後も読み終わらなければ、logging で警告を書き、パイプを閉じずに False を返す (読み取りスレッドが
     readline で止まっている間にパイプを close すると、close も止まるため。読み取りスレッドは daemon のまま手放す)。
     """
-    raise NotImplementedError
+    process.terminate()
+    try:
+        wait_for_exit_and_output(process, reader, TERMINATE_GRACE_S)
+        return True
+    except subprocess.TimeoutExpired:
+        process.kill()
+    try:
+        wait_for_exit_and_output(process, reader, TERMINATE_GRACE_S)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "claude output pipes stayed open after kill; "
+            "gave up reading them without closing"
+        )
+        return False
 
 
 class ClaudeCodeHeadlessAdvisor:
@@ -557,25 +596,60 @@ class ClaudeCodeHeadlessAdvisor:
         outcome: dict = {"returncode": None, "timed_out": False, "error": None}
         stdout: str | None = None
         stderr: str | None = None
+        stream_log: StreamJsonLog | None = None
+        reader: ProcessOutputReader | None = None
         try:
             context_path = write_advisor_inputs(run_dir, context)
             prompt = build_advisor_prompt(context_path, self.notes_dir, self.game)
             cmd = build_claude_command(
-                prompt, self.notes_dir_relative, self.runs_dir_relative
+                prompt,
+                self.notes_dir_relative,
+                self.runs_dir_relative,
+                stream_json=self.record_steps,
             )
-            stdout, stderr = self._run_process(cmd, outcome)
+            if self.record_steps:
+                stream_log = StreamJsonLog(
+                    run_dir / STREAM_FILE_NAME,
+                    self.clock,
+                    lambda error: self._report_record_error(run_dir, error),
+                )
+                process = self._start_claude(cmd, outcome)
+                if process is not None:
+                    # 待つ処理が例外を出しても、そこまでに読んだ標準エラー出力を残せるよう、reader をここで持つ
+                    reader = ProcessOutputReader(
+                        process.stdout, process.stderr, stream_log.add_line
+                    )
+                    self._wait_for_streaming_process(process, reader, outcome)
+            else:
+                stdout, stderr = self._run_process(cmd, outcome)
         # claude を起動できない (FileNotFoundError) など、失敗の型を問わず記録して次の要求を受け付ける
         except Exception as e:
             outcome["error"] = describe_error(e)
             logger.exception("advisor run %s failed", advisor_run_dir_name(index))
-        record = build_result_record(
-            outcome["returncode"],
-            self.clock() - started,
-            outcome["timed_out"],
-            outcome["error"],
-            stdout,
-            stderr,
-        )
+        finally:
+            # 読み終わらずに手放した読み取りスレッドが、この後に届けた行を stream.jsonl に書かないよう、
+            # result.json を書く前に記録を止める
+            if stream_log is not None:
+                stream_log.stop()
+        duration_s = self.clock() - started
+        if self.record_steps:
+            record = build_stream_result_record(
+                outcome["returncode"],
+                duration_s,
+                outcome["timed_out"],
+                outcome["error"],
+                stream_log.last_result if stream_log is not None else None,
+                reader.stderr_text if reader is not None else None,
+            )
+        else:
+            record = build_result_record(
+                outcome["returncode"],
+                duration_s,
+                outcome["timed_out"],
+                outcome["error"],
+                stdout,
+                stderr,
+            )
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / RESULT_FILE_NAME).write_text(
@@ -594,23 +668,9 @@ class ClaudeCodeHeadlessAdvisor:
         communicate がタイムアウト以外の例外 (Exception) を出したら、stop_process で子プロセスを止めてから、
         その例外をそのまま出す。
         """
-        with self.lock:
-            if self.closed:
-                outcome["error"] = "stopped by close"
-                return None, None
-            # close() が子プロセスを見つけられるよう、起動と保持を同じロックの中で行う
-            process = self.start_process(
-                cmd,
-                cwd=self.workdir,
-                env=build_child_env(os.environ, self.hidden_env_names),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            self.process = process
+        process = self._start_claude(cmd, outcome)
+        if process is None:
+            return None, None
         try:
             try:
                 stdout, stderr = process.communicate(timeout=self.timeout_s)
@@ -630,3 +690,81 @@ class ClaudeCodeHeadlessAdvisor:
         finally:
             with self.lock:
                 self.process = None
+
+    def _wait_for_streaming_process(
+        self,
+        process: subprocess.Popen,
+        reader: ProcessOutputReader,
+        outcome: dict,
+    ) -> None:
+        """_start_claude で起動した process の出力を reader で読みながら、終了と読み終わりを待つ。
+
+        outcome に returncode・timed_out・error を入れる (_run_process と同じ)。標準エラー出力は reader.stderr_text に残る。
+        読み取りスレッドの起動か待つ処理が、タイムアウト以外の例外 (Exception) を出したら、stop_streaming_process で
+        子プロセスを止めてから、その例外をそのまま出す。最後に必ず self.process を None に戻す。
+        """
+        try:
+            try:
+                reader.start()
+                wait_for_exit_and_output(process, reader, self.timeout_s)
+            except subprocess.TimeoutExpired:
+                outcome["timed_out"] = True
+                outcome["error"] = f"timed out after {self.timeout_s} seconds"
+                stop_streaming_process(process, reader)
+                return
+            except Exception:
+                # 待つ処理の失敗で子プロセスを残さないよう、止めてから出し直す
+                stop_streaming_process(process, reader)
+                raise
+            outcome["returncode"] = process.returncode
+            with self.lock:
+                if self.closed:
+                    outcome["error"] = "stopped by close"
+        finally:
+            with self.lock:
+                self.process = None
+
+    def _start_claude(self, cmd: list[str], outcome: dict) -> subprocess.Popen | None:
+        """close() の後でなければ、cmd の子プロセスを起動して self.process に持ち、それを返す。
+
+        close() の後なら起動せず、outcome の error を `stopped by close` にして None を返す。
+        """
+        with self.lock:
+            if self.closed:
+                outcome["error"] = "stopped by close"
+                return None
+            # close() が子プロセスを見つけられるよう、起動と保持を同じロックの中で行う
+            process = self.start_process(
+                cmd,
+                cwd=self.workdir,
+                env=build_child_env(os.environ, self.hidden_env_names),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            self.process = process
+        return process
+
+    def _report_record_error(self, run_dir: Path, error: str) -> None:
+        """途中経過の記録 (stream.jsonl) の失敗を知らせる (StreamJsonLog の on_error)。
+
+        logging で警告を書き、log があれば build_record_error_event の辞書を渡す。
+        log が例外 (Exception) を出したら、捕まえて logging の警告にする (この関数は標準出力の読み取りスレッドか
+        StreamJsonLog の作成の中で呼ばれ、例外を出すと読み取りや claude の起動が止まるため)。
+        """
+        logger.warning(
+            "stopped recording advisor steps to %s: %s",
+            run_dir / STREAM_FILE_NAME,
+            error,
+        )
+        if self.log is None:
+            return
+        try:
+            self.log(build_record_error_event(run_dir, error))
+        except Exception:
+            logger.warning(
+                "failed to log the record error of %s", run_dir, exc_info=True
+            )

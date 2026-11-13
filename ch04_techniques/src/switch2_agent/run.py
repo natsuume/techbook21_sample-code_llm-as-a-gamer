@@ -393,6 +393,7 @@ def main(argv: list[str] | None = None) -> None:
             args.advisor_timeout,
             hidden_env_names=tuple(API_KEY_ENVS.values()),
             log=run_log.write,
+            record_steps=args.record_dashboard,
         )
         model: DecisionModel = (
             JevModel(api_key) if args.model == "jev" else DecisionsApiModel(api_key)

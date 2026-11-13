@@ -103,6 +103,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--advisor-timeout S` | advisor の 1 回の実行の上限 (秒) | 300 | 0 より大きい有限の値 |
 | `--max-consecutive-errors N` | Decision Model の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |
 | `--save-requests` | 要求ごとの入出力を `runs/<YYYYmmdd-HHMMSS>/requests.jsonl` と `frames/` に書きます (ログの節を参照) | オフ | なし (付けるとオン) |
+| `--record-dashboard` | ダッシュボードが読む記録として、advisor の途中経過を `runs/<YYYYmmdd-HHMMSS>/advisor-001/stream.jsonl` などに書きます (ログの節を参照) | オフ | なし (付けるとオン) |
 
 範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。しきい値は「確率がこの値を超えたら真」の値で、ちょうど同じ値は偽です。`--image-width` の下限の 498 は、Jev が受け付ける画像の各辺の下限 (280 ピクセル) を 16:9 の高さで満たす幅です。
 
@@ -132,6 +133,8 @@ claude -p <プロンプト> --output-format json --permission-mode dontAsk \
   --max-turns 30
 ```
 
+`--record-dashboard` を付けたときは、`--output-format json` の代わりに `--output-format stream-json --verbose` を付けます。ほかの指定は同じです。
+
 許可のルールで読み取りを許すのは、`game_notes/<ゲーム>/` と、その実行の `runs/<YYYYmmdd-HHMMSS>/` の下です (ほかに読める範囲は注意事項に書きます)。書き込みを許すのは `game_notes/<ゲーム>/` の 4 ファイルだけで、Bash は許しません。確認が要る操作のうち、許可のルールに無いものは、確認を求めずに拒否されます (`--permission-mode dontAsk`)。拒否された操作は、ログの `permission_denials` に残ります。advisor の `claude` のプロセスには、Decision Model の API キーの環境変数 (`TYPESAFE_API_KEY`・`OPENAI_API_KEY`) を渡しません。
 
 ## ログ
@@ -142,6 +145,7 @@ claude -p <プロンプト> --output-format json --permission-mode dontAsk \
 |---|---|
 | `run.jsonl` | 1 行 1 件の JSON のログ。要求ごとの所要時間 (`select_s`・`encode_s`・`decide_s`・`apply_s`)、Jev で直前の要求の後に待った秒数 (`interval_wait_s`。待たなければ 0)、画像の枚数と大きさ、決めた操作、advisor の呼び出し、失敗などを書きます。同じ内容の要約を画面にも表示します |
 | `advisor-001/` など | advisor の 1 回の実行ごとの入出力。advisor 用に選んだ最大 10 枚の画像 (`frame-01.jpg` など。意味のあるフレーム、フレームの履歴から選んだものの順で、どちらも古い順)、文脈 (`context.md`)、結果 (`result.json`。終了コード、所要時間、`claude -p` の出力、拒否された操作) |
+| `advisor-001/stream.jsonl` など | `--record-dashboard` を付けたときだけ書く、advisor の途中経過の JSON Lines。`claude -p` を `--output-format stream-json --verbose` で動かし、標準出力の行 (ツール呼び出し、ツールの結果、最後の `result` など) が 1 行届くたびに、読んだ時刻 (`mono`。`time.monotonic()` の秒) と、その行を JSON として読んだもの (`data`) を `stream.jsonl` の 1 行に書きます。JSON として読めない行は、`data` の代わりに元の文字列を `raw` に入れます。このときの `result.json` の `claude -p` の出力は、最後に届いた `result` の行です。`stream.jsonl` を書けなかったときは、`run.jsonl` に `record_error` の行を書き、advisor の実行は続けます |
 | `requests.jsonl` | `--save-requests` を付けたときだけ書く、Decision Model への要求ごとの入出力の JSON Lines。1 行目は header で、`--model` の値、役割の説明と安全のための規則、43 の問いを書きます。2 行目以降は要求ごとに 1 行で、要求に載せた 1 枚の画像のラベルとファイル名、ゲームの情報の 4 ファイルの内容、直近の応答と送った操作の履歴、43 の問いの確率、応答の本文、決めた操作、結果 (`ok`: 操作を送った、`error`: Decision Model か操作の送信の失敗、`discarded`: キャプチャーが止まったため応答を捨てた) を書きます。各行の `number` は `run.jsonl` の `decision` の `number` と同じで、2 つのログで同じ要求の行を対応づけられます |
 | `frames/` | `--save-requests` を付けたときだけ書く、要求に載せた画像 (JPEG)。ファイル名は、実行を始めてからの経過時間 (マイクロ秒) です。複数の要求に載った同じフレーム (失敗した要求の後に、同じフレームで送り直したときなど) は、1 回だけ保存します |
 
@@ -170,4 +174,5 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 - `.env` を `ch04_techniques` に置くと、advisor はそのファイルも読めると考えられます。advisor の `claude` のプロセスには API キーの環境変数を渡していませんが、`.env` を読んで、画面の文字で注入された指示に従うと、API キーをゲームの情報のファイルに書き写せます。書き写された API キーは、毎回の要求で Decision Model の API に送られます。避けるには、API キーを書いたファイルを `ch04_techniques` に置かないでください。API キーは `export` で設定するか、`.env` を `ch04_techniques` の外に置いて `--env-file` にそのパスを指定します
 - `--setting-sources project` で実行する人のユーザー側の設定を読まないようにしていますが、ユーザーの `~/.claude/CLAUDE.md` が読まれるかは確かめていません。advisor の動作は、実行する人の Claude Code の環境に左右されることがあります
 - `--save-requests` を付けたときの `requests.jsonl` と `frames/` には、ゲームの画面の画像と、ゲームの情報の 4 ファイルの内容がそのまま残ります
+- `--record-dashboard` を付けたときの `stream.jsonl` には、advisor が読んだファイルの中身 (ツールの結果) と、ゲームの情報のファイルに書いた内容がそのまま残ります。読んだ画像も、ツールの結果に入って残ると考えられます (確かめていません)。画面の文字で注入された指示に従って、advisor が `ch04_techniques` の中のほかのファイル (`.env` など) を読んだ場合は、そのファイルの中身も残ります
 - 利用によって生じたアカウントの制限、データの損失、機器の故障などの不利益は、利用者の自己責任となります
