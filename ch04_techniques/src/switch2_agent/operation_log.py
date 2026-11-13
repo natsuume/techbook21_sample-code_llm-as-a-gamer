@@ -1,5 +1,5 @@
 """Decision Model の応答と、その応答で送った操作の記録。コントローラーを中立に戻したことも記録する。
-advisor に渡す操作の記録の文を作り、Decision Model の要求に入れる直近の記録を返す。
+役割ごとの advisor に渡す操作の記録の文を作り、Decision Model の要求に入れる直近の記録を返す。
 
 Pipeline のスレッドが add し、同じスレッドで format_since と recent を呼ぶが、ほかのスレッドから読めるようにロックを持つ。
 """
@@ -106,11 +106,12 @@ class OperationLog:
         with self.lock:
             return list(self.records)[-count:]
 
-    def format_since(self, time: float, now: float) -> str:
-        """since(time) の記録を 1 行 1 件で並べた文を返す。記録が無ければ空文字を返す。
+    def format_since(self, time: float, now: float, role_name: str) -> str:
+        """since(time) の記録を 1 行 1 件で並べた文を、役割 role_name の advisor に渡す形で返す。記録が無ければ空文字を返す。
 
         各行は `<record_time(記録) - now を小数第 2 位まで> 秒: <format_record(記録)>` で、OperationRecord の行には
-        続けて ` / advisor <advisor_probability を小数第 2 位まで>` を書く。行は \\n でつなぐ。例:
+        続けて ` / advisor <record.action.advisor_probabilities[role_name] を小数第 2 位まで>` (その役割の問いの確率)
+        を書く。行は \\n でつなぐ。例:
             -3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12
             -1.05 秒: 中立に戻した (Decision Model の失敗)
         """
@@ -118,6 +119,7 @@ class OperationLog:
         for record in self.since(time):
             line = f"{record_time(record) - now:.2f} 秒: {format_record(record)}"
             if isinstance(record, OperationRecord):
-                line += f" / advisor {record.action.advisor_probability:.2f}"
+                probability = record.action.advisor_probabilities[role_name]
+                line += f" / advisor {probability:.2f}"
             lines.append(line)
         return "\n".join(lines)

@@ -14,15 +14,16 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
     4. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
     5. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
        そうでなければ、問いごとの答え (選択肢ごとの確率と、真である確率) から操作を決めて PadOutput に渡す (すぐ戻る)
-    6. advisor を呼ぶ答えで、advisor が実行中でなければ、advisor に渡す画像を要求とは別に選び
-       (意味のあるフレーム + フレームの履歴から等間隔に選んだもの)、Advisor.request_update を呼ぶ (すぐ戻る)
+    6. advisor を呼ぶ答えの役割 (advisor_roles.ADVISOR_ROLES) のうち、その役割の advisor が実行中でないものがあれば、
+       advisor に渡す画像を要求とは別に 1 回だけ選び (意味のあるフレーム + フレームの履歴から等間隔に選んだもの)、
+       その役割ごとに Advisor.request_update を呼ぶ (すぐ戻る)
     7. 要求のログ (request_log) があれば、要求ごとの入出力を書く
 時間はすべて clock の差で測る。画像のラベルと操作の履歴の経過秒は、Pipeline の開始時刻 (started_at) を起点にする。
 """
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -31,6 +32,7 @@ from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds, decide_action
 from switch2_agent.advisor_images import build_advisor_images
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.advisors.base import Advisor, AdvisorContext
 from switch2_agent.decision_models.base import (
     Decision,
@@ -118,8 +120,8 @@ class PipelineParts:
     selector         advisor に渡す画像を、フレームの履歴から選ぶ選び方
     model            Decision Model
     output           操作を送る先
-    advisor          advisor
-    read_notes       ゲームの情報の 4 ファイルを読む関数 (種別 → 中身)
+    advisors         advisor の役割の name → その役割の advisor (advisor_roles.ADVISOR_ROLES のすべての役割を含む)
+    read_notes      ゲームの情報の 4 ファイルを読む関数 (種別 → 中身)
     questions        問いの一覧 (questions.build_questions)
     thresholds       advisor の問いのしきい値
     encode           フレームを JPEG にする関数 (run では decision_request.JpegCache を渡す)
@@ -144,7 +146,7 @@ class PipelineParts:
     selector: RecentFrameSelector
     model: DecisionModel
     output: PadOutputLike
-    advisor: Advisor
+    advisors: Mapping[str, Advisor]
     read_notes: Callable[[], dict[str, str]]
     questions: list[Question]
     thresholds: Thresholds
@@ -183,7 +185,8 @@ class Pipeline:
                                  まだ無ければ None
         last_response_at         直前の model.decide が戻った (応答を受け取ったか DecisionModelError を出した) 時刻
                                  (clock() の値)。まだ model.decide を呼んでいなければ None
-        last_advisor_at          操作の記録の起点 (advisor が受け付けた要求の received_at。最初は started_at)
+        last_advisor_at          advisor の役割の name → その役割の操作の記録の起点 (その役割の advisor が
+                                 受け付けた要求の received_at。最初はどの役割も started_at)
         no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。新しいフレームがあると分かったら、
                                  要求を送る前に None に戻す (要求の成否によらない)
         consecutive_errors       Decision Model の連続の失敗の回数。model.decide が成功したら 0 に戻す
@@ -202,7 +205,8 @@ class Pipeline:
     ):
         """属性を入れる。
 
-        started_at と last_advisor_at は parts.clock() の値にし、request_count は 0、last_response_at は None にする。
+        started_at は parts.clock() の値、last_advisor_at は advisor_roles.ADVISOR_ROLES のどの役割も started_at に
+        し、request_count は 0、last_response_at は None にする。
         """
         self.parts = parts
         self.max_consecutive_errors = max_consecutive_errors
@@ -217,7 +221,9 @@ class Pipeline:
         self.request_sent = False
         self.request_count = 0
         self.last_sent_frame_time: float | None = None
-        self.last_advisor_at = self.started_at
+        self.last_advisor_at: dict[str, float] = {
+            role.name: self.started_at for role in ADVISOR_ROLES
+        }
         self.no_new_frame_since: float | None = None
         self.consecutive_errors = 0
 
@@ -267,19 +273,25 @@ class Pipeline:
            apply が送信の例外 (RuntimeError / OSError) を出したら、要求のログに result="error"、
            error=describe_error(例外)、decision は応答、action は決めた操作の記録を書き、OutputSendError に包んで出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
-        8. action.advisor_requested が真で、advisor.is_busy() が偽のときだけ、advisor に渡す画像を要求とは別に選び、
-           AdvisorContext を作って advisor.request_update を呼ぶ。is_busy() が真なら、画像を選ばず request_update も
-           呼ばない (advisor_accepted は False。advisor の実行中に、要求のたびに最大 10 枚を符号化して、
-           速い層を遅らせないため)。
-           画像は、advisor_now = clock() として、frame_selection.advisor_frames.select_advisor_frames(history, store,
-           selector, advisor_now) で選んだフレームを、advisor_images.build_advisor_images(選んだフレーム, advisor_now,
-           origin=started_at, encode) で JPEG にしたもの (意味のあるフレーム → フレームの履歴から選んだもの、どちらも古い順)。
-           AdvisorContext は game、その画像、notes の strategy (無ければ空文字)、
-           operation_log.format_since(last_advisor_at, received_at)、action.advisor_probability、
-           time.strftime("%H:%M:%S") の壁時計の時刻からなる。
-           受け付けられたら (True)、last_advisor_at = received_at (次の操作の記録の起点)
+        8. action.advisor_requested が空でなければ、_request_advisor_updates(action, notes, received_at) で
+           役割ごとの advisor に求め、受け付けた役割の name の集合を advisor_accepted にする (空なら呼ばず、
+           advisor_accepted は空の集合)。_request_advisor_updates は次を行う:
+           - advisor_roles.ADVISOR_ROLES の順に、action.advisor_requested に入っていて、advisors[name].is_busy() が偽の
+             役割だけを対象にする。is_busy() が真の役割には request_update を呼ばない
+           - 対象が 1 つ以上あれば、advisor に渡す画像をその回に 1 回だけ選んで符号化し (_select_advisor_images)、
+             対象のすべての役割で使い回す (advisor の実行中や、複数の役割を呼ぶときに、何度も最大 10 枚を符号化して
+             速い層を遅らせないため)。対象が無ければ画像を選ばない。
+             画像は、advisor_now = clock() として、frame_selection.advisor_frames.select_advisor_frames(history, store,
+             selector, advisor_now) で選んだフレームを、advisor_images.build_advisor_images(選んだフレーム, advisor_now,
+             origin=started_at, encode) で JPEG にしたもの (意味のあるフレーム → フレームの履歴から選んだもの、どちらも古い順)
+           - 対象の役割ごとに (ADVISOR_ROLES の順に) AdvisorContext を作って advisors[name].request_update を呼ぶ。
+             AdvisorContext は game、その画像、notes の strategy (無ければ空文字)、
+             operation_log.format_since(last_advisor_at[name], received_at, name)、action.advisor_probabilities[name]、
+             time.strftime("%H:%M:%S") の壁時計の時刻からなる
+           - 受け付けられた (True) 役割の last_advisor_at[name] を received_at にし (その役割の次の操作の記録の起点)、
+             受け付けた役割の name の frozenset を返す
         9. 要求のログに result="ok"、error=None、decision は応答、action は送った操作、
-           advisor_accepted=request_update の結果 (呼ばなければ False) の記録を書く
+           advisor_accepted=受け付けた役割の name の frozenset (呼ばなければ空の集合) の記録を書く
         10. last_sent_frame_time = frame.time。5・6 の例外で終わった要求では進めない (そのため、DecisionModelError や
            送信の失敗の後は、新しいフレームが届いていなくても、同じフレームで次の要求を送る)。
            log に次の辞書を渡す:
@@ -288,13 +300,15 @@ class Pipeline:
               "select_s": 3 で now を取ってから 4 を始めるまでの時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
               (HTTP を含む), "apply_s": output.apply の時間, "images": 要求の画像の枚数 (1),
               "payload_bytes": 要求の画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
-              "advisor_probability", "advisor_requested", "advisor_accepted": request_update の結果
-              (呼ばなければ False), "refusals": decision.refusals}
+              "advisor_probabilities": 役割の name → その役割の問いの確率の辞書 (action.advisor_probabilities),
+              "advisor_requested": action.advisor_requested の役割の name のリスト,
+              "advisor_accepted": 受け付けた役割の name のリスト, "refusals": decision.refusals}
+             (役割の name のリストは advisor_roles.ADVISOR_ROLES の順)
            ブリッジが復旧中で戻るときと、新しいフレームが無くて戻るときと、例外で終わるときは、この辞書を渡さない。
 
         要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
         (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
-        (ok 以外は False)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
+        (受け付けた役割の name の frozenset。ok 以外は空の集合)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
         失敗など) を出したら、判断のループを止めないよう捕まえ、log に {"event": "request_log_error",
         "error": describe_error(例外)} を渡して続ける
         (write が失敗しても、5・6 で出す例外は 5・6 のとおりに出す)。
@@ -420,23 +434,11 @@ class Pipeline:
         applied_at = parts.clock()
 
         parts.operation_log.add(OperationRecord(sent_at, received_at, action))
-        advisor_accepted = False
-        # advisor の実行中は、画像を選んで符号化する時間で速い層を遅らせないよう、何もしない
-        if action.advisor_requested and not parts.advisor.is_busy():
-            advisor_accepted = parts.advisor.request_update(
-                AdvisorContext(
-                    game=parts.game,
-                    images=self._select_advisor_images(),
-                    current_strategy=notes.get("strategy", ""),
-                    operation_log_text=parts.operation_log.format_since(
-                        self.last_advisor_at, received_at
-                    ),
-                    trigger_probability=action.advisor_probability,
-                    trigger_time_text=time.strftime("%H:%M:%S"),
-                )
-            )
-            if advisor_accepted:
-                self.last_advisor_at = received_at
+        advisor_accepted: frozenset[str] = (
+            self._request_advisor_updates(action, notes, received_at)
+            if action.advisor_requested
+            else frozenset()
+        )
         self._write_request_log(
             number,
             sent_at,
@@ -463,9 +465,15 @@ class Pipeline:
                 "images": len(request.images),
                 "payload_bytes": sum(len(image.jpeg) for image in request.images),
                 "action": format_action(action),
-                "advisor_probability": action.advisor_probability,
-                "advisor_requested": action.advisor_requested,
-                "advisor_accepted": advisor_accepted,
+                "advisor_probabilities": dict(action.advisor_probabilities),
+                "advisor_requested": [
+                    role.name
+                    for role in ADVISOR_ROLES
+                    if role.name in action.advisor_requested
+                ],
+                "advisor_accepted": [
+                    role.name for role in ADVISOR_ROLES if role.name in advisor_accepted
+                ],
                 "refusals": decision.refusals,
             }
         )
@@ -569,7 +577,7 @@ class Pipeline:
         received_at: float | None = None,
         decision: Decision | None = None,
         action: PadAction | None = None,
-        advisor_accepted: bool = False,
+        advisor_accepted: frozenset[str] = frozenset(),
     ) -> None:
         """parts.request_log があれば、要求 1 回分の RequestLogEntry (origin は started_at) を書く。
 
@@ -611,6 +619,42 @@ class Pipeline:
             return 0.0
         self.parts.sleep(remaining)
         return remaining
+
+    def _request_advisor_updates(
+        self, action: PadAction, notes: Mapping[str, str], received_at: float
+    ) -> frozenset[str]:
+        """action.advisor_requested の役割の advisor に求め、受け付けた役割の name の集合を返す (run_once の 8)。
+
+        notes はその要求で読んだゲームの情報 (種別 → 中身)、received_at はその要求の応答を受け取った時刻。
+        """
+        parts = self.parts
+        targets = [
+            role.name
+            for role in ADVISOR_ROLES
+            if role.name in action.advisor_requested
+            and not parts.advisors[role.name].is_busy()
+        ]
+        if not targets:
+            return frozenset()
+        # 呼ぶ役割が複数でも、画像は 1 回だけ選んで符号化し、使い回す
+        images = self._select_advisor_images()
+        trigger_time_text = time.strftime("%H:%M:%S")
+        accepted: set[str] = set()
+        for name in targets:
+            context = AdvisorContext(
+                game=parts.game,
+                images=images,
+                current_strategy=notes.get("strategy", ""),
+                operation_log_text=parts.operation_log.format_since(
+                    self.last_advisor_at[name], received_at, name
+                ),
+                trigger_probability=action.advisor_probabilities[name],
+                trigger_time_text=trigger_time_text,
+            )
+            if parts.advisors[name].request_update(context):
+                self.last_advisor_at[name] = received_at
+                accepted.add(name)
+        return frozenset(accepted)
 
     def _select_advisor_images(self) -> list[LabeledImage]:
         """advisor に渡す画像を、今の時刻 (clock()) で要求とは別に選んで JPEG にする (run_once の 8)。"""

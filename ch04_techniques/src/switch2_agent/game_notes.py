@@ -1,7 +1,8 @@
-"""ゲームの情報の 4 ファイル (操作方法・攻略情報・進行状況・戦略) を用意し、読み取って要求の文にする。
+"""ゲームの情報の 4 ファイル (操作方法・攻略情報・目標と進行状況と戦略・問題の解決の助言) を用意し、読み取って要求の文にする。
 
-ファイルは <root>/<ゲーム名>/<種別>.md に置く。advisor が Skill の手順で書き換え、
-Pipeline は要求のたびに最新の内容を読む (advisor の出力は戦略の受け渡しに使わない)。
+ファイルは <root>/<ゲーム名>/<種別>.md に置く。種別ごとに受け持ちの advisor (advisor_roles.ADVISOR_ROLES の
+note_kind) が Skill の手順で書き換え、Pipeline は要求のたびに最新の内容を読む (advisor の出力は戦略の受け渡しに
+使わない)。NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は、作らず、読まず、変えない。
 """
 
 import re
@@ -12,13 +13,13 @@ from pathlib import Path
 from switch2_remote.error_message import describe_error
 
 # ゲームの情報の種別。並びは要求の文に並べる順でもある
-NOTE_KINDS = ("controls", "tips", "progress", "strategy")
+NOTE_KINDS = ("controls", "tips", "strategy", "advice")
 # 種別 → 要求の文で使う見出し
 NOTE_TITLES = {
     "controls": "ゲームの操作方法",
     "tips": "攻略情報・Tips",
-    "progress": "進行状況",
-    "strategy": "戦略",
+    "strategy": "目標・進行状況・戦略",
+    "advice": "問題の解決の助言",
 }
 # まだ何も書かれていない種別の代わりに置く文
 EMPTY_NOTE_TEXT = "(まだ書かれていない)"
@@ -40,7 +41,8 @@ def ensure_game_notes(root: Path, game: str) -> dict[str, Path]:
     """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を作り、種別 → パスの辞書を返す。
 
     ディレクトリーは親を含めて作る。作るファイルの中身は空にする。既にあるファイルは変えない。
-    game が不正なら game_notes_dir と同じく ValueError にする。
+    NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は作らず、あっても変えず、
+    返す辞書にも入れない。game が不正なら game_notes_dir と同じく ValueError にする。
     """
     notes_dir = game_notes_dir(root, game)
     notes_dir.mkdir(parents=True, exist_ok=True)
