@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from switch2_agent.advisor_roles import ADVISOR_ROLES, AdvisorRole
 from switch2_agent.advisors import claude_code_headless
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.advisors.claude_code_headless import (
-    ADVISOR_SKILLS,
+    FAILED_RUN_COOLDOWN_S,
     TERMINATE_GRACE_S,
     ClaudeCodeHeadlessAdvisor,
     advisor_run_dir_name,
@@ -18,6 +19,7 @@ from switch2_agent.advisors.claude_code_headless import (
     build_allowed_tools,
     build_child_env,
     build_claude_command,
+    build_log_event,
     build_record_error_event,
     build_stream_result_record,
     image_file_name,
@@ -26,20 +28,18 @@ from switch2_agent.advisors.claude_code_headless import (
 )
 from switch2_agent.advisors.stream_json_log import STREAM_FILE_NAME
 from switch2_agent.decision_request import LabeledImage
+from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 from switch2_agent.safety import SAFETY_RULES
 
 NOTES_DIR_RELATIVE = "game_notes/zelda"
 RUNS_DIR_RELATIVE = "runs/20261112-120000"
+ROLES_BY_NAME = {role.name: role for role in ADVISOR_ROLES}
+# テストで使う役割 (目標・戦略の更新)
+ROLE = ROLES_BY_NAME["strategy"]
 EXPECTED_ALLOWED_TOOLS = [
     "Read(/game_notes/zelda/**)",
     "Read(/runs/20261112-120000/**)",
-    "Edit(/game_notes/zelda/controls.md)",
-    "Edit(/game_notes/zelda/tips.md)",
-    "Edit(/game_notes/zelda/progress.md)",
     "Edit(/game_notes/zelda/strategy.md)",
-    "Skill(record-controls)",
-    "Skill(record-tips)",
-    "Skill(record-progress)",
     "Skill(record-strategy)",
 ]
 CLAUDE_OUTPUT = {
@@ -212,14 +212,15 @@ class Recorder:
         self.held_jobs.append(job)
 
 
-def make_advisor(tmp_path: Path, start_thread=None, **kwargs):
-    """tmp_path の下を workdir にした advisor と、偽の start_process・記録・実行のディレクトリーを返す。
+def make_advisor(tmp_path: Path, start_thread=None, role: AdvisorRole = ROLE, **kwargs):
+    """tmp_path の下を workdir にした役割 role の advisor と、偽の start_process・記録・実行のディレクトリーを返す。
 
-    start_thread を省略すると、実行の本体をその場で呼ぶ。
+    start_thread を省略すると、実行の本体をその場で呼ぶ。同じ tmp_path で何度呼んでもよい
+    (ディレクトリーは共通にする)。
     """
     workdir = tmp_path / "ch04_techniques"
     notes_dir = workdir / "game_notes" / "zelda"
-    notes_dir.mkdir(parents=True)
+    notes_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = workdir / "runs" / "20261112-120000"
     clock = FakeClock(100.0)
     start_process = FakeStartProcess(clock)
@@ -229,6 +230,7 @@ def make_advisor(tmp_path: Path, start_thread=None, **kwargs):
         notes_dir,
         runs_dir,
         "zelda",
+        role,
         start_process=start_process,
         log=recorder.log,
         start_thread=start_thread if start_thread is not None else (lambda job: job()),
@@ -238,8 +240,8 @@ def make_advisor(tmp_path: Path, start_thread=None, **kwargs):
     return advisor, start_process, recorder, runs_dir
 
 
-def read_result(runs_dir: Path, index: int = 1) -> dict:
-    path = runs_dir / advisor_run_dir_name(index) / "result.json"
+def read_result(runs_dir: Path, index: int = 1, role: AdvisorRole = ROLE) -> dict:
+    path = runs_dir / advisor_run_dir_name(role.name, index) / "result.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -254,9 +256,12 @@ def wait_until(condition, message: str) -> None:
 # --- 名前 ---
 
 
-def test_run_dir_and_image_file_names():
-    assert advisor_run_dir_name(1) == "advisor-001"
-    assert advisor_run_dir_name(12) == "advisor-012"
+def test_run_dir_names_have_role_name_and_three_digit_number():
+    assert advisor_run_dir_name("strategy", 1) == "advisor-strategy-001"
+    assert advisor_run_dir_name("tips", 12) == "advisor-tips-012"
+
+
+def test_image_file_names():
     assert image_file_name(1) == "frame-01.jpg"
     assert image_file_name(10) == "frame-10.jpg"
 
@@ -265,18 +270,24 @@ def test_run_dir_and_image_file_names():
 
 
 def test_command_starts_with_claude_print_and_prompt():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     assert cmd[:3] == ["claude", "-p", "プロンプト"]
 
 
 def test_command_uses_json_output_and_dont_ask_mode():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     assert option_value(cmd, "--output-format") == "json"
     assert option_value(cmd, "--permission-mode") == "dontAsk"
 
 
 def test_command_reads_only_project_settings_and_disables_hooks():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     assert option_value(cmd, "--setting-sources") == "project"
     assert json.loads(option_value(cmd, "--settings")) == {"disableAllHooks": True}
     assert "--bare" not in cmd
@@ -285,40 +296,41 @@ def test_command_reads_only_project_settings_and_disables_hooks():
 def test_command_limits_turns():
     assert (
         option_value(
-            build_claude_command("p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+            build_claude_command("p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE),
             "--max-turns",
         )
         == "30"
     )
-    cmd = build_claude_command("p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, max_turns=10)
+    cmd = build_claude_command(
+        "p", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE, max_turns=10
+    )
     assert option_value(cmd, "--max-turns") == "10"
 
 
 def test_command_allowed_tools_is_one_comma_joined_string():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     assert option_value(cmd, "--allowedTools").split(",") == EXPECTED_ALLOWED_TOOLS
 
 
-def test_command_allows_writing_only_the_four_note_files():
+def test_command_allows_writing_only_the_note_file_of_the_role():
     rules = option_value(
-        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE),
         "--allowedTools",
     ).split(",")
     write_rules = [rule for rule in rules if rule.startswith(("Edit", "Write"))]
-    assert write_rules == [
-        "Edit(/game_notes/zelda/controls.md)",
-        "Edit(/game_notes/zelda/tips.md)",
-        "Edit(/game_notes/zelda/progress.md)",
-        "Edit(/game_notes/zelda/strategy.md)",
-    ]
-    # ディレクトリー全体への書き込みは許さない
+    assert write_rules == ["Edit(/game_notes/zelda/strategy.md)"]
+    # ほかの 3 ファイルとディレクトリー全体への書き込みは許さない
+    for kind in ("controls", "tips", "advice"):
+        assert f"Edit(/game_notes/zelda/{kind}.md)" not in rules
     assert "Edit(/game_notes/zelda/**)" not in rules
     assert not any(rule.startswith("Bash") for rule in rules)
 
 
 def test_command_allows_reading_only_under_notes_dir_and_runs_dir():
     rules = option_value(
-        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE),
+        build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE),
         "--allowedTools",
     ).split(",")
     read_rules = [rule for rule in rules if rule.startswith("Read")]
@@ -328,25 +340,34 @@ def test_command_allows_reading_only_under_notes_dir_and_runs_dir():
     ]
 
 
-def test_allowed_tools_include_reads_edit_and_four_skills():
-    rules = build_allowed_tools("game_notes/mario", "runs/20261112-130000")
+@pytest.mark.parametrize(
+    "role_name, note_file, skill",
+    [
+        ("controls", "controls.md", "record-controls"),
+        ("strategy", "strategy.md", "record-strategy"),
+        ("advice", "advice.md", "record-advice"),
+        ("tips", "tips.md", "record-tips"),
+    ],
+)
+def test_allowed_tools_have_reads_and_one_edit_and_one_skill_of_role(
+    role_name, note_file, skill
+):
+    rules = build_allowed_tools(
+        "game_notes/mario", "runs/20261112-130000", ROLES_BY_NAME[role_name]
+    )
     assert rules == [
         "Read(/game_notes/mario/**)",
         "Read(/runs/20261112-130000/**)",
-        "Edit(/game_notes/mario/controls.md)",
-        "Edit(/game_notes/mario/tips.md)",
-        "Edit(/game_notes/mario/progress.md)",
-        "Edit(/game_notes/mario/strategy.md)",
-        *[f"Skill({name})" for name in ADVISOR_SKILLS],
+        f"Edit(/game_notes/mario/{note_file})",
+        f"Skill({skill})",
     ]
     # パスを限らない Read は含めない
     assert "Read" not in rules
-    assert ADVISOR_SKILLS == (
-        "record-controls",
-        "record-tips",
-        "record-progress",
-        "record-strategy",
-    )
+
+
+def test_skill_list_constant_is_removed():
+    # 使える Skill は役割から決めるため、全役割の Skill の一覧の定数は無い
+    assert not hasattr(claude_code_headless, "ADVISOR_SKILLS")
 
 
 # --- build_child_env ---
@@ -375,26 +396,75 @@ def test_child_env_keeps_all_variables_without_hidden_names():
 # --- build_advisor_prompt ---
 
 
-def test_prompt_points_to_context_notes_and_skills(tmp_path):
-    context_path = tmp_path / "advisor-001" / "context.md"
+def sample_prompt(tmp_path: Path, role: AdvisorRole = ROLE) -> tuple[str, Path, Path]:
+    """role の advisor への指示の文と、そこに渡した context.md のパスとゲームの情報のディレクトリーを返す。"""
+    context_path = tmp_path / "advisor-strategy-001" / "context.md"
     notes_dir = tmp_path / "game_notes" / "zelda"
-    prompt = build_advisor_prompt(context_path, notes_dir, "zelda")
+    prompt = build_advisor_prompt(context_path, notes_dir, "zelda", role)
+    return prompt, context_path, notes_dir
+
+
+def test_prompt_starts_with_role_title(tmp_path):
+    prompt, _, _ = sample_prompt(tmp_path)
+    assert prompt.splitlines()[0] == (
+        "あなたは、Nintendo Switch 2 のゲーム「zelda」を遊ぶ速い層のために、"
+        "目標・戦略の更新を受け持つ advisor である。"
+    )
+    assert not prompt.startswith("/")
+
+
+def test_prompt_points_to_context_and_all_four_note_files_in_order(tmp_path):
+    prompt, context_path, notes_dir = sample_prompt(tmp_path)
     assert str(context_path) in prompt
-    assert str(notes_dir) in prompt
-    assert "zelda" in prompt
-    for skill in ADVISOR_SKILLS:
-        assert skill in prompt
+    lines = prompt.splitlines()
+    positions = []
+    for kind in NOTE_KINDS:
+        index = next(
+            i for i, line in enumerate(lines) if str(notes_dir / f"{kind}.md") in line
+        )
+        assert NOTE_TITLES[kind] in lines[index]
+        positions.append(index)
+    assert positions == sorted(positions)
+
+
+def test_prompt_has_task_skill_and_the_only_writable_file_of_role(tmp_path):
+    prompt, _, _ = sample_prompt(tmp_path)
+    assert ROLE.task in prompt
+    assert "record-strategy の Skill の手順で strategy.md を書き換える" in prompt
+    assert (
+        "書き換えてよいのは strategy.md だけで、ほかの 3 ファイルは読むだけにする"
+        in prompt
+    )
+    # ほかの役割の Skill は書かない
+    for other in ("record-controls", "record-tips", "record-advice"):
+        assert other not in prompt
+
+
+def test_prompt_has_safety_rules_and_short_answer(tmp_path):
+    prompt, _, _ = sample_prompt(tmp_path)
     assert SAFETY_RULES in prompt
     assert "3 行以内" in prompt
-    assert not prompt.startswith("/")
+    assert "短く保つ" in prompt
+
+
+def test_prompt_of_another_role_uses_its_title_and_file(tmp_path):
+    prompt, _, _ = sample_prompt(tmp_path, ROLES_BY_NAME["advice"])
+    assert prompt.splitlines()[0].endswith(
+        "問題の解決の助言を受け持つ advisor である。"
+    )
+    assert "record-advice の Skill の手順で advice.md を書き換える" in prompt
+    assert (
+        "書き換えてよいのは advice.md だけで、ほかの 3 ファイルは読むだけにする"
+        in prompt
+    )
 
 
 # --- write_advisor_inputs ---
 
 
 def test_write_advisor_inputs_writes_images_and_context(tmp_path):
-    run_dir = tmp_path / "runs" / "advisor-001"
-    context_path = write_advisor_inputs(run_dir, sample_context())
+    run_dir = tmp_path / "runs" / "advisor-strategy-001"
+    context_path = write_advisor_inputs(run_dir, sample_context(), ROLE)
     assert context_path == run_dir / "context.md"
     assert (run_dir / "frame-01.jpg").read_bytes() == b"jpeg-one"
     assert (run_dir / "frame-02.jpg").read_bytes() == b"jpeg-two"
@@ -416,11 +486,21 @@ def test_write_advisor_inputs_writes_images_and_context(tmp_path):
 
 def test_write_advisor_inputs_marks_empty_strategy_and_log(tmp_path):
     context_path = write_advisor_inputs(
-        tmp_path / "advisor-001", sample_context(strategy="", log_text="")
+        tmp_path / "advisor-strategy-001",
+        sample_context(strategy="", log_text=""),
+        ROLE,
     )
     text = context_path.read_text(encoding="utf-8")
     assert "(まだ書かれていない)" in text
     assert "(記録なし)" in text
+
+
+def test_write_advisor_inputs_writes_role_line(tmp_path):
+    context_path = write_advisor_inputs(
+        tmp_path / "advisor-tips-001", sample_context(), ROLES_BY_NAME["tips"]
+    )
+    lines = context_path.read_text(encoding="utf-8").splitlines()
+    assert "- 役割: 攻略情報・Tips の更新" in lines
 
 
 # --- ClaudeCodeHeadlessAdvisor ---
@@ -434,6 +514,7 @@ def test_advisor_rejects_notes_dir_outside_workdir(tmp_path):
             tmp_path / "elsewhere",
             workdir / "runs",
             "zelda",
+            ROLE,
         )
 
 
@@ -445,6 +526,7 @@ def test_advisor_rejects_runs_dir_outside_workdir(tmp_path):
             workdir / "game_notes" / "zelda",
             tmp_path / "runs",
             "zelda",
+            ROLE,
         )
 
 
@@ -511,12 +593,12 @@ def test_request_update_writes_inputs_in_numbered_run_dir(tmp_path):
     advisor, start_process, _, runs_dir = make_advisor(tmp_path)
     advisor.request_update(sample_context())
     advisor.request_update(sample_context())
-    for index in (1, 2):
-        run_dir = runs_dir / advisor_run_dir_name(index)
+    for name in ("advisor-strategy-001", "advisor-strategy-002"):
+        run_dir = runs_dir / name
         assert (run_dir / "context.md").is_file()
         assert (run_dir / "frame-01.jpg").read_bytes() == b"jpeg-one"
     prompt = start_process.calls[0][0][2]
-    assert str(runs_dir / "advisor-001" / "context.md") in prompt
+    assert str(runs_dir / "advisor-strategy-001" / "context.md") in prompt
 
 
 def test_request_update_writes_result_json_and_logs(tmp_path):
@@ -534,11 +616,61 @@ def test_request_update_writes_result_json_and_logs(tmp_path):
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event["event"] == "advisor"
-    assert event["run_dir"] == str(runs_dir / "advisor-001")
+    assert event["run_dir"] == str(runs_dir / advisor_run_dir_name("strategy", 1))
     assert event["returncode"] == 0
     assert event["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
     assert event["result"] == "戦略を更新した"
     assert advisor.is_busy() is False
+
+
+def test_request_update_logs_role_name(tmp_path):
+    advisor, _, recorder, _ = make_advisor(tmp_path, role=ROLES_BY_NAME["controls"])
+    advisor.request_update(sample_context())
+    assert recorder.events[0]["role"] == "controls"
+
+
+def test_log_event_has_role_name():
+    record = {
+        "returncode": 0,
+        "duration_s": 1.5,
+        "timed_out": False,
+        "error": None,
+        "output": CLAUDE_OUTPUT,
+        "permission_denials": [],
+    }
+    event = build_log_event(
+        Path("/work/runs/advisor-tips-001"), record, ROLES_BY_NAME["tips"]
+    )
+    assert event["role"] == "tips"
+    assert event["event"] == "advisor"
+    assert event["result"] == "戦略を更新した"
+
+
+def test_advisors_of_two_roles_keep_their_own_busy_and_run_dirs(tmp_path):
+    held = Recorder()
+    strategy, _, _, runs_dir = make_advisor(tmp_path, start_thread=held.hold)
+    tips, _, _, _ = make_advisor(
+        tmp_path, start_thread=held.hold, role=ROLES_BY_NAME["tips"]
+    )
+    # 片方の実行中も、もう片方は要求を受け付ける (役割どうしは並列に動いてよい)
+    assert strategy.request_update(sample_context()) is True
+    assert strategy.is_busy() is True
+    assert tips.is_busy() is False
+    assert tips.request_update(sample_context()) is True
+    for job in held.held_jobs:
+        job()
+    # 実行のディレクトリーは役割ごとの名前と連番で、同じ runs_dir でもぶつからない
+    assert (runs_dir / "advisor-strategy-001" / "result.json").is_file()
+    assert (runs_dir / "advisor-tips-001" / "result.json").is_file()
+
+
+def test_request_update_uses_allowed_tools_and_prompt_of_its_role(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path, role=ROLES_BY_NAME["advice"])
+    advisor.request_update(sample_context())
+    cmd = start_process.calls[0][0]
+    rules = option_value(cmd, "--allowedTools").split(",")
+    assert rules[2:] == ["Edit(/game_notes/zelda/advice.md)", "Skill(record-advice)"]
+    assert "問題の解決の助言を受け持つ advisor である。" in cmd[2]
 
 
 def test_request_update_records_non_json_output(tmp_path):
@@ -572,7 +704,7 @@ def test_request_update_terminates_claude_on_timeout(tmp_path):
     assert result["stderr"] == "still running"
     assert len(recorder.events) == 1
     assert recorder.events[0]["timed_out"] is True
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path):
@@ -589,7 +721,7 @@ def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path)
     ]
     assert TERMINATE_GRACE_S == 5.0
     assert read_result(runs_dir)["timed_out"] is True
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_terminates_claude_when_waiting_fails(tmp_path):
@@ -608,7 +740,7 @@ def test_request_update_terminates_claude_when_waiting_fails(tmp_path):
     assert len(recorder.events) == 1
     assert "timeout value is too large" in recorder.events[0]["error"]
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
@@ -627,7 +759,7 @@ def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
     ]
     assert "timeout value is too large" in read_result(runs_dir)["error"]
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_stops_reading_when_pipes_stay_open_after_kill(tmp_path):
@@ -653,7 +785,7 @@ def test_request_update_stops_reading_when_pipes_stay_open_after_kill(tmp_path):
     assert result["stderr"] == ""
     assert len(recorder.events) == 1
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_records_exception(tmp_path):
@@ -665,9 +797,57 @@ def test_request_update_records_exception(tmp_path):
     assert result["returncode"] is None
     assert "claude not found" in result["error"]
     assert len(recorder.events) == 1
+    assert advisor.busy is False
+    # 失敗の後、FAILED_RUN_COOLDOWN_S 秒の間は次の要求を受け付けず、その後は受け付ける
+    assert FAILED_RUN_COOLDOWN_S == 60.0
+    assert advisor.is_busy() is True
+    assert advisor.request_update(sample_context()) is False
+    advisor.clock.now += FAILED_RUN_COOLDOWN_S - 0.01
+    assert advisor.request_update(sample_context()) is False
+    advisor.clock.now += 0.01
     assert advisor.is_busy() is False
-    # 失敗の後も、次の要求を受け付ける
     assert advisor.request_update(sample_context()) is True
+    assert len(start_process.calls) == 2
+
+
+def test_failed_run_cooldown_starts_at_end_of_failed_run(tmp_path):
+    # 待ちは、失敗した実行が終わった時刻から数える (実行に 300 秒かかったタイムアウトなら、その後から 60 秒)
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    start_process.timeout_first = True
+    start_process.duration = 300.0
+    started = advisor.clock.now
+    advisor.request_update(sample_context())
+    assert advisor.retry_after == started + 300.0 + FAILED_RUN_COOLDOWN_S
+    assert advisor.is_busy() is True
+
+
+def test_run_with_nonzero_exit_code_starts_cooldown(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    start_process.exit_code = 1
+    advisor.request_update(sample_context())
+    assert advisor.busy is False
+    assert advisor.is_busy() is True
+    assert advisor.request_update(sample_context()) is False
+
+
+def test_successful_run_does_not_start_cooldown(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    advisor.request_update(sample_context())
+    assert advisor.retry_after is None
+    assert advisor.is_busy() is False
+    assert advisor.request_update(sample_context()) is True
+    assert len(start_process.calls) == 2
+
+
+def test_successful_run_after_cooldown_clears_it(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path, failed_run_cooldown_s=5.0)
+    start_process.exit_code = 1
+    advisor.request_update(sample_context())
+    assert advisor.retry_after is not None
+    advisor.clock.now += 5.0
+    start_process.exit_code = 0
+    assert advisor.request_update(sample_context()) is True
+    assert advisor.retry_after is None
 
 
 # --- close ---
@@ -675,7 +855,7 @@ def test_request_update_records_exception(tmp_path):
 
 def test_close_without_running_advisor_returns():
     advisor = ClaudeCodeHeadlessAdvisor(
-        Path("/work"), Path("/work/game_notes/zelda"), Path("/work/runs"), "zelda"
+        Path("/work"), Path("/work/game_notes/zelda"), Path("/work/runs"), "zelda", ROLE
     )
     advisor.close()
     assert advisor.request_update(sample_context()) is False
@@ -692,7 +872,7 @@ def test_close_terminates_running_claude_and_waits_for_thread(tmp_path):
     process = start_process.processes[0]
     assert "terminate" in process.calls
     assert "kill" not in process.calls
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
     result = read_result(runs_dir)
     assert result["returncode"] == -15
     assert result["error"] == "stopped by close"
@@ -711,7 +891,7 @@ def test_close_kills_claude_that_ignores_terminate(tmp_path):
     advisor.close()
     process = start_process.processes[0]
     assert process.calls[1:] == ["terminate", ("wait", TERMINATE_GRACE_S), "kill"]
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_close_prevents_starting_claude_for_pending_request(tmp_path):
@@ -919,8 +1099,10 @@ class FakeStreamingStartProcess:
             process.wake.set()
 
 
-def make_streaming_advisor(tmp_path: Path, start_thread=None, **kwargs):
-    """make_advisor と同じだが、record_steps=True の advisor と FakeStreamingStartProcess を返す。"""
+def make_streaming_advisor(
+    tmp_path: Path, start_thread=None, role: AdvisorRole = ROLE, **kwargs
+):
+    """make_advisor と同じだが、record_steps=True の役割 role の advisor と FakeStreamingStartProcess を返す。"""
     workdir = tmp_path / "ch04_techniques"
     notes_dir = workdir / "game_notes" / "zelda"
     notes_dir.mkdir(parents=True)
@@ -933,6 +1115,7 @@ def make_streaming_advisor(tmp_path: Path, start_thread=None, **kwargs):
         notes_dir,
         runs_dir,
         "zelda",
+        role,
         start_process=start_process,
         log=recorder.log,
         start_thread=start_thread if start_thread is not None else (lambda job: job()),
@@ -943,15 +1126,17 @@ def make_streaming_advisor(tmp_path: Path, start_thread=None, **kwargs):
     return advisor, start_process, recorder, runs_dir
 
 
-def read_stream(runs_dir: Path, index: int = 1) -> list[dict]:
-    path = runs_dir / advisor_run_dir_name(index) / STREAM_FILE_NAME
+def read_stream(runs_dir: Path, index: int = 1, role: AdvisorRole = ROLE) -> list[dict]:
+    path = runs_dir / advisor_run_dir_name(role.name, index) / STREAM_FILE_NAME
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_stream_command_differs_only_in_output_format_and_verbose():
-    json_cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    json_cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     stream_cmd = build_claude_command(
-        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, stream_json=True
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE, stream_json=True
     )
     assert option_value(stream_cmd, "--output-format") == "stream-json"
     assert stream_cmd.count("--verbose") == 1
@@ -966,7 +1151,9 @@ def test_stream_command_differs_only_in_output_format_and_verbose():
 
 
 def test_json_command_has_no_verbose():
-    cmd = build_claude_command("プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE)
+    cmd = build_claude_command(
+        "プロンプト", NOTES_DIR_RELATIVE, RUNS_DIR_RELATIVE, ROLE
+    )
     assert "--verbose" not in cmd
 
 
@@ -1010,7 +1197,7 @@ def test_stream_result_record_has_same_keys_as_json_result_record():
 
 
 def test_record_error_event():
-    run_dir = Path("/work/runs/20261112-120000/advisor-001")
+    run_dir = Path("/work/runs/20261112-120000/advisor-strategy-001")
     assert build_record_error_event(run_dir, "No space left on device") == {
         "event": "record_error",
         "kind": "advisor_steps",
@@ -1023,7 +1210,7 @@ def test_record_steps_off_writes_no_stream_file(tmp_path):
     advisor, start_process, _, runs_dir = make_advisor(tmp_path)
     advisor.request_update(sample_context())
     assert option_value(start_process.calls[0][0], "--output-format") == "json"
-    assert not (runs_dir / "advisor-001" / STREAM_FILE_NAME).exists()
+    assert not (runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME).exists()
 
 
 def test_record_steps_starts_claude_with_stream_json_and_same_options(tmp_path):
@@ -1070,6 +1257,7 @@ def test_record_steps_writes_result_json_from_last_result_line(tmp_path):
     event = recorder.events[0]
     assert set(event) == {
         "event",
+        "role",
         "run_dir",
         "returncode",
         "duration_s",
@@ -1079,7 +1267,8 @@ def test_record_steps_writes_result_json_from_last_result_line(tmp_path):
         "result",
     }
     assert event["event"] == "advisor"
-    assert event["run_dir"] == str(runs_dir / "advisor-001")
+    assert event["role"] == ROLE.name
+    assert event["run_dir"] == str(runs_dir / "advisor-strategy-001")
     assert event["result"] == "戦略を更新した"
     assert event["permission_denials"] == CLAUDE_OUTPUT["permission_denials"]
     assert advisor.is_busy() is False
@@ -1130,7 +1319,7 @@ def test_record_steps_lines_are_readable_while_claude_runs(tmp_path):
     )
     start_process.hold_after = 2
     advisor.request_update(sample_context())
-    stream_path = runs_dir / "advisor-001" / STREAM_FILE_NAME
+    stream_path = runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME
     wait_until(
         lambda: (
             stream_path.is_file()
@@ -1167,7 +1356,7 @@ def test_record_steps_terminates_claude_on_timeout_and_keeps_lines(tmp_path):
     assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
     assert len(recorder.events) == 1
     assert recorder.events[0]["timed_out"] is True
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_record_steps_kills_claude_that_ignores_terminate_on_timeout(
@@ -1188,7 +1377,7 @@ def test_record_steps_kills_claude_that_ignores_terminate_on_timeout(
     ]
     assert read_result(runs_dir)["timed_out"] is True
     assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_record_steps_stops_claude_when_waiting_fails(tmp_path):
@@ -1208,7 +1397,7 @@ def test_record_steps_stops_claude_when_waiting_fails(tmp_path):
     assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
     assert len(recorder.events) == 1
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_record_steps_gives_up_pipes_that_stay_open_after_kill(tmp_path, monkeypatch):
@@ -1237,7 +1426,7 @@ def test_record_steps_gives_up_pipes_that_stay_open_after_kill(tmp_path, monkeyp
     assert read_stream(runs_dir) == EXPECTED_STREAM_RECORDS[:2]
     assert len(recorder.events) == 1
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
     process.pipes_released.set()
 
 
@@ -1253,7 +1442,7 @@ def test_record_steps_close_terminates_claude_and_keeps_lines(tmp_path):
     process = start_process.processes[0]
     assert "terminate" in process.calls
     assert "kill" not in process.calls
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
     result = read_result(runs_dir)
     assert result["returncode"] == -15
     assert result["error"] == "stopped by close"
@@ -1285,12 +1474,12 @@ def test_record_steps_records_start_failure(tmp_path):
     assert result["returncode"] is None
     assert "claude not found" in result["error"]
     assert [event["event"] for event in recorder.events] == ["advisor"]
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_record_steps_reports_stream_file_that_cannot_be_opened(tmp_path):
     advisor, start_process, recorder, runs_dir = make_streaming_advisor(tmp_path)
-    run_dir = runs_dir / "advisor-001"
+    run_dir = runs_dir / "advisor-strategy-001"
     (run_dir / STREAM_FILE_NAME).mkdir(parents=True)
     advisor.request_update(sample_context())
     # 記録だけをやめ、claude は起動して実行を続ける
@@ -1314,7 +1503,7 @@ def test_record_steps_continues_when_logging_record_error_fails(tmp_path):
         recorder.events.append(event)
 
     advisor.log = log_failing_on_record_error
-    (runs_dir / "advisor-001" / STREAM_FILE_NAME).mkdir(parents=True)
+    (runs_dir / "advisor-strategy-001" / STREAM_FILE_NAME).mkdir(parents=True)
     advisor.request_update(sample_context())
     # record_error の行を log に渡せなくても、claude は起動して実行を続ける
     assert len(start_process.calls) == 1

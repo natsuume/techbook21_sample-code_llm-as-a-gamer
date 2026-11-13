@@ -361,21 +361,53 @@ def test_sticks_and_buttons_are_held_together():
 # --- advisor ---
 
 
-def test_advisor_requested_above_threshold():
-    action = decide(advisor=0.51)
-    assert action.advisor_requested is True
-    assert action.advisor_probability == 0.51
+def test_advisor_probabilities_are_keyed_by_role_name_in_role_order():
+    action = decide(
+        advisor_controls=0.125,
+        advisor_strategy=0.25,
+        advisor_advice=0.375,
+        advisor_tips=0.5,
+    )
+    assert list(action.advisor_probabilities.items()) == [
+        ("controls", 0.125),
+        ("strategy", 0.25),
+        ("advice", 0.375),
+        ("tips", 0.5),
+    ]
+
+
+def test_advisor_requested_has_roles_above_threshold():
+    action = decide(advisor_strategy=0.51, advisor_advice=0.9, advisor_tips=0.2)
+    assert action.advisor_requested == frozenset({"strategy", "advice"})
 
 
 def test_advisor_not_requested_at_threshold():
-    action = decide(advisor=0.5)
-    assert action.advisor_requested is False
-    assert action.advisor_probability == 0.5
+    # しきい値ちょうど (0.5) の役割は入れない。少しでも超えた役割は入れる
+    action = decide(advisor_controls=0.5, advisor_tips=0.5000001)
+    assert action.advisor_requested == frozenset({"tips"})
+    assert action.advisor_probabilities["controls"] == 0.5
 
 
-def test_advisor_uses_given_threshold():
-    action = decide(thresholds=Thresholds(advisor=0.8), advisor=0.7)
-    assert action.advisor_requested is False
+def test_advisor_requested_is_empty_when_no_role_exceeds_threshold():
+    action = decide(advisor_strategy=0.4)
+    assert action.advisor_requested == frozenset()
+    assert action.advisor_probabilities == {
+        "controls": 0.0,
+        "strategy": 0.4,
+        "advice": 0.0,
+        "tips": 0.0,
+    }
+
+
+def test_advisor_uses_given_threshold_for_all_roles():
+    action = decide(
+        thresholds=Thresholds(advisor=0.8),
+        advisor_controls=0.7,
+        advisor_strategy=0.85,
+        advisor_advice=0.8,
+        advisor_tips=0.9,
+    )
+    assert action.advisor_requested == frozenset({"strategy", "tips"})
 
 
 # --- 入力の検証 ---

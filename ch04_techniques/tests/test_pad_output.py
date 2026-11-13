@@ -35,8 +35,8 @@ def action(held: PadState | None = None, taps: set[str] | None = None) -> PadAct
     return PadAction(
         held=held if held is not None else PadState(),
         taps=frozenset(taps or ()),
-        advisor_requested=False,
-        advisor_probability=0.0,
+        advisor_probabilities={},
+        advisor_requested=frozenset(),
     )
 
 

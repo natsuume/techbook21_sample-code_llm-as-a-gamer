@@ -1,7 +1,8 @@
 """第4章のエージェント (switch2-agent) を起動する。
 
 1 つのプロセスで、キャプチャー (CaptureWithHistory) とその見張り (CaptureWatcher)、コントローラーのブリッジ
-(BridgeSupervisor)、押下状態の送信 (PadOutput)、advisor (ClaudeCodeHeadlessAdvisor)、Decision Model、
+(BridgeSupervisor)、押下状態の送信 (PadOutput)、役割ごとの advisor (ClaudeCodeHeadlessAdvisor を
+advisor_roles.ADVISOR_ROLES の役割ごとに 1 つ)、Decision Model、
 判断のループ (Pipeline) を動かす。
 Decision Model が TypeSafe Jev (--model jev) なら、直前の応答が返ってから jev.JEV_MIN_REQUEST_INTERVAL_S 秒 (0.2 秒)
 空けて次の要求を送る (Pipeline の min_request_interval_s)。OpenAI Decisions API (--model decisions) では空けない。
@@ -15,7 +16,7 @@ Ctrl+C で止まる。
     --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
     --jpeg-quality N             要求に載せる画像の JPEG の品質 (整数 1〜100、既定 85)
-    --threshold-advisor P        advisor の問いのしきい値 (0〜1、既定 0.5)。ボタンとスティックの問いは選択肢の問いと
+    --threshold-advisor P        advisor の問いのしきい値 (0〜1、既定 0.5。4 つの役割で共通)。ボタンとスティックの問いは選択肢の問いと
                                  段階の確率の問いで決めるため、しきい値を持たない (action_decision.decide_action)
     --valley-ratio R             鮮明度の谷とみなす比 (0 と 1 を含まない範囲、既定 0.5)
     --similarity-threshold D     意味のあるフレームが似ているとみなす差分の上限 (0〜255、既定 0.15)
@@ -26,7 +27,7 @@ Ctrl+C で止まる。
     --record-dashboard           ダッシュボードが読む記録を runs/<実行>/ に書く (既定はオフ): フレームの判定と縮小画像
                                  (frames.jsonl と thumbs/)、送ったレポート (pad.jsonl)、要求の行 (requests.jsonl。
                                  --save-requests が無ければ frames/ は書かない)、advisor の途中経過
-                                 (advisor-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
+                                 (advisor-<役割>-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
                                  origin_mono) と、終了時の記録の件数 (record_end)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
@@ -39,6 +40,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
@@ -47,6 +49,8 @@ from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
+from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisors.base import Advisor
 from switch2_agent.advisors.claude_code_headless import (
     DEFAULT_ADVISOR_TIMEOUT_S,
     ClaudeCodeHeadlessAdvisor,
@@ -209,7 +213,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "ダッシュボードが読む記録 (フレームの判定と縮小画像 frames.jsonl・thumbs/、"
             "送ったレポート pad.jsonl、要求の行 requests.jsonl、advisor の途中経過 "
-            "advisor-<連番>/stream.jsonl、run.jsonl の起動引数と記録の件数) を "
+            "advisor-<役割>-<連番>/stream.jsonl、run.jsonl の起動引数と記録の件数) を "
             "runs/<実行>/ に書く。既定はオフ"
         ),
     )
@@ -320,9 +324,11 @@ def main(argv: list[str] | None = None) -> None:
            保管に add し、recorder があれば判定の前後を frames.jsonl と thumbs/ に記録する)
         7. CaptureWatcher(capture_ended=capture.ended を返す関数, latest_frame_time=history.latest() の time
            (無ければ None) を返す関数, on_lost=output.stop_output, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
-        8. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
-           hidden_env_names=API_KEY_ENVS の値 (Decision Model の API キーの環境変数。advisor の子プロセスに渡さない),
-           log=RunLog.write, record_steps=--record-dashboard の値)
+        8. advisor_roles.ADVISOR_ROLES の順に、役割ごとに ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー,
+           実行のディレクトリー, game, role, advisor_timeout, hidden_env_names=API_KEY_ENVS の値 (Decision Model の
+           API キーの環境変数。advisor の子プロセスに渡さない), log=RunLog.write, record_steps=--record-dashboard の値)
+           を 1 つずつ作る。advisor_timeout、hidden_env_names、record_steps は全役割で共通。役割の name → advisor の
+           辞書を Pipeline の advisors に渡す
         9. Decision Model (JevModel / DecisionsApiModel)
         10. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
@@ -338,11 +344,12 @@ def main(argv: list[str] | None = None) -> None:
     --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。
     --record-dashboard が付いていれば、同じ実行のディレクトリーに、フレームの判定と縮小画像 (frames.jsonl と thumbs/)、
     送ったレポート (pad.jsonl)、要求の行 (requests.jsonl。--save-requests が無ければ frames/ は書かない)、
-    advisor の途中経過 (advisor-<連番>/stream.jsonl) を書き、終了時に run.jsonl に record_end を書く。
+    advisor の途中経過 (advisor-<役割>-<連番>/stream.jsonl) を書き、終了時に run.jsonl に record_end を書く。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
-    終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、advisor.close()、capture.close()、
-    recorder.close()、supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を呼ばないよう、見張りを
-    最初に止める。recorder は、記録を送ってくる PadOutput とキャプチャーを止めた後に閉じ、中立のレポートまで記録する)。
+    終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、作れた advisor の close()
+    (close_advisors ですべてを同時に)、capture.close()、recorder.close()、supervisor.close() の順に閉じる
+    (見張りが片付けの途中で on_lost を呼ばないよう、見張りを最初に止める。recorder は、記録を送ってくる PadOutput と
+    キャプチャーを止めた後に閉じ、中立のレポートまで記録する)。
     """
     args = parse_args(argv)
     workdir = Path.cwd()
@@ -374,7 +381,7 @@ def main(argv: list[str] | None = None) -> None:
     output = None
     capture = None
     watcher = None
-    advisor = None
+    advisors: dict[str, ClaudeCodeHeadlessAdvisor] = {}
     recorder = None
     stop = threading.Event()
     try:
@@ -407,16 +414,19 @@ def main(argv: list[str] | None = None) -> None:
             on_lost=output.stop_output,
             stale_timeout_s=DEFAULT_STALE_FRAME_TIMEOUT_S,
         )
-        advisor = ClaudeCodeHeadlessAdvisor(
-            workdir,
-            notes_dir,
-            run_dir,
-            args.game,
-            args.advisor_timeout,
-            hidden_env_names=tuple(API_KEY_ENVS.values()),
-            log=run_log.write,
-            record_steps=args.record_dashboard,
-        )
+        # 途中の役割で作るのに失敗しても、作れた advisor を閉じられるよう、1 つずつ辞書に足す
+        for role in ADVISOR_ROLES:
+            advisors[role.name] = ClaudeCodeHeadlessAdvisor(
+                workdir,
+                notes_dir,
+                run_dir,
+                args.game,
+                role,
+                args.advisor_timeout,
+                hidden_env_names=tuple(API_KEY_ENVS.values()),
+                log=run_log.write,
+                record_steps=args.record_dashboard,
+            )
         model: DecisionModel = (
             JevModel(api_key) if args.model == "jev" else DecisionsApiModel(api_key)
         )
@@ -435,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
                 selector=EvenIntervalSelector(),
                 model=model,
                 output=output,
-                advisor=advisor,
+                advisors=dict(advisors),
                 read_notes=lambda: read_game_notes(note_paths),
                 questions=questions,
                 thresholds=Thresholds(advisor=args.threshold_advisor),
@@ -480,13 +490,25 @@ def main(argv: list[str] | None = None) -> None:
         if output is not None:
             output.neutral()
             output.close()
-        if advisor is not None:
-            advisor.close()
+        close_advisors(advisors.values())
         if capture is not None:
             capture.close()
         if recorder is not None:
             recorder.close()
         supervisor.close()
+
+
+def close_advisors(advisors: Iterable[Advisor]) -> None:
+    """advisors の close() を、advisor ごとの別のスレッドで同時に呼び、すべてが戻るまで待つ。
+
+    close() は実行中の claude の子プロセスを止め、その終了を待つ。1 つずつ順に呼ぶと、前の advisor を待つ間も
+    後の advisor の子プロセスが動き続け (ゲームの情報のファイルを書き換えられる)、待ち時間も advisor の数だけ延びる。
+    """
+    threads = [threading.Thread(target=advisor.close) for advisor in advisors]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 if __name__ == "__main__":

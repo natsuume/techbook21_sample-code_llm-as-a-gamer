@@ -21,7 +21,7 @@ from switch2_agent.operation_log import NeutralRecord, OperationRecord
 from switch2_agent.questions import Choice, Question
 from switch2_agent.safety import SAFETY_RULES
 
-NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
+NOTES = {"controls": "A で決定", "tips": "", "strategy": "右へ進む", "advice": ""}
 QUESTIONS = [
     Question(
         "button_A",
@@ -59,7 +59,8 @@ EXPECTED_ROLE_DESCRIPTION_LINES = [
     "問いには、選択肢の中から 1 つを選ぶ問い (選択肢の問い) と、真である確率で答える問いがある。",
     "スティックの強さの問い (傾きを何 % 以上にするべきか) は、そのスティックをその軸 (左右か上下) に倒す場合の傾きについての問いである。",
     "選択肢の問いで迷ったら、none (押さない、倒さない) の選択肢を選ぶ。",
-    "ゲームの情報 (操作方法・攻略情報・進行状況・戦略) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。",
+    "ゲームの情報 (操作方法・攻略情報・目標と進行状況と戦略・問題の解決の助言) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。",
+    "問題の解決の助言は、助言に書かれている場面に今の画面が当てはまるときだけ参考にする。",
 ]
 
 
@@ -101,8 +102,8 @@ def operation(received_at: float, taps: set[str] | None = None) -> OperationReco
         action=PadAction(
             held=PadState(frozenset(), {}),
             taps=frozenset(taps or ()),
-            advisor_requested=False,
-            advisor_probability=0.0,
+            advisor_probabilities={},
+            advisor_requested=frozenset(),
         ),
     )
 
@@ -274,8 +275,8 @@ def test_build_decision_request_state_text_contains_four_kinds():
     for heading in [
         "## ゲームの操作方法",
         "## 攻略情報・Tips",
-        "## 進行状況",
-        "## 戦略",
+        "## 目標・進行状況・戦略",
+        "## 問題の解決の助言",
     ]:
         assert heading in request.state_text
     assert "右へ進む" in request.state_text

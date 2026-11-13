@@ -36,14 +36,16 @@ QUESTIONS = [
         ),
     ),
     Question(
+        "advisor_strategy",
+        "今、advisor に目標と戦略の更新を求めるべきか。",
         "advisor",
-        "今、advisor に戦略の更新を求めるべきか。",
-        "advisor",
-        "",
+        "strategy",
         "probability",
         (),
     ),
 ]
+# sample_action の advisor の問いの確率 (役割の name → 確率)
+ADVISOR_PROBABILITIES = {"controls": 0.1, "strategy": 0.7, "advice": 0.9, "tips": 0.0}
 CHOICES = {"button_A": {"none": 0.1, "hold": 0.8, "tap": 0.1}}
 HISTORY_TEXT = (
     "## 直近の応答と送った操作 (古い順、最大 5 回)\n"
@@ -59,7 +61,7 @@ RAW_RESPONSE = {
             "confidence": 0.8,
             "probabilities": {"none": 0.1, "hold": 0.8, "tap": 0.1},
         },
-        "advisor": {"type": "noul", "noul": 0.7},
+        "advisor_strategy": {"type": "noul", "noul": 0.7},
     },
 }
 
@@ -88,14 +90,14 @@ def sample_action() -> PadAction:
     return PadAction(
         held=PadState(frozenset({"A"}), {}),
         taps=frozenset({"B"}),
-        advisor_requested=True,
-        advisor_probability=0.7,
+        advisor_probabilities=dict(ADVISOR_PROBABILITIES),
+        advisor_requested=frozenset({"advice", "strategy"}),
     )
 
 
 def sample_decision() -> Decision:
     return Decision(
-        probabilities={"advisor": 0.7},
+        probabilities={"advisor_strategy": 0.7},
         choices=CHOICES,
         refusals=1,
         raw_response=RAW_RESPONSE,
@@ -113,7 +115,7 @@ def ok_entry(**overrides) -> RequestLogEntry:
         request=sample_request(),
         decision=sample_decision(),
         action=sample_action(),
-        advisor_accepted=True,
+        advisor_accepted=frozenset({"advice", "strategy"}),
         result="ok",
         error=None,
     )
@@ -197,8 +199,8 @@ def test_write_header_writes_model_instructions_and_questions(tmp_path):
                 ],
             },
             {
-                "name": "advisor",
-                "text": "今、advisor に戦略の更新を求めるべきか。",
+                "name": "advisor_strategy",
+                "text": "今、advisor に目標と戦略の更新を求めるべきか。",
                 "kind": "advisor",
                 "answer_type": "probability",
                 "choices": [],
@@ -249,13 +251,45 @@ def test_write_ok_entry_writes_request_line(tmp_path):
     assert line["state_text"] == "## 戦略\n右へ進む"
     assert line["history_text"] == HISTORY_TEXT
     assert line["previous_operation_text"] == PREVIOUS_OPERATION_TEXT
-    assert line["probabilities"] == {"advisor": 0.7}
+    assert line["probabilities"] == {"advisor_strategy": 0.7}
     assert line["refusals"] == 1
     assert line["raw_response"] == RAW_RESPONSE
     assert line["action"] == format_action(entry.action)
-    assert line["advisor_requested"] is True
-    assert line["advisor_probability"] == 0.7
-    assert line["advisor_accepted"] is True
+
+
+def test_write_ok_entry_writes_advisor_items_of_each_role(tmp_path):
+    RequestLog(tmp_path).write(ok_entry())
+    line = request_lines(tmp_path)[0]
+    assert line["advisor_probabilities"] == ADVISOR_PROBABILITIES
+    # 役割の name のリストは ADVISOR_ROLES の順 (名前の順ではない)
+    assert line["advisor_requested"] == ["strategy", "advice"]
+    assert line["advisor_accepted"] == ["strategy", "advice"]
+    assert "advisor_probability" not in line
+
+
+def test_write_entry_lists_only_accepted_roles(tmp_path):
+    RequestLog(tmp_path).write(ok_entry(advisor_accepted=frozenset({"advice"})))
+    line = request_lines(tmp_path)[0]
+    assert line["advisor_requested"] == ["strategy", "advice"]
+    assert line["advisor_accepted"] == ["advice"]
+
+
+def test_write_entry_without_action_has_null_advisor_items_and_empty_accepted(
+    tmp_path,
+):
+    RequestLog(tmp_path).write(
+        ok_entry(
+            action=None,
+            advisor_accepted=frozenset(),
+            result="discarded",
+            error="no new frame for 2.0 seconds",
+        )
+    )
+    line = request_lines(tmp_path)[0]
+    assert "advisor_probabilities" in line
+    assert line["advisor_probabilities"] is None
+    assert line["advisor_requested"] is None
+    assert line["advisor_accepted"] == []
 
 
 def test_write_ok_entry_writes_choices_of_decision(tmp_path):
@@ -272,7 +306,7 @@ def test_write_error_entry_has_null_choices(tmp_path):
             received_at=None,
             decision=None,
             action=None,
-            advisor_accepted=False,
+            advisor_accepted=frozenset(),
             result="error",
             error="HTTP 500",
         )
@@ -342,7 +376,7 @@ def test_write_error_entry_without_response(tmp_path):
             received_at=None,
             decision=None,
             action=None,
-            advisor_accepted=False,
+            advisor_accepted=frozenset(),
             result="error",
             error="HTTP 500",
         )
@@ -356,7 +390,7 @@ def test_write_error_entry_without_response(tmp_path):
     assert line["action"] is None
     for key in ("probabilities", "refusals", "raw_response"):
         assert line.get(key) is None
-    assert line["advisor_accepted"] is False
+    assert line["advisor_accepted"] == []
     # 応答が無くても、送った画像と要求の文は残す
     assert [image["file"] for image in line["images"]] == [
         "frames/000001500000.jpg",
@@ -370,7 +404,7 @@ def test_write_discarded_entry_with_decision_but_without_action(tmp_path):
     RequestLog(tmp_path).write(
         ok_entry(
             action=None,
-            advisor_accepted=False,
+            advisor_accepted=frozenset(),
             result="discarded",
             error="no new frame for 2.0 seconds",
         )
@@ -379,14 +413,14 @@ def test_write_discarded_entry_with_decision_but_without_action(tmp_path):
     assert line["result"] == "discarded"
     assert line["error"] == "no new frame for 2.0 seconds"
     assert line["t_received"] == pytest.approx(3.5)
-    assert line["probabilities"] == {"advisor": 0.7}
+    assert line["probabilities"] == {"advisor_strategy": 0.7}
     assert line["raw_response"] == RAW_RESPONSE
     assert line["action"] is None
 
 
 def test_write_send_error_entry_with_decision_and_action(tmp_path):
     entry = ok_entry(
-        advisor_accepted=False,
+        advisor_accepted=frozenset(),
         result="error",
         error="bridge did not acknowledge the report",
     )
@@ -394,9 +428,9 @@ def test_write_send_error_entry_with_decision_and_action(tmp_path):
     line = request_lines(tmp_path)[0]
     assert line["result"] == "error"
     assert line["error"] == "bridge did not acknowledge the report"
-    assert line["probabilities"] == {"advisor": 0.7}
+    assert line["probabilities"] == {"advisor_strategy": 0.7}
     assert line["action"] == format_action(entry.action)
-    assert line["advisor_accepted"] is False
+    assert line["advisor_accepted"] == []
 
 
 def test_write_previous_operation_text_is_null_for_first_request(tmp_path):

@@ -13,12 +13,12 @@ INVALID_GAME_NAMES = ["", "..", "../outside", "a/b", "zelda game", "ゼルダ", 
 
 
 def test_note_kinds_and_titles():
-    assert NOTE_KINDS == ("controls", "tips", "progress", "strategy")
+    assert NOTE_KINDS == ("controls", "tips", "strategy", "advice")
     assert NOTE_TITLES == {
         "controls": "ゲームの操作方法",
         "tips": "攻略情報・Tips",
-        "progress": "進行状況",
-        "strategy": "戦略",
+        "strategy": "目標・進行状況・戦略",
+        "advice": "問題の解決の助言",
     }
 
 
@@ -47,6 +47,30 @@ def test_ensure_game_notes_creates_four_empty_files(tmp_path):
         assert paths[kind].read_text(encoding="utf-8") == ""
 
 
+def test_ensure_game_notes_does_not_create_progress_file(tmp_path):
+    root = tmp_path / "game_notes"
+    paths = ensure_game_notes(root, "zelda")
+    assert "progress" not in paths
+    assert not (root / "zelda" / "progress.md").exists()
+    assert sorted(path.name for path in (root / "zelda").iterdir()) == [
+        "advice.md",
+        "controls.md",
+        "strategy.md",
+        "tips.md",
+    ]
+
+
+def test_ensure_game_notes_keeps_progress_file_of_earlier_run(tmp_path):
+    # 以前の実行で作られた progress.md は、変えず、返す辞書にも入れない (読まない)
+    notes_dir = tmp_path / "zelda"
+    notes_dir.mkdir()
+    (notes_dir / "progress.md").write_text("1 面の途中", encoding="utf-8")
+    paths = ensure_game_notes(tmp_path, "zelda")
+    assert (notes_dir / "progress.md").read_text(encoding="utf-8") == "1 面の途中"
+    assert "progress" not in paths
+    assert "1 面の途中" not in read_game_notes(paths).values()
+
+
 def test_ensure_game_notes_keeps_existing_files(tmp_path):
     notes_dir = tmp_path / "zelda"
     notes_dir.mkdir()
@@ -63,15 +87,15 @@ def test_read_game_notes_reads_files(tmp_path):
     assert notes == {
         "controls": "",
         "tips": "敵は左から来る",
-        "progress": "",
         "strategy": "",
+        "advice": "",
     }
 
 
 def test_read_game_notes_returns_empty_for_missing_file(tmp_path):
     paths = ensure_game_notes(tmp_path, "zelda")
-    paths["progress"].unlink()
-    assert read_game_notes(paths)["progress"] == ""
+    paths["advice"].unlink()
+    assert read_game_notes(paths)["advice"] == ""
 
 
 def test_read_game_notes_returns_empty_and_warns_for_unreadable_file(tmp_path, capsys):
@@ -87,13 +111,18 @@ def test_read_game_notes_returns_empty_and_warns_for_unreadable_file(tmp_path, c
 
 def test_format_game_notes_lists_headings_in_note_kinds_order():
     text = format_game_notes(
-        {"strategy": "右へ進む", "progress": "1 面", "tips": "", "controls": "A で決定"}
+        {
+            "advice": "扉の前で A",
+            "strategy": "右へ進む",
+            "tips": "",
+            "controls": "A で決定",
+        }
     )
     assert text == (
         "## ゲームの操作方法\nA で決定\n\n"
         "## 攻略情報・Tips\n(まだ書かれていない)\n\n"
-        "## 進行状況\n1 面\n\n"
-        "## 戦略\n右へ進む"
+        "## 目標・進行状況・戦略\n右へ進む\n\n"
+        "## 問題の解決の助言\n扉の前で A"
     )
 
 

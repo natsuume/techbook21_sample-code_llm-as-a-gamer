@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 from switch2_agent.action_decision import PadAction
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.dashboard_records import thumb_file_name
 from switch2_agent.decision_models.base import Decision
 from switch2_agent.decision_request import DecisionRequest
@@ -61,7 +62,7 @@ class RequestLogEntry:
     request            送った要求
     decision           Decision Model の応答。応答が無いときは None
     action             応答から決めた操作。決める前に終わったときは None
-    advisor_accepted   advisor が戦略の更新の要求を受け付けたか (呼ばなかったときは False)
+    advisor_accepted   要求を受け付けた advisor の役割の name の集合 (どの役割も呼ばなかったときは空の集合)
     result             "ok" (操作を送った)、"error" (model.decide の失敗か、操作の送信の失敗)、
                        "discarded" (キャプチャーが止まったため、応答を捨てた)
     error              result が "ok" でないときの説明。"ok" なら None
@@ -75,7 +76,7 @@ class RequestLogEntry:
     request: DecisionRequest
     decision: Decision | None
     action: PadAction | None
-    advisor_accepted: bool
+    advisor_accepted: frozenset[str]
     result: Literal["ok", "error", "discarded"]
     error: str | None
 
@@ -178,8 +179,11 @@ class RequestLog:
                                                                   probabilities は確率の問いの確率、choices は選択肢の
                                                                   問いの選択肢ごとの確率
             action                    operation_log.format_action(entry.action) (action が None なら null)
-            advisor_requested / advisor_probability               entry.action の同名の値 (action が None なら null)
-            advisor_accepted          entry.advisor_accepted
+            advisor_probabilities     entry.action.advisor_probabilities (役割の name → その役割の問いの確率の object。
+                                      action が None なら null)
+            advisor_requested         entry.action.advisor_requested の役割の name のリスト (action が None なら null)
+            advisor_accepted          entry.advisor_accepted の役割の name のリスト (受け付けた役割が無ければ空のリスト)
+            役割の name のリストは advisor_roles.ADVISOR_ROLES の順に並べる
         書き込みの OSError はそのまま出す。
         """
         if self.save_frames:
@@ -265,9 +269,19 @@ def build_request_record(
             else None
         ),
         "action": format_action(action) if action is not None else None,
-        "advisor_requested": action.advisor_requested if action is not None else None,
-        "advisor_probability": (
-            action.advisor_probability if action is not None else None
+        "advisor_probabilities": (
+            dict(action.advisor_probabilities) if action is not None else None
         ),
-        "advisor_accepted": entry.advisor_accepted,
+        "advisor_requested": (
+            [
+                role.name
+                for role in ADVISOR_ROLES
+                if role.name in action.advisor_requested
+            ]
+            if action is not None
+            else None
+        ),
+        "advisor_accepted": [
+            role.name for role in ADVISOR_ROLES if role.name in entry.advisor_accepted
+        ],
     }
