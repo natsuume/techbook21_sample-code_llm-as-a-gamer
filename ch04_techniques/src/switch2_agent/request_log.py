@@ -1,7 +1,7 @@
 """要求ごとの入出力を、実行のディレクトリーに JSON Lines と JPEG のファイルで残す (起動引数 --save-requests)。
 
 後から「どの入力にどう答えたか」を調べられるよう、Decision Model への要求 1 回ごとに、送った画像・ゲームの情報・
-直近の応答と送った操作の履歴・問いごとの確率・応答の本文・決めた操作を書く。
+直近の応答と送った操作の履歴・問いごとの答え (選択肢ごとの確率と、真である確率)・応答の本文・決めた操作を書く。
 
 書くファイル (run_dir は実行のディレクトリー runs/<YYYYmmdd-HHMMSS>/):
     run_dir/requests.jsonl      write_header の header の行 (モデル・役割の説明と安全のための規則・問いの一覧) と、
@@ -106,7 +106,9 @@ class RequestLog:
         """要求に共通の内容を、header の行として requests.jsonl に 1 行追記する。
 
         行は {"event": "header", "time": 壁時計の時刻, "model": model, "instructions": instructions,
-        "questions": [{"name": Question.name, "text": Question.text, "kind": Question.kind}, ...] (questions の順)}。
+        "questions": [{"name": Question.name, "text": Question.text, "kind": Question.kind,
+        "answer_type": Question.answer_type, "choices": [{"name": Choice.name, "description": Choice.description}, ...]},
+        ...] (questions の順。choices は Question.choices の順で、確率の問いは空のリスト)}。
         run は、Pipeline を作った後に 1 回、model に起動引数 --model の値、instructions に
         decision_request.build_instructions()、questions に Pipeline に渡した問いの一覧を渡して呼ぶ。
         """
@@ -121,6 +123,11 @@ class RequestLog:
                         "name": question.name,
                         "text": question.text,
                         "kind": question.kind,
+                        "answer_type": question.answer_type,
+                        "choices": [
+                            {"name": choice.name, "description": choice.description}
+                            for choice in question.choices
+                        ],
                     }
                     for question in questions
                 ],
@@ -147,7 +154,9 @@ class RequestLog:
                                       "file": "frames/<frame_file_name の名前>", "bytes": JPEG のバイト数,
                                       "after_previous_operation": after_previous_operation}
             state_text / history_text / previous_operation_text   entry.request の同名の値
-            probabilities / refusals / raw_response               entry.decision の同名の値 (decision が None なら null)
+            probabilities / choices / refusals / raw_response     entry.decision の同名の値 (decision が None なら null)。
+                                                                  probabilities は確率の問いの確率、choices は選択肢の
+                                                                  問いの選択肢ごとの確率
             action                    operation_log.format_action(entry.action) (action が None なら null)
             advisor_requested / advisor_probability               entry.action の同名の値 (action が None なら null)
             advisor_accepted          entry.advisor_accepted
@@ -208,6 +217,7 @@ def build_request_record(entry: RequestLogEntry, wall_time: str) -> dict[str, ob
         "history_text": request.history_text,
         "previous_operation_text": request.previous_operation_text,
         "probabilities": decision.probabilities if decision is not None else None,
+        "choices": decision.choices if decision is not None else None,
         "refusals": decision.refusals if decision is not None else None,
         "raw_response": (
             dict(decision.raw_response)

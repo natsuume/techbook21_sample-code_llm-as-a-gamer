@@ -13,7 +13,7 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
     3. 要求に載せるフレームとして、フレームの履歴の最新の 1 枚を選ぶ
     4. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
     5. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
-       そうでなければ、問いごとの確率から操作を決めて PadOutput に渡す (すぐ戻る)
+       そうでなければ、問いごとの答え (選択肢ごとの確率と、真である確率) から操作を決めて PadOutput に渡す (すぐ戻る)
     6. advisor を呼ぶ答えで、advisor が実行中でなければ、advisor に渡す画像を要求とは別に選び
        (意味のあるフレーム + フレームの履歴から等間隔に選んだもの)、Advisor.request_update を呼ぶ (すぐ戻る)
     7. 要求のログ (request_log) があれば、要求ごとの入出力を書く
@@ -121,7 +121,7 @@ class PipelineParts:
     advisor          advisor
     read_notes       ゲームの情報の 4 ファイルを読む関数 (種別 → 中身)
     questions        問いの一覧 (questions.build_questions)
-    thresholds       問いの種類ごとのしきい値
+    thresholds       advisor の問いのしきい値
     encode           フレームを JPEG にする関数 (run では decision_request.JpegCache を渡す)
     operation_log    応答と送った操作の記録と、判断のループを続けたまま中立に戻した記録
     log              ログの辞書を 1 件ずつ受け取る関数 (run では RunLog.write)
@@ -258,7 +258,7 @@ class Pipeline:
            まず output.neutral() し (要求のログの書き込みで、中立に戻すのを遅らせないため)、その後に要求のログに
            result="discarded"、error=reason、decision は応答、action は None の記録を書いてから、
            CaptureStoppedError(reason) を出す
-        6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)。
+        6. action = decide_action(decision.probabilities, decision.choices, questions, thresholds)、output.apply(action)。
            apply が pad_output.OutputStoppedError を出したら (5 の確認の後に、見張りがキャプチャーの停止を判定して
            出力を止めた)、5 と同じく応答を捨て、要求のログに result="discarded"、error=止まった理由、decision は応答、
            action は決めた操作の記録を書いてから、CaptureStoppedError(止まった理由。capture_lost() の理由で、無ければ
@@ -383,7 +383,7 @@ class Pipeline:
             raise CaptureStoppedError(lost_reason)
 
         action = decide_action(
-            decision.probabilities, parts.questions, parts.thresholds
+            decision.probabilities, decision.choices, parts.questions, parts.thresholds
         )
         apply_started = parts.clock()
         try:

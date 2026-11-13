@@ -18,13 +18,31 @@ from switch2_agent.decision_request import (
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.game_notes import format_game_notes
 from switch2_agent.operation_log import NeutralRecord, OperationRecord
-from switch2_agent.questions import Question
+from switch2_agent.questions import Choice, Question
 from switch2_agent.safety import SAFETY_RULES
 
 NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
 QUESTIONS = [
-    Question("press_A", "今、A ボタン を押した状態にするべきか。", "press", "A"),
-    Question("advisor", "今、advisor に戦略の更新を求めるべきか。", "advisor", ""),
+    Question(
+        "button_A",
+        "今、A ボタンをどうするか。",
+        "button",
+        "A",
+        "choice",
+        (
+            Choice("none", "押さない"),
+            Choice("hold", "押した状態にする。押した状態は次の判断まで続く"),
+            Choice("tap", "1 回だけ短く押す"),
+        ),
+    ),
+    Question(
+        "advisor",
+        "今、advisor に戦略の更新を求めるべきか。",
+        "advisor",
+        "",
+        "probability",
+        (),
+    ),
 ]
 # 要求の時刻と、要求に載せるフレーム (フレームの履歴の最新のフレーム) の時刻
 NOW = 100.0
@@ -38,6 +56,9 @@ EXPECTED_ROLE_DESCRIPTION_LINES = [
     "ラベルの「前回の操作の前」「前回の操作の後」は、前回の操作 (操作の履歴の最後の行。前回の判断で決めた操作か、その後にコントローラーを中立に戻したこと) の前の画像か、後の画像かを表す。",
     "操作が画面に出るまでには遅れがあるため、「前回の操作の後」の画像でも、操作の前の画面のことがある。",
     "直近の応答と送った操作の履歴に、最近の判断で送った操作と、コントローラーを中立に戻したことを、その時刻とともに書いてある。",
+    "問いには、選択肢の中から 1 つを選ぶ問い (選択肢の問い) と、真である確率で答える問いがある。",
+    "スティックの強さの問い (傾きを何 % 以上にするべきか) は、そのスティックをその軸 (左右か上下) に倒す場合の傾きについての問いである。",
+    "選択肢の問いで迷ったら、none (押さない、倒さない) の選択肢を選ぶ。",
     "ゲームの情報 (操作方法・攻略情報・進行状況・戦略) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。",
 ]
 
@@ -218,7 +239,7 @@ def test_format_previous_operation_writes_time_of_neutral_record():
 # --- build_instructions / build_decision_request ---
 
 
-def test_role_description_explains_latest_image_and_history():
+def test_role_description_explains_latest_image_history_and_questions():
     assert ROLE_DESCRIPTION.splitlines() == EXPECTED_ROLE_DESCRIPTION_LINES
 
 
