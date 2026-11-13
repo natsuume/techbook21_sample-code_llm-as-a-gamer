@@ -41,6 +41,12 @@ https://code.claude.com/docs/en/permissions、https://code.claude.com/docs/en/sk
 - 標準入力は渡さない (subprocess.DEVNULL)。claude -p は標準入力も読むため、端末の入力を読ませない
 拒否された操作は出力の JSON の permission_denials に入り、拒否されても実行は止まらない。
 
+途中経過の記録 (record_steps。run の --record-dashboard): `--output-format json` の代わりに
+`--output-format stream-json --verbose` を付け (ほかの引数は同じ)、標準出力の 1 行 1 件の JSON を、届くたびに
+advisor-<連番>/stream.jsonl に時刻つきで書く (stream_json_log)。result.json と log の行のキーは同じで、output は
+最後に届いた result の行になる。子プロセスの止め方 (terminate → TERMINATE_GRACE_S 秒 → kill) も同じ。
+stream.jsonl を開けない・書けないときは、その記録だけをやめ、log に record_error の行を渡して実行を続ける。
+
 未確認 (公式ドキュメントに記載なし): --max-turns に達したときと、拒否された操作があったときの終了コード
 (終了コードと出力をそのまま記録する)。--output-format json の出力に permission_denials が必ず含まれるか
 (ドキュメントでは stream-json の result メッセージに入ると書かれている。無ければ空のリストとして記録する)。
@@ -59,6 +65,7 @@ from pathlib import Path
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.advisors.base import AdvisorContext
+from switch2_agent.advisors.stream_json_log import ProcessOutputReader
 from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 from switch2_agent.safety import SAFETY_RULES
 
@@ -83,6 +90,8 @@ CLOSE_WAIT_S = 10.0
 DISABLE_HOOKS_SETTINGS = '{"disableAllHooks": true}'
 CONTEXT_FILE_NAME = "context.md"
 RESULT_FILE_NAME = "result.json"
+# 途中経過の記録 (stream.jsonl) の失敗を log に渡す record_error の行の kind
+RECORD_ERROR_KIND = "advisor_steps"
 EMPTY_STRATEGY_TEXT = "(まだ書かれていない)"
 EMPTY_OPERATION_LOG_TEXT = "(記録なし)"
 
@@ -204,6 +213,7 @@ def build_claude_command(
     runs_dir_relative: str,
     max_turns: int = DEFAULT_MAX_TURNS,
     executable: str = CLAUDE_EXECUTABLE,
+    stream_json: bool = False,
 ) -> list[str]:
     """claude -p の引数の列を返す (純粋な関数)。
 
@@ -211,8 +221,11 @@ def build_claude_command(
      "--setting-sources", "project", "--settings", DISABLE_HOOKS_SETTINGS,
      "--allowedTools", <build_allowed_tools(notes_dir_relative, runs_dir_relative) をカンマでつないだ 1 つの文字列>,
      "--max-turns", str(max_turns)]
-    --bare は付けない。
+    stream_json が真なら、"--output-format", "json" の代わりに "--output-format", "stream-json", "--verbose" を
+    同じ位置に置く (ほかの引数と順は同じ)。--bare は付けない。
     """
+    if stream_json:
+        raise NotImplementedError
     return [
         executable,
         "-p",
@@ -265,6 +278,31 @@ def build_result_record(
         "stderr": stderr or "",
         "permission_denials": denials if isinstance(denials, list) else [],
     }
+
+
+def build_stream_result_record(
+    returncode: int | None,
+    duration_s: float,
+    timed_out: bool,
+    error: str | None,
+    last_result: object | None,
+    stderr: str | None,
+) -> dict:
+    """途中経過を記録したとき (record_steps) の result.json の辞書を返す (純粋な関数)。
+
+    キーは build_result_record と同じ。output は last_result (最後に届いた result の行。届いていなければ None)、
+    stdout は常に None。permission_denials は output が object で、その permission_denials がリストならそれ、
+    そうでなければ []。stderr が None なら空文字にする。
+    """
+    raise NotImplementedError
+
+
+def build_record_error_event(run_dir: Path, error: str) -> dict:
+    """途中経過の記録 (stream.jsonl) の失敗を log に渡す 1 件の辞書を返す (純粋な関数)。
+
+    {"event": "record_error", "kind": RECORD_ERROR_KIND ("advisor_steps"), "run_dir": str(run_dir), "error": error}
+    """
+    raise NotImplementedError
 
 
 def build_log_event(run_dir: Path, record: dict) -> dict:
@@ -326,6 +364,31 @@ def stop_process(process: subprocess.Popen) -> tuple[str | None, str | None]:
         return None, None
 
 
+def wait_for_exit_and_output(
+    process: subprocess.Popen, reader: ProcessOutputReader, timeout_s: float
+) -> None:
+    """process の終了と、reader の読み終わり (2 つのパイプの EOF) を、合わせて timeout_s 秒まで待つ。
+
+    process.wait(timeout=timeout_s) で終了を待ち、残りの時間 (time.monotonic で測る) で reader.join を待つ。
+    どちらかが間に合わなければ subprocess.TimeoutExpired を出す (process.wait の例外はそのまま出す)。
+    communicate(timeout) が終了と EOF をまとめて待つのと同じ意味の待ち方 (途中経過を記録するときに使う)。
+    """
+    raise NotImplementedError
+
+
+def stop_streaming_process(
+    process: subprocess.Popen, reader: ProcessOutputReader
+) -> bool:
+    """途中経過を記録しているときに、実行中の process を止める。reader が読み終わったら True を返す。
+
+    terminate して wait_for_exit_and_output で TERMINATE_GRACE_S 秒まで待ち、間に合わなければ kill して、
+    さらに TERMINATE_GRACE_S 秒まで待つ (stop_process と同じ順と時間)。
+    kill の後も読み終わらなければ、logging で警告を書き、パイプを閉じずに False を返す (読み取りスレッドが
+    readline で止まっている間にパイプを close すると、close も止まるため。読み取りスレッドは daemon のまま手放す)。
+    """
+    raise NotImplementedError
+
+
 class ClaudeCodeHeadlessAdvisor:
     """advisors.base.Advisor の実装。claude -p を裏のスレッドで 1 件ずつ実行する。
 
@@ -339,7 +402,9 @@ class ClaudeCodeHeadlessAdvisor:
     log            実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
     start_thread   実行の本体 (引数なしの関数) を受け取って裏で起動する関数。既定では daemon スレッドで起動して待たない
                    (テストではその場で呼ぶ関数や、呼ばずに保留する関数を渡す)
-    clock          所要時間を測る時計 (既定 time.monotonic)
+    clock          所要時間と、途中経過の行を読んだ時刻 (stream.jsonl の mono) を測る時計 (既定 time.monotonic)
+    record_steps   True なら、claude を stream-json の出力で動かし、途中経過を advisor-<連番>/stream.jsonl に書く
+                   (run の --record-dashboard。既定 False)
 
     状態 (lock で守る):
         busy       実行中なら True
@@ -361,6 +426,7 @@ class ClaudeCodeHeadlessAdvisor:
         log: Callable[[dict], None] | None = None,
         start_thread: Callable[[Callable[[], None]], None] = start_daemon_thread,
         clock: Callable[[], float] = time.monotonic,
+        record_steps: bool = False,
     ):
         """属性を入れ、busy を False、run_count を 0 にする。
 
@@ -383,6 +449,7 @@ class ClaudeCodeHeadlessAdvisor:
         self.log = log
         self.start_thread = start_thread
         self.clock = clock
+        self.record_steps = record_steps
         self.lock = threading.Lock()
         self.busy = False
         self.run_count = 0
@@ -420,6 +487,20 @@ class ClaudeCodeHeadlessAdvisor:
             1〜2 の途中の例外 (Exception) も捕まえて 3・4 で記録し、logging で標準エラー出力にトレースバックを書く。
             result.json を書けなければ (OSError)、その説明を error に入れて 4 に進む。
             最後に必ず (ロックの中で) busy を False に戻し、idle を set する (log の例外はスレッドの外に出る)。
+
+        record_steps が真なら、2 と 3 を次のようにする (1 と 4、error の値は同じ):
+            2. 1 の後に、run_dir / STREAM_FILE_NAME (stream.jsonl) の StreamJsonLog (clock は self.clock) を作る。
+               コマンドは build_claude_command(..., stream_json=True) で作り、同じ引数で start_process する。
+               ProcessOutputReader で標準出力の行を StreamJsonLog.add_line に渡しながら読み、標準エラー出力を並行して
+               読み切る。wait_for_exit_and_output(process, reader, timeout_s) で、終了と読み終わりを待つ。
+               タイムアウトしたら stop_streaming_process で止める。待つ処理がほかの例外 (Exception) を出したら、
+               同じく stop_streaming_process で止めてから、その例外を 3・4 で記録する。
+               stream.jsonl を開けない・書けないとき (StreamJsonLog の on_error) は、logging で警告を書き、log があれば
+               build_record_error_event の辞書を渡して、実行を続ける (log の行は 1 回の実行につき最大 1 件)
+            3. result.json には build_stream_result_record の辞書を書く (output は StreamJsonLog.last_result、
+               stderr は ProcessOutputReader.stderr_text)。書く前に StreamJsonLog.stop を呼び、以後に届いた行
+               (kill の後も読み終わらなかった読み取りスレッドの行) を書かない
+            止めるまでに届いた行は stream.jsonl に残る。
         """
         with self.lock:
             if self.busy or self.closed:

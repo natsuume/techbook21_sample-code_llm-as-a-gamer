@@ -100,11 +100,20 @@ def recorder(tmp_path, monkeypatch):
 
     class FakeAdvisor:
         def __init__(
-            self, workdir, notes_dir, runs_dir, game, timeout_s, hidden_env_names, log
+            self,
+            workdir,
+            notes_dir,
+            runs_dir,
+            game,
+            timeout_s,
+            hidden_env_names,
+            log,
+            record_steps=False,
         ):
             self.args = (workdir, notes_dir, runs_dir, game, timeout_s)
             self.hidden_env_names = hidden_env_names
             self.log = log
+            self.record_steps = record_steps
             rec.advisor = self
             rec.events.append("advisor created")
 
@@ -223,6 +232,13 @@ def test_main_passes_run_dir_and_notes_dir_to_advisor(recorder):
     assert notes_dir == recorder.workdir / "game_notes" / "zelda"
     assert runs_dir.parent == recorder.workdir / "runs"
     assert (game, timeout_s) == ("zelda", 120.0)
+
+
+def test_main_records_advisor_steps_only_with_record_dashboard(recorder):
+    run.main(REQUIRED)
+    assert recorder.advisor.record_steps is False
+    run.main([*REQUIRED, "--record-dashboard"])
+    assert recorder.advisor.record_steps is True
 
 
 def test_main_hides_api_keys_from_advisor(recorder):
@@ -494,11 +510,16 @@ def test_parse_args_uses_defaults():
         "advisor_timeout": 300.0,
         "max_consecutive_errors": 5,
         "save_requests": False,
+        "record_dashboard": False,
     }
 
 
 def test_parse_args_accepts_save_requests():
     assert run.parse_args([*REQUIRED, "--save-requests"]).save_requests is True
+
+
+def test_parse_args_accepts_record_dashboard():
+    assert run.parse_args([*REQUIRED, "--record-dashboard"]).record_dashboard is True
 
 
 def test_parse_args_accepts_decisions_model():
