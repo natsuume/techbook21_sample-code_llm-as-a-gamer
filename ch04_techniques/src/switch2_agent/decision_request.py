@@ -1,7 +1,11 @@
 """Decision Model への要求 (API の種類によらない形) を組み立てる。
 
 要求は、役割の説明と安全のための規則 (instructions)、ゲームの情報の 4 ファイルの内容 (state_text)、
-ラベル付きの画像 (古い順)、問いの一覧からなる。API ごとの形への変換は decision_models が行う。
+ラベル付きの画像 (古い順)、問いの一覧、直近の応答と送った操作の履歴 (history_text)、
+前回の操作を送った時点を表す区切りの文 (previous_operation_text) からなる。
+画像のラベルには、実行を始めてからの経過秒 (t) と何秒前の画像かを書き、直近の区間の画像には、
+前回の判断で決めた操作を送る前の画像か、送った後の画像かも書く。
+API ごとの形への変換は decision_models が行う。
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -9,7 +13,7 @@ from dataclasses import dataclass
 
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.request_frames import RequestFrames
-from switch2_agent.game_notes import format_game_notes
+from switch2_agent.operation_log import OperationRecord
 from switch2_agent.questions import Question
 from switch2_agent.safety import SAFETY_RULES
 
@@ -17,11 +21,14 @@ from switch2_agent.safety import SAFETY_RULES
 MEANINGFUL_LABEL = "過去の場面"
 RECENT_LABEL = "直近"
 DEFAULT_JPEG_CACHE_CAPACITY = 64  # JpegCache が持つ符号化の結果の数の既定値
+DEFAULT_HISTORY_COUNT = 5  # 要求に入れる直近の応答と送った操作の数
 # Decision Model に毎回渡す役割の説明
 ROLE_DESCRIPTION = """\
 あなたは Nintendo Switch 2 のゲームを操作するコントローラーの判断をする。
-画像は時刻の古い順に並んでいる。各画像の前のラベルに、何秒前の画像かを書いてある。
+画像は時刻の古い順に並んでいる。各画像の前のラベルに、実行を始めてからの経過秒 (t) と、何秒前の画像かを書いてある。
 「過去の場面」は今より前の場面の代表の画像、「直近」は前回の判断から今までの画像である。
+「直近」のラベルの「前回の操作の前」「前回の操作の後」は、前回の判断で決めた操作を送る前の画像か、送った後の画像かを表す。
+直近の応答と送った操作の履歴に、最近の判断で送った操作とその時刻を書いてある。
 ゲームの情報 (操作方法・攻略情報・進行状況・戦略) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。
 """
 
@@ -30,61 +37,106 @@ ROLE_DESCRIPTION = """\
 class LabeledImage:
     """要求に載せる画像 1 枚。
 
-    label        画像の前に置く説明 (label_frames のラベル)
-    jpeg         JPEG のバイト列
-    frame_time   元のフレームの time (time.monotonic の値)
+    label                      画像の前に置く説明 (label_frames のラベル)
+    jpeg                       JPEG のバイト列
+    frame_time                 元のフレームの time (time.monotonic の値)
+    after_previous_operation   直近の区間の画像で、前回の操作を送った後 (frame_time が前回の操作の時刻以上) なら True。
+                               意味のあるフレームの画像と、前回の操作が無い (最初の要求の) 画像は False
     """
 
     label: str
     jpeg: bytes
     frame_time: float
+    after_previous_operation: bool = False
 
 
 @dataclass(frozen=True)
 class DecisionRequest:
     """Decision Model への要求 1 回分。
 
-    instructions   役割の説明と安全のための規則 (build_instructions)
-    state_text     ゲームの情報の 4 ファイルの内容 (game_notes.format_game_notes)
-    images         ラベル付きの画像。意味のあるフレーム (古い順) → 直近の区間のフレーム (古い順) の順
-    questions      問いの一覧
+    instructions              役割の説明と安全のための規則 (build_instructions)
+    state_text                ゲームの情報の 4 ファイルの内容 (game_notes.format_game_notes)
+    images                    ラベル付きの画像。意味のあるフレーム (古い順) → 直近の区間のフレーム (古い順) の順
+    questions                 問いの一覧
+    history_text              直近の応答と送った操作の履歴 (format_operation_history)。空文字なら履歴を入れない
+    previous_operation_text   前回の操作を送った時点を表す区切りの文 (format_previous_operation)。
+                              前回の操作が無ければ None
     """
 
     instructions: str
     state_text: str
     images: list[LabeledImage]
     questions: list[Question]
+    history_text: str = ""
+    previous_operation_text: str | None = None
 
 
 def build_instructions() -> str:
-    """Decision Model に毎回渡す役割の説明と、safety.SAFETY_RULES をつないだ文を返す。
+    """Decision Model に毎回渡す役割の説明 (ROLE_DESCRIPTION) と、safety.SAFETY_RULES をつないだ文を返す。
 
     役割の説明には次を書く:
         - Nintendo Switch 2 のゲームを操作するコントローラーの判断をすること
-        - 画像は時刻の古い順に並んでいること (ラベルに何秒前の画像かを書いてあること)
+        - 画像は時刻の古い順に並んでいること (ラベルに、実行を始めてからの経過秒 t と何秒前の画像かを書いてあること)
+        - 「過去の場面」と「直近」の画像の違い
+        - 「直近」のラベルの「前回の操作の前」「前回の操作の後」が、前回の判断で決めた操作を送る前か後かを表すこと
+        - 直近の応答と送った操作の履歴に、最近の判断で送った操作とその時刻を書いてあること
         - 各問いには、ほかの問いの答えと関係なく独立に答えること
     """
     return f"{ROLE_DESCRIPTION}\n{SAFETY_RULES}"
 
 
-def label_frames(frames: RequestFrames, now: float) -> list[tuple[str, TimedFrame]]:
-    """要求に載せるフレームを並べ、(ラベル, フレーム) のリストにする。
+def label_frames(
+    frames: RequestFrames,
+    now: float,
+    origin: float,
+    previous_operation_at: float | None,
+) -> list[tuple[str, TimedFrame, bool]]:
+    """要求に載せるフレームを並べ、(ラベル, フレーム, 前回の操作の後か) のリストにする。
 
     並びは意味のあるフレーム (frames.meaningful、古い順) → 直近の区間のフレーム (frames.recent、古い順)。
-    ラベルは、意味のあるフレームが `過去の場面 <k>/<n> (<秒> 秒前)`、直近の区間のフレームが
-    `直近 <k>/<n> (<秒> 秒前)`。k はその種類の中での 1 始まりの番号、n はその種類のフレームの数。
-    秒は now - frame.time を小数第 2 位まで書く (例: `過去の場面 2/5 (12.30 秒前)`、`直近 4/5 (0.21 秒前)`)。
+    origin は経過秒の起点 (Pipeline.started_at)、previous_operation_at は前回の操作を送った時刻
+    (OperationLog の最新の OperationRecord の received_at。まだ操作を送っていなければ None)。
+    k はその種類の中での 1 始まりの番号、n はその種類のフレームの数。t は frame.time - origin、
+    秒前は now - frame.time で、どちらも小数第 2 位まで書く。
+    - 意味のあるフレーム: `過去の場面 <k>/<n> (t=<t> 秒、<秒前> 秒前)`。3 つ目の値は常に False
+      (例: `過去の場面 2/5 (t=115.80 秒、12.30 秒前)`)
+    - 直近の区間のフレームで、previous_operation_at が None (最初の要求): `直近 <k>/<n> (t=<t> 秒、<秒前> 秒前)`。
+      3 つ目の値は False
+    - 直近の区間のフレームで、previous_operation_at があるとき: frame.time >= previous_operation_at なら
+      `直近 <k>/<n> (t=<t> 秒、<秒前> 秒前、前回の操作の後)` で 3 つ目の値は True、
+      frame.time < previous_operation_at なら `直近 <k>/<n> (t=<t> 秒、<秒前> 秒前、前回の操作の前)` で False
+      (例: `直近 4/5 (t=127.89 秒、0.21 秒前、前回の操作の後)`)
     """
-    labeled: list[tuple[str, TimedFrame]] = []
-    for prefix, group in [
-        (MEANINGFUL_LABEL, frames.meaningful),
-        (RECENT_LABEL, frames.recent),
-    ]:
-        for number, frame in enumerate(group, start=1):
-            seconds_ago = now - frame.time
-            label = f"{prefix} {number}/{len(group)} ({seconds_ago:.2f} 秒前)"
-            labeled.append((label, frame))
-    return labeled
+    raise NotImplementedError
+
+
+def format_operation_history(
+    records: Sequence[OperationRecord], now: float, origin: float
+) -> str:
+    """直近の応答と送った操作の履歴の文 (DecisionRequest.history_text) を返す。
+
+    1 行目は見出し `## 直近の応答と送った操作 (古い順、最大 <DEFAULT_HISTORY_COUNT> 回)`。
+    続けて records (古い順) を 1 行 1 応答で `- t=<t> 秒 (<秒前> 秒前): <operation_log.format_action>` と書く。
+    t は record.received_at - origin、秒前は now - record.received_at で、どちらも小数第 2 位まで書く。
+    最後の行 (前回の操作) の末尾には ` (前回の操作)` を付ける。records が空なら、見出しの次に
+    `(まだ操作を送っていない)` の 1 行を書く。行は \\n でつなぎ、末尾に改行を付けない。例:
+        ## 直近の応答と送った操作 (古い順、最大 5 回)
+        - t=128.10 秒 (2.75 秒前): 押下 none / 短押し UP
+        - t=130.30 秒 (0.55 秒前): 押下 none / 短押し HOME (前回の操作)
+    """
+    raise NotImplementedError
+
+
+def format_previous_operation(
+    record: OperationRecord | None, now: float, origin: float
+) -> str | None:
+    """前回の操作を送った時点を表す区切りの文 (DecisionRequest.previous_operation_text) を返す。
+
+    record (前回の応答と送った操作) があれば `── t=<t> 秒 (<秒前> 秒前) に、前回の応答の操作を送った ──`
+    を返す。t は record.received_at - origin、秒前は now - record.received_at で、どちらも小数第 2 位まで書く
+    (例: `── t=130.30 秒 (0.55 秒前) に、前回の応答の操作を送った ──`)。record が None なら None を返す。
+    """
+    raise NotImplementedError
 
 
 def build_decision_request(
@@ -93,23 +145,22 @@ def build_decision_request(
     notes: Mapping[str, str],
     questions: Sequence[Question],
     encode: Callable[[TimedFrame], bytes],
+    origin: float,
+    recent_operations: Sequence[OperationRecord],
 ) -> DecisionRequest:
     """要求を組み立てる。
 
+    origin は経過秒の起点 (Pipeline.started_at)。recent_operations は直近の応答と送った操作の記録 (古い順。
+    Pipeline は OperationLog.recent(DEFAULT_HISTORY_COUNT) を渡す)。前回の操作の時刻 previous_operation_at は
+    recent_operations の最後の記録の received_at (空なら None)。
     instructions = build_instructions()、state_text = game_notes.format_game_notes(notes)。
-    images は label_frames(frames, now) の順に、各フレームを encode で JPEG にした LabeledImage
-    (frame_time はフレームの time)。questions はリストにして入れる。
+    images は label_frames(frames, now, origin, previous_operation_at) の順に、各フレームを encode で JPEG にした
+    LabeledImage (frame_time はフレームの time、after_previous_operation は label_frames の 3 つ目の値)。
+    questions はリストにして入れる。
+    history_text = format_operation_history(recent_operations, now, origin)、
+    previous_operation_text = format_previous_operation(recent_operations の最後の記録 (空なら None), now, origin)。
     """
-    images = [
-        LabeledImage(label=label, jpeg=encode(frame), frame_time=frame.time)
-        for label, frame in label_frames(frames, now)
-    ]
-    return DecisionRequest(
-        instructions=build_instructions(),
-        state_text=format_game_notes(notes),
-        images=images,
-        questions=list(questions),
-    )
+    raise NotImplementedError
 
 
 class JpegCache:

@@ -1,6 +1,7 @@
-"""Decision Model の応答と、その応答で送った操作の記録。advisor に渡す操作の記録の文を作る。
+"""Decision Model の応答と、その応答で送った操作の記録。advisor に渡す操作の記録の文を作り、
+Decision Model の要求に入れる直近の記録を返す。
 
-Pipeline のスレッドが add し、同じスレッドで format_since を呼ぶが、ほかのスレッドから読めるようにロックを持つ。
+Pipeline のスレッドが add し、同じスレッドで format_since と recent を呼ぶが、ほかのスレッドから読めるようにロックを持つ。
 """
 
 import threading
@@ -59,6 +60,13 @@ class OperationLog:
         """received_at > time (time より後) の記録を古い順に返す。"""
         with self.lock:
             return [record for record in self.records if record.received_at > time]
+
+    def recent(self, count: int) -> list[OperationRecord]:
+        """新しいものから count 件の記録を、古い順に返す。
+
+        記録が count 件より少なければ、すべての記録を古い順に返す。count が 0 以下なら空のリストを返す。
+        """
+        raise NotImplementedError
 
     def format_since(self, time: float, now: float) -> str:
         """since(time) の記録を 1 行 1 応答で並べた文を返す。記録が無ければ空文字を返す。

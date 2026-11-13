@@ -21,6 +21,8 @@ Ctrl+C で止まる。
     --similarity-threshold D     意味のあるフレームが似ているとみなす差分の上限 (0〜255、既定 0.15)
     --advisor-timeout S          advisor の 1 回の実行の上限 (秒。0 より大きい有限の値、既定 300)
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
+    --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの確率・応答の本文・操作) を
+                                 runs/<実行>/requests.jsonl と frames/ に書く (容量が大きくなるため既定はオフ)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方 (ch04_techniques ディレクトリーで実行する):
@@ -108,7 +110,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     history_seconds (float、既定 5.0)、image_width (int、既定 1280)、jpeg_quality (int、既定 85)、
     threshold_press / threshold_tap / threshold_stick / threshold_advisor (float、既定 0.5)、
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
-    max_consecutive_errors (int、既定 5)。
+    max_consecutive_errors (int、既定 5)、save_requests (bool、既定 False。--save-requests を付けたら True)。
 
     argv が None なら sys.argv[1:] を使う。--game と --model は必須。範囲 (モジュールの docstring の起動引数) の外の値、
     数として読めない値、--process-fps が --ffmpeg-fps より大きい組み合わせは、第2章の daemon.parse_args と同じく
@@ -192,6 +194,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_MAX_CONSECUTIVE_ERRORS,
         help="Decision Model の失敗がこの回数続いたら止まる (1 以上)",
+    )
+    parser.add_argument(
+        "--save-requests",
+        action="store_true",
+        help=(
+            "要求ごとの入出力 (画像・ゲームの情報・問いごとの確率・応答の本文・操作) を "
+            "runs/<実行>/requests.jsonl と frames/ に書く。容量が大きくなるため既定はオフ"
+        ),
     )
     args = parser.parse_args(argv)
     for message in range_errors(args):
@@ -289,8 +299,12 @@ def main(argv: list[str] | None = None) -> None:
         8. Decision Model (JevModel / DecisionsApiModel)
         9. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
-           capture_ended は capture.ended、capture_lost は watcher.lost)
+           capture_ended は capture.ended、capture_lost は watcher.lost。request_log は、--save-requests が
+           付いていれば RequestLog(実行のディレクトリー)、付いていなければ None)
+        10. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
+           Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
+    --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、advisor.close()、capture.close()、
     supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を呼ばないよう、見張りを最初に止める)。

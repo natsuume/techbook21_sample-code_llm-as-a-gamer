@@ -1,6 +1,7 @@
 import base64
 import json
 import uuid
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -23,6 +24,11 @@ from switch2_agent.questions import Question
 IMAGE_ONE = b"jpeg-image-one"
 IMAGE_TWO = b"jpeg-image-two"
 NAMES = ["press_A", "tap_B", "advisor"]
+HISTORY_TEXT = (
+    "## 直近の応答と送った操作 (古い順、最大 5 回)\n"
+    "- t=3.80 秒 (0.10 秒前): 押下 none / 短押し A (前回の操作)"
+)
+PREVIOUS_OPERATION_TEXT = "── t=3.80 秒 (0.10 秒前) に、前回の応答の操作を送った ──"
 
 
 def sample_request(images: list[LabeledImage] | None = None) -> DecisionRequest:
@@ -44,6 +50,27 @@ def sample_request(images: list[LabeledImage] | None = None) -> DecisionRequest:
                 "advisor", "今、advisor に戦略の更新を求めるべきか。", "advisor", ""
             ),
         ],
+    )
+
+
+def timeline_request() -> DecisionRequest:
+    """前回の操作の後の画像と、操作の履歴・区切りの文を持つ要求を返す。"""
+    return replace(
+        sample_request(
+            images=[
+                LabeledImage(
+                    "過去の場面 1/1 (t=1.00 秒、3.00 秒前)", IMAGE_ONE, 1.0, False
+                ),
+                LabeledImage(
+                    "直近 1/1 (t=3.90 秒、0.10 秒前、前回の操作の後)",
+                    IMAGE_TWO,
+                    3.9,
+                    True,
+                ),
+            ]
+        ),
+        history_text=HISTORY_TEXT,
+        previous_operation_text=PREVIOUS_OPERATION_TEXT,
     )
 
 
@@ -182,6 +209,35 @@ def test_payload_uses_given_model():
     )
 
 
+def test_payload_state_has_operation_history_between_game_notes_and_frames():
+    request = timeline_request()
+    payload = build_jev_payload(
+        request, make_reference=fixed_references("ref-1", "ref-2")
+    )
+    state = payload["state"]
+    assert list(state) == ["instructions", "game_notes", "operation_history", "frames"]
+    assert state["operation_history"] == HISTORY_TEXT
+    assert state["game_notes"] == request.state_text
+
+
+def test_payload_without_history_text_has_no_operation_history():
+    payload = build_jev_payload(sample_request())
+    assert list(payload["state"]) == ["instructions", "game_notes", "frames"]
+
+
+def test_payload_uses_labels_as_is_without_previous_operation_text():
+    # 前回の操作の前後はラベルに書いてあるため、区切りの文は Jev の要求に入れない
+    request = timeline_request()
+    payload = build_jev_payload(
+        request, make_reference=fixed_references("ref-1", "ref-2")
+    )
+    assert payload["state"]["frames"] == [
+        {"label": "過去の場面 1/1 (t=1.00 秒、3.00 秒前)", "image": "ref-1"},
+        {"label": "直近 1/1 (t=3.90 秒、0.10 秒前、前回の操作の後)", "image": "ref-2"},
+    ]
+    assert PREVIOUS_OPERATION_TEXT not in json.dumps(payload, ensure_ascii=False)
+
+
 # --- 応答の解釈 ---
 
 
@@ -237,8 +293,11 @@ def test_decide_posts_payload_with_image_header_and_returns_decision():
 
     model = JevModel("ts-test", client=mock_client(handler))
     decision = model.decide(sample_request())
+    # 応答の本文の JSON の object を raw_response に入れて返す
     assert decision == Decision(
-        probabilities={"press_A": 0.99, "tap_B": 0.93, "advisor": 0.0}, refusals=0
+        probabilities={"press_A": 0.99, "tap_B": 0.93, "advisor": 0.0},
+        refusals=0,
+        raw_response=jev_body(ALL_ANSWERS),
     )
     assert len(requests) == 1
     sent = requests[0]
@@ -251,6 +310,18 @@ def test_decide_posts_payload_with_image_header_and_returns_decision():
     assert body["model"] == "jev-1.14.0"
     assert [frame["image"] for frame in body["state"]["frames"]] == list(body["assets"])
     assert set(body["questions"]) == set(NAMES)
+
+
+def test_decide_sends_operation_history():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=jev_body(ALL_ANSWERS))
+
+    JevModel("ts-test", client=mock_client(handler)).decide(timeline_request())
+    body = json.loads(requests[0].content)
+    assert body["state"].get("operation_history") == HISTORY_TEXT
 
 
 def test_decide_without_images_has_no_image_header():

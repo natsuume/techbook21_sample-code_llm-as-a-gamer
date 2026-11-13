@@ -19,6 +19,7 @@ advisor (headless の Claude Code) を持つ。映像の受け取りと入力の
     operation_log          応答と送った操作の記録
     advisors               advisor (headless の Claude Code) の呼び出し
     run_log                実行のログ (JSON Lines)
+    request_log            要求ごとの入出力のログ (JSON Lines と画像。--save-requests のときだけ書く)
     pipeline               判断のループ
     run                    起動 (switch2-agent)
 """

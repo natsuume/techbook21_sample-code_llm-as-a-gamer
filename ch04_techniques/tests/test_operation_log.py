@@ -56,6 +56,40 @@ def test_default_capacity_is_500():
     assert OperationLog().capacity == 500
 
 
+def test_recent_returns_newest_records_oldest_first():
+    log = OperationLog()
+    for t in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]:
+        log.add(record(t))
+    assert received(log.recent(5)) == [3.0, 4.0, 5.0, 6.0, 7.0]
+
+
+def test_recent_returns_all_records_when_fewer_than_count():
+    log = OperationLog()
+    for t in [1.0, 2.0]:
+        log.add(record(t))
+    assert received(log.recent(5)) == [1.0, 2.0]
+
+
+def test_recent_is_empty_without_records():
+    assert OperationLog().recent(5) == []
+
+
+def test_recent_returns_exactly_count_records():
+    log = OperationLog()
+    for t in [1.0, 2.0, 3.0]:
+        log.add(record(t))
+    assert received(log.recent(3)) == [1.0, 2.0, 3.0]
+    assert received(log.recent(1)) == [3.0]
+
+
+def test_recent_is_empty_for_count_of_zero_or_less():
+    log = OperationLog()
+    for t in [1.0, 2.0, 3.0]:
+        log.add(record(t))
+    assert log.recent(0) == []
+    assert log.recent(-1) == []
+
+
 def test_format_action_writes_held_and_taps():
     action = make_action(buttons={"A"}, sticks={"LS": (0.8, 0.0)}, taps={"B"})
     assert format_action(action) == "押下 A+LS:0.8,0 / 短押し B"

@@ -9,11 +9,15 @@ https://docs.typesafe.ai/models、2026-11-12 に確認) に合わせる。
       "state": {
         "instructions": <instructions>,
         "game_notes": <state_text>,
+        "operation_history": <history_text>,
         "frames": [{"label": <画像 1 のラベル>, "image": <画像 1 の参照文字列>}, ...]
       },
       "assets": {<画像 1 の参照文字列>: {"type": "image", "format": "jpg", "data_base64": <base64>}, ...},
       "questions": {<Question.name>: {"type": "noul", "instructions": <Question.text>}, ...}
     }
+state のキーは instructions、game_notes、operation_history、frames の順。operation_history (直近の応答と送った
+操作の履歴) は、history_text が空文字なら入れない。frames のラベルは DecisionRequest の画像のラベルをそのまま使う。
+前回の操作の前か後かはラベルに書いてあるため、前回の操作を送った時点の区切りの文 (previous_operation_text) は入れない。
 画像はトップレベルの assets に 1 回だけ登録し、state の frames の各要素の image に参照文字列を 1 回だけ置く。
 参照文字列は書くたびに同じ画像が足されるため、問いの文には書かない。どこからも参照しない asset は 400 になるため、
 登録した asset はすべて state から参照する。画像が無い要求では assets を入れない (assets は 1 個以上の map)。
@@ -73,9 +77,13 @@ def build_jev_payload(
 ) -> dict[str, object]:
     """request を Jev の要求の JSON (モジュールの docstring の形) にする。
 
+    state は {"instructions": request.instructions, "game_notes": request.state_text,
+    "operation_history": request.history_text, "frames": [...]} の順のキーを持つ。request.history_text が
+    空文字なら operation_history を入れない。request.previous_operation_text は入れない。
     request.images の各画像に make_reference() で参照文字列を 1 つずつ作り (make_reference は呼ぶたびに
     異なる文字列を返す)、assets に {"type": "image", "format": JPEG_ASSET_FORMAT, "data_base64": <base64>}
-    を 1 回だけ登録し、state の frames に request.images の順で {"label": ラベル, "image": 参照文字列} を置く。
+    を 1 回だけ登録し、state の frames に request.images の順で {"label": ラベル (画像の label のまま),
+    "image": 参照文字列} を置く。
     base64 は標準のアルファベットで、= のパディングを付け、改行も data: の接頭辞も付けない (base64.b64encode)。
     questions は request.questions の name をキーにし、値を {"type": "noul", "instructions": text} にする。
     画像が無ければ assets を入れない。
@@ -155,8 +163,9 @@ class JevModel:
         self.model = model
 
     def decide(self, request: DecisionRequest) -> Decision:
-        """request を JEV_URL に POST し、Decision(parse_jev_response の結果, refusals=0) を返す。
+        """request を JEV_URL に POST し、Decision(parse_jev_response の結果, refusals=0, raw_response=応答の本文) を返す。
 
+        応答の本文は post_json の結果の JSON の object。
         ヘッダーは build_jev_headers(api_key, 画像があるか)、本文は build_jev_payload(request, model)。
         送信と応答の検証は base.post_json で行う (httpx の例外と 2xx 以外の応答は DecisionModelError)。
         """
