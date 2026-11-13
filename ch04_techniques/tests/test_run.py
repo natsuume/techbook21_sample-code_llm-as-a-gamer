@@ -1,24 +1,34 @@
 import json
 import threading
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
+from switch2_remote.controller_state import PadState
 
 from switch2_agent import run
 from switch2_agent.action_decision import Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.dashboard_records import PadReport
 from switch2_agent.decision_models import jev
-from switch2_agent.decision_request import JpegCache, build_instructions
+from switch2_agent.decision_request import (
+    DecisionRequest,
+    JpegCache,
+    LabeledImage,
+    build_instructions,
+)
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.game_notes import NOTE_KINDS
 from switch2_agent.questions import build_questions
-from switch2_agent.request_log import RequestLog
+from switch2_agent.request_log import RequestLog, RequestLogEntry
 
 REQUIRED = ["--game", "zelda", "--model", "jev"]
 TEST_API_KEY = "test-key-not-a-secret"
+# 偽の Pipeline の started_at (経過秒の起点の time.monotonic の値)
+PIPELINE_STARTED_AT = 12.5
 
 
 class Recorder:
@@ -41,7 +51,7 @@ def recorder(tmp_path, monkeypatch):
     偽物は本物と同じ引数だけを受け取り、ほかの引数を渡すと TypeError になる。
     偽の Pipeline の run は、rec.pipeline_error があればそれを送出し、無ければすぐ戻る。
     偽の Pipeline の min_request_interval_s は、渡されなければ None のまま残す (run.main が明示的に渡したかを
-    確かめるため。本物の既定値は 0.0)。
+    確かめるため。本物の既定値は 0.0)。偽の Pipeline の started_at は PIPELINE_STARTED_AT。
     """
     rec = Recorder()
     (tmp_path / ".claude" / "skills").mkdir(parents=True)
@@ -63,8 +73,9 @@ def recorder(tmp_path, monkeypatch):
             rec.events.append("supervisor closed")
 
     class FakePadOutput:
-        def __init__(self, sender):
+        def __init__(self, sender, on_report=None):
             self.sender = sender
+            self.on_report = on_report
             rec.output = self
             rec.events.append("output created")
 
@@ -148,6 +159,7 @@ def recorder(tmp_path, monkeypatch):
             self.parts = parts
             self.max_consecutive_errors = max_consecutive_errors
             self.min_request_interval_s = min_request_interval_s
+            self.started_at = PIPELINE_STARTED_AT
             rec.pipeline = self
             rec.events.append("pipeline created")
 
@@ -603,6 +615,221 @@ def test_main_closes_only_created_parts_when_capture_fails(recorder, monkeypatch
     with pytest.raises(RuntimeError, match="ffmpeg not found"):
         run.main(REQUIRED)
     assert closed(recorder) == ["output neutral", "output closed", "supervisor closed"]
+
+
+# --- --record-dashboard ---
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def only_run_dir(recorder: Recorder) -> Path:
+    [run_log] = list((recorder.workdir / "runs").glob("*/run.jsonl"))
+    return run_log.parent
+
+
+def run_log_lines(recorder: Recorder) -> list[dict]:
+    return read_jsonl(only_run_dir(recorder) / "run.jsonl")
+
+
+def call_during_pipeline_run(monkeypatch, during_run) -> None:
+    """recorder の fixture の偽の Pipeline の run の中で、during_run() を呼ぶようにする。
+
+    run.main が部品を作り終えてから片付けを始めるまでの間に、フレームやレポートを渡すために使う。
+    """
+    base = run.Pipeline
+
+    class PipelineCallingBack(base):
+        def run(self, stop):
+            during_run()
+            super().run(stop)
+
+    monkeypatch.setattr(run, "Pipeline", PipelineCallingBack)
+
+
+def sent_report(mono: float) -> PadReport:
+    return PadReport(
+        mono=mono,
+        source="apply",
+        state=PadState(frozenset({"A"}), {}),
+        ok=True,
+        error=None,
+    )
+
+
+def test_main_with_record_dashboard_writes_args_and_origin_to_start(recorder):
+    argv = [*REQUIRED, "--record-dashboard", "--valley-ratio", "0.4"]
+    run.main(argv)
+    start = run_log_lines(recorder)[0]
+    assert start["event"] == "start"
+    assert start["args"] == vars(run.parse_args(argv))
+    assert start["origin_mono"] == PIPELINE_STARTED_AT
+
+
+def test_main_without_record_dashboard_keeps_start_keys(recorder):
+    run.main(REQUIRED)
+    start = run_log_lines(recorder)[0]
+    assert set(start) == {"time", "event", "game", "model", "run_dir"}
+
+
+def test_main_without_record_dashboard_writes_no_dashboard_records(recorder):
+    run.main(REQUIRED)
+    assert recorder.output.on_report is None
+    run_dir = only_run_dir(recorder)
+    for name in ("frames.jsonl", "pad.jsonl", "thumbs"):
+        assert not (run_dir / name).exists()
+    events = [line["event"] for line in run_log_lines(recorder)]
+    assert "record_end" not in events
+
+
+def test_main_with_record_dashboard_records_sent_reports(recorder, monkeypatch):
+    call_during_pipeline_run(
+        monkeypatch, lambda: recorder.output.on_report(sent_report(1.5))
+    )
+    run.main([*REQUIRED, "--record-dashboard"])
+    assert read_jsonl(only_run_dir(recorder) / "pad.jsonl") == [
+        {"mono": 1.5, "source": "apply", "state": "A", "ok": True, "error": None}
+    ]
+
+
+def test_main_with_record_dashboard_records_frames_from_capture(recorder, monkeypatch):
+    def feed_frames():
+        # 鮮明度 200 の山の後に谷 (50) が来て回復 (150) すると、山のフレームが意味のあるフレームになる
+        for t, sharpness in enumerate([100, 200, 50, 150]):
+            recorder.capture.on_frame(frame(float(t), sharpness, gray=10))
+
+    call_during_pipeline_run(monkeypatch, feed_frames)
+    run.main([*REQUIRED, "--record-dashboard"])
+    run_dir = only_run_dir(recorder)
+    # close で書き切ってから戻る
+    lines = read_jsonl(run_dir / "frames.jsonl")
+    assert [line["mono"] for line in lines] == [0.0, 1.0, 2.0, 3.0]
+    assert all((run_dir / line["thumb"]).is_file() for line in lines)
+    assert lines[3]["event"]["kind"] == "close"
+    # 記録するときも、残した意味のあるフレームは保管に入る
+    kept = recorder.pipeline.parts.store.latest_before(10.0, 5)
+    assert [f.time for f in kept] == [1.0]
+
+
+def test_main_with_record_dashboard_writes_record_end(recorder, monkeypatch):
+    def feed_records():
+        recorder.capture.on_frame(frame(1.0, 100, gray=10))
+        recorder.capture.on_frame(frame(1.1, 100, gray=10))
+        recorder.output.on_report(sent_report(1.05))
+
+    call_during_pipeline_run(monkeypatch, feed_records)
+    run.main([*REQUIRED, "--record-dashboard"])
+    record_ends = [
+        line for line in run_log_lines(recorder) if line["event"] == "record_end"
+    ]
+    assert len(record_ends) == 1
+    record_end = record_ends[0]
+    assert record_end["written"] == {"frames": 2, "pad": 1}
+    assert record_end["dropped"] == {"frames": 0, "pad": 0}
+
+
+def test_main_closes_dashboard_recorder_after_capture_and_before_supervisor(
+    recorder, monkeypatch
+):
+    record_end_written_at_close: dict[str, bool] = {}
+
+    def record_end_written() -> bool:
+        return any(line["event"] == "record_end" for line in run_log_lines(recorder))
+
+    capture_base = run.CaptureWithHistory
+    supervisor_base = run.BridgeSupervisor
+
+    class Capture(capture_base):
+        def close(self):
+            record_end_written_at_close["capture"] = record_end_written()
+            super().close()
+
+    class Supervisor(supervisor_base):
+        def close(self):
+            record_end_written_at_close["supervisor"] = record_end_written()
+            super().close()
+
+    monkeypatch.setattr(run, "CaptureWithHistory", Capture)
+    monkeypatch.setattr(run, "BridgeSupervisor", Supervisor)
+    run.main([*REQUIRED, "--record-dashboard"])
+    assert record_end_written_at_close == {"capture": False, "supervisor": True}
+
+
+def test_main_closes_dashboard_recorder_when_capture_fails(recorder, monkeypatch):
+    def failing_capture(ffmpeg_fps, process_fps, history, on_frame):
+        raise RuntimeError("ffmpeg not found")
+
+    monkeypatch.setattr(run, "CaptureWithHistory", failing_capture)
+    with pytest.raises(RuntimeError, match="ffmpeg not found"):
+        run.main([*REQUIRED, "--record-dashboard"])
+    record_ends = [
+        line for line in run_log_lines(recorder) if line["event"] == "record_end"
+    ]
+    assert len(record_ends) == 1
+    assert record_ends[0]["written"] == {"frames": 0, "pad": 0}
+
+
+def test_main_with_only_record_dashboard_writes_request_lines_without_frames(recorder):
+    run.main([*REQUIRED, "--record-dashboard"])
+    assert isinstance(recorder.pipeline.parts.request_log, RequestLog)
+    run_dir = only_run_dir(recorder)
+    assert [line["event"] for line in read_jsonl(run_dir / "requests.jsonl")] == [
+        "header"
+    ]
+    assert not (run_dir / "frames").exists()
+
+
+# --- build_request_log ---
+
+
+def minimal_entry() -> RequestLogEntry:
+    """画像 1 枚 (フレームの time 101.5、経過秒 1.5) の、応答が無かった要求の記録を返す。"""
+    request = DecisionRequest(
+        instructions="指示",
+        state_text="",
+        images=[LabeledImage("直近 1/1", b"jpeg", 101.5)],
+        questions=[],
+    )
+    return RequestLogEntry(
+        number=1,
+        origin=100.0,
+        sent_at=102.0,
+        encoded_at=102.0,
+        received_at=None,
+        request=request,
+        decision=None,
+        action=None,
+        advisor_accepted=frozenset(),
+        result="error",
+        error="HTTP 500",
+    )
+
+
+def test_build_request_log_without_options_is_none(tmp_path):
+    assert run.build_request_log(tmp_path, run.parse_args(REQUIRED)) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "options, frames_saved, thumb",
+    [
+        # --save-requests だけなら、画像を書き、thumb は足さない
+        (["--save-requests"], True, None),
+        (["--record-dashboard"], False, "thumbs/101500000.jpg"),
+        (["--save-requests", "--record-dashboard"], True, "thumbs/101500000.jpg"),
+    ],
+)
+def test_build_request_log_follows_options(tmp_path, options, frames_saved, thumb):
+    request_log = run.build_request_log(tmp_path, run.parse_args([*REQUIRED, *options]))
+    assert isinstance(request_log, RequestLog)
+    request_log.write(minimal_entry())
+    [line] = read_jsonl(tmp_path / "requests.jsonl")
+    [image] = line["images"]
+    assert (tmp_path / "frames").is_dir() is frames_saved
+    assert image["file"] == ("frames/000001500000.jpg" if frames_saved else None)
+    assert ("thumb" in image) is (thumb is not None)
+    assert image.get("thumb") == thumb
 
 
 # --- parse_args ---

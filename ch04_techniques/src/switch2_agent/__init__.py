@@ -21,7 +21,10 @@ advisor (headless の Claude Code) を持つ。映像の受け取りと入力の
     advisor_roles          advisor の役割の一覧 (役割ごとの問い・書き込めるファイル・Skill)
     advisors               役割ごとの advisor (headless の Claude Code) の呼び出し
     run_log                実行のログ (JSON Lines)
-    request_log            要求ごとの入出力のログ (JSON Lines と画像。--save-requests のときだけ書く)
+    request_log            要求ごとの入出力のログ (JSON Lines と画像。--save-requests か --record-dashboard のときだけ書く)
+    dashboard_records      ダッシュボードが読む記録 (フレームの判定・送ったレポート) の行の組み立て (純粋な関数)
+    record_writer          上限つきのキューと専用の書き出しスレッドで、記録を 1 件ずつ書く
+    dashboard_recorder     ダッシュボードが読む記録 (frames.jsonl・thumbs/・pad.jsonl) を書く (--record-dashboard のときだけ)
     pipeline               判断のループ
     run                    起動 (switch2-agent)
 """

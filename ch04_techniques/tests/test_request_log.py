@@ -16,6 +16,7 @@ from switch2_agent.request_log import (
     REQUEST_LOG_FILE_NAME,
     RequestLog,
     RequestLogEntry,
+    build_request_record,
     frame_file_name,
 )
 
@@ -454,3 +455,72 @@ def test_write_keeps_non_ascii_text_readable(tmp_path):
     text = (tmp_path / REQUEST_LOG_FILE_NAME).read_text(encoding="utf-8")
     assert "右へ進む" in text
     assert "前回の操作の後" in text
+
+
+# --- 画像を書かない・縮小画像の名前を足す (--record-dashboard) ---
+
+
+def test_default_images_have_no_thumb(tmp_path):
+    RequestLog(tmp_path).write(ok_entry())
+    images = request_lines(tmp_path)[0]["images"]
+    assert all("thumb" not in image for image in images)
+
+
+def test_without_save_frames_does_not_create_frames_dir(tmp_path):
+    RequestLog(tmp_path, save_frames=False)
+    assert not (tmp_path / FRAMES_DIR_NAME).exists()
+
+
+def test_without_save_frames_writes_lines_without_images(tmp_path):
+    log = RequestLog(tmp_path, save_frames=False)
+    log.write_header("jev", "指示", QUESTIONS)
+    log.write(ok_entry())
+    assert not (tmp_path / FRAMES_DIR_NAME).exists()
+    events = [line["event"] for line in read_lines(tmp_path / REQUEST_LOG_FILE_NAME)]
+    assert events == ["header", "request"]
+    images = request_lines(tmp_path)[0]["images"]
+    assert [image["file"] for image in images] == [None, None]
+    # file のほかは画像を書くときと同じ
+    assert [image["t"] for image in images] == pytest.approx([1.5, 2.25])
+    assert [image["bytes"] for image in images] == [len(b"jpeg-one"), len(b"jpeg-two!")]
+    assert [image["after_previous_operation"] for image in images] == [False, True]
+    assert all("thumb" not in image for image in images)
+
+
+def test_record_thumbs_adds_thumb_named_after_frame_time(tmp_path):
+    RequestLog(tmp_path, record_thumbs=True).write(ok_entry())
+    images = request_lines(tmp_path)[0]["images"]
+    # thumb は経過秒ではなく、フレームの time (time.monotonic の値) から決める (frames.jsonl の thumb と同じ)
+    assert [image["thumb"] for image in images] == [
+        "thumbs/101500000.jpg",
+        "thumbs/102250000.jpg",
+    ]
+    # save_frames は既定の True なので、画像も書く
+    assert [image["file"] for image in images] == [
+        "frames/000001500000.jpg",
+        "frames/000002250000.jpg",
+    ]
+    assert (tmp_path / FRAMES_DIR_NAME / "000001500000.jpg").read_bytes() == b"jpeg-one"
+
+
+def test_record_thumbs_without_save_frames(tmp_path):
+    RequestLog(tmp_path, save_frames=False, record_thumbs=True).write(ok_entry())
+    images = request_lines(tmp_path)[0]["images"]
+    assert [(image["file"], image["thumb"]) for image in images] == [
+        (None, "thumbs/101500000.jpg"),
+        (None, "thumbs/102250000.jpg"),
+    ]
+    assert not (tmp_path / FRAMES_DIR_NAME).exists()
+
+
+def test_build_request_record_with_flags():
+    record = build_request_record(
+        ok_entry(), "12:00:00.000", save_frames=False, record_thumbs=True
+    )
+    first = record["images"][0]
+    assert (first["file"], first["thumb"]) == (None, "thumbs/101500000.jpg")
+    # 画像以外のキーは変わらない
+    default = build_request_record(ok_entry(), "12:00:00.000")
+    assert {key: value for key, value in record.items() if key != "images"} == {
+        key: value for key, value in default.items() if key != "images"
+    }

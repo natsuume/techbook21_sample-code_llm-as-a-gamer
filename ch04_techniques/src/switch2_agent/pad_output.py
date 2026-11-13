@@ -19,8 +19,14 @@ controller_state.build_report は相反する方向で ValueError を出すた�
 
 apply は Pipeline のスレッドから、start_due_taps と release_due_taps はタイマースレッドから呼ぶため、
 状態の変更と送信は 1 つのロックの中で行う。
+
+on_report を渡すと、レポートを送ろうとするたびに、送信の成否が決まった後、ロックの中で
+dashboard_records.PadReport を渡す (run では、--record-dashboard を付けたときに
+dashboard_recorder.DashboardRecorder.record_pad を渡し、pad.jsonl に書く)。ロックの中で呼ぶため、
+受け取った順が送った順になる。
 """
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -30,6 +36,10 @@ from switch2_remote.controller_state import DPAD_DIRECTIONS, PadState, build_rep
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction
+from switch2_agent.dashboard_records import PadReport, PadReportSource
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 TAP_PRESS_S = 0.12  # 短押しで押している時間 (秒)。第2章の tap と同じ
 # 同じボタンを離してから次に押すまでの最小の間隔 (秒)。第2章の tap と同じ
@@ -85,6 +95,8 @@ class PadOutput:
                           OutputStoppedError を出す
         stop_timer        close() で立て、タイマースレッドを止める
         timer_thread      タイマースレッド。start_timer が False なら None
+        on_report         レポートを送ろうとするたびに PadReport を受け取る関数 (_send_locked)。None なら呼ばない
+        last_report_error on_report の最後の失敗の説明 (describe_error)。無ければ None
     """
 
     def __init__(
@@ -92,20 +104,25 @@ class PadOutput:
         sender: ReportSender,
         clock: Callable[[], float] = time.monotonic,
         start_timer: bool = True,
+        on_report: Callable[[PadReport], None] | None = None,
     ):
         """何も押していない状態で作る (作るときにはレポートを送らない)。
 
         start_timer が True なら、TIMER_INTERVAL_S ごとに start_due_taps と release_due_taps を呼ぶタイマースレッド
         (daemon スレッド) を起動する。False なら起動しない (テストでは start_due_taps と release_due_taps を直接呼ぶ)。
+        on_report は、レポートを送ろうとするたびに PadReport を受け取る関数 (_send_locked の docstring)。
+        None なら PadReport を作らず、そのための clock も呼ばない。
         """
         self.sender = sender
         self.clock = clock
+        self.on_report = on_report
         self.lock = threading.Lock()
         self.held = PadState()
         self.tapping: dict[str, float] = {}
         self.pending_taps: dict[str, float] = {}
         self.last_released: dict[str, float] = {}
         self.last_error: str | None = None
+        self.last_report_error: str | None = None
         self.output_stopped = False
         self.stop_timer = threading.Event()
         self.timer_thread: threading.Thread | None = None
@@ -138,7 +155,7 @@ class PadOutput:
         送信の例外はそのまま呼び出し側に出す (状態は更新したまま。時刻は送信前の now から計算した値のまま)。
         stop_output() の後は、状態を変えず、何も送らずに OutputStoppedError を出す (確かめるのはロックの中なので、
         stop_output と同時に呼ばれても、止めた後に押すレポートは送らない。呼び出し側は、操作が送られなかったことを
-        例外で知る)。
+        例外で知る)。このときは送ろうとしていないため、on_report も呼ばない。
         """
         with self.lock:
             if self.output_stopped:
@@ -161,7 +178,7 @@ class PadOutput:
                 elif self._can_start_tap(button, now):
                     self.tapping[button] = now + TAP_PRESS_S
                     started.append(button)
-            self._send_locked()
+            self._send_locked("apply")
             sent_at = self.clock()
             for button in started:
                 self.tapping[button] = sent_at + TAP_PRESS_S
@@ -197,7 +214,7 @@ class PadOutput:
                 if self._can_start_due_tap(button):
                     self.tapping[button] = now + TAP_PRESS_S
                     started.append(button)
-            if started and self._send_quietly_locked():
+            if started and self._send_quietly_locked("tap_start"):
                 sent_at = self.clock()
                 for button in started:
                     self.tapping[button] = sent_at + TAP_PRESS_S
@@ -223,7 +240,7 @@ class PadOutput:
             for button in due:
                 del self.tapping[button]
                 self.last_released[button] = now
-            if self._send_quietly_locked():
+            if self._send_quietly_locked("tap_release"):
                 sent_at = self.clock()
                 for button in due:
                     self.last_released[button] = sent_at
@@ -237,7 +254,7 @@ class PadOutput:
             self.held = PadState()
             self.tapping.clear()
             self.pending_taps.clear()
-            self._send_quietly_locked()
+            self._send_quietly_locked("neutral")
 
     def stop_output(self) -> None:
         """以後の apply を止めたうえで、neutral と同じく中立のレポートを送る。止めた状態は戻さない。
@@ -252,7 +269,7 @@ class PadOutput:
             self.held = PadState()
             self.tapping.clear()
             self.pending_taps.clear()
-            self._send_quietly_locked()
+            self._send_quietly_locked("stop_output")
 
     def close(self) -> None:
         """タイマースレッドを止め、終わるのを待つ。タイマースレッドが無ければ何もしない。"""
@@ -307,18 +324,64 @@ class PadOutput:
         opposite = OPPOSITE_DIRECTION.get(button)
         return opposite is None or opposite not in self.tapping
 
-    def _send_locked(self) -> None:
-        """held と tapping を合成したレポートを送る。呼び出し側がロックを持つ。失敗したら例外をそのまま出す。"""
+    def _send_locked(self, source: PadReportSource) -> None:
+        """held と tapping を合成したレポートを送る。呼び出し側がロックを持つ。失敗したら例外をそのまま出す。
+
+        source は送ろうとしたメソッド (apply → "apply"、start_due_taps → "tap_start"、release_due_taps →
+        "tap_release"、neutral → "neutral"、stop_output → "stop_output")。
+        on_report があれば、送信の成否が決まった後に、PadReport(mono=clock() (送信が戻った後。失敗なら例外が
+        戻った後), source, state=送った押下状態 (compose_report_state の結果), ok, error) を渡す:
+            - 成功: ok=True、error=None
+            - 失敗 (Exception): ok=False、error=describe_error(e) で渡してから、同じ例外を出す
+        on_report の例外 (Exception) は外に出さず (タイマースレッドを止めないため)、説明 (describe_error) を
+        last_report_error に入れる。logging で警告とトレースバックを書くのは最初の失敗のときだけにする (ロックの中で
+        送信のたびに I/O をしないため)。on_report が None なら、clock は呼ばない。
+        """
         state = compose_report_state(self.held, frozenset(self.tapping))
-        self.sender.set_report(build_report(state))
+        report_bytes = build_report(state)
+        try:
+            self.sender.set_report(report_bytes)
+        except Exception as e:
+            self._report_locked(source, state, describe_error(e))
+            raise
+        self._report_locked(source, state, None)
 
-    def _send_quietly_locked(self) -> bool:
-        """_send_locked を呼び、送信できたら True を返す。呼び出し側がロックを持つ。
+    def _report_locked(
+        self, source: PadReportSource, state: PadState, error: str | None
+    ) -> None:
+        """on_report があれば、送ろうとしたレポートの PadReport を渡す。呼び出し側がロックを持つ。
 
-        送信の失敗 (RuntimeError / OSError) は外に出さず、説明を last_error に記録して False を返す。
+        mono は呼んだときの clock() (送信が戻った後)、ok は error が None なら True。
+        on_report の例外 (Exception) は外に出さず、説明を last_report_error に入れる (_send_locked の docstring)。
+        """
+        if self.on_report is None:
+            return
+        sent = PadReport(
+            mono=self.clock(),
+            source=source,
+            state=state,
+            ok=error is None,
+            error=error,
+        )
+        try:
+            self.on_report(sent)
+        # 記録の失敗でタイマースレッドや判断のループを止めないため、失敗の型を問わずに捕まえる
+        except Exception as e:
+            if self.last_report_error is None:
+                logger.warning(
+                    "on_report failed; later failures are kept in last_report_error",
+                    exc_info=True,
+                )
+            self.last_report_error = describe_error(e)
+
+    def _send_quietly_locked(self, source: PadReportSource) -> bool:
+        """_send_locked(source) を呼び、送信できたら True を返す。呼び出し側がロックを持つ。
+
+        送信の失敗 (RuntimeError / OSError) は外に出さず、説明を last_error に記録して False を返す
+        (on_report には、_send_locked が失敗の PadReport を渡し済み)。
         """
         try:
-            self._send_locked()
+            self._send_locked(source)
         except (RuntimeError, OSError) as e:
             self.last_error = describe_error(e)
             return False
