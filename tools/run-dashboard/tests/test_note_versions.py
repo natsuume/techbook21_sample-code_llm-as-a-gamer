@@ -273,3 +273,19 @@ def test_note_version_of_request_is_none_for_unknown_number_or_before_first_vers
     assert note_version_of_request(versions, 2, requests) == 0
     assert note_version_of_request(versions, 99, requests) is None
     assert note_version_of_request([], 1, requests) is None
+
+
+def test_request_whose_number_cannot_be_key_is_treated_as_missing():
+    requests = [
+        request(1, 1.0, BASE_NOTES),
+        {**request(2, 2.0, {**BASE_NOTES, "strategy": "s2"}), "number": [2]},
+        request(3, 3.0, {**BASE_NOTES, "strategy": "s2"}),
+    ]
+    versions = build_note_versions(requests, [])
+    assert [(version.version, version.request) for version in versions] == [
+        (0, 1),
+        (1, [2]),
+    ]
+    # number が list の要求の行で始まった版は、始まった位置が分からないため、どの要求の時点の版にもならない
+    assert note_version_of_request(versions, 3, requests) == 0
+    assert note_version_of_request(versions, 1, requests) == 0

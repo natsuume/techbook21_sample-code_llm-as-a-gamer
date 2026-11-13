@@ -13,7 +13,7 @@ from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.game_notes import NOTE_KINDS, NOTE_TITLES
 
 from run_dashboard.advisor_runs import AdvisorRun
-from run_dashboard.jsonl_lines import is_json_number
+from run_dashboard.jsonl_lines import is_json_number, is_json_scalar
 
 # 書き換えた advisor の実行が見つからない変更の by
 EXTERNAL_CHANGE = "external"
@@ -169,17 +169,22 @@ def note_version_of_request(
 
     requests (ファイルの順) の中で number の要求の行より前 (その行を含む) に始まった版のうち、最後の版の version。
     number の要求の行が requests に無いか、当てはまる版が無ければ None を返す。
+    number がキーにできない値 (list・dict) の要求の行と、その行で始まった版は、無いものとして扱う。
     """
     # 要求の number → requests の中の位置 (同じ number の行が複数あれば最初の行)
     positions: dict[object, int] = {}
     for position, request in enumerate(requests):
-        positions.setdefault(request.get("number"), position)
-    request_position = positions.get(number)
+        request_number = request.get("number")
+        if is_json_scalar(request_number):
+            positions.setdefault(request_number, position)
+    request_position = positions.get(number) if is_json_scalar(number) else None
     if request_position is None:
         return None
     version_number = None
     for version in versions:
-        start_position = positions.get(version.request)
+        start_position = (
+            positions.get(version.request) if is_json_scalar(version.request) else None
+        )
         if start_position is not None and start_position <= request_position:
             version_number = version.version
     return version_number

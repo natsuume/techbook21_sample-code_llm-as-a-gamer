@@ -22,7 +22,7 @@ from switch2_agent.action_decision import (
 from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.questions import NONE_CHOICE, Choice, Question, build_questions
 
-from run_dashboard.jsonl_lines import is_json_number
+from run_dashboard.jsonl_lines import is_json_number, is_json_scalar
 
 # adopted の値のうち、操作に採らなかったことを表す値 (ボタンが十字キーの相反する方向に負けた)
 REJECTED = "rejected"
@@ -49,7 +49,12 @@ def is_old_format(header: dict | None) -> bool:
         for question in questions
     ):
         return True
-    names = {question.get("name") for question in questions}
+    # キーにできない値 (list・dict) の name は、集合に入れない (その問いの name は無いものとして扱う)
+    names = {
+        question.get("name")
+        for question in questions
+        if is_json_scalar(question.get("name"))
+    }
     return not all(role.question_name in names for role in ADVISOR_ROLES)
 
 
@@ -108,12 +113,14 @@ def questions_for_decision(question_list: list[dict]) -> list[Question]:
     switch2_agent.questions.build_questions() の問いと name で突き合わせ、target はその問いの値、
     text・kind・answer_type は question_list の値、choices は question_list の choices の
     switch2_agent.questions.Choice(name, description) のタプルで作る。
-    build_questions() に無い name の問いは入れない (その問いの adopted は求めない)。
+    build_questions() に無い name の問い (name がキーにできない値 (list・dict) の問いを含む) は入れない
+    (その問いの adopted は求めない)。
     """
     built = {question.name: question for question in build_questions()}
     questions = []
     for item in question_list:
-        base = built.get(item["name"])
+        name = item["name"]
+        base = built.get(name) if is_json_scalar(name) else None
         if base is None:
             continue
         questions.append(
@@ -145,17 +152,21 @@ def question_value(
     - 確率の問い (answer_type が "probability"): probabilities[name]
     答えが無い (probabilities か choices が None、name が無い、足す選択肢が 1 つでも無い) か、値が数
     (bool を除く int と float) でなければ None を返す。answer_type がそのどちらでもない問いも None を返す。
+    問いや選択肢の name がキーにできない値 (list・dict) なら、その答えは無いものとして扱う。
     """
     name = question["name"]
+    if not is_json_scalar(name):
+        return None
     if question["answer_type"] == "choice":
         values = choices.get(name) if choices is not None else None
         if not isinstance(values, Mapping):
             return None
         total = 0.0
         for choice in question["choices"]:
-            if choice["name"] == NONE_CHOICE:
+            choice_name = choice["name"]
+            if choice_name == NONE_CHOICE:
                 continue
-            value = values.get(choice["name"])
+            value = values.get(choice_name) if is_json_scalar(choice_name) else None
             if not is_json_number(value):
                 return None
             total += value
@@ -197,7 +208,10 @@ def adopted_answers(
     """答えから、問いの name → adopted の値の辞書を返す (questions の順)。threshold は advisor の問いのしきい値。
 
     先に switch2_agent.action_decision.check_answers(probabilities, choices, questions) を呼び、ValueError なら
-    (答えの欠けた応答) None を返す。adopted の値は、第4章の decide_action と同じ決め方で、問いの kind ごとに決める:
+    (答えの欠けた応答) None を返す。答えの値が数でないか、選択肢の問いの答えが object でないために、第4章の関数の
+    中や比較で TypeError が出たときと、header の選択肢が第4章の問いと違う (ボタンの問いに hold が無いなど) ために
+    KeyError が出たときも None を返す (記録の形の違う 1 件で、API の応答を 500 にしないため)。
+    adopted の値は、第4章の decide_action と同じ決め方で、問いの kind ごとに決める:
         - button: initial = adopt_buttons(choices, questions)、kept = dict(initial) に remove_opposite_dpad(kept)
           をした結果とする。問いの target が kept にあればその種類 ("hold" か "tap")、initial にあって kept に無ければ
           "rejected" (押す側の合計が none より大きかったが、十字キーの相反する方向に負けて採らなかった)、
@@ -208,9 +222,19 @@ def adopted_answers(
         - advisor: probabilities[name] > threshold なら "requested"、それ以外 (しきい値ちょうどを含む) は None
     """
     try:
-        check_answers(probabilities, choices, questions)
-    except ValueError:
+        return _adopted_values(questions, probabilities, choices, threshold)
+    except (ValueError, TypeError, KeyError):
         return None
+
+
+def _adopted_values(
+    questions: list[Question],
+    probabilities: Mapping,
+    choices: Mapping,
+    threshold: float,
+) -> dict[str, str | None]:
+    """adopted_answers の adopted の値を求める。答えが欠けていれば ValueError、型が違えば TypeError がそのまま出る。"""
+    check_answers(probabilities, choices, questions)
     initial = adopt_buttons(choices, questions)
     kept = dict(initial)
     remove_opposite_dpad(kept)

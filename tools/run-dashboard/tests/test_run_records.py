@@ -1,7 +1,18 @@
 import json
 
 import pytest
-from synthetic_runs import CONTROLS_RUN_NAME, STRATEGY_RUN_NAME
+from switch2_agent.action_decision import Thresholds, decide_action
+from switch2_agent.decision_request import build_decision_request
+from switch2_agent.questions import build_questions
+from switch2_agent.request_log import RequestLogEntry, build_request_record
+from synthetic_runs import (
+    CONTROLS_RUN_NAME,
+    FIRST_NOTES,
+    STRATEGY_RUN_NAME,
+    encode_frame,
+    make_decision,
+    make_frame,
+)
 
 from run_dashboard.run_directory import AdvisorRunDir
 from run_dashboard.run_records import (
@@ -88,7 +99,7 @@ def test_load_dashboard_run(runs):
         "record_end",
     ]
     # start の行より前の record_error は負の秒。start の行より後でも、時刻がわずかに前 (3 ミリ秒) の行は
-    # 負の秒のまま。00:00 台の行 (12.75 秒以降) は日付をまたいで 24 時間を足す
+    # 負の秒のまま。00:00 台の行 (12.75 秒以降) は、日付をまたいだ後の decision の行を起点に求める
     assert [event.t for event in records.run_events] == pytest.approx(
         [-0.5, 0.0, -0.003, 1.25, 2.125, 3.5, 5.25, 6.75, 7.0, 12.75, 14.5, 15.0]
     )
@@ -269,6 +280,145 @@ def test_run_without_start_line_has_no_t(tmp_path):
     assert records.start is None
     assert records.origin_mono is None
     assert [event.t for event in records.run_events] == [None]
+
+
+# 壁時計と monotonic の時計がずれた実行。Pipeline の起点 (monotonic) は SKEWED_ORIGIN_MONO で、run.jsonl の
+# decision の行の壁時計の時刻は、同じ number の要求の受信時刻 (monotonic の差) より 10 秒以上進んでいる
+SKEWED_RUN_NAME = "20261102-100000"
+SKEWED_ORIGIN_MONO = 100.0
+SKEWED_RUN_LINES = [
+    {"time": "09:59:59.500", "event": "record_error", "kind": "pad", "error": "x"},
+    {"time": "10:00:00.000", "event": "start", "game": "smb", "model": "jev"},
+    # 要求 1 の受信時刻は 1.25 秒 (壁時計の差は 11.25 秒)
+    {"time": "10:00:11.250", "event": "decision", "number": 1, "decide_s": 0.25},
+    {"time": "10:00:12.000", "event": "decision_error", "error": "HTTP 500"},
+    # requests.jsonl に要求の行が無い number
+    {"time": "10:00:13.000", "event": "decision", "number": 2, "decide_s": 0.25},
+    # 要求 3 の受信時刻は 5.0 秒 (壁時計の差は 16.0 秒)
+    {"time": "10:00:16.000", "event": "decision", "number": 3, "decide_s": 0.25},
+    {"time": "10:00:16.500", "event": "bridge_wait"},
+]
+
+
+def skewed_request_record(number: int, sent: float, received: float) -> dict:
+    """第4章の build_request_record で作った、経過秒 sent に送って received に受け取った要求の行を返す。"""
+    questions = build_questions()
+    decision = make_decision()
+    request = build_decision_request(
+        make_frame(SKEWED_ORIGIN_MONO, sent, 100.0, 50),
+        SKEWED_ORIGIN_MONO + sent,
+        FIRST_NOTES,
+        questions,
+        encode_frame,
+        origin=SKEWED_ORIGIN_MONO,
+        recent_operations=[],
+    )
+    entry = RequestLogEntry(
+        number=number,
+        origin=SKEWED_ORIGIN_MONO,
+        sent_at=SKEWED_ORIGIN_MONO + sent,
+        encoded_at=SKEWED_ORIGIN_MONO + sent,
+        received_at=SKEWED_ORIGIN_MONO + received,
+        request=request,
+        decision=decision,
+        action=decide_action(
+            decision.probabilities, decision.choices, questions, Thresholds()
+        ),
+        advisor_accepted=frozenset(),
+        result="ok",
+        error=None,
+    )
+    return build_request_record(
+        entry, "10:00:00.000", save_frames=False, record_thumbs=False
+    )
+
+
+def write_skewed_run(runs_dir, with_requests: bool) -> None:
+    """SKEWED_RUN_LINES の run.jsonl を書く。with_requests が真なら、要求 1 と 3 の requests.jsonl も書く。"""
+    run_dir = runs_dir / SKEWED_RUN_NAME
+    write_run_lines(run_dir, SKEWED_RUN_LINES)
+    if with_requests:
+        lines = [
+            skewed_request_record(1, 1.0, 1.25),
+            skewed_request_record(3, 4.75, 5.0),
+        ]
+        (run_dir / "requests.jsonl").write_text(
+            "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
+            encoding="utf-8",
+        )
+
+
+def test_run_events_after_decision_line_are_based_on_received_time_of_request(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    write_skewed_run(runs_dir, with_requests=True)
+    records = load_run(runs_dir, SKEWED_RUN_NAME)
+    assert records is not None
+    assert [request["t_received"] for request in records.requests] == pytest.approx(
+        [1.25, 5.0]
+    )
+    assert [event.t for event in records.run_events] == pytest.approx(
+        [
+            # start の行より前の行は、start の行との壁時計の差
+            -0.5,
+            0.0,
+            # 壁時計が 10 秒進んでいても、decision の行は同じ number の要求の受信時刻
+            1.25,
+            # その後の行は、受信時刻 + decision の行との壁時計の差
+            2.0,
+            # requests.jsonl に要求の行の無い number の decision の行は起点にせず、その前の起点から求める
+            3.0,
+            5.0,
+            5.5,
+        ]
+    )
+
+
+def test_run_events_without_requests_file_are_wall_clock_difference_from_start(
+    tmp_path,
+):
+    runs_dir = tmp_path / "runs"
+    write_skewed_run(runs_dir, with_requests=False)
+    records = load_run(runs_dir, SKEWED_RUN_NAME)
+    assert records is not None
+    assert [event.t for event in records.run_events] == pytest.approx(
+        [-0.5, 0.0, 11.25, 12.0, 13.0, 16.0, 16.5]
+    )
+
+
+# 23:59 台に始まり、0 時をまたいだ実行。要求 1 の受信時刻は 8.5 秒 (decision の行の壁時計の差は 9.0 秒)
+MIDNIGHT_RUN_NAME = "20261103-235950"
+MIDNIGHT_RUN_LINES = [
+    {"time": "23:59:50.000", "event": "start", "game": "smb", "model": "jev"},
+    {"time": "23:59:59.000", "event": "decision", "number": 1, "decide_s": 0.25},
+    {"time": "00:00:01.500", "event": "bridge_wait"},
+]
+
+
+@pytest.mark.parametrize(
+    "with_requests, expected",
+    [
+        # decision の行 (8.5 秒) の後の 0 時台の行は、decision の行との差 -86397.5 秒に 24 時間を足して 8.5 + 2.5
+        (True, [0.0, 8.5, 11.0]),
+        # requests.jsonl が無ければ、start の行との差 -86388.5 秒に 24 時間を足す
+        (False, [0.0, 9.0, 11.5]),
+    ],
+)
+def test_run_events_after_midnight_add_a_day_to_difference_from_origin_line(
+    tmp_path, with_requests, expected
+):
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / MIDNIGHT_RUN_NAME
+    write_run_lines(run_dir, MIDNIGHT_RUN_LINES)
+    if with_requests:
+        (run_dir / "requests.jsonl").write_text(
+            json.dumps(skewed_request_record(1, 8.25, 8.5), ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    records = load_run(runs_dir, MIDNIGHT_RUN_NAME)
+    assert records is not None
+    assert [event.t for event in records.run_events] == pytest.approx(expected)
 
 
 def test_empty_run_dir_has_no_records(tmp_path):

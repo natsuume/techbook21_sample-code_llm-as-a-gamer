@@ -52,6 +52,15 @@ def number_or_none(value: object) -> float | None:
     return float(value) if is_json_number(value) else None
 
 
+def is_json_scalar(value: object) -> bool:
+    """JSON から読んだ値 value が配列 (list) でも object (dict) でもなければ True を返す。
+
+    JSON から読んだ値のうち、辞書や集合のキーにできない (hash できない) のは list と dict だけ。要求の number や
+    問いの name などをキーに使う前に、この判定でキーにできない値を除く (除いた値は、無いものとして扱う)。
+    """
+    return not isinstance(value, list | dict)
+
+
 def read_complete_lines(path: Path, offset: int = 0) -> LineChunk:
     """path をバイナリで開き、バイトの位置 offset から最後の \\n までにある行を読む。
 

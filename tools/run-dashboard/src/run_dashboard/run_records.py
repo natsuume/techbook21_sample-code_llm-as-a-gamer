@@ -24,7 +24,12 @@ from switch2_agent.request_log import REQUEST_LOG_FILE_NAME
 from switch2_agent.run import RUN_LOG_FILE_NAME
 
 from run_dashboard.elapsed_time import parse_wall_time, run_log_elapsed
-from run_dashboard.jsonl_lines import ParsedLines, is_json_number, read_json_lines
+from run_dashboard.jsonl_lines import (
+    ParsedLines,
+    is_json_number,
+    is_json_scalar,
+    read_json_lines,
+)
 from run_dashboard.run_directory import (
     AdvisorRunDir,
     find_run_dir,
@@ -146,12 +151,20 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
     その種類の skipped_lines は 0 にする。stream.jsonl は skipped_lines と has_stream_file のためだけに読み、
     中身は持たない (中身は read_advisor_stream で読む)。
 
-    run.jsonl の行の経過秒 t:
-        start の行の time を elapsed_time.parse_wall_time で読んだ値を起点にし、各行に
-        elapsed_time.run_log_elapsed(その行の time を parse_wall_time で読んだ値, 起点,
-        after_start=その行がファイルの中で start の行より後にあるか) を付ける。start の行自身は 0.0。
-        start の行が無い、start の行の time が読めない、その行の time が読めないときは t を None にする
-        (t が None の行は skipped_lines に数えない)。
+    run.jsonl の行の経過秒 t (time は elapsed_time.parse_wall_time で読む):
+        起点の行は、start の行 (t は 0.0) と、start の行より後の行のうち、event が "decision" で、number と同じ
+        number の要求の行が requests.jsonl にあり、その t_received が数の行 (t はその t_received)。
+        - start の行より前の行: elapsed_time.run_log_elapsed(その行の time, start の行の time, after_start=False)
+        - start の行と、それより後の行: ファイルの順で、その行以前の最後の起点の行 (その行自身が起点の行なら
+          その行) を使い、起点の行の t + run_log_elapsed(その行の time, 起点の行の time, after_start=True)。
+          その行自身が起点の行なら、t は起点の行の t
+        start の行が無いか、start の行の time が読めなければ、すべての行の t を None にする。起点の行の time が
+        読めないか、その行の time が読めないときも、その行の t を None にする (起点の行自身の t は上のとおり)。
+        t が None の行は skipped_lines に数えない。
+        壁時計と monotonic の時計が実行中にずれるマシンがあるため、decision の行で、ほかの記録 (requests.jsonl・
+        frames.jsonl・pad.jsonl・stream.jsonl。どれも monotonic の時計) と同じ時間軸に近づける。
+        requests.jsonl の無い実行では、起点の行が start の行だけになり、壁時計の差のままなので、ずれうる。
+        number がキーにできない値 (list・dict) の行は、起点の行にしない。
     """
     run_dir = find_run_dir(runs_dir, name)
     if run_dir is None:
@@ -172,6 +185,7 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
     header = next(
         (line for line in request_lines if line.get("event") == "header"), None
     )
+    requests = [line for line in request_lines if line.get("event") == "request"]
 
     advisor_dirs = list_advisor_run_dirs(run_dir)
     has_stream_file = False
@@ -187,9 +201,9 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
         start=start,
         origin_mono=_origin_mono_of(start),
         args=args if isinstance(args, dict) else None,
-        run_events=_build_run_events(run_lines, start_index),
+        run_events=_build_run_events(run_lines, start_index, requests),
         header=header,
-        requests=[line for line in request_lines if line.get("event") == "request"],
+        requests=requests,
         frames=_records_of(parsed["frames"]),
         pad=_records_of(parsed["pad"]),
         advisor_dirs=advisor_dirs,
@@ -235,28 +249,68 @@ def _records_of(lines: ParsedLines | None) -> list[dict] | None:
     return lines.records if lines is not None else None
 
 
-def _build_run_events(lines: list[dict], start_index: int | None) -> list[RunEvent]:
+def _received_times(requests: list[dict]) -> dict[object, float]:
+    """requests.jsonl の要求の行 requests から、number → 受信時刻 t_received の辞書を返す。
+
+    t_received が数の行だけを入れる。number がキーにできない値 (list・dict) の行は入れない。同じ number の行が
+    複数あれば、最初の行の値。
+    """
+    received: dict[object, float] = {}
+    for request in requests:
+        number = request.get("number")
+        t_received = request.get("t_received")
+        if is_json_scalar(number) and is_json_number(t_received):
+            received.setdefault(number, float(t_received))
+    return received
+
+
+def _anchor_t(line: dict, received_times: dict[object, float]) -> float | None:
+    """run.jsonl の行 line が時刻の起点にする decision の行なら、その経過秒 (同じ number の要求の受信時刻) を返す。
+
+    起点にするのは、event が "decision" で、number と同じ number の要求の行が received_times (_received_times の
+    結果) にある行。そうでなければ None を返す。
+    """
+    number = line.get("number")
+    if line.get("event") != "decision" or not is_json_scalar(number):
+        return None
+    return received_times.get(number)
+
+
+def _build_run_events(
+    lines: list[dict], start_index: int | None, requests: list[dict]
+) -> list[RunEvent]:
     """run.jsonl の行 lines (ファイルの順) に経過秒 t を付けた RunEvent のリストを返す (load_run の docstring の t)。
 
-    start_index は start の行の lines の中の位置 (start の行が無ければ None)。
+    start_index は start の行の lines の中の位置 (start の行が無ければ None)。requests は requests.jsonl の
+    要求の行 (ファイルの順)。
     """
     start_time = (
         parse_wall_time(lines[start_index].get("time"))
         if start_index is not None
         else None
     )
+    if start_index is None or start_time is None:
+        return [RunEvent(t=None, record=line) for line in lines]
+    received_times = _received_times(requests)
+    # 今の起点の行の経過秒と time (start の行から始め、起点にする decision の行が来るたびに置き換える)
+    origin_t: float = 0.0
+    origin_time: float | None = start_time
     events = []
     for index, line in enumerate(lines):
+        line_time = parse_wall_time(line.get("time"))
         t: float | None = None
-        if start_index is not None and start_time is not None:
-            if index == start_index:
-                t = 0.0
-            else:
-                line_time = parse_wall_time(line.get("time"))
-                if line_time is not None:
-                    t = run_log_elapsed(
-                        line_time, start_time, after_start=index > start_index
-                    )
+        if index < start_index:
+            if line_time is not None:
+                t = run_log_elapsed(line_time, start_time, after_start=False)
+        elif index == start_index:
+            t = 0.0
+        else:
+            anchor_t = _anchor_t(line, received_times)
+            if anchor_t is not None:
+                origin_t, origin_time = anchor_t, line_time
+                t = anchor_t
+            elif line_time is not None and origin_time is not None:
+                t = origin_t + run_log_elapsed(line_time, origin_time, after_start=True)
         events.append(RunEvent(t=t, record=line))
     return events
 

@@ -1359,16 +1359,23 @@ def write_old_format_common(run_dir: Path, start_seconds: float) -> None:
 def old_request_line(
     number: int, probabilities: dict, extra: Mapping[str, object]
 ) -> dict:
-    """古い形の requests.jsonl の要求の行を返す。extra のキーで行を足す・置き換える。"""
-    t_sent = float(number)
+    """古い形の requests.jsonl の要求の行を返す。extra のキーで行を足す・置き換える。
+
+    受信の経過秒 (t_received) と decide_s は、OLD_DECISIONS の同じ number の decision の行の経過秒と decide_s に
+    そろえる (第4章では、decision の行を応答を受け取った直後に書くため)。t_sent は t_received - decide_s。
+    """
+    t_received, decide_s = next(
+        (t, decide_s) for t, decided, decide_s in OLD_DECISIONS if decided == number
+    )
+    t_sent = t_received - decide_s
     image_t = old_image_t(number)
     return {
         "event": "request",
         "number": number,
         "time": format_clock(9 * 3600 + t_sent),
         "t_sent": t_sent,
-        "t_received": t_sent + 0.5,
-        "decide_s": 0.5,
+        "t_received": t_received,
+        "decide_s": decide_s,
         "result": "ok",
         "error": None,
         "images": [

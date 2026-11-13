@@ -339,6 +339,62 @@ def test_adopted_answers_is_none_for_missing_choice():
     assert adopted_answers(build_questions(), probabilities, choices, 0.5) is None
 
 
+@pytest.mark.parametrize(
+    "choice_changes, probability_changes",
+    [
+        # 答えの値が文字列
+        ({"button_A": {"none": "0.5", "hold": 0.25, "tap": 0.25}}, {}),
+        ({}, {"advisor_tips": "0.75"}),
+        # 答えの値が list
+        ({"button_UP": {"none": [0.0], "hold": [1.0], "tap": [0.0]}}, {}),
+        ({}, {"advisor_strategy": [0.75]}),
+        # 答えの値が null
+        ({"stick_RS_y": {"none": None, "up": 0.5, "down": 0.5}}, {}),
+        # 選択肢の問いの答えが object でない
+        ({"stick_LS_x": [0.0, 1.0, 0.0]}, {}),
+        ({"button_B": "none hold tap"}, {}),
+    ],
+)
+def test_adopted_answers_is_none_for_answers_of_other_types(
+    choice_changes, probability_changes
+):
+    probabilities, choices = neutral_answers()
+    choices.update(choice_changes)
+    probabilities.update(probability_changes)
+    assert adopted_answers(build_questions(), probabilities, choices, 0.5) is None
+    request = {"probabilities": probabilities, "choices": choices}
+    assert request_adopted(build_questions(), request, 0.5) is None
+
+
+def test_adopted_answers_is_none_when_header_choices_differ_from_chapter_4():
+    # header のボタンの問いの選択肢が空 (hold と tap が無い)。check_answers は通るが、adopt_buttons が
+    # hold の確率を読めない
+    header = current_header()
+    for item in header["questions"]:
+        if item["name"] == "button_A":
+            item["choices"] = []
+    questions = questions_for_decision(header["questions"])
+    probabilities, choices = neutral_answers()
+    choices["button_A"] = {}
+    assert adopted_answers(questions, probabilities, choices, 0.5) is None
+
+
+def test_names_that_cannot_be_keys_are_treated_as_missing():
+    list_name_item = {**BUTTON_A_ITEM, "name": ["button_A"]}
+    list_choice_item = {
+        **BUTTON_A_ITEM,
+        "choices": [{"name": ["hold"], "description": "押した状態にする"}],
+    }
+    choices = {"button_A": {"none": 0.0, "hold": 1.0, "tap": 0.0}}
+    assert question_value(list_name_item, {}, choices) is None
+    assert question_value(list_choice_item, {}, choices) is None
+    assert questions_for_decision([list_name_item]) == []
+    # name が list の問いを足しても、advisor の役割ごとの 4 問はそろっている
+    header = current_header()
+    header["questions"].append({**ADVISOR_STRATEGY_ITEM, "name": ["advisor_x"]})
+    assert is_old_format(header) is False
+
+
 def test_adopted_count():
     assert adopted_count(None) is None
     assert adopted_count({}) == 0

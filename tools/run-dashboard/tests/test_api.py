@@ -479,6 +479,38 @@ def test_request_detail_of_run_with_save_requests_only(client, runs):
     assert detail["adopted_count"] == 1
 
 
+def test_request_line_with_values_of_other_types_does_not_break_api(runs):
+    # number が list で、答えの値が文字列、選択肢の問いの答えが object でない要求の行を足す
+    run = runs.dashboard
+    line = {
+        "event": "request",
+        "number": [7],
+        "t_sent": 14.5,
+        "t_received": 14.75,
+        "result": "ok",
+        "state_text": "分けられない文",
+        "probabilities": {"advisor_tips": "0.75"},
+        "choices": {"button_A": [0.0, 1.0, 0.0]},
+        "advisor_requested": None,
+        "advisor_accepted": None,
+    }
+    with (run.run_dir / "requests.jsonl").open("a", encoding="utf-8") as file:
+        file.write(json.dumps(line, ensure_ascii=False) + "\n")
+    client = make_client(runs.runs_dir, None)
+
+    items = get_json(client, f"/api/runs/{run.name}/requests")["items"]
+    assert [item["n"] for item in items] == [1, 2, 3, 4, 5, 6, [7]]
+    assert items[-1]["p"] == values_of({}, None)
+    assert items[-1]["adopted_count"] is None
+
+    summary = get_json(client, f"/api/runs/{run.name}")
+    assert summary["counts"]["requests"] == 7
+    assert summary["note_versions"][-1]["request"] == [7]
+    assert summary["note_versions"][-1]["changed"] == []
+    # number が list の要求の行で始まった版は、ほかの要求の時点の版にしない
+    assert get_json(client, f"/api/runs/{run.name}/requests/6")["note_version"] == 2
+
+
 # --- GET /api/runs/{run}/frames ---
 
 DASHBOARD_FRAME_ITEMS = [
