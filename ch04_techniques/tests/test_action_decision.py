@@ -3,11 +3,13 @@ from dataclasses import fields
 import pytest
 
 from switch2_agent.action_decision import (
+    PROBABILITY_TOLERANCE,
     STICK_MIN_STRENGTH,
     STICK_STRENGTH_STEP,
     PadAction,
     Thresholds,
     decide_action,
+    probabilities_equal,
 )
 from switch2_agent.questions import NONE_CHOICE, build_questions
 
@@ -141,6 +143,20 @@ def test_button_is_not_pressed_when_press_side_sum_equals_none():
     assert action.taps == frozenset()
 
 
+def test_button_is_not_pressed_when_press_side_sum_equals_none_up_to_rounding():
+    # 0.1 + 0.2 は浮動小数点数では 0.30000000000000004 になり、none の 0.3 をわずかに上回るが、同じ値として押さない
+    assert 0.1 + 0.2 != 0.3
+    action = decide({"button_A": button(0.3, 0.1, 0.2)})
+    assert action.held.buttons == frozenset()
+    assert action.taps == frozenset()
+
+
+def test_probabilities_equal_uses_tolerance():
+    assert probabilities_equal(0.1 + 0.7, 0.3 + 0.5)
+    assert probabilities_equal(0.8, 0.8 + PROBABILITY_TOLERANCE / 2)
+    assert not probabilities_equal(0.8, 0.8 + PROBABILITY_TOLERANCE * 10)
+
+
 def test_hold_wins_when_hold_and_tap_are_equal():
     action = decide({"button_X": button(0.0, 0.5, 0.5)})
     assert action.held.buttons == frozenset({"X"})
@@ -196,6 +212,19 @@ def test_opposite_dpad_with_equal_press_side_sum_drops_both():
         }
     )
     assert action.held.buttons == frozenset({"UP"})
+    assert action.taps == frozenset()
+
+
+def test_opposite_dpad_with_press_side_sums_equal_up_to_rounding_drops_both():
+    # UP の合計 0.1 + 0.7 は 0.7999999999999999、DOWN の合計 0.3 + 0.5 は 0.8 になるが、同じ値として両方とも外す
+    assert 0.1 + 0.7 != 0.3 + 0.5
+    action = decide(
+        {
+            "button_UP": button(0.2, 0.1, 0.7),
+            "button_DOWN": button(0.2, 0.3, 0.5),
+        }
+    )
+    assert action.held.buttons == frozenset()
     assert action.taps == frozenset()
 
 

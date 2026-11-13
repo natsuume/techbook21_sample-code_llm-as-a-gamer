@@ -6,6 +6,7 @@
 I/O・スレッド・時刻を扱わない。
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -27,6 +28,14 @@ OPPOSITE_DPAD_PAIRS = (("UP", "DOWN"), ("LEFT", "RIGHT"))
 # スティックを倒すときの傾きの最小値と、強さの問いの段階 1 つあたりの傾きの増分。傾きは 0.25〜1.0 になる
 STICK_MIN_STRENGTH = 0.25
 STICK_STRENGTH_STEP = 0.25
+# 確率を足した値どうし (押す側の合計など) を比べるときに、同じ値とみなす差の上限。
+# 0.1 + 0.7 と 0.3 + 0.5 のように、数としては等しい合計が浮動小数点数の丸めで食い違っても同じ値として扱う
+PROBABILITY_TOLERANCE = 1e-9
+
+
+def probabilities_equal(a: float, b: float) -> bool:
+    """a と b の差が PROBABILITY_TOLERANCE 以下なら True を返す。"""
+    return math.isclose(a, b, rel_tol=0.0, abs_tol=PROBABILITY_TOLERANCE)
 
 
 @dataclass(frozen=True)
@@ -75,11 +84,13 @@ def decide_action(
     答えは、その軸の方向が none になるときも要る)。questions に無い name と選択肢の name は無視する。
 
     1. ボタン: ボタンの問い (button_<ボタン>) の none・hold・tap の確率を p_none・p_hold・p_tap とする。
-       押す側の合計 p_hold + p_tap が p_none より大きい (>) ときだけ押す (同じ値なら押さない)。押すなら、
+       押す側の合計 p_hold + p_tap が p_none より大きい (>) ときだけ押す (同じ値なら押さない。同じ値かは
+       probabilities_equal で判定する)。押すなら、
        p_hold >= p_tap のとき押下状態 (held)、そうでなければ短押し (taps) にする (同じ値なら押下状態)。
        押すボタンは、押す側の合計 p_hold + p_tap を「採った確率」として持つ
     2. 十字キー: 相反する方向 (UP と DOWN、LEFT と RIGHT) が、押下状態と短押しを合わせて両方とも採られたら、
-       1 の採った確率 (押す側の合計) が高いほうを残す (同じ値なら両方とも外す)
+       1 の採った確率 (押す側の合計) が高いほうを残す (同じ値なら両方とも外す。同じ値かは probabilities_equal で
+       判定する)
     3. スティックの方向: 軸の問い (stick_<スティック>_x と stick_<スティック>_y) ごとに、確率が最も高い選択肢を採る。
        最大の確率の選択肢が 2 つ以上あれば none にする (none が最大に含まれる場合も、左と右や上と下が同じ値の場合も)
     4. スティックの強さ: 方向が none でない軸だけ計算する。その軸の強さの問い (stick_<スティック>_<軸>_at_least_<段階>)
@@ -138,8 +149,8 @@ def adopt_buttons(
 ) -> dict[str, tuple[str, float]]:
     """ボタンの問いの答えから、押すボタン → (HOLD_CHOICE か TAP_CHOICE, 押す側の合計) を返す (decide_action の 1)。
 
-    押す側の合計 p_hold + p_tap が p_none より大きいボタンだけを入れる。p_hold >= p_tap なら HOLD_CHOICE、
-    そうでなければ TAP_CHOICE。
+    押す側の合計 p_hold + p_tap が p_none より大きく、同じ値 (probabilities_equal) でもないボタンだけを入れる。
+    p_hold >= p_tap なら HOLD_CHOICE、そうでなければ TAP_CHOICE。
     """
     adopted: dict[str, tuple[str, float]] = {}
     for question in questions:
@@ -149,7 +160,8 @@ def adopt_buttons(
         hold = values[HOLD_CHOICE]
         tap = values[TAP_CHOICE]
         press_side = hold + tap
-        if press_side > values[NONE_CHOICE]:
+        none = values[NONE_CHOICE]
+        if press_side > none and not probabilities_equal(press_side, none):
             kind = HOLD_CHOICE if hold >= tap else TAP_CHOICE
             adopted[question.target] = (kind, press_side)
     return adopted
@@ -158,16 +170,19 @@ def adopt_buttons(
 def remove_opposite_dpad(adopted: dict[str, tuple[str, float]]) -> None:
     """adopted (adopt_buttons の結果) で十字キーの相反する方向が両方とも採られていたら、押す側の合計が低いほうを外す。
 
-    同じ値なら両方とも外す。adopted をその場で書き換える (decide_action の 2)。
+    同じ値 (probabilities_equal) なら両方とも外す。adopted をその場で書き換える (decide_action の 2)。
     """
     for first, second in OPPOSITE_DPAD_PAIRS:
         if first not in adopted or second not in adopted:
             continue
         first_probability = adopted[first][1]
         second_probability = adopted[second][1]
-        if first_probability >= second_probability:
+        if probabilities_equal(first_probability, second_probability):
+            del adopted[first]
             del adopted[second]
-        if second_probability >= first_probability:
+        elif first_probability > second_probability:
+            del adopted[second]
+        else:
             del adopted[first]
 
 
