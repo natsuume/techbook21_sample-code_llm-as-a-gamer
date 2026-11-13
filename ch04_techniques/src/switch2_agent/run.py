@@ -23,8 +23,11 @@ Ctrl+C で止まる。
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
     --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を
                                  runs/<実行>/requests.jsonl と frames/ に書く (容量が大きくなるため既定はオフ)
-    --record-dashboard           ダッシュボードが読む記録 (advisor の途中経過 runs/<実行>/advisor-<連番>/stream.jsonl) を書く
-                                 (既定はオフ)
+    --record-dashboard           ダッシュボードが読む記録を runs/<実行>/ に書く (既定はオフ): フレームの判定と縮小画像
+                                 (frames.jsonl と thumbs/)、送ったレポート (pad.jsonl)、要求の行 (requests.jsonl。
+                                 --save-requests が無ければ frames/ は書かない)、advisor の途中経過
+                                 (advisor-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
+                                 origin_mono) と、終了時の記録の件数 (record_end)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
 使い方 (ch04_techniques ディレクトリーで実行する):
@@ -203,8 +206,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--record-dashboard",
         action="store_true",
         help=(
-            "ダッシュボードが読む記録 (advisor の途中経過 "
-            "runs/<実行>/advisor-<連番>/stream.jsonl) を書く。既定はオフ"
+            "ダッシュボードが読む記録 (フレームの判定と縮小画像 frames.jsonl・thumbs/、"
+            "送ったレポート pad.jsonl、要求の行 requests.jsonl、advisor の途中経過 "
+            "advisor-<連番>/stream.jsonl、run.jsonl の起動引数と記録の件数) を "
+            "runs/<実行>/ に書く。既定はオフ"
         ),
     )
     args = parser.parse_args(argv)
@@ -276,6 +281,17 @@ def range_errors(args: argparse.Namespace) -> list[str]:
     return errors
 
 
+def build_request_log(run_dir: Path, args: argparse.Namespace) -> RequestLog | None:
+    """起動引数 args に応じて、要求ごとの入出力のログ (RequestLog) を作って返す。作らないなら None を返す。
+
+    --record-dashboard が付いていれば RequestLog(run_dir, save_frames=args.save_requests, record_thumbs=True)
+    (要求の行に縮小画像の名前 thumb を足す。--save-requests が無ければ frames/ を作らず、画像の file を null にする)。
+    --save-requests だけなら RequestLog(run_dir) (要求の行と、要求に載せた画像 frames/ を書く)。
+    どちらも無ければ None。
+    """
+    raise NotImplementedError
+
+
 def main(argv: list[str] | None = None) -> None:
     """起動引数を解釈し、部品を用意して Pipeline を動かす。
 
@@ -288,30 +304,40 @@ def main(argv: list[str] | None = None) -> None:
         1. ゲームの情報のファイルを用意する (game_notes.ensure_game_notes(cwd / NOTES_DIR_NAME, game))
         2. BridgeSupervisor(start_bridge=Bridge, reset_radio=reset_bluetooth_radio)。最初のブリッジの起動に
            失敗したら (BridgeStartError)、そのメッセージで終了する
-        3. PadOutput(supervisor)
-        4. 意味のあるフレームの判定 (SharpnessValleyDetector(valley_ratio, MeanAbsDiffSimilarity(similarity_threshold)))
+        3. --record-dashboard が付いていれば、ダッシュボードの記録 recorder = DashboardRecorder(実行のディレクトリー,
+           RunLog.write)。付いていなければ recorder は None
+        4. PadOutput(supervisor)。recorder があれば PadOutput(supervisor, on_report=recorder.record_pad)
+           (送ろうとしたレポートを pad.jsonl に書く)
+        5. 意味のあるフレームの判定 (SharpnessValleyDetector(valley_ratio, MeanAbsDiffSimilarity(similarity_threshold)))
            と保管 (MeaningfulFrameStore)
-        5. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
-           判定の feed が返したフレームを保管に add する
-        6. CaptureWatcher(capture_ended=capture.ended を返す関数, latest_frame_time=history.latest() の time
+        6. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
+           dashboard_recorder.feed_detector(frame, 判定, 保管, recorder) を呼ぶ (判定の feed が返したフレームを
+           保管に add し、recorder があれば判定の前後を frames.jsonl と thumbs/ に記録する)
+        7. CaptureWatcher(capture_ended=capture.ended を返す関数, latest_frame_time=history.latest() の time
            (無ければ None) を返す関数, on_lost=output.stop_output, stale_timeout_s=pipeline.DEFAULT_STALE_FRAME_TIMEOUT_S)
-        7. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
+        8. ClaudeCodeHeadlessAdvisor(cwd, ゲームの情報のディレクトリー, 実行のディレクトリー, game, advisor_timeout,
            hidden_env_names=API_KEY_ENVS の値 (Decision Model の API キーの環境変数。advisor の子プロセスに渡さない),
            log=RunLog.write, record_steps=--record-dashboard の値)
-        8. Decision Model (JevModel / DecisionsApiModel)
-        9. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
+        9. Decision Model (JevModel / DecisionsApiModel)
+        10. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
-           capture_ended は capture.ended、capture_lost は watcher.lost。request_log は、--save-requests が
-           付いていれば RequestLog(実行のディレクトリー)、付いていなければ None。min_request_interval_s は、
+           capture_ended は capture.ended、capture_lost は watcher.lost。request_log は
+           build_request_log(実行のディレクトリー, 起動引数)。min_request_interval_s は、
            --model が jev なら jev.JEV_MIN_REQUEST_INTERVAL_S、decisions なら 0.0)
-        10. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
+        11. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
            Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
+        12. run.jsonl に start の行 {"event": "start", "game", "model", "run_dir"} を書く。--record-dashboard が
+           付いていれば、"args": vars(起動引数) (argparse の属性名をキーにした起動引数のすべて) と
+           "origin_mono": pipeline.started_at (経過秒の起点の time.monotonic の値) も足す
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
     --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。
-    --record-dashboard が付いていれば、advisor の途中経過も同じ実行のディレクトリーの advisor-<連番>/stream.jsonl に書く。
+    --record-dashboard が付いていれば、同じ実行のディレクトリーに、フレームの判定と縮小画像 (frames.jsonl と thumbs/)、
+    送ったレポート (pad.jsonl)、要求の行 (requests.jsonl。--save-requests が無ければ frames/ は書かない)、
+    advisor の途中経過 (advisor-<連番>/stream.jsonl) を書き、終了時に run.jsonl に record_end を書く。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、advisor.close()、capture.close()、
-    supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を呼ばないよう、見張りを最初に止める)。
+    recorder.close()、supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を呼ばないよう、見張りを
+    最初に止める。recorder は、記録を送ってくる PadOutput とキャプチャーを止めた後に閉じ、中立のレポートまで記録する)。
     """
     args = parse_args(argv)
     workdir = Path.cwd()

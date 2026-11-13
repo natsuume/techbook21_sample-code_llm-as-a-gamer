@@ -1,9 +1,15 @@
 import time
 
 import pytest
-from switch2_remote.controller_state import NEUTRAL_REPORT, PadState, build_report
+from switch2_remote.controller_state import (
+    NEUTRAL_REPORT,
+    PadState,
+    build_report,
+    format_state,
+)
 
 from switch2_agent.action_decision import PadAction
+from switch2_agent.dashboard_records import PadReport
 from switch2_agent.pad_output import (
     TAP_PRESS_S,
     TAP_RELEASE_GAP_S,
@@ -601,3 +607,191 @@ def test_timer_thread_starts_pending_tap_and_releases_it():
 def test_close_without_timer_thread_does_nothing():
     output, _, _ = make_output()
     output.close()
+
+
+# --- 送ったレポートの記録 (on_report) ---
+
+
+class ReportRecorder:
+    """on_report の代わり。受け取った PadReport を reports に入れる。fail_with があれば、その例外を出す。
+
+    lock_held   呼ばれたときに PadOutput のロックを持っていたか (呼ばれた順)
+    """
+
+    def __init__(self, fail_with: Exception | None = None):
+        self.reports: list[PadReport] = []
+        self.lock_held: list[bool] = []
+        self.fail_with = fail_with
+        self.output: PadOutput | None = None
+
+    def __call__(self, report: PadReport) -> None:
+        self.reports.append(report)
+        if self.output is not None:
+            self.lock_held.append(self.output.lock.locked())
+        if self.fail_with is not None:
+            raise self.fail_with
+
+
+def make_recorded_output(
+    sender: FakeSender | None = None,
+    clock: FakeClock | None = None,
+    fail_with: Exception | None = None,
+):
+    """on_report を渡した、タイマースレッドを起動しない PadOutput と、偽の sender・clock・on_report を返す。"""
+    clock = clock if clock is not None else FakeClock(0.0)
+    sender = sender if sender is not None else FakeSender()
+    reports = ReportRecorder(fail_with)
+    output = PadOutput(sender, clock=clock, start_timer=False, on_report=reports)
+    reports.output = output
+    return output, sender, clock, reports
+
+
+def test_on_report_is_none_by_default():
+    output, _, _ = make_output()
+    assert output.on_report is None
+    assert output.last_report_error is None
+
+
+def test_on_report_receives_each_send_with_source():
+    output, sender, clock, reports = make_recorded_output()
+    output.apply(action(held=pad("A")))
+    clock.now = 0.5
+    # 押したままの A を外して短押しにする: 離すレポートを送り、短押しは TAP_RELEASE_GAP_S 後に始める
+    output.apply(action(taps={"A"}))
+    clock.now = output.pending_taps["A"]
+    output.start_due_taps()
+    clock.now = output.tapping["A"]
+    output.release_due_taps()
+    output.neutral()
+    output.stop_output()
+    assert [r.source for r in reports.reports] == [
+        "apply",
+        "apply",
+        "tap_start",
+        "tap_release",
+        "neutral",
+        "stop_output",
+    ]
+    assert [r.state for r in reports.reports] == [
+        pad("A"),
+        PadState(),
+        pad("A"),
+        PadState(),
+        PadState(),
+        PadState(),
+    ]
+    assert all(r.ok and r.error is None for r in reports.reports)
+    # 受け取った順が送った順
+    assert [build_report(r.state) for r in reports.reports] == sender.reports
+
+
+def test_on_report_receives_composed_state_of_sent_report():
+    output, _, _, reports = make_recorded_output()
+    output.apply(action(held=pad("UP", LS=(0.8, 0.0)), taps={"DOWN", "A"}))
+    # 短押しの DOWN を優先し、送るレポートからだけ held の UP を外す
+    [sent] = reports.reports
+    assert sent.state == pad("DOWN", "A", LS=(0.8, 0.0))
+    assert format_state(sent.state) == "A+DOWN+LS:0.8,0"
+
+
+def test_on_report_is_called_inside_lock():
+    output, _, clock, reports = make_recorded_output()
+    output.apply(action(taps={"A"}))
+    clock.now = 0.12
+    output.release_due_taps()
+    assert reports.lock_held == [True, True]
+
+
+def test_on_report_mono_is_time_after_send_returns():
+    clock = FakeClock(0.0)
+    output, _, _, reports = make_recorded_output(SlowSender(clock), clock)
+    output.apply(action(taps={"A"}))
+    clock.now = 1.0
+    output.neutral()
+    assert [r.mono for r in reports.reports] == pytest.approx([SEND_S, 1.0 + SEND_S])
+
+
+def test_on_report_receives_failed_apply_before_error_is_raised():
+    clock = FakeClock(0.0)
+    sender = SlowSender(clock)
+    output, _, _, reports = make_recorded_output(sender, clock)
+    sender.fail_with = RuntimeError("bridge failed")
+    with pytest.raises(RuntimeError, match="bridge failed"):
+        output.apply(action(held=pad("B")))
+    [failed] = reports.reports
+    assert (failed.source, failed.state) == ("apply", pad("B"))
+    assert (failed.ok, failed.error) == (False, "bridge failed")
+    # 失敗のときは、例外が戻った後の時刻
+    assert failed.mono == pytest.approx(SEND_S)
+
+
+def test_on_report_receives_failed_quiet_send_and_last_error_is_kept():
+    output, sender, _, reports = make_recorded_output()
+    sender.fail_with = OSError("pipe closed")
+    output.neutral()
+    [failed] = reports.reports
+    assert (failed.source, failed.ok, failed.error) == ("neutral", False, "pipe closed")
+    assert output.last_error == "pipe closed"
+
+
+def test_on_report_receives_failed_tap_release():
+    output, sender, clock, reports = make_recorded_output()
+    output.apply(action(taps={"A"}))
+    sender.fail_with = RuntimeError("bridge failed")
+    clock.now = 0.12
+    output.release_due_taps()
+    assert [(r.source, r.ok, r.error) for r in reports.reports] == [
+        ("apply", True, None),
+        ("tap_release", False, "bridge failed"),
+    ]
+    assert output.last_error == "bridge failed"
+
+
+def test_on_report_failure_does_not_change_sending():
+    output, sender, clock, reports = make_recorded_output(
+        fail_with=RuntimeError("record queue is broken")
+    )
+    output.apply(action(taps={"A"}))
+    assert sender.reports == [report("A")]
+    assert output.tapping == pytest.approx({"A": TAP_PRESS_S})
+    clock.now = 0.12
+    output.release_due_taps()
+    assert sender.reports == [report("A"), NEUTRAL_REPORT]
+    assert output.tapping == {}
+    assert output.last_released == pytest.approx({"A": 0.12})
+    # on_report の失敗は送信の失敗ではない
+    assert output.last_error is None
+    assert output.last_report_error == "record queue is broken"
+    assert len(reports.reports) == 2
+
+
+def test_on_report_failure_does_not_hide_send_error():
+    output, sender, _, _ = make_recorded_output(
+        fail_with=RuntimeError("record queue is broken")
+    )
+    sender.fail_with = RuntimeError("bridge failed")
+    with pytest.raises(RuntimeError, match="bridge failed"):
+        output.apply(action(held=pad("A")))
+    output.neutral()
+    assert output.last_error == "bridge failed"
+    assert output.last_report_error == "record queue is broken"
+
+
+def test_on_report_is_not_called_when_apply_is_stopped():
+    output, sender, _, reports = make_recorded_output()
+    output.stop_output()
+    with pytest.raises(OutputStoppedError):
+        output.apply(action(held=pad("A")))
+    assert [r.source for r in reports.reports] == ["stop_output"]
+    assert sender.reports == [NEUTRAL_REPORT]
+
+
+def test_on_report_is_not_called_when_nothing_is_sent():
+    output, sender, clock, reports = make_recorded_output()
+    output.apply(action(held=pad("A")))
+    clock.now = 1.0
+    # 離す短押しも、始める短押しも無いので送らない
+    output.release_due_taps()
+    output.start_due_taps()
+    assert [r.source for r in reports.reports] == ["apply"]
+    assert sender.reports == [report("A")]
