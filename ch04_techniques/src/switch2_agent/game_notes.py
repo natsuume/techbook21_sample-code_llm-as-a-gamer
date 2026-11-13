@@ -3,14 +3,18 @@
 ファイルは <root>/<ゲーム名>/<種別>.md に置く。種別ごとに受け持ちの advisor (advisor_roles.ADVISOR_ROLES の
 note_kind) が Skill の手順で書き換え、Pipeline は要求のたびに最新の内容を読む (advisor の出力は戦略の受け渡しに
 使わない)。NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は、作らず、読まず、変えない。
+起動時に、無いファイルと、空か空白だけのファイルには、default_notes の既定の内容 (controls と strategy) を書く。
 """
 
+import contextlib
 import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 
 from switch2_remote.error_message import describe_error
+
+from switch2_agent.default_notes import DEFAULT_NOTES
 
 # ゲームの情報の種別。並びは要求の文に並べる順でもある
 NOTE_KINDS = ("controls", "tips", "strategy", "advice")
@@ -37,24 +41,64 @@ def game_notes_dir(root: Path, game: str) -> Path:
     return root / game
 
 
-def ensure_game_notes(root: Path, game: str) -> dict[str, Path]:
-    """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を作り、種別 → パスの辞書を返す。
+def ensure_game_notes(
+    root: Path, game: str, defaults: Mapping[str, str] = DEFAULT_NOTES
+) -> dict[str, Path]:
+    """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を用意し、種別 → パスの辞書を返す。
 
-    ディレクトリーは親を含めて作る。作るファイルの中身は空にする。既にあるファイルは変えない。
+    ディレクトリーは親を含めて作る。<種別>.md は種別ごとに次のようにする:
+        - 無ければ空で作る
+        - 中身が空か空白だけで、defaults にその種別があれば、その内容を書く (いま作ったファイルも含む)
+        - 中身が空白以外を含むなら変えない。読めない (OSError、UnicodeDecodeError) ときも変えない
+        - 既定の内容を書けない (OSError) ときの扱いは write_default_note のとおりで、起動は続ける
+    defaults の既定値は default_notes.DEFAULT_NOTES (controls と strategy の既定の内容)。
     NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は作らず、あっても変えず、
     返す辞書にも入れない。game が不正なら game_notes_dir と同じく ValueError にする。
     """
     notes_dir = game_notes_dir(root, game)
     notes_dir.mkdir(parents=True, exist_ok=True)
     paths = {kind: notes_dir / f"{kind}.md" for kind in NOTE_KINDS}
-    for path in paths.values():
-        # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)
+    for kind, path in paths.items():
+        default = defaults.get(kind, "")
+        # "x" は既にあるファイルを開かない (中身も更新時刻も変えない)。作ったファイルは空で、既定の内容は下で書く
         try:
             with path.open("x", encoding="utf-8"):
                 pass
         except FileExistsError:
             pass
+        if default and is_blank_file(path):
+            write_default_note(path, default)
     return paths
+
+
+def write_default_note(path: Path, default: str) -> None:
+    """中身が空か空白だけのファイル path に、既定の内容 default を書く。
+
+    書けない (OSError) ときは、警告を標準エラー出力に 1 行書いて戻る (例外を投げない)。途中まで書けていても
+    次の起動でもう一度書けるよう、中身を空に戻す。空に戻せないときは、そのままにする。
+    """
+    try:
+        path.write_text(default, encoding="utf-8")
+    except OSError as e:
+        print(
+            f"warning: could not write default notes to {path}: {describe_error(e)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        # 書く前の中身も空か空白だけなので、空にしても書かれていた内容は失われない
+        with contextlib.suppress(OSError):
+            path.write_text("", encoding="utf-8")
+
+
+def is_blank_file(path: Path) -> bool:
+    """path のファイルの中身が空か空白だけなら True を返す。
+
+    読めない (OSError、UnicodeDecodeError) ときは False を返す (中身のわからないファイルを書き直さないため)。
+    """
+    try:
+        return not path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def read_game_notes(paths: Mapping[str, Path]) -> dict[str, str]:
