@@ -12,6 +12,8 @@ from pathlib import Path
 
 from switch2_remote.error_message import describe_error
 
+from switch2_agent.default_notes import DEFAULT_NOTES
+
 # ゲームの情報の種別。並びは要求の文に並べる順でもある
 NOTE_KINDS = ("controls", "tips", "strategy", "advice")
 # 種別 → 要求の文で使う見出し
@@ -37,10 +39,16 @@ def game_notes_dir(root: Path, game: str) -> Path:
     return root / game
 
 
-def ensure_game_notes(root: Path, game: str) -> dict[str, Path]:
-    """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を作り、種別 → パスの辞書を返す。
+def ensure_game_notes(
+    root: Path, game: str, defaults: Mapping[str, str] = DEFAULT_NOTES
+) -> dict[str, Path]:
+    """ゲームの情報のディレクトリーと、NOTE_KINDS の 4 つの <種別>.md を用意し、種別 → パスの辞書を返す。
 
-    ディレクトリーは親を含めて作る。作るファイルの中身は空にする。既にあるファイルは変えない。
+    ディレクトリーは親を含めて作る。<種別>.md は種別ごとに次のようにする:
+        - 無ければ作る。中身は defaults にその種別があればその内容、無ければ空にする
+        - あって、中身が空か空白だけで、defaults にその種別があれば、その内容で書き直す
+        - あって、中身が空白以外を含むなら変えない。読めない (OSError、UnicodeDecodeError) ときも変えない
+    defaults の既定値は default_notes.DEFAULT_NOTES (controls と strategy の既定の内容)。
     NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は作らず、あっても変えず、
     返す辞書にも入れない。game が不正なら game_notes_dir と同じく ValueError にする。
     """
