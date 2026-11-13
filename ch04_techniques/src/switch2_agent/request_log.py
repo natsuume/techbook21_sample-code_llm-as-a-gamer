@@ -6,7 +6,7 @@
 書くファイル (run_dir は実行のディレクトリー runs/<YYYYmmdd-HHMMSS>/):
     run_dir/requests.jsonl      write_header の header の行 (モデル・役割の説明と安全のための規則・問いの一覧) と、
                                 要求 1 回ごとの write の request の行。1 行 1 件の JSON
-    run_dir/frames/<名前>.jpg   要求に載せた画像。名前は経過秒 (origin からの秒) をミリ秒にして 9 桁の 0 埋めにしたもの
+    run_dir/frames/<名前>.jpg   要求に載せた画像。名前は経過秒 (origin からの秒) をマイクロ秒にして 12 桁の 0 埋めにしたもの
                                 (frame_file_name)。意味のあるフレームは要求をまたいで同じものが載るため、同じ名前の
                                 ファイルは 1 回だけ書き、request の行からは名前で参照する
 Pipeline のスレッドだけから呼ぶため、ロックは持たない。書き込みの OSError はそのまま呼び出し側に出す
@@ -34,11 +34,13 @@ FRAMES_DIR_NAME = (
 
 
 def frame_file_name(t: float) -> str:
-    """経過秒 t (origin からの秒) の画像のファイル名 `<t をミリ秒に丸めて 9 桁の 0 埋め>.jpg` を返す。
+    """経過秒 t (origin からの秒) の画像のファイル名 `<t をマイクロ秒に丸めて 12 桁の 0 埋め>.jpg` を返す。
 
-    ミリ秒は round(t * 1000) (例: t=1.5 なら 000001500.jpg、t=128.1 なら 000128100.jpg)。
+    マイクロ秒は round(t * 1_000_000) (例: t=1.5 なら 000001500000.jpg、t=128.1 なら 000128100000.jpg)。
+    キャプチャーの読み取りが遅れて溜まったフレームを続けて処理すると、別のフレームの時刻が 1 ミリ秒以内に
+    並ぶことがあるため、ファイル名で別のフレームを区別できるようマイクロ秒まで使う。
     """
-    return f"{round(t * 1000):09d}.jpg"
+    return f"{round(t * 1_000_000):012d}.jpg"
 
 
 @dataclass(frozen=True)

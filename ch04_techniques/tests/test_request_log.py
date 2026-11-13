@@ -117,14 +117,16 @@ def test_constants():
 @pytest.mark.parametrize(
     "t, expected",
     [
-        (0.0, "000000000.jpg"),
-        (1.5, "000001500.jpg"),
-        (128.1, "000128100.jpg"),
-        # ミリ秒は切り捨てではなく丸める
-        (0.0016, "000000002.jpg"),
+        (0.0, "000000000000.jpg"),
+        (1.5, "000001500000.jpg"),
+        (128.1, "000128100000.jpg"),
+        # マイクロ秒は切り捨てではなく丸める
+        (0.0000016, "000000000002.jpg"),
+        # 1 ミリ秒以内の 2 枚も別の名前になる
+        (1.5004, "000001500400.jpg"),
     ],
 )
-def test_frame_file_name_is_milliseconds_with_nine_digits(t, expected):
+def test_frame_file_name_is_microseconds_with_twelve_digits(t, expected):
     assert frame_file_name(t) == expected
 
 
@@ -227,12 +229,12 @@ def test_write_lists_images_with_elapsed_time_and_file(tmp_path):
     first, second = images
     assert first["label"] == "過去の場面 1/1 (t=1.50 秒、1.50 秒前)"
     assert first["t"] == pytest.approx(1.5)
-    assert first["file"] == "frames/000001500.jpg"
+    assert first["file"] == "frames/000001500000.jpg"
     assert first["bytes"] == len(b"jpeg-one")
     assert first["after_previous_operation"] is False
     assert second["label"] == "直近 1/1 (t=2.25 秒、0.75 秒前、前回の操作の後)"
     assert second["t"] == pytest.approx(2.25)
-    assert second["file"] == "frames/000002250.jpg"
+    assert second["file"] == "frames/000002250000.jpg"
     assert second["bytes"] == len(b"jpeg-two!")
     assert second["after_previous_operation"] is True
 
@@ -241,18 +243,18 @@ def test_write_saves_jpeg_of_each_image_under_frames(tmp_path):
     RequestLog(tmp_path).write(ok_entry())
     frames_dir = tmp_path / FRAMES_DIR_NAME
     assert sorted(path.name for path in frames_dir.iterdir()) == [
-        "000001500.jpg",
-        "000002250.jpg",
+        "000001500000.jpg",
+        "000002250000.jpg",
     ]
-    assert (frames_dir / "000001500.jpg").read_bytes() == b"jpeg-one"
-    assert (frames_dir / "000002250.jpg").read_bytes() == b"jpeg-two!"
+    assert (frames_dir / "000001500000.jpg").read_bytes() == b"jpeg-one"
+    assert (frames_dir / "000002250000.jpg").read_bytes() == b"jpeg-two!"
 
 
 def test_write_saves_jpeg_of_same_frame_only_once(tmp_path):
     log = RequestLog(tmp_path)
     log.write(ok_entry(number=1))
     # 1 回目に書いたファイルを書き換えておき、2 回目の write で書き直されないことを確かめる
-    first_file = tmp_path / FRAMES_DIR_NAME / "000001500.jpg"
+    first_file = tmp_path / FRAMES_DIR_NAME / "000001500000.jpg"
     first_file.write_bytes(b"kept")
     request = replace(
         sample_request(),
@@ -263,11 +265,13 @@ def test_write_saves_jpeg_of_same_frame_only_once(tmp_path):
     )
     log.write(ok_entry(number=2, request=request))
     assert first_file.read_bytes() == b"kept"
-    assert (tmp_path / FRAMES_DIR_NAME / "000003000.jpg").read_bytes() == b"jpeg-three"
+    assert (
+        tmp_path / FRAMES_DIR_NAME / "000003000000.jpg"
+    ).read_bytes() == b"jpeg-three"
     # 行からは同じファイルを参照する
     lines = request_lines(tmp_path)
-    assert lines[0]["images"][0]["file"] == "frames/000001500.jpg"
-    assert lines[1]["images"][0]["file"] == "frames/000001500.jpg"
+    assert lines[0]["images"][0]["file"] == "frames/000001500000.jpg"
+    assert lines[1]["images"][0]["file"] == "frames/000001500000.jpg"
 
 
 def test_write_error_entry_without_response(tmp_path):
@@ -294,8 +298,8 @@ def test_write_error_entry_without_response(tmp_path):
     assert line["advisor_accepted"] is False
     # 応答が無くても、送った画像と要求の文は残す
     assert [image["file"] for image in line["images"]] == [
-        "frames/000001500.jpg",
-        "frames/000002250.jpg",
+        "frames/000001500000.jpg",
+        "frames/000002250000.jpg",
     ]
     assert line["history_text"] == HISTORY_TEXT
 

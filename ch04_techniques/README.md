@@ -143,7 +143,7 @@ claude -p <プロンプト> --output-format json --permission-mode dontAsk \
 | `run.jsonl` | 1 行 1 件の JSON のログ。要求ごとの所要時間 (`select_s`・`encode_s`・`decide_s`・`apply_s`)、画像の枚数と大きさ、決めた操作、advisor の呼び出し、失敗などを書きます。同じ内容の要約を画面にも表示します |
 | `advisor-001/` など | advisor の 1 回の実行ごとの入出力。advisor に渡した画像 (`frame-01.jpg` など)、文脈 (`context.md`)、結果 (`result.json`。終了コード、所要時間、`claude -p` の出力、拒否された操作) |
 | `requests.jsonl` | `--save-requests` を付けたときだけ書く、Decision Model への要求ごとの入出力の JSON Lines。1 行目は header で、`--model` の値、役割の説明と安全のための規則、43 の問いを書きます。2 行目以降は要求ごとに 1 行で、画像のラベルとファイル名、ゲームの情報の 4 ファイルの内容、直近の応答と送った操作の履歴、43 の問いの確率、応答の本文、決めた操作、結果 (`ok`: 操作を送った、`error`: Decision Model か操作の送信の失敗、`discarded`: キャプチャーが止まったため応答を捨てた) を書きます。各行の `number` は `run.jsonl` の `decision` の `number` と同じで、2 つのログで同じ要求の行を対応づけられます |
-| `frames/` | `--save-requests` を付けたときだけ書く、要求に載せた画像 (JPEG)。ファイル名は、実行を始めてからの経過時間 (ミリ秒) です。複数の要求に載った同じフレームは、1 回だけ保存します |
+| `frames/` | `--save-requests` を付けたときだけ書く、要求に載せた画像 (JPEG)。ファイル名は、実行を始めてからの経過時間 (マイクロ秒) です。複数の要求に載った同じフレームは、1 回だけ保存します |
 
 `game_notes/` と `runs/` の中身は Git の管理から外しています (`.gitignore`)。
 
