@@ -13,21 +13,29 @@ from dataclasses import dataclass
 
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.request_frames import RequestFrames
-from switch2_agent.operation_log import OperationRecord
+from switch2_agent.game_notes import format_game_notes
+from switch2_agent.operation_log import OperationRecord, format_action
 from switch2_agent.questions import Question
 from switch2_agent.safety import SAFETY_RULES
 
 # ラベルの先頭の語。意味のあるフレーム (直近の区間より前の場面) と、直近の区間のフレーム
 MEANINGFUL_LABEL = "過去の場面"
 RECENT_LABEL = "直近"
+# 直近の区間のラベルの末尾に書く、前回の操作との前後
+BEFORE_PREVIOUS_OPERATION_LABEL = "前回の操作の前"
+AFTER_PREVIOUS_OPERATION_LABEL = "前回の操作の後"
 DEFAULT_JPEG_CACHE_CAPACITY = 64  # JpegCache が持つ符号化の結果の数の既定値
 DEFAULT_HISTORY_COUNT = 5  # 要求に入れる直近の応答と送った操作の数
+# 操作の履歴の見出しと、記録が無いときの行
+HISTORY_HEADING = f"## 直近の応答と送った操作 (古い順、最大 {DEFAULT_HISTORY_COUNT} 回)"
+NO_OPERATION_TEXT = "(まだ操作を送っていない)"
 # Decision Model に毎回渡す役割の説明
 ROLE_DESCRIPTION = """\
 あなたは Nintendo Switch 2 のゲームを操作するコントローラーの判断をする。
 画像は時刻の古い順に並んでいる。各画像の前のラベルに、実行を始めてからの経過秒 (t) と、何秒前の画像かを書いてある。
 「過去の場面」は今より前の場面の代表の画像、「直近」は前回の判断から今までの画像である。
 「直近」のラベルの「前回の操作の前」「前回の操作の後」は、前回の判断で決めた操作を送る前の画像か、送った後の画像かを表す。
+操作が画面に出るまでには遅れがあるため、「前回の操作の後」の画像でも、操作の前の画面のことがある。
 直近の応答と送った操作の履歴に、最近の判断で送った操作とその時刻を書いてある。
 ゲームの情報 (操作方法・攻略情報・進行状況・戦略) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。
 """
@@ -79,6 +87,7 @@ def build_instructions() -> str:
         - 画像は時刻の古い順に並んでいること (ラベルに、実行を始めてからの経過秒 t と何秒前の画像かを書いてあること)
         - 「過去の場面」と「直近」の画像の違い
         - 「直近」のラベルの「前回の操作の前」「前回の操作の後」が、前回の判断で決めた操作を送る前か後かを表すこと
+        - 操作が画面に出るまでには遅れがあるため、「前回の操作の後」の画像でも操作の前の画面のことがあること
         - 直近の応答と送った操作の履歴に、最近の判断で送った操作とその時刻を書いてあること
         - 各問いには、ほかの問いの答えと関係なく独立に答えること
     """
@@ -107,7 +116,25 @@ def label_frames(
       frame.time < previous_operation_at なら `直近 <k>/<n> (t=<t> 秒、<秒前> 秒前、前回の操作の前)` で False
       (例: `直近 4/5 (t=127.89 秒、0.21 秒前、前回の操作の後)`)
     """
-    raise NotImplementedError
+    labeled: list[tuple[str, TimedFrame, bool]] = []
+    for number, frame in enumerate(frames.meaningful, start=1):
+        timing = f"t={frame.time - origin:.2f} 秒、{now - frame.time:.2f} 秒前"
+        label = f"{MEANINGFUL_LABEL} {number}/{len(frames.meaningful)} ({timing})"
+        labeled.append((label, frame, False))
+    for number, frame in enumerate(frames.recent, start=1):
+        timing = f"t={frame.time - origin:.2f} 秒、{now - frame.time:.2f} 秒前"
+        after = False
+        if previous_operation_at is not None:
+            after = frame.time >= previous_operation_at
+            order = (
+                AFTER_PREVIOUS_OPERATION_LABEL
+                if after
+                else BEFORE_PREVIOUS_OPERATION_LABEL
+            )
+            timing = f"{timing}、{order}"
+        label = f"{RECENT_LABEL} {number}/{len(frames.recent)} ({timing})"
+        labeled.append((label, frame, after))
+    return labeled
 
 
 def format_operation_history(
@@ -124,7 +151,16 @@ def format_operation_history(
         - t=128.10 秒 (2.75 秒前): 押下 none / 短押し UP
         - t=130.30 秒 (0.55 秒前): 押下 none / 短押し HOME (前回の操作)
     """
-    raise NotImplementedError
+    if not records:
+        return f"{HISTORY_HEADING}\n{NO_OPERATION_TEXT}"
+    lines = [HISTORY_HEADING]
+    for record in records:
+        lines.append(
+            f"- t={record.received_at - origin:.2f} 秒 "
+            f"({now - record.received_at:.2f} 秒前): {format_action(record.action)}"
+        )
+    lines[-1] += " (前回の操作)"
+    return "\n".join(lines)
 
 
 def format_previous_operation(
@@ -136,7 +172,12 @@ def format_previous_operation(
     を返す。t は record.received_at - origin、秒前は now - record.received_at で、どちらも小数第 2 位まで書く
     (例: `── t=130.30 秒 (0.55 秒前) に、前回の応答の操作を送った ──`)。record が None なら None を返す。
     """
-    raise NotImplementedError
+    if record is None:
+        return None
+    return (
+        f"── t={record.received_at - origin:.2f} 秒 "
+        f"({now - record.received_at:.2f} 秒前) に、前回の応答の操作を送った ──"
+    )
 
 
 def build_decision_request(
@@ -160,7 +201,31 @@ def build_decision_request(
     history_text = format_operation_history(recent_operations, now, origin)、
     previous_operation_text = format_previous_operation(recent_operations の最後の記録 (空なら None), now, origin)。
     """
-    raise NotImplementedError
+    previous_operation = recent_operations[-1] if recent_operations else None
+    previous_operation_at = (
+        previous_operation.received_at if previous_operation is not None else None
+    )
+    images = [
+        LabeledImage(
+            label=label,
+            jpeg=encode(frame),
+            frame_time=frame.time,
+            after_previous_operation=after,
+        )
+        for label, frame, after in label_frames(
+            frames, now, origin, previous_operation_at
+        )
+    ]
+    return DecisionRequest(
+        instructions=build_instructions(),
+        state_text=format_game_notes(notes),
+        images=images,
+        questions=list(questions),
+        history_text=format_operation_history(recent_operations, now, origin),
+        previous_operation_text=format_previous_operation(
+            previous_operation, now, origin
+        ),
+    )
 
 
 class JpegCache:

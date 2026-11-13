@@ -33,6 +33,7 @@ answer は {"type": "refusal", "name": ...} (probability が無い) のことも
 
 import base64
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import httpx
 
@@ -79,7 +80,20 @@ def build_decisions_payload(
         {"type": "input_text", "text": request.instructions},
         {"type": "input_text", "text": request.state_text},
     ]
+    if request.history_text:
+        content.append({"type": "input_text", "text": request.history_text})
+    separator_placed = False
     for image in request.images:
+        if (
+            image.after_previous_operation
+            and not separator_placed
+            and request.previous_operation_text is not None
+        ):
+            # 前回の操作を送った時点の区切りを、送った後の最初の画像の組の前に 1 回だけ置く
+            content.append(
+                {"type": "input_text", "text": request.previous_operation_text}
+            )
+            separator_placed = True
         # 画像の説明の専用のフィールドは無いため、画像の直前にラベルのテキストを置く
         content.append({"type": "input_text", "text": image.label})
         content.append({"type": "input_image", "image_url": jpeg_data_url(image.jpeg)})
@@ -176,6 +190,7 @@ class DecisionsApiModel:
             build_decisions_payload(request, self.model),
             self.timeout_s,
         )
-        return parse_decisions_response(
+        decision = parse_decisions_response(
             body, [question.name for question in request.questions]
         )
+        return replace(decision, raw_response=body)

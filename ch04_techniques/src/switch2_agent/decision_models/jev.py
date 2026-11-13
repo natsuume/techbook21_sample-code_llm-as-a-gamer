@@ -98,13 +98,16 @@ def build_jev_payload(
             "format": JPEG_ASSET_FORMAT,
             "data_base64": base64.b64encode(image.jpeg).decode("ascii"),
         }
+    state: dict[str, object] = {
+        "instructions": request.instructions,
+        "game_notes": request.state_text,
+    }
+    if request.history_text:
+        state["operation_history"] = request.history_text
+    state["frames"] = frames
     payload: dict[str, object] = {
         "model": model,
-        "state": {
-            "instructions": request.instructions,
-            "game_notes": request.state_text,
-            "frames": frames,
-        },
+        "state": state,
         "questions": {
             question.name: {"type": "noul", "instructions": question.text}
             for question in request.questions
@@ -179,4 +182,4 @@ class JevModel:
         probabilities = parse_jev_response(
             body, [question.name for question in request.questions]
         )
-        return Decision(probabilities=probabilities, refusals=0)
+        return Decision(probabilities=probabilities, refusals=0, raw_response=body)

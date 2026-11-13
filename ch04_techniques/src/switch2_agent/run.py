@@ -52,7 +52,7 @@ from switch2_agent.decision_models import decisions_api, jev
 from switch2_agent.decision_models.base import DecisionModel
 from switch2_agent.decision_models.decisions_api import DecisionsApiModel
 from switch2_agent.decision_models.jev import JevModel
-from switch2_agent.decision_request import JpegCache
+from switch2_agent.decision_request import JpegCache, build_instructions
 from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import (
@@ -73,6 +73,7 @@ from switch2_agent.pipeline import (
     PipelineParts,
 )
 from switch2_agent.questions import build_questions
+from switch2_agent.request_log import RequestLog
 from switch2_agent.run_log import RunLog
 
 FFMPEG_FPS_MIN, FFMPEG_FPS_MAX = 1, DEVICE_FPS  # 第2章の daemon と同じ範囲
@@ -387,6 +388,8 @@ def main(argv: list[str] | None = None) -> None:
                 frame.nv12, DEVICE_HEIGHT, args.image_width, args.jpeg_quality
             )
 
+        questions = build_questions()
+        request_log = RequestLog(run_dir) if args.save_requests else None
         pipeline = Pipeline(
             PipelineParts(
                 history=history,
@@ -396,7 +399,7 @@ def main(argv: list[str] | None = None) -> None:
                 output=output,
                 advisor=advisor,
                 read_notes=lambda: read_game_notes(note_paths),
-                questions=build_questions(),
+                questions=questions,
                 thresholds=Thresholds(
                     press=args.threshold_press,
                     tap=args.threshold_tap,
@@ -413,9 +416,12 @@ def main(argv: list[str] | None = None) -> None:
                 bridge_failed=lambda: supervisor.state == "failed",
                 bridge_recovering=lambda: supervisor.state == "recovering",
                 capture_lost=watcher.lost,
+                request_log=request_log,
             ),
             max_consecutive_errors=args.max_consecutive_errors,
         )
+        if request_log is not None:
+            request_log.write_header(args.model, build_instructions(), questions)
         run_log.write(
             {
                 "event": "start",

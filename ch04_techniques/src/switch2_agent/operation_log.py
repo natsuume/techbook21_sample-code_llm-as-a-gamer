@@ -66,7 +66,11 @@ class OperationLog:
 
         記録が count 件より少なければ、すべての記録を古い順に返す。count が 0 以下なら空のリストを返す。
         """
-        raise NotImplementedError
+        if count <= 0:
+            # records[-0:] はすべての記録になるため、先に除く
+            return []
+        with self.lock:
+            return list(self.records)[-count:]
 
     def format_since(self, time: float, now: float) -> str:
         """since(time) の記録を 1 行 1 応答で並べた文を返す。記録が無ければ空文字を返す。

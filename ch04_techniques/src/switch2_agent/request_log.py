@@ -13,6 +13,8 @@ Pipeline のスレッドだけから呼ぶため、ロックは持たない。�
 (Pipeline が捕まえて run.jsonl に記録し、判断のループは止めない)。
 """
 
+import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +23,9 @@ from typing import Literal
 from switch2_agent.action_decision import PadAction
 from switch2_agent.decision_models.base import Decision
 from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.operation_log import format_action
 from switch2_agent.questions import Question
+from switch2_agent.run_log import format_wall_time
 
 REQUEST_LOG_FILE_NAME = "requests.jsonl"
 FRAMES_DIR_NAME = (
@@ -34,7 +38,7 @@ def frame_file_name(t: float) -> str:
 
     ミリ秒は round(t * 1000) (例: t=1.5 なら 000001500.jpg、t=128.1 なら 000128100.jpg)。
     """
-    raise NotImplementedError
+    return f"{round(t * 1000):09d}.jpg"
 
 
 @dataclass(frozen=True)
@@ -72,9 +76,15 @@ class RequestLogEntry:
 class RequestLog:
     """実行のディレクトリー run_dir に、要求ごとの入出力を書く。
 
-    requests.jsonl の行は json.dumps(..., ensure_ascii=False) で書き、書くたびに flush する。
+    requests.jsonl の行は json.dumps(..., ensure_ascii=False) で書く。1 行を書くたびにファイルを追記のモード
+    (UTF-8) で開いて閉じるため、書いた行はすぐにファイルに書き出される (flush)。
     行の "time" は壁時計の時刻 (run_log.format_wall_time(time.time()) と同じ `HH:MM:SS.mmm` の形)。
     画像を書いたファイルの名前は、この RequestLog が覚えておき、同じ名前のファイルは 1 回だけ書く。
+
+    属性:
+        frames_dir       画像を書くディレクトリー (run_dir / FRAMES_DIR_NAME)
+        path             要求のログのファイル (run_dir / REQUEST_LOG_FILE_NAME)
+        written_frames   この RequestLog で書いた画像のファイル名の集合
     """
 
     def __init__(self, run_dir: Path):
@@ -82,7 +92,10 @@ class RequestLog:
 
         run_dir は呼び出し側が作る。requests.jsonl に既にある行は残す。
         """
-        raise NotImplementedError
+        self.frames_dir = run_dir / FRAMES_DIR_NAME
+        self.path = run_dir / REQUEST_LOG_FILE_NAME
+        self.frames_dir.mkdir(exist_ok=True)
+        self.written_frames: set[str] = set()
 
     def write_header(
         self, model: str, instructions: str, questions: Sequence[Question]
@@ -94,7 +107,22 @@ class RequestLog:
         run は、Pipeline を作った後に 1 回、model に起動引数 --model の値、instructions に
         decision_request.build_instructions()、questions に Pipeline に渡した問いの一覧を渡して呼ぶ。
         """
-        raise NotImplementedError
+        self._append_line(
+            {
+                "event": "header",
+                "time": format_wall_time(time.time()),
+                "model": model,
+                "instructions": instructions,
+                "questions": [
+                    {
+                        "name": question.name,
+                        "text": question.text,
+                        "kind": question.kind,
+                    }
+                    for question in questions
+                ],
+            }
+        )
 
     def write(self, entry: RequestLogEntry) -> None:
         """entry の画像の JPEG を frames/ に書き、entry を request の行として requests.jsonl に 1 行追記する。
@@ -116,10 +144,72 @@ class RequestLog:
                                       "file": "frames/<frame_file_name の名前>", "bytes": JPEG のバイト数,
                                       "after_previous_operation": after_previous_operation}
             state_text / history_text / previous_operation_text   entry.request の同名の値
-            probabilities / refusals / raw_response               entry.decision の同名の値 (decision があれば)
+            probabilities / refusals / raw_response               entry.decision の同名の値 (decision が None なら null)
             action                    operation_log.format_action(entry.action) (action が None なら null)
-            advisor_requested / advisor_probability               entry.action の同名の値 (action があれば)
+            advisor_requested / advisor_probability               entry.action の同名の値 (action が None なら null)
             advisor_accepted          entry.advisor_accepted
         書き込みの OSError はそのまま出す。
         """
-        raise NotImplementedError
+        for image in entry.request.images:
+            name = frame_file_name(image.frame_time - entry.origin)
+            if name not in self.written_frames:
+                (self.frames_dir / name).write_bytes(image.jpeg)
+                # 書けたときだけ覚える (書けなかった画像は、次に載ったときに書き直す)
+                self.written_frames.add(name)
+        self._append_line(build_request_record(entry, format_wall_time(time.time())))
+
+    def _append_line(self, record: dict[str, object]) -> None:
+        """record を JSON の 1 行として requests.jsonl に追記する (ファイルを開いて書き、閉じる)。"""
+        line = json.dumps(record, ensure_ascii=False)
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(line + "\n")
+
+
+def build_request_record(entry: RequestLogEntry, wall_time: str) -> dict[str, object]:
+    """entry を、requests.jsonl の request の行の辞書 (RequestLog.write の docstring のキー) にする (純粋な関数)。
+
+    wall_time は行の "time" に入れる壁時計の時刻。画像の file は frame_file_name で決める (書くのは RequestLog.write)。
+    """
+    request = entry.request
+    decision = entry.decision
+    action = entry.action
+    received = entry.received_at
+    images = []
+    for image in request.images:
+        t = image.frame_time - entry.origin
+        images.append(
+            {
+                "label": image.label,
+                "t": t,
+                "file": f"{FRAMES_DIR_NAME}/{frame_file_name(t)}",
+                "bytes": len(image.jpeg),
+                "after_previous_operation": image.after_previous_operation,
+            }
+        )
+    return {
+        "event": "request",
+        "number": entry.number,
+        "time": wall_time,
+        "t_sent": entry.sent_at - entry.origin,
+        "t_received": received - entry.origin if received is not None else None,
+        "decide_s": received - entry.encoded_at if received is not None else None,
+        "result": entry.result,
+        "error": entry.error,
+        "images": images,
+        "state_text": request.state_text,
+        "history_text": request.history_text,
+        "previous_operation_text": request.previous_operation_text,
+        "probabilities": decision.probabilities if decision is not None else None,
+        "refusals": decision.refusals if decision is not None else None,
+        "raw_response": (
+            dict(decision.raw_response)
+            if decision is not None and decision.raw_response is not None
+            else None
+        ),
+        "action": format_action(action) if action is not None else None,
+        "advisor_requested": action.advisor_requested if action is not None else None,
+        "advisor_probability": (
+            action.advisor_probability if action is not None else None
+        ),
+        "advisor_accepted": entry.advisor_accepted,
+    }

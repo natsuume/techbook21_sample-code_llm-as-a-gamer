@@ -721,6 +721,27 @@ def test_neutralizes_before_writing_request_log_when_capture_stops_while_waiting
     assert calls == ["neutral", "write discarded"]
 
 
+def test_neutralizes_before_writing_request_log_when_decide_fails():
+    pipeline, env = make_pipeline()
+    # 偽の output の neutral / apply と、偽の RequestLog の write を、呼ばれた順に 1 つのリストに記録する
+    calls: list[str] = []
+    env.output.events = calls
+
+    class OrderRecordingRequestLog(FakeRequestLog):
+        def write(self, entry: RequestLogEntry) -> None:
+            calls.append(f"write {entry.result}")
+            super().write(entry)
+
+    pipeline.parts.request_log = OrderRecordingRequestLog()
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError, match="HTTP 500"):
+        pipeline.run_once()
+    # 要求のログの書き込みで中立に戻すのを遅らせないよう、先に中立に戻してからログを書く
+    assert calls == ["neutral", "write error"]
+
+
 def test_request_log_records_discarded_decision_when_output_is_stopped():
     pipeline, env, request_log = make_pipeline_with_request_log()
     sent_decision = decision(press_A=0.9, advisor=0.9)
@@ -851,7 +872,8 @@ def test_run_neutralizes_waits_and_stops_after_consecutive_decision_errors():
         pipeline.run(threading.Event())
     assert type(excinfo.value) is RuntimeError
     assert len(env.model.requests) == 3
-    assert env.output.events == ["neutral"] * 3
+    # 失敗のたびに、run_once が要求のログを書く前に 1 回、run の扱いでもう 1 回、中立に戻す
+    assert env.output.events == ["neutral", "neutral"] * 3
     assert len(env.events("decision_error")) == 3
     # 失敗のたびに待つ (止まる直前の待ちの有無は問わない)
     assert env.sleeps[:2] == [1.0, 1.0]
@@ -875,7 +897,8 @@ def test_run_resets_error_count_after_success():
     env.clock.now = 10.0
     pipeline.run(stop)
     assert len(env.model.requests) == 6
-    assert env.output.events.count("neutral") == 3
+    # 3 回の失敗のそれぞれで、run_once と run の扱いが 1 回ずつ中立に戻す
+    assert env.output.events.count("neutral") == 6
     assert env.output.events.count("apply") == 3
 
 
