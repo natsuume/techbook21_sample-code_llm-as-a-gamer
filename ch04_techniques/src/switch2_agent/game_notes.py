@@ -49,6 +49,7 @@ def ensure_game_notes(
         - 無ければ作る。中身は defaults にその種別があればその内容、無ければ空にする
         - あって、中身が空か空白だけで、defaults にその種別があれば、その内容で書き直す
         - あって、中身が空白以外を含むなら変えない。読めない (OSError、UnicodeDecodeError) ときも変えない
+        - 空のファイルを書き直せない (OSError) ときは、警告を標準エラー出力に 1 行書き、変えずに続ける
     defaults の既定値は default_notes.DEFAULT_NOTES (controls と strategy の既定の内容)。
     NOTE_KINDS に無い種別のファイル (以前の実行で作られた progress.md など) は作らず、あっても変えず、
     返す辞書にも入れない。game が不正なら game_notes_dir と同じく ValueError にする。
@@ -66,7 +67,15 @@ def ensure_game_notes(
         except FileExistsError:
             pass
         if default and is_blank_file(path):
-            path.write_text(default, encoding="utf-8")
+            try:
+                path.write_text(default, encoding="utf-8")
+            except OSError as e:
+                # 書き直せない空のファイルは、読めないファイルと同じく変えずに起動を続ける
+                print(
+                    f"warning: could not write default notes to {path}: {describe_error(e)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
     return paths
 
 
