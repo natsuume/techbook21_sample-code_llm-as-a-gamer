@@ -836,6 +836,29 @@ def test_request_log_write_error_does_not_stop_requests():
     assert request_log.errors == []
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+        ValueError("Circular reference detected"),
+    ],
+)
+def test_request_log_value_error_does_not_stop_run_once(error):
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    request_log.errors = [error]
+    env.model.outcomes = [decision(press_A=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 書けなくても例外を出さず、操作を送って記録し、run.jsonl に残す
+    assert len(env.output.applied) == 1
+    assert len(env.operation_log.since(0.0)) == 1
+    assert len(env.events("decision")) == 1
+    assert env.events("request_log_error") == [
+        {"event": "request_log_error", "error": describe_error(error)}
+    ]
+
+
 def test_request_log_write_error_keeps_decision_model_error():
     pipeline, env, request_log = make_pipeline_with_request_log()
     error = OSError("disk full")
@@ -905,11 +928,12 @@ def test_run_resets_error_count_after_success():
 def test_run_waits_for_next_frame_after_first_request_fails():
     pipeline, env = make_pipeline()
     stop = threading.Event()
-    # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の後は、1 秒間隔のフレームが最初の区間 (0.5 秒) に入らない
+    # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の間 (中立に戻した 13.6 から 14.6 まで) は、
+    # 2 秒間隔のフレームが届かないので、次のフレーム (15.0) を待つ
     env.model.decide_s = 0.6
     env.model.outcomes = [DecisionModelError("HTTP 500")]
     # 起動 (10.0) から 3 秒 (stale_frame_timeout_s より長く first_frame_timeout_s より短い) フレームが無く、
-    # その後 13.0 から 1 秒間隔でフレームが届く
+    # その後 13.0 から 2 秒間隔でフレームが届く
     next_frame_time = 13.0
 
     def sleep_and_receive_frames(seconds: float) -> None:
@@ -919,7 +943,7 @@ def test_run_waits_for_next_frame_after_first_request_fails():
             pytest.fail("pipeline did not stop by 30.0")
         while next_frame_time <= env.clock.now:
             env.add_frames(next_frame_time)
-            next_frame_time += 1.0
+            next_frame_time += 2.0
 
     def stop_after_two_requests():
         if len(env.model.requests) == 2:
@@ -1359,6 +1383,33 @@ def test_request_after_decision_error_shows_neutral_as_previous_operation():
         "直近 2/3 (t=1.60 秒、0.40 秒前、前回の操作の前)",
         "直近 3/3 (t=1.80 秒、0.20 秒前、前回の操作の後)",
     ]
+
+
+def test_meaningful_frames_are_before_neutral_after_first_request_fails():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 最初の要求は 10.2 に失敗し、中立に戻した (成功した要求はまだ無い)
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    # 中立に戻す前 (9.6) と後 (10.5) に意味のあるフレームを撮り、失敗の後の待ちの後の 11.2 に次の要求を送る
+    env.store.add(frame(9.6))
+    env.store.add(frame(10.5))
+    env.add_frames(10.5, 11.0)
+    env.clock.now = 11.2
+    pipeline.run_once()
+    request = env.model.requests[1]
+    neutralized_at = neutral_records(env)[0].neutralized_at
+    meaningful = [
+        image for image in request.images if image.label.startswith("過去の場面")
+    ]
+    recent = [image for image in request.images if image.label.startswith("直近")]
+    # 中立に戻した後のフレームは、過去の場面ではなく直近の区間の「前回の操作の後」の画像として載る
+    assert [image.frame_time for image in meaningful] == [9.6]
+    assert all(image.frame_time < neutralized_at for image in meaningful)
+    assert [image.frame_time for image in recent] == [10.5, 11.0]
+    assert all(image.after_previous_operation for image in recent)
 
 
 def test_run_records_neutral_once_for_each_decision_error():

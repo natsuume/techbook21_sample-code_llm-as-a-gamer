@@ -344,6 +344,17 @@ def test_write_previous_operation_text_is_null_for_first_request(tmp_path):
     assert request_lines(tmp_path)[0]["previous_operation_text"] is None
 
 
+def test_write_keeps_lone_surrogate_in_raw_response_readable(tmp_path):
+    # 応答の JSON の "\ud800" の escape を読んだ値は、UTF-8 で書けない単独のサロゲートの文字になる
+    raw_response = {"model": "jev-1.14.0", "note": "壊れた文字\ud800"}
+    decision = replace(sample_decision(), raw_response=raw_response)
+    RequestLog(tmp_path).write(ok_entry(decision=decision))
+    lines = read_lines(tmp_path / REQUEST_LOG_FILE_NAME)
+    assert len(lines) == 1
+    # escape として書くので、読み直すと同じ値になる
+    assert lines[0]["raw_response"] == raw_response
+
+
 def test_write_keeps_non_ascii_text_readable(tmp_path):
     RequestLog(tmp_path).write(ok_entry())
     text = (tmp_path / REQUEST_LOG_FILE_NAME).read_text(encoding="utf-8")

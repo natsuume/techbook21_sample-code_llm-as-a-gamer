@@ -79,7 +79,8 @@ class RequestLog:
     """実行のディレクトリー run_dir に、要求ごとの入出力を書く。
 
     requests.jsonl の行は json.dumps(..., ensure_ascii=False) で書く。1 行を書くたびにファイルを追記のモード
-    (UTF-8) で開いて閉じるため、書いた行はすぐにファイルに書き出される (flush)。
+    (UTF-8) で開いて閉じるため、書いた行はすぐにファイルに書き出される (flush)。UTF-8 で書けない単独のサロゲートは
+    `\\udXXX` の escape として書く (_append_line)。
     行の "time" は壁時計の時刻 (run_log.format_wall_time(time.time()) と同じ `HH:MM:SS.mmm` の形)。
     画像を書いたファイルの名前は、この RequestLog が覚えておき、同じ名前のファイルは 1 回だけ書く。
 
@@ -161,9 +162,14 @@ class RequestLog:
         self._append_line(build_request_record(entry, format_wall_time(time.time())))
 
     def _append_line(self, record: dict[str, object]) -> None:
-        """record を JSON の 1 行として requests.jsonl に追記する (ファイルを開いて書き、閉じる)。"""
+        """record を JSON の 1 行として requests.jsonl に追記する (ファイルを開いて書き、閉じる)。
+
+        ファイルは errors="backslashreplace" で開く。UTF-8 で書けない単独のサロゲート (応答の JSON の `\\ud800` の
+        escape を読んだ値など) は、JSON の文字列の中で有効な `\\udXXX` の escape として書くため、json.loads で
+        読み直すと同じ値になる。
+        """
         line = json.dumps(record, ensure_ascii=False)
-        with self.path.open("a", encoding="utf-8") as file:
+        with self.path.open("a", encoding="utf-8", errors="backslashreplace") as file:
             file.write(line + "\n")
 
 

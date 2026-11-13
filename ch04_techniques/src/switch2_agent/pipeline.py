@@ -46,6 +46,7 @@ from switch2_agent.operation_log import (
     OperationLog,
     OperationRecord,
     format_action,
+    record_time,
 )
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.questions import Question
@@ -99,7 +100,7 @@ class RequestLogLike(Protocol):
     """Pipeline が要求ごとの入出力を書く先。run では request_log.RequestLog を使う。"""
 
     def write(self, entry: RequestLogEntry) -> None:
-        """要求 1 回分の記録を書く。書き込みの失敗は OSError で出す。"""
+        """要求 1 回分の記録を書く。書き込みの失敗は OSError か ValueError (文字の符号化の失敗など) で出す。"""
         ...
 
 
@@ -213,7 +214,9 @@ class Pipeline:
            続けて reason = capture_lost() が None でなければ、output.neutral() して CaptureStoppedError(reason) を出す
         2. history.latest() が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
            このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る
-        3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now) で選ぶ。
+        3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now,
+           previous_operation_at=operation_log の最新の記録の operation_log.record_time (記録が無ければ None))
+           で選ぶ (意味のあるフレームは、常に前回の操作より前のフレームになる)。
            直近の区間 (recent) が空なら、2 と同じく要求を送らず「新しいフレームが無いときの扱い」をして戻る。
            空でなければ、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
@@ -261,8 +264,9 @@ class Pipeline:
 
         要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
         (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
-        (ok 以外は False)、result、error) を request_log.write に渡す。write が OSError を出したら、判断のループを
-        止めないよう捕まえ、log に {"event": "request_log_error", "error": describe_error(例外)} を渡して続ける
+        (ok 以外は False)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
+        失敗など) を出したら、判断のループを止めないよう捕まえ、log に {"event": "request_log_error",
+        "error": describe_error(例外)} を渡して続ける
         (write が失敗しても、5・6 で出す例外は 5・6 のとおりに出す)。
 
         新しいフレームが無いときの扱い: no_new_frame_since が None なら clock() の値を入れる。
@@ -290,8 +294,17 @@ class Pipeline:
             return
 
         now = parts.clock()
+        latest_records = parts.operation_log.recent(1)
+        previous_operation_at = (
+            record_time(latest_records[0]) if latest_records else None
+        )
         frames = select_request_frames(
-            parts.history, parts.store, parts.selector, self.previous_sent_at, now
+            parts.history,
+            parts.store,
+            parts.selector,
+            self.previous_sent_at,
+            now,
+            previous_operation_at=previous_operation_at,
         )
         if not frames.recent:
             self._wait_for_new_frame()
@@ -536,8 +549,8 @@ class Pipeline:
     ) -> None:
         """parts.request_log があれば、要求 1 回分の RequestLogEntry (origin は started_at) を書く。
 
-        write の OSError は判断のループを止めないよう捕まえ、log に {"event": "request_log_error", "error": <説明>}
-        を渡して戻る (run_once の docstring の「要求のログ」)。
+        write の OSError と ValueError (文字の符号化の失敗など) は判断のループを止めないよう捕まえ、
+        log に {"event": "request_log_error", "error": <説明>} を渡して戻る (run_once の docstring の「要求のログ」)。
         """
         request_log = self.parts.request_log
         if request_log is None:
@@ -557,7 +570,7 @@ class Pipeline:
         )
         try:
             request_log.write(entry)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             self.parts.log({"event": "request_log_error", "error": describe_error(e)})
 
     def _wait_for_new_frame(self) -> None:
