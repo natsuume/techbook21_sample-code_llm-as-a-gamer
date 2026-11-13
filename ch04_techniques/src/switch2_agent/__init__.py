@@ -9,13 +9,13 @@ advisor (headless の Claude Code) を持つ。映像の受け取りと入力の
     capture_with_history   第2章の Capture に、フレームの履歴と鮮明度の計算を足したもの
     capture_watcher        キャプチャーが止まったことを別のスレッドで見張り、押下状態を中立に戻す
     frame_selection        advisor に渡すフレームの選び方 (等間隔の選択、意味のあるフレームの判定と保管)
-    questions              Decision Model に送る問いの一覧
+    questions              Decision Model に送る問いの一覧 (選択肢の問いと確率の問い)
     safety                 Decision Model と advisor に毎回入れる安全のための規則
     game_notes             ゲームの情報の 4 ファイル (操作方法・攻略情報・進行状況・戦略) の用意と読み取り
     decision_request       Decision Model への要求の組み立てと、JPEG の符号化の使い回し
     advisor_images         advisor に渡す画像 (ラベル付きの JPEG) の組み立て
     decision_models        Decision Model (OpenAI Decisions API と TypeSafe Jev) の呼び出し
-    action_decision        問いごとの確率から、押下状態・短押し・スティック・advisor の呼び出しを決める
+    action_decision        問いごとの答えから、押下状態・短押し・スティック・advisor の呼び出しを決める
     pad_output             押下状態と短押しを合わせたレポートの送信
     operation_log          応答と送った操作の記録
     advisors               advisor (headless の Claude Code) の呼び出し

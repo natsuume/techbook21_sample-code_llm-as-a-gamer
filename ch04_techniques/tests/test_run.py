@@ -7,6 +7,7 @@ from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_agent import run
+from switch2_agent.action_decision import Thresholds
 from switch2_agent.decision_models import jev
 from switch2_agent.decision_request import JpegCache, build_instructions
 from switch2_agent.frame_history import TimedFrame
@@ -237,8 +238,6 @@ def test_main_wires_pipeline_parts(recorder):
     run.main(
         [
             *REQUIRED,
-            "--threshold-press",
-            "0.6",
             "--threshold-advisor",
             "0.7",
             "--max-consecutive-errors",
@@ -253,9 +252,9 @@ def test_main_wires_pipeline_parts(recorder):
     assert recorder.model.api_key == TEST_API_KEY
     assert parts.history is recorder.capture.history
     assert isinstance(parts.encode, JpegCache)
-    assert (parts.thresholds.press, parts.thresholds.advisor) == (0.6, 0.7)
+    assert parts.thresholds == Thresholds(advisor=0.7)
     assert parts.game == "zelda"
-    assert len(parts.questions) == 43
+    assert parts.questions == build_questions()
     assert set(parts.read_notes()) == set(NOTE_KINDS)
 
 
@@ -353,7 +352,16 @@ def test_main_with_save_requests_passes_request_log_and_writes_header(recorder):
     assert header["model"] == "jev"
     assert header["instructions"] == build_instructions()
     assert header["questions"] == [
-        {"name": q.name, "text": q.text, "kind": q.kind} for q in build_questions()
+        {
+            "name": q.name,
+            "text": q.text,
+            "kind": q.kind,
+            "answer_type": q.answer_type,
+            "choices": [
+                {"name": c.name, "description": c.description} for c in q.choices
+            ],
+        }
+        for q in build_questions()
     ]
 
 
@@ -485,9 +493,6 @@ def test_parse_args_uses_defaults():
         "history_seconds": 5.0,
         "image_width": 1280,
         "jpeg_quality": 85,
-        "threshold_press": 0.5,
-        "threshold_tap": 0.5,
-        "threshold_stick": 0.5,
         "threshold_advisor": 0.5,
         "valley_ratio": 0.5,
         "similarity_threshold": 0.15,
@@ -541,9 +546,8 @@ def test_parse_args_requires_game_and_model(argv, capsys):
         (["--image-width", "1280"], "image_width", 1280),
         (["--jpeg-quality", "1"], "jpeg_quality", 1),
         (["--jpeg-quality", "100"], "jpeg_quality", 100),
-        (["--threshold-press", "0"], "threshold_press", 0.0),
-        (["--threshold-tap", "1"], "threshold_tap", 1.0),
-        (["--threshold-stick", "0.75"], "threshold_stick", 0.75),
+        (["--threshold-advisor", "0"], "threshold_advisor", 0.0),
+        (["--threshold-advisor", "0.75"], "threshold_advisor", 0.75),
         (["--threshold-advisor", "1.0"], "threshold_advisor", 1.0),
         (["--valley-ratio", "0.01"], "valley_ratio", 0.01),
         (["--valley-ratio", "0.99"], "valley_ratio", 0.99),
@@ -574,9 +578,9 @@ def test_parse_args_accepts_values_in_range(extra, attribute, expected):
         ["--image-width", "640.5"],
         ["--jpeg-quality", "0"],
         ["--jpeg-quality", "101"],
-        ["--threshold-press", "-0.1"],
-        ["--threshold-tap", "1.1"],
-        ["--threshold-stick", "nan"],
+        ["--threshold-advisor", "-0.1"],
+        ["--threshold-advisor", "1.1"],
+        ["--threshold-advisor", "nan"],
         ["--threshold-advisor", "2"],
         ["--valley-ratio", "0"],
         ["--valley-ratio", "1"],
@@ -595,6 +599,17 @@ def test_parse_args_rejects_values_out_of_range(extra, capsys):
         run.parse_args([*REQUIRED, *extra])
     assert excinfo.value.code == 2
     assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "option", ["--threshold-press", "--threshold-tap", "--threshold-stick"]
+)
+def test_parse_args_has_no_button_or_stick_thresholds(option, capsys):
+    # ボタンとスティックの問いはしきい値を使わないため、その起動引数は無い
+    with pytest.raises(SystemExit) as excinfo:
+        run.parse_args([*REQUIRED, option, "0.5"])
+    assert excinfo.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("option", ["--history-seconds", "--advisor-timeout"])

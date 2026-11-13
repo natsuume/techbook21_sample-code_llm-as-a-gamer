@@ -15,15 +15,13 @@ Ctrl+C で止まる。
     --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
     --jpeg-quality N             要求に載せる画像の JPEG の品質 (整数 1〜100、既定 85)
-    --threshold-press P          押下状態の問いのしきい値 (0〜1、既定 0.5)
-    --threshold-tap P            短押しの問いのしきい値 (0〜1、既定 0.5)
-    --threshold-stick P          スティックの問いのしきい値 (0〜1、既定 0.5)
-    --threshold-advisor P        advisor の問いのしきい値 (0〜1、既定 0.5)
+    --threshold-advisor P        advisor の問いのしきい値 (0〜1、既定 0.5)。ボタンとスティックの問いは選択肢の問いと
+                                 段階の確率の問いで決めるため、しきい値を持たない (action_decision.decide_action)
     --valley-ratio R             鮮明度の谷とみなす比 (0 と 1 を含まない範囲、既定 0.5)
     --similarity-threshold D     意味のあるフレームが似ているとみなす差分の上限 (0〜255、既定 0.15)
     --advisor-timeout S          advisor の 1 回の実行の上限 (秒。0 より大きい有限の値、既定 300)
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
-    --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの確率・応答の本文・操作) を
+    --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を
                                  runs/<実行>/requests.jsonl と frames/ に書く (容量が大きくなるため既定はオフ)
     範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
 
@@ -97,13 +95,6 @@ DEFAULT_IMAGE_WIDTH = DEVICE_WIDTH
 DEFAULT_JPEG_QUALITY = 85
 # --model ごとの API キーの環境変数の名前
 API_KEY_ENVS = {"jev": jev.API_KEY_ENV, "decisions": decisions_api.API_KEY_ENV}
-# しきい値の種類 → 起動引数の説明で使う呼び名
-THRESHOLD_TITLES = {
-    "press": "押下状態",
-    "tap": "短押し",
-    "stick": "スティック",
-    "advisor": "advisor",
-}
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -111,7 +102,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
     game (str)、model ("jev" / "decisions")、ffmpeg_fps (int、既定 30)、process_fps (int、既定 10)、
     history_seconds (float、既定 5.0)、image_width (int、既定 1280)、jpeg_quality (int、既定 85)、
-    threshold_press / threshold_tap / threshold_stick / threshold_advisor (float、既定 0.5)、
+    threshold_advisor (float、既定 0.5)、
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
     max_consecutive_errors (int、既定 5)、save_requests (bool、既定 False。--save-requests を付けたら True)。
 
@@ -164,13 +155,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_JPEG_QUALITY,
         help=f"要求に載せる画像の JPEG の品質 ({JPEG_QUALITY_MIN}〜{JPEG_QUALITY_MAX})",
     )
-    for kind, title in THRESHOLD_TITLES.items():
-        parser.add_argument(
-            f"--threshold-{kind}",
-            type=float,
-            default=DEFAULT_THRESHOLD,
-            help=f"{title}の問いのしきい値 (0〜1)。確率がこれを超えたら真",
-        )
+    parser.add_argument(
+        "--threshold-advisor",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help="advisor の問いのしきい値 (0〜1)。確率がこれを超えたら真",
+    )
     parser.add_argument(
         "--valley-ratio",
         type=float,
@@ -202,7 +192,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--save-requests",
         action="store_true",
         help=(
-            "要求ごとの入出力 (画像・ゲームの情報・問いごとの確率・応答の本文・操作) を "
+            "要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を "
             "runs/<実行>/requests.jsonl と frames/ に書く。容量が大きくなるため既定はオフ"
         ),
     )
@@ -248,10 +238,8 @@ def range_errors(args: argparse.Namespace) -> list[str]:
             f"--jpeg-quality must be {JPEG_QUALITY_MIN}..{JPEG_QUALITY_MAX}: "
             f"{args.jpeg_quality}"
         )
-    for kind in ("press", "tap", "stick", "advisor"):
-        value = getattr(args, f"threshold_{kind}")
-        if not 0.0 <= value <= 1.0:
-            errors.append(f"--threshold-{kind} must be 0..1: {value}")
+    if not 0.0 <= args.threshold_advisor <= 1.0:
+        errors.append(f"--threshold-advisor must be 0..1: {args.threshold_advisor}")
     if not 0.0 < args.valley_ratio < 1.0:
         errors.append(
             f"--valley-ratio must be between 0 and 1 (exclusive): {args.valley_ratio}"
@@ -403,12 +391,7 @@ def main(argv: list[str] | None = None) -> None:
                 advisor=advisor,
                 read_notes=lambda: read_game_notes(note_paths),
                 questions=questions,
-                thresholds=Thresholds(
-                    press=args.threshold_press,
-                    tap=args.threshold_tap,
-                    stick=args.threshold_stick,
-                    advisor=args.threshold_advisor,
-                ),
+                thresholds=Thresholds(advisor=args.threshold_advisor),
                 encode=JpegCache(encode),
                 operation_log=OperationLog(),
                 log=run_log.write,
