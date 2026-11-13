@@ -6,7 +6,9 @@ I/O・符号化・縮小は書き出しスレッドで行う。記録する側�
 
 件数の規則: written は書けた件数、dropped は捨てた件数 (満杯・受け付けをやめた後・失敗で止めた後に届いた分、
 失敗で止めたときにキューに残っていた分と失敗した 1 件、wait_until_written の時間切れで書けなかった分)。
-put を呼んだ回数 = written + dropped になる (wait_until_written が戻った後)。
+wait_until_written が戻るまでに put を呼んだ回数 = written + dropped になる。wait_until_written が戻った後の put は
+数えない (件数は、戻ったときの値から変えない。run の片付けでは、第 2 章の Capture.close がフレームの読み取りスレッドの
+終わりを待たないため、記録を閉じた後に、片付けの途中のフレームが多くても 1 件届くことがある)。
 """
 
 from collections.abc import Callable
@@ -54,14 +56,15 @@ class BoundedRecordWriter[T]:
         """item をキューに入れ、入れられたら True を返す。例外を出さない。
 
         キューが満杯のとき、stop_accepting の後、write_item の失敗で記録を止めた後は、入れずに dropped を
-        1 増やして False を返す。
+        1 増やして False を返す。wait_until_written が戻った後は、dropped も増やさずに False を返す。
         フレームの読み取りスレッドや PadOutput のロックの中から呼ぶため、I/O をせず、書き出しスレッドを待たない
         (queue.Queue.put_nowait と、件数だけを守る小さなロックを使い、write_item の間に持つロックは取らない)。
         """
         raise NotImplementedError
 
     def stop_accepting(self) -> None:
-        """以後の put を受け付けない (put は False を返し、dropped に数える)。キューに入っている分は書き続ける。
+        """以後の put を受け付けない (put は False を返し、wait_until_written が戻るまでは dropped に数える)。
+        キューに入っている分は書き続ける。
 
         待たずに戻る。2 つの writer を並行に待つため、終わるのを待つのは wait_until_written で行う。
         2 回目以降の呼び出しは何もしない。
@@ -77,7 +80,7 @@ class BoundedRecordWriter[T]:
         timeout_s 秒で終わらなければ、キューに残っていた分と書いている途中の 1 件を dropped に足し、以後は
         書き出しスレッドが新しく write_item を呼ばないようにして False を返す (書いている途中の 1 件は、ファイルに
         残ることがある。その 1 件が戻ったら、書き出しスレッドは on_finish を呼んで終わる)。
-        戻った後は、written と dropped が変わらない。
+        戻った後は、written と dropped が変わらない (以後の put は数えずに False を返す)。
         """
         raise NotImplementedError
 

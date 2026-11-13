@@ -230,6 +230,30 @@ def test_put_after_stop_accepting_is_dropped():
     assert (writer.written, writer.dropped) == (1, 1)
 
 
+def test_put_after_wait_until_written_returns_is_not_counted():
+    writes = Writes()
+    writer = make_writer(writes)
+    writer.put(1)
+    assert finish(writer) is True
+    # 記録を閉じた後に届いた記録 (片付けの途中のフレームなど) は、書かず、件数も変えない
+    assert writer.put(2) is False
+    assert writes.items == [1]
+    assert (writer.written, writer.dropped) == (1, 0)
+
+
+def test_put_after_wait_until_written_times_out_is_not_counted():
+    writes = Writes(open_gate=False)
+    writer = make_writer(writes)
+    writer.put(1)
+    wait_for(writes.started, "first write")
+    writer.stop_accepting()
+    assert writer.wait_until_written(SHORT_WAIT) is False
+    assert (writer.written, writer.dropped) == (0, 1)
+    assert writer.put(2) is False
+    assert (writer.written, writer.dropped) == (0, 1)
+    writes.gate.set()
+
+
 def test_stop_accepting_keeps_writing_queued_items():
     writes = Writes(open_gate=False)
     writer = make_writer(writes)
