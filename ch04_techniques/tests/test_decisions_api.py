@@ -1,5 +1,6 @@
 import base64
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -21,6 +22,12 @@ from switch2_agent.questions import Question
 IMAGE_ONE = b"jpeg-image-one"
 IMAGE_TWO = b"jpeg-image-two"
 NAMES = ["press_A", "tap_B", "advisor"]
+HISTORY_TEXT = (
+    "## 直近の応答と送った操作 (古い順、最大 5 回)\n"
+    "- t=3.80 秒 (0.10 秒前): 押下 none / 短押し A (前回の操作)"
+)
+PREVIOUS_OPERATION_TEXT = "── t=3.80 秒 (0.10 秒前) に、前回の応答の操作を送った ──"
+IMAGE_MARK = "<image>"  # content_texts で、画像 (input_image) の要素を表す文字列
 
 
 def sample_request() -> DecisionRequest:
@@ -41,6 +48,32 @@ def sample_request() -> DecisionRequest:
             ),
         ],
     )
+
+
+def timeline_request(
+    after_flags: list[bool],
+    previous_operation_text: str | None = PREVIOUS_OPERATION_TEXT,
+    history_text: str = HISTORY_TEXT,
+) -> DecisionRequest:
+    """after_flags の順に、`画像 <番号>` のラベルと after_previous_operation を持つ画像の要求を返す。"""
+    images = [
+        LabeledImage(f"画像 {number}", f"jpeg-{number}".encode(), float(number), after)
+        for number, after in enumerate(after_flags, start=1)
+    ]
+    return replace(
+        sample_request(),
+        images=images,
+        history_text=history_text,
+        previous_operation_text=previous_operation_text,
+    )
+
+
+def content_texts(payload: dict) -> list[str]:
+    """payload の content を、テキストは text、画像は IMAGE_MARK にした列にする。"""
+    return [
+        item["text"] if item["type"] == "input_text" else IMAGE_MARK
+        for item in payload["input"][0]["content"]
+    ]
 
 
 def b64(data: bytes) -> str:
@@ -147,6 +180,87 @@ def test_payload_uses_given_model():
     assert build_decisions_payload(sample_request(), model="other")["model"] == "other"
 
 
+def test_payload_puts_history_text_after_state_text():
+    request = timeline_request([False, False])
+    payload = build_decisions_payload(request)
+    assert payload["input"][0]["content"][:3] == [
+        {"type": "input_text", "text": request.instructions},
+        {"type": "input_text", "text": request.state_text},
+        {"type": "input_text", "text": HISTORY_TEXT},
+    ]
+
+
+def test_payload_without_history_text_puts_first_label_after_state_text():
+    request = timeline_request([False], previous_operation_text=None, history_text="")
+    assert content_texts(build_decisions_payload(request)) == [
+        request.instructions,
+        request.state_text,
+        "画像 1",
+        IMAGE_MARK,
+    ]
+
+
+@pytest.mark.parametrize(
+    "after_flags, expected_images",
+    [
+        # 「後」の最初の画像 (画像 3) のラベルの直前に、区切りの文を 1 回だけ置く
+        (
+            [False, False, True, True],
+            [
+                "画像 1",
+                IMAGE_MARK,
+                "画像 2",
+                IMAGE_MARK,
+                PREVIOUS_OPERATION_TEXT,
+                "画像 3",
+                IMAGE_MARK,
+                "画像 4",
+                IMAGE_MARK,
+            ],
+        ),
+        # 最初の画像が「後」なら、履歴の直後 (最初のラベルの直前) に置く
+        (
+            [True, True],
+            [PREVIOUS_OPERATION_TEXT, "画像 1", IMAGE_MARK, "画像 2", IMAGE_MARK],
+        ),
+        # 「後」の画像が無ければ置かない
+        ([False, False], ["画像 1", IMAGE_MARK, "画像 2", IMAGE_MARK]),
+    ],
+)
+def test_payload_puts_previous_operation_text_before_first_image_after_it(
+    after_flags, expected_images
+):
+    request = timeline_request(after_flags)
+    assert content_texts(build_decisions_payload(request)) == [
+        request.instructions,
+        request.state_text,
+        HISTORY_TEXT,
+        *expected_images,
+    ]
+
+
+def test_payload_without_previous_operation_text_has_no_separator():
+    request = timeline_request([False, True], previous_operation_text=None)
+    assert content_texts(build_decisions_payload(request)) == [
+        request.instructions,
+        request.state_text,
+        HISTORY_TEXT,
+        "画像 1",
+        IMAGE_MARK,
+        "画像 2",
+        IMAGE_MARK,
+    ]
+
+
+def test_payload_with_timeline_contains_each_image_once():
+    text = json.dumps(
+        build_decisions_payload(timeline_request([False, True])), ensure_ascii=False
+    )
+    assert text.count(b64(b"jpeg-1")) == 1
+    assert text.count(b64(b"jpeg-2")) == 1
+    assert text.count(PREVIOUS_OPERATION_TEXT) == 1
+
+
 # --- 応答の解釈 ---
 
 
@@ -227,8 +341,11 @@ def test_decide_posts_payload_and_returns_decision():
     model = DecisionsApiModel("sk-test", client=mock_client(handler))
     request = sample_request()
     decision = model.decide(request)
+    # 応答の本文の JSON の object を raw_response に入れて返す
     assert decision == Decision(
-        probabilities={"press_A": 0.95, "tap_B": 0.1, "advisor": 0.0}, refusals=0
+        probabilities={"press_A": 0.95, "tap_B": 0.1, "advisor": 0.0},
+        refusals=0,
+        raw_response=decision_body(ALL_ANSWERS),
     )
     assert len(requests) == 1
     sent = requests[0]
@@ -254,6 +371,24 @@ def test_decide_counts_refusals():
     )
     assert decision.refusals == 1
     assert decision.probabilities["tap_B"] == 0.0
+    assert decision.raw_response == decision_body(answers)
+
+
+def test_decide_sends_history_and_previous_operation_text():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=decision_body(ALL_ANSWERS))
+
+    request = timeline_request([False, True])
+    DecisionsApiModel("sk-test", client=mock_client(handler)).decide(request)
+    assert json.loads(requests[0].content) == build_decisions_payload(request)
+    assert content_texts(json.loads(requests[0].content))[2:5] == [
+        HISTORY_TEXT,
+        "画像 1",
+        IMAGE_MARK,
+    ]
 
 
 def test_decide_uses_given_model_and_timeout():

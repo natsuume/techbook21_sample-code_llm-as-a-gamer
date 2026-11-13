@@ -32,10 +32,13 @@ class Decision:
     probabilities   問いの name → 真である確率 (0〜1)。要求のすべての問いの name を含む
     refusals        回答を拒否された問いの数。拒否された問いの確率は 0.0 として probabilities に入れる
                     (拒否を返さない API では常に 0)
+    raw_response    応答の本文の JSON の object (post_json の結果)。要求ごとのログ (request_log) に残す。
+                    応答の本文を持たないとき (応答の解釈だけをしたときなど) は None
     """
 
     probabilities: dict[str, float]
     refusals: int
+    raw_response: Mapping[str, object] | None = None
 
 
 class DecisionModel(Protocol):

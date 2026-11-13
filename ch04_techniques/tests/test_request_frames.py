@@ -108,6 +108,44 @@ def test_meaningful_frames_of_first_request_are_before_first_window():
     assert times(frames.meaningful) == [9.0]
 
 
+def test_window_starts_at_previous_operation_before_first_window():
+    # まだ要求が成功していない (previous_sent_at が None) うちに、最初の区間の始まり (now - 0.5 = 10.5) より前の
+    # 9.8 に中立に戻した: 9.8 からを直近の区間にし、意味のあるフレームは 9.8 より前に限る
+    history = history_with(9.5, 9.9, 10.2, 10.8)
+    store = store_with(9.0, 9.7, 10.0)
+    frames = select_request_frames(
+        history, store, EvenIntervalSelector(), None, 11.0, previous_operation_at=9.8
+    )
+    assert times(frames.recent) == [9.9, 10.2, 10.8]
+    assert times(frames.meaningful) == [9.0, 9.7]
+
+
+def test_window_does_not_move_when_previous_operation_is_after_start():
+    # 前回の操作 (9.9) が前回の送信 (9.7) より後なら、直近の区間の始まりは前回の送信のまま
+    history = history_with(9.6, 9.8, 10.0)
+    store = store_with(9.65, 9.85)
+    frames = select_request_frames(
+        history, store, EvenIntervalSelector(), 9.7, 10.0, previous_operation_at=9.9
+    )
+    assert times(frames.recent) == [9.8, 10.0]
+    assert times(frames.meaningful) == [9.65]
+
+
+def test_first_window_does_not_move_when_previous_operation_is_inside_it():
+    # 前回の操作 (9.7) が最初の区間 (9.5 から 10.0) の中なら、始まりは now - first_window_s のまま
+    history = history_with(9.4, 9.6, 9.8, 10.0)
+    frames = select_request_frames(
+        history,
+        store_with(9.3),
+        EvenIntervalSelector(),
+        None,
+        10.0,
+        previous_operation_at=9.7,
+    )
+    assert times(frames.recent) == [9.6, 9.8, 10.0]
+    assert times(frames.meaningful) == [9.3]
+
+
 def test_meaningful_frames_are_limited_to_newest_meaningful_max():
     store = store_with(1.0, 2.0, 3.0, 4.0)
     frames = select_request_frames(

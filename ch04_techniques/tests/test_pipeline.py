@@ -4,6 +4,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 from switch2_remote.bridge_supervisor import BridgeReconnectingError
+from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds
 from switch2_agent.advisors.base import AdvisorContext
@@ -12,7 +13,7 @@ from switch2_agent.decision_request import DecisionRequest
 from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.even_interval import EvenIntervalSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
-from switch2_agent.operation_log import OperationLog, format_action
+from switch2_agent.operation_log import NeutralRecord, OperationLog, format_action
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.pipeline import (
     CaptureStoppedError,
@@ -21,9 +22,12 @@ from switch2_agent.pipeline import (
     PipelineParts,
 )
 from switch2_agent.questions import build_questions
+from switch2_agent.request_log import RequestLogEntry
 
 NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
+HISTORY_HEADING = "## 直近の応答と送った操作 (古い順、最大 5 回)"
 DECISION_LOG_KEYS = {
+    "number",
     "select_s",
     "encode_s",
     "decide_s",
@@ -127,6 +131,19 @@ class FakeAdvisor:
         pass
 
 
+class FakeRequestLog:
+    """偽の RequestLog。write で受け取った記録を entries に足す。errors の先頭があれば、足さずに送出する。"""
+
+    def __init__(self):
+        self.entries: list[RequestLogEntry] = []
+        self.errors: list[Exception] = []
+
+    def write(self, entry: RequestLogEntry) -> None:
+        if self.errors:
+            raise self.errors.pop(0)
+        self.entries.append(entry)
+
+
 class Env:
     """Pipeline に渡した偽の部品と、記録を持つ。"""
 
@@ -180,6 +197,16 @@ def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
     return Pipeline(parts, **kwargs), env
 
 
+def make_pipeline_with_request_log(
+    now: float = 9.0, **kwargs
+) -> tuple[Pipeline, Env, FakeRequestLog]:
+    """make_pipeline の Pipeline に、偽の RequestLog を渡したものを返す。"""
+    pipeline, env = make_pipeline(now, **kwargs)
+    request_log = FakeRequestLog()
+    pipeline.parts.request_log = request_log
+    return pipeline, env, request_log
+
+
 def frame_times(request: DecisionRequest) -> list[float]:
     return [image.frame_time for image in request.images]
 
@@ -228,6 +255,68 @@ def test_request_contains_latest_notes_and_questions():
     request = env.model.requests[0]
     assert "右へ進む" in request.state_text
     assert [q.name for q in request.questions] == [q.name for q in build_questions()]
+
+
+# --- 画像の時系列と操作の履歴 ---
+
+
+def test_first_request_has_elapsed_labels_and_no_previous_operation():
+    # パイプラインの開始 (9.0) を経過秒の起点にする
+    pipeline, env = make_pipeline(now=9.0)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    request = env.model.requests[0]
+    assert [image.label for image in request.images] == [
+        "直近 1/1 (t=0.90 秒、0.10 秒前)"
+    ]
+    assert [image.after_previous_operation for image in request.images] == [False]
+    assert request.history_text == f"{HISTORY_HEADING}\n(まだ操作を送っていない)"
+    assert request.previous_operation_text is None
+
+
+def test_second_request_marks_frames_before_and_after_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [decision(tap_UP=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答は 10.2 に受け取り、その直後に操作を送った
+    env.add_frames(10.1, 10.3)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    request = env.model.requests[1]
+    assert [image.label for image in request.images] == [
+        "直近 1/2 (t=1.10 秒、0.40 秒前、前回の操作の前)",
+        "直近 2/2 (t=1.30 秒、0.20 秒前、前回の操作の後)",
+    ]
+    assert [image.after_previous_operation for image in request.images] == [
+        False,
+        True,
+    ]
+    assert request.history_text == (
+        f"{HISTORY_HEADING}\n- t=1.20 秒 (0.30 秒前): 押下 none / 短押し UP (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=1.20 秒 (0.30 秒前) に、前回の応答の操作を送った ──"
+    )
+
+
+def test_request_history_has_at_most_five_recent_operations():
+    pipeline, env = make_pipeline(now=9.0)
+    # 時刻 10.0, 10.5, …, 13.0 に 7 回要求する (応答はそれぞれ 0.2 秒後)
+    for index in range(7):
+        now = 10.0 + 0.5 * index
+        env.add_frames(now - 0.1)
+        env.clock.now = now
+        pipeline.run_once()
+    lines = env.model.requests[6].history_text.splitlines()
+    # 見出しと、それまでの 6 回の操作のうち新しい 5 回 (10.7〜12.7 に受け取った応答)
+    assert lines[0] == HISTORY_HEADING
+    assert len(lines) == 6
+    assert lines[1].startswith("- t=1.70 秒 ")
+    assert lines[5].startswith("- t=3.70 秒 ")
+    assert lines[5].endswith(" (前回の操作)")
 
 
 # --- 操作 ---
@@ -456,6 +545,341 @@ def test_decision_log_has_measurement_items():
     assert log["action"] == format_action(env.output.applied[0])
     assert log["advisor_probability"] == 0.0
     assert log["refusals"] == 2
+    assert log["number"] == 1
+
+
+# --- 要求のログ ---
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_request_log_records_successful_request(accepted):
+    pipeline, env, request_log = make_pipeline_with_request_log(now=9.0)
+    sent_decision = decision(press_A=0.9, advisor=0.9)
+    env.model.outcomes = [sent_decision]
+    env.advisor.answers = [accepted]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert len(request_log.entries) == 1
+    entry = request_log.entries[0]
+    assert entry.number == 1
+    assert entry.origin == 9.0
+    assert entry.sent_at == 10.0
+    assert entry.received_at == pytest.approx(10.2)
+    assert entry.request is env.model.requests[0]
+    assert entry.decision is sent_decision
+    assert entry.action == env.output.applied[0]
+    assert entry.advisor_accepted is accepted
+    assert entry.result == "ok"
+    assert entry.error is None
+
+
+def test_request_log_entry_has_time_just_before_decide():
+    pipeline, env, request_log = make_pipeline_with_request_log(now=9.0)
+
+    def read_notes_taking_time() -> dict[str, str]:
+        # 要求を組み立てる間に 0.1 秒かかったことにする
+        env.clock.now += 0.1
+        return dict(NOTES)
+
+    pipeline.parts.read_notes = read_notes_taking_time
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    entry = request_log.entries[0]
+    # sent_at は要求の時刻 (フレームを選ぶ前)、encoded_at は model.decide を呼ぶ直前の時刻
+    assert entry.sent_at == 10.0
+    assert entry.encoded_at == pytest.approx(10.1)
+    assert entry.received_at == pytest.approx(10.3)
+    # run.jsonl の decide_s と同じく、encoded_at から received_at までが model.decide の時間
+    assert env.events("decision")[0]["decide_s"] == pytest.approx(
+        entry.received_at - entry.encoded_at
+    )
+
+
+def test_request_numbers_count_every_sent_request():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    env.model.outcomes = [DecisionModelError("HTTP 500"), decision()]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    env.add_frames(10.3)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    # 失敗した要求も通し番号を進める
+    assert pipeline.request_count == 2
+    assert [entry.number for entry in request_log.entries] == [1, 2]
+    assert [entry.result for entry in request_log.entries] == ["error", "ok"]
+    assert [event["number"] for event in env.events("decision")] == [2]
+
+
+def test_request_count_starts_at_zero():
+    pipeline, _ = make_pipeline()
+    assert pipeline.request_count == 0
+
+
+def test_no_request_log_entry_without_new_frame():
+    # 新しいフレームが無く要求を送らない回は、通し番号を進めず、要求のログにも書かない
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.model.requests == []
+    assert pipeline.request_count == 0
+    assert request_log.entries == []
+
+
+def test_request_log_records_decision_error_and_raises():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError, match="HTTP 500"):
+        pipeline.run_once()
+    assert len(request_log.entries) == 1
+    entry = request_log.entries[0]
+    assert entry.result == "error"
+    assert entry.error == "HTTP 500"
+    assert entry.request is env.model.requests[0]
+    assert entry.sent_at == 10.0
+    assert entry.encoded_at == 10.0
+    assert entry.received_at is None
+    assert entry.decision is None
+    assert entry.action is None
+    assert entry.advisor_accepted is False
+
+
+def test_request_log_records_discarded_decision_when_capture_is_lost():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    sent_decision = decision(press_A=0.9)
+    env.model.outcomes = [sent_decision]
+
+    def lose_capture():
+        env.capture_lost = "no new frame for 2.0 seconds"
+
+    env.model.on_decide = lose_capture
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run_once()
+    assert len(request_log.entries) == 1
+    entry = request_log.entries[0]
+    assert entry.result == "discarded"
+    assert entry.error == "no new frame for 2.0 seconds"
+    assert entry.received_at == pytest.approx(10.2)
+    assert entry.decision is sent_decision
+    # 操作を決める前に応答を捨てた
+    assert entry.action is None
+    assert entry.advisor_accepted is False
+
+
+def test_request_log_records_discarded_decision_when_capture_ends():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+
+    def end_capture():
+        env.capture_ended = True
+
+    env.model.on_decide = end_capture
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="capture ended"):
+        pipeline.run_once()
+    assert [(e.result, e.error) for e in request_log.entries] == [
+        ("discarded", "capture ended")
+    ]
+
+
+def mark_capture_lost(env: Env) -> None:
+    env.capture_lost = "no new frame for 2.0 seconds"
+
+
+def mark_capture_ended(env: Env) -> None:
+    env.capture_ended = True
+
+
+@pytest.mark.parametrize("stop_capture", [mark_capture_lost, mark_capture_ended])
+def test_neutralizes_before_writing_request_log_when_capture_stops_while_waiting(
+    stop_capture,
+):
+    pipeline, env = make_pipeline()
+    # 偽の output の neutral / apply と、偽の RequestLog の write を、呼ばれた順に 1 つのリストに記録する
+    calls: list[str] = []
+    env.output.events = calls
+
+    class OrderRecordingRequestLog(FakeRequestLog):
+        def write(self, entry: RequestLogEntry) -> None:
+            calls.append(f"write {entry.result}")
+            super().write(entry)
+
+    pipeline.parts.request_log = OrderRecordingRequestLog()
+    env.model.on_decide = lambda: stop_capture(env)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    # 要求のログの書き込みで中立に戻すのを遅らせないよう、先に中立に戻してからログを書く
+    assert calls == ["neutral", "write discarded"]
+
+
+def test_neutralizes_before_writing_request_log_when_decide_fails():
+    pipeline, env = make_pipeline()
+    # 偽の output の neutral / apply と、偽の RequestLog の write を、呼ばれた順に 1 つのリストに記録する
+    calls: list[str] = []
+    env.output.events = calls
+
+    class OrderRecordingRequestLog(FakeRequestLog):
+        def write(self, entry: RequestLogEntry) -> None:
+            calls.append(f"write {entry.result}")
+            super().write(entry)
+
+    pipeline.parts.request_log = OrderRecordingRequestLog()
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(DecisionModelError, match="HTTP 500"):
+        pipeline.run_once()
+    # 要求のログの書き込みで中立に戻すのを遅らせないよう、先に中立に戻してからログを書く
+    assert calls == ["neutral", "write error"]
+
+
+def test_request_log_records_discarded_decision_when_output_is_stopped():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    sent_decision = decision(press_A=0.9, advisor=0.9)
+    env.model.outcomes = [sent_decision]
+    env.output.apply_errors = [OutputStoppedError("pad output was stopped")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="pad output was stopped"):
+        pipeline.run_once()
+    assert len(request_log.entries) == 1
+    entry = request_log.entries[0]
+    assert entry.result == "discarded"
+    assert entry.error == "pad output was stopped"
+    assert entry.decision is sent_decision
+    # 操作は決めたが、送られていない
+    assert entry.action is not None
+    assert entry.action.held.buttons == frozenset({"A"})
+    assert entry.advisor_accepted is False
+    assert env.advisor.contexts == []
+
+
+def test_request_log_uses_reason_from_watcher_when_output_is_stopped():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+
+    class StoppingOutput(FakeOutput):
+        def apply(self, action):
+            env.capture_lost = "no new frame for 2.0 seconds"
+            raise OutputStoppedError("pad output was stopped")
+
+    pipeline.parts.output = StoppingOutput()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError):
+        pipeline.run_once()
+    assert [(e.result, e.error) for e in request_log.entries] == [
+        ("discarded", "no new frame for 2.0 seconds")
+    ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("bridge did not acknowledge the report"),
+        OSError("pipe closed"),
+    ],
+)
+def test_request_log_records_send_error(error):
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    sent_decision = decision(press_A=0.9)
+    env.model.outcomes = [sent_decision]
+    env.output.apply_errors = [error]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(OutputSendError):
+        pipeline.run_once()
+    assert len(request_log.entries) == 1
+    entry = request_log.entries[0]
+    assert entry.result == "error"
+    assert entry.error == describe_error(error)
+    assert entry.received_at == pytest.approx(10.2)
+    assert entry.decision is sent_decision
+    assert entry.action is not None
+    assert entry.action.held.buttons == frozenset({"A"})
+    assert entry.advisor_accepted is False
+
+
+def test_request_log_write_error_does_not_stop_requests():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    errors = [OSError("disk full"), OSError("disk full")]
+    request_log.errors = list(errors)
+
+    def add_frame_and_stop_after_two_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    env.model.on_decide = add_frame_and_stop_after_two_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 書けなくても判断のループは止まらず、操作を送って run.jsonl に残す
+    assert len(env.model.requests) == 2
+    assert len(env.output.applied) == 2
+    assert len(env.events("decision")) == 2
+    assert len(env.operation_log.since(0.0)) == 2
+    assert env.events("request_log_error") == [
+        {"event": "request_log_error", "error": describe_error(error)}
+        for error in errors
+    ]
+    assert request_log.errors == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+        ValueError("Circular reference detected"),
+    ],
+)
+def test_request_log_value_error_does_not_stop_run_once(error):
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    request_log.errors = [error]
+    env.model.outcomes = [decision(press_A=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 書けなくても例外を出さず、操作を送って記録し、run.jsonl に残す
+    assert len(env.output.applied) == 1
+    assert len(env.operation_log.since(0.0)) == 1
+    assert len(env.events("decision")) == 1
+    assert env.events("request_log_error") == [
+        {"event": "request_log_error", "error": describe_error(error)}
+    ]
+
+
+def test_request_log_write_error_keeps_decision_model_error():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    error = OSError("disk full")
+    request_log.errors = [error]
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 要求のログが書けなくても、Decision Model の失敗はそのまま出す
+    with pytest.raises(DecisionModelError, match="HTTP 500"):
+        pipeline.run_once()
+    assert env.events("request_log_error") == [
+        {"event": "request_log_error", "error": describe_error(error)}
+    ]
+
+
+def test_request_log_writes_one_entry_per_request():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    run_three_requests(env, pipeline)
+    assert [entry.number for entry in request_log.entries] == [1, 2, 3]
+    assert [entry.request for entry in request_log.entries] == env.model.requests
+    assert [event["number"] for event in env.events("decision")] == [1, 2, 3]
 
 
 # --- run ---
@@ -471,7 +895,8 @@ def test_run_neutralizes_waits_and_stops_after_consecutive_decision_errors():
         pipeline.run(threading.Event())
     assert type(excinfo.value) is RuntimeError
     assert len(env.model.requests) == 3
-    assert env.output.events == ["neutral"] * 3
+    # 失敗のたびに、run_once が要求のログを書く前に 1 回、run の扱いでもう 1 回、中立に戻す
+    assert env.output.events == ["neutral", "neutral"] * 3
     assert len(env.events("decision_error")) == 3
     # 失敗のたびに待つ (止まる直前の待ちの有無は問わない)
     assert env.sleeps[:2] == [1.0, 1.0]
@@ -495,18 +920,20 @@ def test_run_resets_error_count_after_success():
     env.clock.now = 10.0
     pipeline.run(stop)
     assert len(env.model.requests) == 6
-    assert env.output.events.count("neutral") == 3
+    # 3 回の失敗のそれぞれで、run_once と run の扱いが 1 回ずつ中立に戻す
+    assert env.output.events.count("neutral") == 6
     assert env.output.events.count("apply") == 3
 
 
 def test_run_waits_for_next_frame_after_first_request_fails():
     pipeline, env = make_pipeline()
     stop = threading.Event()
-    # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の後は、1 秒間隔のフレームが最初の区間 (0.5 秒) に入らない
+    # 応答の時間 (0.6 秒) と失敗の後の待ち (1.0 秒) の間 (中立に戻した 13.6 から 14.6 まで) は、
+    # 2 秒間隔のフレームが届かないので、次のフレーム (15.0) を待つ
     env.model.decide_s = 0.6
     env.model.outcomes = [DecisionModelError("HTTP 500")]
     # 起動 (10.0) から 3 秒 (stale_frame_timeout_s より長く first_frame_timeout_s より短い) フレームが無く、
-    # その後 13.0 から 1 秒間隔でフレームが届く
+    # その後 13.0 から 2 秒間隔でフレームが届く
     next_frame_time = 13.0
 
     def sleep_and_receive_frames(seconds: float) -> None:
@@ -516,7 +943,7 @@ def test_run_waits_for_next_frame_after_first_request_fails():
             pytest.fail("pipeline did not stop by 30.0")
         while next_frame_time <= env.clock.now:
             env.add_frames(next_frame_time)
-            next_frame_time += 1.0
+            next_frame_time += 2.0
 
     def stop_after_two_requests():
         if len(env.model.requests) == 2:
@@ -913,3 +1340,173 @@ def test_run_does_nothing_when_stop_is_already_set():
     env.clock.now = 10.0
     pipeline.run(stop)
     assert env.model.requests == []
+
+
+# --- 判断のループを続けたまま中立に戻したことの記録 ---
+
+
+def neutral_records(env: Env) -> list[NeutralRecord]:
+    """env の operation_log にある、中立に戻した記録を古い順に返す。"""
+    return [
+        record
+        for record in env.operation_log.since(0.0)
+        if isinstance(record, NeutralRecord)
+    ]
+
+
+def test_request_after_decision_error_shows_neutral_as_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [decision(press_RIGHT=0.9), DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 1 回目の応答は 10.2 に受け取り、RIGHT を押した。2 回目の要求は 10.7 に失敗し、中立に戻した
+    env.add_frames(10.4)
+    env.clock.now = 10.5
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    env.add_frames(10.6, 10.8)
+    env.clock.now = 11.0
+    pipeline.run_once()
+    request = env.model.requests[2]
+    assert request.history_text == (
+        f"{HISTORY_HEADING}\n"
+        "- t=1.20 秒 (0.80 秒前): 押下 RIGHT / 短押し none\n"
+        "- t=1.70 秒 (0.30 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=1.70 秒 (0.30 秒前) に、中立に戻した (Decision Model の失敗) ──"
+    )
+    # 中立に戻した時刻 (10.7) が、前回の操作の前と後の境目になる
+    assert [image.label for image in request.images] == [
+        "直近 1/3 (t=1.40 秒、0.60 秒前、前回の操作の前)",
+        "直近 2/3 (t=1.60 秒、0.40 秒前、前回の操作の前)",
+        "直近 3/3 (t=1.80 秒、0.20 秒前、前回の操作の後)",
+    ]
+
+
+def test_meaningful_frames_are_before_neutral_after_first_request_fails():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [DecisionModelError("HTTP 500")]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 最初の要求は 10.2 に失敗し、中立に戻した (成功した要求はまだ無い)
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    # 中立に戻す前 (9.6) と後 (10.5) に意味のあるフレームを撮り、失敗の後の待ちの後の 11.2 に次の要求を送る
+    env.store.add(frame(9.6))
+    env.store.add(frame(10.5))
+    env.add_frames(10.5, 11.0)
+    env.clock.now = 11.2
+    pipeline.run_once()
+    request = env.model.requests[1]
+    neutralized_at = neutral_records(env)[0].neutralized_at
+    meaningful = [
+        image for image in request.images if image.label.startswith("過去の場面")
+    ]
+    recent = [image for image in request.images if image.label.startswith("直近")]
+    # 中立に戻した後のフレームは、過去の場面ではなく直近の区間の「前回の操作の後」の画像として載る
+    assert [image.frame_time for image in meaningful] == [9.6]
+    assert all(image.frame_time < neutralized_at for image in meaningful)
+    assert [image.frame_time for image in recent] == [10.5, 11.0]
+    assert all(image.after_previous_operation for image in recent)
+
+
+def test_run_records_neutral_once_for_each_decision_error():
+    pipeline, env = make_pipeline(now=9.0, error_backoff_s=1.0)
+    stop = threading.Event()
+    env.model.outcomes = [decision(press_RIGHT=0.9), DecisionModelError("HTTP 500")]
+
+    def add_frame_and_stop_after_three_requests():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 3:
+            stop.set()
+
+    # 失敗の後の待ち (1.0 秒) で clock を進め、待ち終わりの時刻のフレームを足す
+    pipeline.parts.sleep = sleep_with_new_frames(env, lambda count: None)
+    env.model.on_decide = add_frame_and_stop_after_three_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 3
+    # run_once と run の扱いで 2 回中立に戻すが、記録は 1 件だけ (2 回目の要求が失敗した 10.4 の記録)
+    assert env.output.events == ["apply", "neutral", "neutral", "apply"]
+    records = neutral_records(env)
+    assert len(records) == 1
+    assert records[0].neutralized_at == pytest.approx(10.4)
+    assert records[0].reason == "Decision Model の失敗"
+    assert len(env.operation_log.since(0.0)) == 3
+    assert env.model.requests[2].history_text.splitlines()[-1] == (
+        "- t=1.40 秒 (1.00 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
+    )
+
+
+def test_request_after_bridge_wait_shows_neutral_as_previous_operation():
+    pipeline, env = make_pipeline(now=9.0)
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+    env.model.outcomes = [decision(press_RIGHT=0.9)]
+
+    def add_frame_and_break_bridge_on_second_request():
+        env.add_frames(env.clock.now)
+        if len(env.model.requests) == 2:
+            # 2 回目の応答を待つ間にブリッジが壊れて復旧が始まり、操作の送信は BridgeReconnectingError になる
+            env.bridge_recovering = True
+            env.output.apply_errors = [
+                BridgeReconnectingError("controller bridge is reconnecting")
+            ]
+        if len(env.model.requests) == 3:
+            stop.set()
+
+    def end_recovery_after_two_waits(count: int) -> None:
+        if count == 2:
+            env.bridge_recovering = False
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, end_recovery_after_two_waits)
+    env.model.on_decide = add_frame_and_break_bridge_on_second_request
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    assert len(env.model.requests) == 3
+    # 1 回目の操作 (10.1 に RIGHT を押した) の後、10.2 に復旧を待ち始めて中立に戻し、10.4 に 3 回目の要求を送った
+    assert env.output.events == ["apply", "neutral", "apply"]
+    records = neutral_records(env)
+    assert len(records) == 1
+    assert records[0].neutralized_at == pytest.approx(10.2)
+    assert records[0].reason == "コントローラーの接続の復旧待ち"
+    request = env.model.requests[2]
+    assert request.history_text == (
+        f"{HISTORY_HEADING}\n"
+        "- t=1.10 秒 (0.30 秒前): 押下 RIGHT / 短押し none\n"
+        "- t=1.20 秒 (0.20 秒前): 中立に戻した (コントローラーの接続の復旧待ち) (前回の操作)"
+    )
+    assert request.previous_operation_text == (
+        "── t=1.20 秒 (0.20 秒前) に、中立に戻した (コントローラーの接続の復旧待ち) ──"
+    )
+    # 中立に戻す前のフレーム (10.1) だけが「前回の操作の前」になる
+    assert frame_times(request) == pytest.approx([10.1, 10.2, 10.3, 10.4])
+    assert [image.after_previous_operation for image in request.images] == [
+        False,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_advisor_operation_log_includes_neutral_after_decision_error():
+    pipeline, env = make_pipeline(now=9.0)
+    env.model.outcomes = [DecisionModelError("HTTP 500"), decision(advisor=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    # 1 回目の要求は 10.2 に失敗し、中立に戻した
+    with pytest.raises(DecisionModelError):
+        pipeline.run_once()
+    env.add_frames(10.4)
+    env.clock.now = 10.5
+    pipeline.run_once()
+    assert len(env.advisor.contexts) == 1
+    # advisor に渡す記録にも、中立に戻したことの行が入る (advisor の確率は書かない)
+    assert env.advisor.contexts[0].operation_log_text == (
+        "-0.50 秒: 中立に戻した (Decision Model の失敗)\n"
+        "0.00 秒: 押下 none / 短押し none / advisor 0.90"
+    )

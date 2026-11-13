@@ -9,12 +9,20 @@ https://developers.openai.com/api/reference/resources/decisions/methods/create�
       "input": [{"role": "user", "content": [
         {"type": "input_text", "text": <instructions>},
         {"type": "input_text", "text": <state_text>},
+        {"type": "input_text", "text": <history_text>},
         {"type": "input_text", "text": <画像 1 のラベル>},
         {"type": "input_image", "image_url": "data:image/jpeg;base64,<画像 1 の base64>"},
+        ...
+        {"type": "input_text", "text": <previous_operation_text>},
+        {"type": "input_text", "text": <前回の操作の後の最初の画像のラベル>},
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,<その画像の base64>"},
         ...
       ]}],
       "questions": [{"type": "predicate", "name": <Question.name>, "instructions": <Question.text>}, ...]
     }
+history_text (直近の応答と送った操作の履歴) のテキストは、空文字なら置かない。previous_operation_text
+(前回の操作を送った時点の区切りの文) は、前回の操作の後 (after_previous_operation が True) の最初の画像の
+ラベルの直前に 1 回だけ置き、previous_operation_text が None か、前回の操作の後の画像が無ければ置かない。
 応答の形: {"answers": [{"type": "predicate", "name": ..., "probability": ...}, ...], "model": ..., "usage": ...}。
 answer は {"type": "refusal", "name": ...} (probability が無い) のこともある。
 
@@ -25,6 +33,7 @@ answer は {"type": "refusal", "name": ...} (probability が無い) のことも
 
 import base64
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import httpx
 
@@ -60,16 +69,31 @@ def build_decisions_payload(
 ) -> dict[str, object]:
     """request を Decisions API の要求の JSON (モジュールの docstring の形) にする。
 
-    input は user のメッセージ 1 つ。content には、instructions のテキスト、state_text のテキストを置き、
-    続けて request.images の順に、ラベルのテキスト (input_text) と画像 (input_image、jpeg_data_url) を
-    1 組ずつ置く。各画像の本体は要求の中に 1 回だけ入る。
+    input は user のメッセージ 1 つ。content には、instructions のテキスト、state_text のテキスト、
+    history_text のテキスト (空文字なら置かない) の順に置き、続けて request.images の順に、ラベルのテキスト
+    (input_text) と画像 (input_image、jpeg_data_url) を 1 組ずつ置く。after_previous_operation が True の
+    最初の画像の組の直前 (ラベルのテキストの前) には、request.previous_operation_text が None でなければ、
+    その文の input_text を 1 回だけ置く。各画像の本体は要求の中に 1 回だけ入る。
     questions は request.questions の順に、{"type": "predicate", "name": name, "instructions": text}。
     """
     content: list[dict[str, str]] = [
         {"type": "input_text", "text": request.instructions},
         {"type": "input_text", "text": request.state_text},
     ]
+    if request.history_text:
+        content.append({"type": "input_text", "text": request.history_text})
+    separator_placed = False
     for image in request.images:
+        if (
+            image.after_previous_operation
+            and not separator_placed
+            and request.previous_operation_text is not None
+        ):
+            # 前回の操作を送った時点の区切りを、送った後の最初の画像の組の前に 1 回だけ置く
+            content.append(
+                {"type": "input_text", "text": request.previous_operation_text}
+            )
+            separator_placed = True
         # 画像の説明の専用のフィールドは無いため、画像の直前にラベルのテキストを置く
         content.append({"type": "input_text", "text": image.label})
         content.append({"type": "input_image", "image_url": jpeg_data_url(image.jpeg)})
@@ -153,8 +177,9 @@ class DecisionsApiModel:
         self.model = model
 
     def decide(self, request: DecisionRequest) -> Decision:
-        """request を DECISIONS_URL に POST し、parse_decisions_response の結果を返す。
+        """request を DECISIONS_URL に POST し、parse_decisions_response の結果の raw_response に応答の本文を入れて返す。
 
+        応答の本文は post_json の結果の JSON の object。
         ヘッダーは build_decisions_headers、本文は build_decisions_payload(request, model)。
         送信と応答の検証は base.post_json で行う (httpx の例外と 2xx 以外の応答は DecisionModelError)。
         """
@@ -165,6 +190,7 @@ class DecisionsApiModel:
             build_decisions_payload(request, self.model),
             self.timeout_s,
         )
-        return parse_decisions_response(
+        decision = parse_decisions_response(
             body, [question.name for question in request.questions]
         )
+        return replace(decision, raw_response=body)

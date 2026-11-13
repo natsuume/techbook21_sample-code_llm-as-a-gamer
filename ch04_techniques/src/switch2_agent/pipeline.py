@@ -8,33 +8,49 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
 1 回の要求 (run_once) の流れ:
     1. キャプチャーが終わっていないか (見張りが止まったと判定していないか)、新しいフレームが届いているかを確かめる
     2. 要求に載せるフレームを選ぶ (前回の要求の送信から今までの直近の区間 + それより前の意味のあるフレーム)
-    3. ゲームの情報の 4 ファイルの最新の内容を読み、要求を組み立てる
+    3. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
     4. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
        そうでなければ、問いごとの確率から操作を決めて PadOutput に渡す (すぐ戻る)
     5. advisor を呼ぶ答えなら、Advisor.request_update を呼ぶ (すぐ戻る)
-時間はすべて clock の差で測る。
+    6. 要求のログ (request_log) があれば、要求ごとの入出力を書く
+時間はすべて clock の差で測る。画像のラベルと操作の履歴の経過秒は、Pipeline の開始時刻 (started_at) を起点にする。
 """
 
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds, decide_action
 from switch2_agent.advisors.base import Advisor, AdvisorContext
-from switch2_agent.decision_models.base import DecisionModel, DecisionModelError
-from switch2_agent.decision_request import build_decision_request
+from switch2_agent.decision_models.base import (
+    Decision,
+    DecisionModel,
+    DecisionModelError,
+)
+from switch2_agent.decision_request import (
+    DEFAULT_HISTORY_COUNT,
+    DecisionRequest,
+    build_decision_request,
+)
 from switch2_agent.frame_history import FrameHistory, TimedFrame
 from switch2_agent.frame_selection.base import RecentFrameSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
 from switch2_agent.frame_selection.request_frames import select_request_frames
-from switch2_agent.operation_log import OperationLog, OperationRecord, format_action
+from switch2_agent.operation_log import (
+    NeutralRecord,
+    OperationLog,
+    OperationRecord,
+    format_action,
+    record_time,
+)
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.questions import Question
+from switch2_agent.request_log import RequestLogEntry
 
 # Decision Model の失敗がこの回数続いたら止まる
 DEFAULT_MAX_CONSECUTIVE_ERRORS = 5
@@ -45,6 +61,9 @@ DEFAULT_STALE_FRAME_TIMEOUT_S = 2.0
 # まだ 1 回も要求を送っていない間に、最初のフレームを待つ上限 (秒)。ffmpeg の起動に時間がかかるため長めにとる
 DEFAULT_FIRST_FRAME_TIMEOUT_S = 10.0
 DEFAULT_BRIDGE_WAIT_S = 0.1  # ブリッジの復旧を待つ間の確認の間隔 (秒)
+# 判断のループを続けたまま中立に戻したときに、operation_log の NeutralRecord に書く理由
+DECISION_ERROR_NEUTRAL_REASON = "Decision Model の失敗"
+BRIDGE_WAIT_NEUTRAL_REASON = "コントローラーの接続の復旧待ち"
 
 
 class CaptureStoppedError(RuntimeError):
@@ -77,6 +96,14 @@ class PadOutputLike(Protocol):
         ...
 
 
+class RequestLogLike(Protocol):
+    """Pipeline が要求ごとの入出力を書く先。run では request_log.RequestLog を使う。"""
+
+    def write(self, entry: RequestLogEntry) -> None:
+        """要求 1 回分の記録を書く。書き込みの失敗は OSError か ValueError (文字の符号化の失敗など) で出す。"""
+        ...
+
+
 @dataclass
 class PipelineParts:
     """Pipeline が使う部品。
@@ -91,7 +118,7 @@ class PipelineParts:
     questions        問いの一覧 (questions.build_questions)
     thresholds       問いの種類ごとのしきい値
     encode           フレームを JPEG にする関数 (run では decision_request.JpegCache を渡す)
-    operation_log    応答と送った操作の記録
+    operation_log    応答と送った操作の記録と、判断のループを続けたまま中立に戻した記録
     log              ログの辞書を 1 件ずつ受け取る関数 (run では RunLog.write)
     clock            現在時刻 (秒) を返す関数 (フレームの time と同じ時計)
     sleep            秒数を受け取って待つ関数
@@ -103,6 +130,8 @@ class PipelineParts:
                        (run では lambda: supervisor.state == "recovering")
     capture_lost     キャプチャーが止まったと見張り (capture_watcher.CaptureWatcher) が判定していれば、その理由を
                      返す関数。まだなら None (run では watcher.lost)
+    request_log      要求ごとの入出力を書く先 (run では --save-requests が付いていれば request_log.RequestLog)。
+                     None なら書かない
     """
 
     history: FrameHistory
@@ -124,6 +153,7 @@ class PipelineParts:
     bridge_failed: Callable[[], bool]
     bridge_recovering: Callable[[], bool]
     capture_lost: Callable[[], str | None]
+    request_log: RequestLogLike | None = None
 
 
 class Pipeline:
@@ -137,8 +167,11 @@ class Pipeline:
         stale_frame_timeout_s    最初の要求を送った後、新しいフレームが無い状態がこの秒数以上続いたら止まる
         first_frame_timeout_s    まだ 1 回も要求を送っていない間、新しいフレームが無い状態がこの秒数以上続いたら止まる
         bridge_wait_s            ブリッジの復旧を待つ間の確認の間隔 (秒)
-        started_at               パイプラインの開始時刻 (__init__ での clock())。最初の advisor の操作の記録の起点
+        started_at               パイプラインの開始時刻 (__init__ での clock())。最初の advisor の操作の記録の起点で、
+                                 要求の画像のラベルと操作の履歴に書く経過秒 (t) の起点
         request_sent             1 回でも model.decide を呼んだら (要求を送ったら) True
+        request_count            送った要求の数 (0 始まり)。model.decide を呼ぶ前に 1 増やし、増やした後の値を
+                                 その要求の通し番号 (requests.jsonl と run.jsonl の number) にする
         previous_sent_at         前回の要求の送信時刻。まだ送っていなければ None
         last_sent_frame_time     前回の要求に載せた最新のフレームの time。まだ送っていなければ None
         last_advisor_at          操作の記録の起点 (advisor が受け付けた要求の received_at。最初は started_at)
@@ -157,7 +190,7 @@ class Pipeline:
         first_frame_timeout_s: float = DEFAULT_FIRST_FRAME_TIMEOUT_S,
         bridge_wait_s: float = DEFAULT_BRIDGE_WAIT_S,
     ):
-        """属性を入れる。started_at と last_advisor_at は parts.clock() の値にする。"""
+        """属性を入れる。started_at と last_advisor_at は parts.clock() の値にし、request_count は 0 にする。"""
         self.parts = parts
         self.max_consecutive_errors = max_consecutive_errors
         self.error_backoff_s = error_backoff_s
@@ -167,6 +200,7 @@ class Pipeline:
         self.bridge_wait_s = bridge_wait_s
         self.started_at = parts.clock()
         self.request_sent = False
+        self.request_count = 0
         self.previous_sent_at: float | None = None
         self.last_sent_frame_time: float | None = None
         self.last_advisor_at = self.started_at
@@ -180,33 +214,60 @@ class Pipeline:
            続けて reason = capture_lost() が None でなければ、output.neutral() して CaptureStoppedError(reason) を出す
         2. history.latest() が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
            このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る
-        3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now) で選ぶ。
+        3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now,
+           previous_operation_at=operation_log の最新の記録の operation_log.record_time (記録が無ければ None))
+           で選ぶ (意味のあるフレームは、常に前回の操作より前のフレームになる)。
            直近の区間 (recent) が空なら、2 と同じく要求を送らず「新しいフレームが無いときの扱い」をして戻る。
            空でなければ、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
-        4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode)
-        5. request_sent = True、sent_at = now、decision = model.decide(request)、received_at = clock()。
+        4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode,
+           origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT))。
+           組み立て終えたら encoded_at = clock() (model.decide を呼ぶ直前の時刻)
+        5. request_sent = True、request_count を 1 増やす (増やした後の値 number がこの要求の通し番号)。
+           sent_at = now、decision = model.decide(request)、received_at = clock()。
+           model.decide が DecisionModelError を出したら、まず output.neutral() し (要求のログの書き込みで、
+           中立に戻すのを遅らせないため)、operation_log.add(NeutralRecord(clock(), DECISION_ERROR_NEUTRAL_REASON))
+           で中立に戻したことを記録する (次の要求の履歴に出し、画像のラベルの前回の操作の時刻にするため)。
+           その後に要求のログに result="error"、error=例外の文字列 (str)、received_at・decision・action は None の
+           記録を書いてから、その例外をそのまま出す (run の DecisionModelError の扱いでも、もう一度
+           output.neutral() を呼ぶが、記録は足さない)。
            成功したら consecutive_errors = 0。続けて、応答を待つ間にキャプチャーが止まっていないかを確かめる:
            reason = capture_lost() とし、None で capture_ended() が真なら reason = "capture ended"。
            reason があれば応答を捨て (操作を反映せず、operation_log にも log の decision にも残さない)、
-           output.neutral() して CaptureStoppedError(reason) を出す
+           まず output.neutral() し (要求のログの書き込みで、中立に戻すのを遅らせないため)、その後に要求のログに
+           result="discarded"、error=reason、decision は応答、action は None の記録を書いてから、
+           CaptureStoppedError(reason) を出す
         6. action = decide_action(decision.probabilities, questions, thresholds)、output.apply(action)。
            apply が pad_output.OutputStoppedError を出したら (5 の確認の後に、見張りがキャプチャーの停止を判定して
-           出力を止めた)、5 と同じく応答を捨て、CaptureStoppedError(capture_lost() の理由。無ければ
-           "pad output was stopped") を出す
+           出力を止めた)、5 と同じく応答を捨て、要求のログに result="discarded"、error=止まった理由、decision は応答、
+           action は決めた操作の記録を書いてから、CaptureStoppedError(止まった理由。capture_lost() の理由で、無ければ
+           "pad output was stopped") を出す。5 と違って中立に戻すのを待たずにログを書いてよいのは、見張りが出力を
+           止めたときに、PadOutput.stop_output が既に中立を送っているため。
+           apply が送信の例外 (RuntimeError / OSError) を出したら、要求のログに result="error"、
+           error=describe_error(例外)、decision は応答、action は決めた操作の記録を書き、OutputSendError に包んで出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
         8. action.advisor_requested なら AdvisorContext を作って advisor.request_update を呼ぶ。
            AdvisorContext は game、request.images、notes の strategy (無ければ空文字)、
            operation_log.format_since(last_advisor_at, received_at)、action.advisor_probability、
            time.strftime("%H:%M:%S") の壁時計の時刻からなる。
            受け付けられたら (True)、last_advisor_at = received_at (次の操作の記録の起点)
-        9. previous_sent_at = sent_at、last_sent_frame_time = 載せた直近の区間の最新のフレームの time。
+        9. 要求のログに result="ok"、error=None、decision は応答、action は送った操作、
+           advisor_accepted=request_update の結果 (呼ばなければ False) の記録を書く
+        10. previous_sent_at = sent_at、last_sent_frame_time = 載せた直近の区間の最新のフレームの time。
            log に次の辞書を渡す:
-             {"event": "decision", "select_s": 3 の時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
+             {"event": "decision", "number": この要求の通し番号 (requests.jsonl の行と突き合わせるため),
+              "select_s": 3 の時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
               (HTTP を含む), "apply_s": output.apply の時間, "images": 画像の枚数,
               "payload_bytes": 画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
               "advisor_probability", "advisor_requested", "advisor_accepted": request_update の結果
               (呼ばなければ False), "refusals": decision.refusals}
+
+        要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
+        (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
+        (ok 以外は False)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
+        失敗など) を出したら、判断のループを止めないよう捕まえ、log に {"event": "request_log_error",
+        "error": describe_error(例外)} を渡して続ける
+        (write が失敗しても、5・6 で出す例外は 5・6 のとおりに出す)。
 
         新しいフレームが無いときの扱い: no_new_frame_since が None なら clock() の値を入れる。
         clock() - no_new_frame_since が上限以上なら、output.neutral() して CaptureStoppedError を出す
@@ -233,8 +294,17 @@ class Pipeline:
             return
 
         now = parts.clock()
+        latest_records = parts.operation_log.recent(1)
+        previous_operation_at = (
+            record_time(latest_records[0]) if latest_records else None
+        )
         frames = select_request_frames(
-            parts.history, parts.store, parts.selector, self.previous_sent_at, now
+            parts.history,
+            parts.store,
+            parts.selector,
+            self.previous_sent_at,
+            now,
+            previous_operation_at=previous_operation_at,
         )
         if not frames.recent:
             self._wait_for_new_frame()
@@ -244,13 +314,32 @@ class Pipeline:
 
         notes = parts.read_notes()
         request = build_decision_request(
-            frames, now, notes, parts.questions, parts.encode
+            frames,
+            now,
+            notes,
+            parts.questions,
+            parts.encode,
+            origin=self.started_at,
+            recent_operations=parts.operation_log.recent(DEFAULT_HISTORY_COUNT),
         )
         encoded_at = parts.clock()
 
         self.request_sent = True
+        self.request_count += 1
+        number = self.request_count
         sent_at = now
-        decision = parts.model.decide(request)
+        try:
+            decision = parts.model.decide(request)
+        except DecisionModelError as e:
+            # 中立に戻し、そのことを操作の記録に足してから要求のログを書く。例外は run に任せる
+            parts.output.neutral()
+            parts.operation_log.add(
+                NeutralRecord(parts.clock(), DECISION_ERROR_NEUTRAL_REASON)
+            )
+            self._write_request_log(
+                number, sent_at, encoded_at, request, result="error", error=str(e)
+            )
+            raise
         received_at = parts.clock()
         self.consecutive_errors = 0
         # 応答を待つ間にキャプチャーが止まっていたら、古い画面への応答なので操作を反映しない
@@ -259,6 +348,16 @@ class Pipeline:
             lost_reason = "capture ended"
         if lost_reason is not None:
             parts.output.neutral()
+            self._write_request_log(
+                number,
+                sent_at,
+                encoded_at,
+                request,
+                result="discarded",
+                error=lost_reason,
+                received_at=received_at,
+                decision=decision,
+            )
             raise CaptureStoppedError(lost_reason)
 
         action = decide_action(
@@ -268,11 +367,33 @@ class Pipeline:
         try:
             parts.output.apply(action)
         except OutputStoppedError:
-            # 上の確認の後に見張りが出力を止めた。操作は送られていないので、記録せずに止まる
-            raise CaptureStoppedError(
-                parts.capture_lost() or "pad output was stopped"
-            ) from None
+            # 上の確認の後に見張りが出力を止めた (中立は stop_output が送っている)。操作は送られていないので、
+            # operation_log には記録せずに止まる
+            stopped_reason = parts.capture_lost() or "pad output was stopped"
+            self._write_request_log(
+                number,
+                sent_at,
+                encoded_at,
+                request,
+                result="discarded",
+                error=stopped_reason,
+                received_at=received_at,
+                decision=decision,
+                action=action,
+            )
+            raise CaptureStoppedError(stopped_reason) from None
         except (RuntimeError, OSError) as e:
+            self._write_request_log(
+                number,
+                sent_at,
+                encoded_at,
+                request,
+                result="error",
+                error=describe_error(e),
+                received_at=received_at,
+                decision=decision,
+                action=action,
+            )
             raise OutputSendError(e) from e
         applied_at = parts.clock()
 
@@ -293,12 +414,25 @@ class Pipeline:
             )
             if advisor_accepted:
                 self.last_advisor_at = received_at
+        self._write_request_log(
+            number,
+            sent_at,
+            encoded_at,
+            request,
+            result="ok",
+            error=None,
+            received_at=received_at,
+            decision=decision,
+            action=action,
+            advisor_accepted=advisor_accepted,
+        )
 
         self.previous_sent_at = sent_at
         self.last_sent_frame_time = max(frame.time for frame in frames.recent)
         parts.log(
             {
                 "event": "decision",
+                "number": number,
                 "select_s": selected_at - now,
                 "encode_s": encoded_at - selected_at,
                 "decide_s": received_at - encoded_at,
@@ -320,7 +454,8 @@ class Pipeline:
         _wait_for_bridge_recovery(stop) で復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を
         送らない)。送信の失敗で復旧が始まった場合も、次の回の始めの確認で待つ。capture_lost() が理由を返すときは、
         復旧中でも待たずに run_once を呼び、その始めの確認で止まる。run_once の例外は次のように扱う:
-        - DecisionModelError: output.neutral() し、log に {"event": "decision_error", "error": <説明>} を渡し、
+        - DecisionModelError: output.neutral() し (中立に戻したことは run_once が operation_log に記録済みのため、
+          記録は足さない)、log に {"event": "decision_error", "error": <説明>} を渡し、
           consecutive_errors を 1 増やし、sleep(error_backoff_s) する。consecutive_errors が
           max_consecutive_errors に達したら RuntimeError (DecisionModelError ではない) で止まる
         - OutputSendError (apply の送信の失敗) は、元の例外で次のように扱う:
@@ -371,7 +506,9 @@ class Pipeline:
     def _wait_for_bridge_recovery(self, stop: threading.Event) -> None:
         """コントローラーのブリッジの復旧が終わるのを、要求を送らずに待つ。
 
-        1. output.neutral() を 1 回呼び、log に {"event": "bridge_wait"} を渡す
+        1. output.neutral() を 1 回呼び、operation_log.add(NeutralRecord(<neutral を呼ぶ直前の clock の値>,
+           BRIDGE_WAIT_NEUTRAL_REASON)) で中立に戻したことを記録して (復旧後の要求の履歴に出し、画像のラベルの
+           前回の操作の時刻にするため)、log に {"event": "bridge_wait"} を渡す
         2. stop が立つか、bridge_recovering() が偽になるか、capture_lost() が理由を返すまで、
            sleep(bridge_wait_s) を繰り返す
         3. log に {"event": "bridge_wait_end", "waited_s": <1 の時点からの clock の差>} を渡す
@@ -383,6 +520,7 @@ class Pipeline:
         parts = self.parts
         started = parts.clock()
         parts.output.neutral()
+        parts.operation_log.add(NeutralRecord(started, BRIDGE_WAIT_NEUTRAL_REASON))
         parts.log({"event": "bridge_wait"})
         while (
             not stop.is_set()
@@ -395,6 +533,45 @@ class Pipeline:
             error = RuntimeError("controller bridge failed while waiting for recovery")
             parts.log({"event": "pipeline_error", "error": describe_error(error)})
             raise error
+
+    def _write_request_log(
+        self,
+        number: int,
+        sent_at: float,
+        encoded_at: float,
+        request: DecisionRequest,
+        result: Literal["ok", "error", "discarded"],
+        error: str | None,
+        received_at: float | None = None,
+        decision: Decision | None = None,
+        action: PadAction | None = None,
+        advisor_accepted: bool = False,
+    ) -> None:
+        """parts.request_log があれば、要求 1 回分の RequestLogEntry (origin は started_at) を書く。
+
+        write の OSError と ValueError (文字の符号化の失敗など) は判断のループを止めないよう捕まえ、
+        log に {"event": "request_log_error", "error": <説明>} を渡して戻る (run_once の docstring の「要求のログ」)。
+        """
+        request_log = self.parts.request_log
+        if request_log is None:
+            return
+        entry = RequestLogEntry(
+            number=number,
+            origin=self.started_at,
+            sent_at=sent_at,
+            encoded_at=encoded_at,
+            received_at=received_at,
+            request=request,
+            decision=decision,
+            action=action,
+            advisor_accepted=advisor_accepted,
+            result=result,
+            error=error,
+        )
+        try:
+            request_log.write(entry)
+        except (OSError, ValueError) as e:
+            self.parts.log({"event": "request_log_error", "error": describe_error(e)})
 
     def _wait_for_new_frame(self) -> None:
         """新しいフレームが無いときの扱い (run_once の docstring のとおり)。"""

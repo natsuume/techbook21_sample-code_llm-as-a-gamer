@@ -7,9 +7,11 @@ from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_agent import run
-from switch2_agent.decision_request import JpegCache
+from switch2_agent.decision_request import JpegCache, build_instructions
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.game_notes import NOTE_KINDS
+from switch2_agent.questions import build_questions
+from switch2_agent.request_log import RequestLog
 
 REQUIRED = ["--game", "zelda", "--model", "jev"]
 TEST_API_KEY = "test-key-not-a-secret"
@@ -318,6 +320,69 @@ def test_main_encodes_frames_with_given_width_and_quality(recorder):
     assert image.shape == (360, 640, 3)
 
 
+def test_main_without_save_requests_writes_no_request_log(recorder):
+    run.main(REQUIRED)
+    assert recorder.pipeline.parts.request_log is None
+    run_dirs = list((recorder.workdir / "runs").iterdir())
+    assert len(run_dirs) == 1
+    assert not (run_dirs[0] / "requests.jsonl").exists()
+    assert not (run_dirs[0] / "frames").exists()
+
+
+def test_main_with_save_requests_passes_request_log_and_writes_header(recorder):
+    run.main([*REQUIRED, "--save-requests"])
+    assert isinstance(recorder.pipeline.parts.request_log, RequestLog)
+    run_logs = list((recorder.workdir / "runs").glob("*/run.jsonl"))
+    assert len(run_logs) == 1
+    # 要求のログは、run.jsonl と同じ実行のディレクトリーに書く
+    run_dir = run_logs[0].parent
+    assert (run_dir / "frames").is_dir()
+    lines = [
+        json.loads(line)
+        for line in (run_dir / "requests.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(lines) == 1
+    header = lines[0]
+    assert header["event"] == "header"
+    assert header["model"] == "jev"
+    assert header["instructions"] == build_instructions()
+    assert header["questions"] == [
+        {"name": q.name, "text": q.text, "kind": q.kind} for q in build_questions()
+    ]
+
+
+def test_main_writes_request_log_header_after_creating_pipeline(recorder, monkeypatch):
+    class FakeRequestLog:
+        def __init__(self, run_dir):
+            self.run_dir = run_dir
+            recorder.request_log = self
+            recorder.events.append("request log opened")
+
+        def write_header(self, model, instructions, questions):
+            self.header = (model, instructions, questions)
+            recorder.events.append("request log header")
+
+    monkeypatch.setattr(run, "RequestLog", FakeRequestLog)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_API_KEY)
+    run.main(["--game", "zelda", "--model", "decisions", "--save-requests"])
+    events = recorder.events
+    assert (
+        events.index("request log opened")
+        < events.index("pipeline created")
+        < events.index("request log header")
+        < events.index("pipeline run")
+    )
+    parts = recorder.pipeline.parts
+    assert parts.request_log is recorder.request_log
+    model, instructions, questions = recorder.request_log.header
+    assert (model, instructions) == ("decisions", build_instructions())
+    # Pipeline に渡したものと同じ問いの一覧を書く
+    assert list(questions) == parts.questions
+    assert recorder.request_log.run_dir.parent == recorder.workdir / "runs"
+
+
 def test_main_uses_decisions_model_with_openai_key(recorder, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", TEST_API_KEY)
     run.main(["--game", "zelda", "--model", "decisions"])
@@ -409,7 +474,12 @@ def test_parse_args_uses_defaults():
         "similarity_threshold": 0.15,
         "advisor_timeout": 300.0,
         "max_consecutive_errors": 5,
+        "save_requests": False,
     }
+
+
+def test_parse_args_accepts_save_requests():
+    assert run.parse_args([*REQUIRED, "--save-requests"]).save_requests is True
 
 
 def test_parse_args_accepts_decisions_model():
