@@ -11,6 +11,7 @@ from switch2_agent.advisor_roles import ADVISOR_ROLES, AdvisorRole
 from switch2_agent.advisors import claude_code_headless
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.advisors.claude_code_headless import (
+    FAILED_RUN_COOLDOWN_S,
     TERMINATE_GRACE_S,
     ClaudeCodeHeadlessAdvisor,
     advisor_run_dir_name,
@@ -700,7 +701,7 @@ def test_request_update_terminates_claude_on_timeout(tmp_path):
     assert result["stderr"] == "still running"
     assert len(recorder.events) == 1
     assert recorder.events[0]["timed_out"] is True
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path):
@@ -717,7 +718,7 @@ def test_request_update_kills_claude_that_ignores_terminate_on_timeout(tmp_path)
     ]
     assert TERMINATE_GRACE_S == 5.0
     assert read_result(runs_dir)["timed_out"] is True
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_terminates_claude_when_waiting_fails(tmp_path):
@@ -736,7 +737,7 @@ def test_request_update_terminates_claude_when_waiting_fails(tmp_path):
     assert len(recorder.events) == 1
     assert "timeout value is too large" in recorder.events[0]["error"]
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
@@ -755,7 +756,7 @@ def test_request_update_kills_claude_that_ignores_terminate_when_waiting_fails(
     ]
     assert "timeout value is too large" in read_result(runs_dir)["error"]
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_stops_reading_when_pipes_stay_open_after_kill(tmp_path):
@@ -781,7 +782,7 @@ def test_request_update_stops_reading_when_pipes_stay_open_after_kill(tmp_path):
     assert result["stderr"] == ""
     assert len(recorder.events) == 1
     assert advisor.process is None
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_request_update_records_exception(tmp_path):
@@ -793,9 +794,57 @@ def test_request_update_records_exception(tmp_path):
     assert result["returncode"] is None
     assert "claude not found" in result["error"]
     assert len(recorder.events) == 1
+    assert advisor.busy is False
+    # 失敗の後、FAILED_RUN_COOLDOWN_S 秒の間は次の要求を受け付けず、その後は受け付ける
+    assert FAILED_RUN_COOLDOWN_S == 60.0
+    assert advisor.is_busy() is True
+    assert advisor.request_update(sample_context()) is False
+    advisor.clock.now += FAILED_RUN_COOLDOWN_S - 0.01
+    assert advisor.request_update(sample_context()) is False
+    advisor.clock.now += 0.01
     assert advisor.is_busy() is False
-    # 失敗の後も、次の要求を受け付ける
     assert advisor.request_update(sample_context()) is True
+    assert len(start_process.calls) == 2
+
+
+def test_failed_run_cooldown_starts_at_end_of_failed_run(tmp_path):
+    # 待ちは、失敗した実行が終わった時刻から数える (実行に 300 秒かかったタイムアウトなら、その後から 60 秒)
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    start_process.timeout_first = True
+    start_process.duration = 300.0
+    started = advisor.clock.now
+    advisor.request_update(sample_context())
+    assert advisor.retry_after == started + 300.0 + FAILED_RUN_COOLDOWN_S
+    assert advisor.is_busy() is True
+
+
+def test_run_with_nonzero_exit_code_starts_cooldown(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    start_process.exit_code = 1
+    advisor.request_update(sample_context())
+    assert advisor.busy is False
+    assert advisor.is_busy() is True
+    assert advisor.request_update(sample_context()) is False
+
+
+def test_successful_run_does_not_start_cooldown(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path)
+    advisor.request_update(sample_context())
+    assert advisor.retry_after is None
+    assert advisor.is_busy() is False
+    assert advisor.request_update(sample_context()) is True
+    assert len(start_process.calls) == 2
+
+
+def test_successful_run_after_cooldown_clears_it(tmp_path):
+    advisor, start_process, _, _ = make_advisor(tmp_path, failed_run_cooldown_s=5.0)
+    start_process.exit_code = 1
+    advisor.request_update(sample_context())
+    assert advisor.retry_after is not None
+    advisor.clock.now += 5.0
+    start_process.exit_code = 0
+    assert advisor.request_update(sample_context()) is True
+    assert advisor.retry_after is None
 
 
 # --- close ---
@@ -820,7 +869,7 @@ def test_close_terminates_running_claude_and_waits_for_thread(tmp_path):
     process = start_process.processes[0]
     assert "terminate" in process.calls
     assert "kill" not in process.calls
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
     result = read_result(runs_dir)
     assert result["returncode"] == -15
     assert result["error"] == "stopped by close"
@@ -839,7 +888,7 @@ def test_close_kills_claude_that_ignores_terminate(tmp_path):
     advisor.close()
     process = start_process.processes[0]
     assert process.calls[1:] == ["terminate", ("wait", TERMINATE_GRACE_S), "kill"]
-    assert advisor.is_busy() is False
+    assert advisor.busy is False
 
 
 def test_close_prevents_starting_claude_for_pending_request(tmp_path):

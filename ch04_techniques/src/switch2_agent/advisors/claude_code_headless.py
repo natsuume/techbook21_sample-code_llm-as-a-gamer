@@ -75,6 +75,9 @@ DEFAULT_MAX_TURNS = 30  # claude -p の --max-turns の既定値
 DEFAULT_ADVISOR_TIMEOUT_S = 300.0  # 1 回の advisor の実行の上限 (秒)
 # terminate してから kill するまでに、子プロセスが終わるのを待つ時間 (秒)
 TERMINATE_GRACE_S = 5.0
+# 失敗した実行 (error があるか、終了コードが 0 以外) の後、次の実行を受け付けない時間 (秒)。claude を起動できない
+# ときなどに、要求のたびに実行と画像の符号化を繰り返して速い層を遅らせないため
+FAILED_RUN_COOLDOWN_S = 60.0
 # close() が、advisor のスレッドの終了を待つ上限 (秒)
 CLOSE_WAIT_S = 10.0
 # --settings に渡すインライン JSON。hook を動かさない
@@ -361,13 +364,16 @@ class ClaudeCodeHeadlessAdvisor:
     log            実行ごとに 1 件の辞書を渡す関数 (run では RunLog.write)。None なら呼ばない
     start_thread   実行の本体 (引数なしの関数) を受け取って裏で起動する関数。既定では daemon スレッドで起動して待たない
                    (テストではその場で呼ぶ関数や、呼ばずに保留する関数を渡す)
-    clock          所要時間を測る時計 (既定 time.monotonic)
+    clock          所要時間と、失敗の後の待ちを測る時計 (既定 time.monotonic)
+    failed_run_cooldown_s  失敗した実行の後、次の実行を受け付けない時間 (秒。既定 FAILED_RUN_COOLDOWN_S)
 
     状態 (lock で守る):
-        busy       実行中なら True
-        run_count  このインスタンスが受け付けた実行の数 (実行のディレクトリーの連番)
-        process    実行中の子プロセス。無ければ None
-        closed     close() を呼んだら True。以後は要求を受け付けず、子プロセスを起動しない
+        busy         実行中なら True
+        run_count    このインスタンスが受け付けた実行の数 (実行のディレクトリーの連番)
+        process      実行中の子プロセス。無ければ None
+        closed       close() を呼んだら True。以後は要求を受け付けず、子プロセスを起動しない
+        retry_after  失敗した実行の後、次の実行を受け付ける時刻 (clock の値)。失敗していなければ None。
+                     失敗は、result.json の error があるか、returncode が 0 以外 (None を除く) の実行
     idle は実行中でなければ set されたイベントで、close() が advisor のスレッドの終了を待つのに使う。
     """
 
@@ -384,8 +390,9 @@ class ClaudeCodeHeadlessAdvisor:
         log: Callable[[dict], None] | None = None,
         start_thread: Callable[[Callable[[], None]], None] = start_daemon_thread,
         clock: Callable[[], float] = time.monotonic,
+        failed_run_cooldown_s: float = FAILED_RUN_COOLDOWN_S,
     ):
-        """属性を入れ、busy を False、run_count を 0 にする。
+        """属性を入れ、busy を False、run_count を 0、retry_after を None にする。
 
         notes_dir か runs_dir が workdir の配下でなければ ValueError にする
         (許可ルールを workdir からの相対パスで書くため)。
@@ -407,17 +414,20 @@ class ClaudeCodeHeadlessAdvisor:
         self.log = log
         self.start_thread = start_thread
         self.clock = clock
+        self.failed_run_cooldown_s = failed_run_cooldown_s
         self.lock = threading.Lock()
         self.busy = False
         self.run_count = 0
         self.process: subprocess.Popen | None = None
         self.closed = False
+        self.retry_after: float | None = None
         self.idle = threading.Event()
         self.idle.set()
 
     def request_update(self, context: AdvisorContext) -> bool:
-        """実行中 (busy) か close() の後なら何もせず False を返す。そうでなければ busy にし、run_count を 1 増やして、
-        その連番の実行の本体を start_thread に渡し、True を返す。busy の確認と変更はロックの中で行う。
+        """実行中 (busy) か、失敗した実行の後の待ちの間 (clock() < retry_after) か、close() の後なら何もせず False を
+        返す。そうでなければ busy にし、run_count を 1 増やして、その連番の実行の本体を start_thread に渡し、True を返す。
+        busy と retry_after の確認と変更はロックの中で行う。
 
         実行の本体 (裏のスレッド) は次を行う:
             1. run_dir = runs_dir / advisor_run_dir_name(role.name, 連番) を作り、write_advisor_inputs(run_dir, context, role)
@@ -440,15 +450,17 @@ class ClaudeCodeHeadlessAdvisor:
                  stdout               JSON として読めなかった標準出力 (読めたとき、または無いときは None)
                  stderr               標準エラー出力 (無ければ空文字)
                  permission_denials   output の permission_denials (output が object でないか、無ければ [])
-            4. log があれば、build_log_event(run_dir, 3 の辞書, role) の辞書 ({"event": "advisor", "role": role.name,
+            4. 3 の辞書の error があるか、returncode が 0 以外 (None を除く) なら、retry_after を
+               clock() + failed_run_cooldown_s にする (ロックの中で、busy を戻す前に行う)。そうでなければ None に戻す
+            5. log があれば、build_log_event(run_dir, 3 の辞書, role) の辞書 ({"event": "advisor", "role": role.name,
                "run_dir", "returncode", "duration_s", "timed_out", "error", "permission_denials",
                "result": <output の result。無ければ None>}) を渡す
-            1〜2 の途中の例外 (Exception) も捕まえて 3・4 で記録し、logging で標準エラー出力にトレースバックを書く。
+            1〜2 の途中の例外 (Exception) も捕まえて 3〜5 で記録し、logging で標準エラー出力にトレースバックを書く。
             result.json を書けなければ (OSError)、その説明を error に入れて 4 に進む。
             最後に必ず (ロックの中で) busy を False に戻し、idle を set する (log の例外はスレッドの外に出る)。
         """
         with self.lock:
-            if self.busy or self.closed:
+            if self.busy or self.closed or self._cooling_down():
                 return False
             self.busy = True
             self.run_count += 1
@@ -458,9 +470,13 @@ class ClaudeCodeHeadlessAdvisor:
         return True
 
     def is_busy(self) -> bool:
-        """実行中なら True を返す。"""
+        """実行中か、失敗した実行の後の待ちの間 (clock() < retry_after) なら True を返す (要求を受け付けない間)。"""
         with self.lock:
-            return self.busy
+            return self.busy or self._cooling_down()
+
+    def _cooling_down(self) -> bool:
+        """失敗した実行の後の待ちの間なら True を返す。lock の中で呼ぶ。"""
+        return self.retry_after is not None and self.clock() < self.retry_after
 
     def close(self) -> None:
         """終了する。以後の要求は受け付けない。
@@ -529,6 +545,11 @@ class ClaudeCodeHeadlessAdvisor:
             )
         except OSError as e:
             record["error"] = record["error"] or describe_error(e)
+        failed = record["error"] is not None or record["returncode"] not in (None, 0)
+        with self.lock:
+            self.retry_after = (
+                self.clock() + self.failed_run_cooldown_s if failed else None
+            )
         if self.log is not None:
             self.log(build_log_event(run_dir, record, self.role))
 

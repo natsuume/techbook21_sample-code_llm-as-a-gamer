@@ -39,7 +39,7 @@ class Advisor(Protocol):
         ...
 
     def is_busy(self) -> bool:
-        """更新の実行中なら True を返す。"""
+        """更新の要求を今は受け付けない (更新の実行中か、失敗した実行の後の待ちの間) なら True を返す。"""
         ...
 
     def close(self) -> None:
