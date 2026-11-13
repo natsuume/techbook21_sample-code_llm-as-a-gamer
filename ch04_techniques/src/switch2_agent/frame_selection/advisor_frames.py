@@ -42,4 +42,9 @@ def select_advisor_frames(
     meaningful は recent の最初のフレームより前 (time が小さい) のフレームだけになる
     (store.latest_before は time ちょうどのフレームを含めない)。
     """
-    raise NotImplementedError
+    recent = selector.select(history.between(now - history.max_age_s, now), recent_max)
+    meaningful_end = recent[0].time if recent else now
+    return AdvisorFrames(
+        recent=recent,
+        meaningful=store.latest_before(meaningful_end, meaningful_max),
+    )

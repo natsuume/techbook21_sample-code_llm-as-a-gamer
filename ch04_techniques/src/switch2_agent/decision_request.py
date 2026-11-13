@@ -132,7 +132,7 @@ def label_latest_frame(
             AFTER_PREVIOUS_OPERATION_LABEL if after else BEFORE_PREVIOUS_OPERATION_LABEL
         )
         timing = f"{timing}、{order}"
-    return f"{RECENT_LABEL} 1/1 ({timing})", frame, after
+    return f"{LATEST_LABEL} ({timing})", frame, after
 
 
 def format_operation_history(

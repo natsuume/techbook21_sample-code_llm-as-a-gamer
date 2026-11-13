@@ -800,6 +800,92 @@ def test_run_waits_interval_before_each_request_after_first():
     ]
 
 
+def test_run_once_sends_no_request_when_bridge_starts_recovering_during_interval_wait():
+    pipeline, env = make_pipeline(min_request_interval_s=0.2)
+
+    def start_recovery(count: int) -> None:
+        env.bridge_recovering = True
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, start_recovery)
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    env.clock.now = 10.3
+    pipeline.run_once()
+    # 待つ間に復旧が始まったので、新しいフレーム (10.4) があっても要求を送らずに戻る。
+    # 中立に戻すことと記録は、run の復旧の待ちに任せる
+    assert env.sleeps == [pytest.approx(0.1)]
+    assert len(env.model.requests) == 1
+    assert pipeline.request_count == 1
+    assert env.output.events == ["apply"]
+    assert len(env.events("decision")) == 1
+    assert neutral_records(env) == []
+
+
+def test_run_once_sends_no_request_while_bridge_is_recovering_without_waiting():
+    # 間隔を待たなかった回 (最初の要求) でも、ブリッジが復旧中なら要求を送らない
+    pipeline, env = make_pipeline()
+    env.bridge_recovering = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.model.requests == []
+    assert pipeline.request_count == 0
+    assert env.output.events == []
+    assert env.sleeps == []
+    assert env.logs == []
+
+
+def test_run_once_stops_when_capture_is_lost_while_bridge_is_recovering():
+    # キャプチャーが止まっていれば、ブリッジが復旧中かを確かめる前に止まる
+    pipeline, env = make_pipeline()
+    env.bridge_recovering = True
+    env.capture_lost = "no new frame for 2.0 seconds"
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    with pytest.raises(CaptureStoppedError, match="no new frame for 2.0 seconds"):
+        pipeline.run_once()
+    assert env.model.requests == []
+    assert env.output.events == ["neutral"]
+
+
+def test_run_waits_for_bridge_recovery_when_it_starts_during_interval_wait():
+    pipeline, env = make_pipeline(now=9.0, min_request_interval_s=0.2)
+    stop = threading.Event()
+    env.model.decide_s = 0.1
+
+    def control_bridge(count: int) -> None:
+        # 1 回目の待ち (間隔の待ち、10.1 から 10.3) の間に復旧が始まり、復旧の待ちの 2 回目 (10.5) で終わる
+        if count == 1:
+            env.bridge_recovering = True
+        if count == 3:
+            env.bridge_recovering = False
+
+    def stop_after_two_requests():
+        if len(env.model.requests) == 2:
+            stop.set()
+
+    pipeline.parts.sleep = sleep_with_new_frames(env, control_bridge)
+    env.model.on_decide = stop_after_two_requests
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run(stop)
+    # 間隔の待ちの後は要求を送らず、復旧の待ち (中立に戻して記録する) に入り、復旧が終わってから 2 回目を送る
+    assert len(env.model.requests) == 2
+    assert env.sleeps == [pytest.approx(0.2), pytest.approx(0.1), pytest.approx(0.1)]
+    assert [event["event"] for event in env.logs] == [
+        "decision",
+        "bridge_wait",
+        "bridge_wait_end",
+        "decision",
+    ]
+    assert env.output.events == ["apply", "neutral", "apply"]
+    records = neutral_records(env)
+    assert [record.reason for record in records] == ["コントローラーの接続の復旧待ち"]
+    assert records[0].neutralized_at == pytest.approx(10.3)
+    assert frame_times(env.model.requests[1]) == pytest.approx([10.5])
+
+
 # --- 要求のログ ---
 
 

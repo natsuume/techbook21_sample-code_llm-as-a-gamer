@@ -422,6 +422,9 @@ def main(argv: list[str] | None = None) -> None:
                 request_log=request_log,
             ),
             max_consecutive_errors=args.max_consecutive_errors,
+            min_request_interval_s=(
+                jev.JEV_MIN_REQUEST_INTERVAL_S if args.model == "jev" else 0.0
+            ),
         )
         if request_log is not None:
             request_log.write_header(args.model, build_instructions(), questions)
