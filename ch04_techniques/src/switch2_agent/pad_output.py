@@ -26,6 +26,7 @@ dashboard_recorder.DashboardRecorder.record_pad を渡し、pad.jsonl に書く)
 受け取った順が送った順になる。
 """
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -36,6 +37,9 @@ from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction
 from switch2_agent.dashboard_records import PadReport, PadReportSource
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 TAP_PRESS_S = 0.12  # 短押しで押している時間 (秒)。第2章の tap と同じ
 # 同じボタンを離してから次に押すまでの最小の間隔 (秒)。第2章の tap と同じ
@@ -330,12 +334,45 @@ class PadOutput:
             - 成功: ok=True、error=None
             - 失敗 (Exception): ok=False、error=describe_error(e) で渡してから、同じ例外を出す
         on_report の例外 (Exception) は外に出さず (タイマースレッドを止めないため)、説明 (describe_error) を
-        last_report_error に入れる。ロックの中なので logging もしない。on_report が None なら、clock は呼ばない。
+        last_report_error に入れる。logging で警告とトレースバックを書くのは最初の失敗のときだけにする (ロックの中で
+        送信のたびに I/O をしないため)。on_report が None なら、clock は呼ばない。
         """
-        if self.on_report is not None:
-            raise NotImplementedError
         state = compose_report_state(self.held, frozenset(self.tapping))
-        self.sender.set_report(build_report(state))
+        report_bytes = build_report(state)
+        try:
+            self.sender.set_report(report_bytes)
+        except Exception as e:
+            self._report_locked(source, state, describe_error(e))
+            raise
+        self._report_locked(source, state, None)
+
+    def _report_locked(
+        self, source: PadReportSource, state: PadState, error: str | None
+    ) -> None:
+        """on_report があれば、送ろうとしたレポートの PadReport を渡す。呼び出し側がロックを持つ。
+
+        mono は呼んだときの clock() (送信が戻った後)、ok は error が None なら True。
+        on_report の例外 (Exception) は外に出さず、説明を last_report_error に入れる (_send_locked の docstring)。
+        """
+        if self.on_report is None:
+            return
+        sent = PadReport(
+            mono=self.clock(),
+            source=source,
+            state=state,
+            ok=error is None,
+            error=error,
+        )
+        try:
+            self.on_report(sent)
+        # 記録の失敗でタイマースレッドや判断のループを止めないため、失敗の型を問わずに捕まえる
+        except Exception as e:
+            if self.last_report_error is None:
+                logger.warning(
+                    "on_report failed; later failures are kept in last_report_error",
+                    exc_info=True,
+                )
+            self.last_report_error = describe_error(e)
 
     def _send_quietly_locked(self, source: PadReportSource) -> bool:
         """_send_locked(source) を呼び、送信できたら True を返す。呼び出し側がロックを持つ。
@@ -343,8 +380,6 @@ class PadOutput:
         送信の失敗 (RuntimeError / OSError) は外に出さず、説明を last_error に記録して False を返す
         (on_report には、_send_locked が失敗の PadReport を渡し済み)。
         """
-        if self.on_report is not None:
-            raise NotImplementedError
         try:
             self._send_locked(source)
         except (RuntimeError, OSError) as e:

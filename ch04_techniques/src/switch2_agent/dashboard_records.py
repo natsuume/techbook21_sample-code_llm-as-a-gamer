@@ -15,13 +15,14 @@ pad.jsonl の 1 行 (レポートを送ろうとした 1 回につき 1 行。bu
 from dataclasses import dataclass
 from typing import Literal
 
-from switch2_remote.controller_state import PadState
+from switch2_remote.controller_state import PadState, format_state
 
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.meaningful_frames import (
     SharpnessValleyDetector,
     ValleyPhase,
 )
+from switch2_agent.image_metrics import mean_abs_diff
 
 FRAMES_RECORD_FILE_NAME = "frames.jsonl"
 PAD_RECORD_FILE_NAME = "pad.jsonl"
@@ -47,7 +48,7 @@ def thumb_file_name(mono: float) -> str:
     例: mono=12345.678901 なら thumbs/12345678901.jpg、mono=1.5 なら thumbs/1500000.jpg。
     frames.jsonl の thumb と requests.jsonl の images の thumb は、どちらもこの名前を使う。
     """
-    raise NotImplementedError
+    return f"{THUMBS_DIR_NAME}/{round(mono * 1_000_000)}.jpg"
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,12 @@ def snapshot_detector(detector: SharpnessValleyDetector) -> DetectorSnapshot:
     フレームはコピーしない。detector は属性を置き換えて状態を変えるため、後で detector.feed を呼んでも、
     返した DetectorSnapshot の値は変わらない。
     """
-    raise NotImplementedError
+    return DetectorSnapshot(
+        phase=detector.phase,
+        peak=detector.peak,
+        valley=detector.valley,
+        last_kept=detector.last_kept,
+    )
 
 
 @dataclass(frozen=True)
@@ -108,7 +114,25 @@ def detector_event(step: FrameStep) -> dict | None:
           candidate は、確定した区間の山 (残すかを判定した候補)。similar_diff は、直前に残したフレームとの差分
     - それ以外 (最初のフレーム、山の更新、谷の更新、谷にならない浅い揺れ、まだ回復していない谷): None
     """
-    raise NotImplementedError
+    before, after = step.before, step.after
+    if before.phase == "rising" and after.phase == "falling":
+        return {"kind": "fall"}
+    if before.phase == "falling" and after.phase == "rising":
+        candidate = before.peak
+        assert candidate is not None  # falling の間は必ず山がある
+        last_kept = before.last_kept
+        return {
+            "kind": "close",
+            "candidate_mono": candidate.time,
+            "candidate_sharpness": candidate.sharpness,
+            "kept": step.kept is not None,
+            "similar_diff": (
+                mean_abs_diff(candidate.gray_small, last_kept.gray_small)
+                if last_kept is not None
+                else None
+            ),
+        }
+    return None
 
 
 def reference_sharpness(after: DetectorSnapshot, valley_ratio: float) -> float:
@@ -118,7 +142,13 @@ def reference_sharpness(after: DetectorSnapshot, valley_ratio: float) -> float:
     "falling" なら after.valley.sharpness / valley_ratio (これ以上まで回復すると谷を確定する)。
     after は、1 枚以上のフレームを入れた後の状態 (peak がある。falling なら valley もある) とする。
     """
-    raise NotImplementedError
+    if after.phase == "rising":
+        peak = after.peak
+        assert peak is not None  # 1 枚以上入れた後は必ず山がある
+        return peak.sharpness * valley_ratio
+    valley = after.valley
+    assert valley is not None  # falling の間は必ず谷がある
+    return valley.sharpness / valley_ratio
 
 
 def build_frame_record(step: FrameStep, diff: float | None) -> dict:
@@ -136,7 +166,19 @@ def build_frame_record(step: FrameStep, diff: float | None) -> dict:
         event            detector_event(step)
         thumb            thumb_file_name(step.frame.time)
     """
-    raise NotImplementedError
+    peak = step.after.peak
+    assert peak is not None  # フレームを入れた後は必ず山がある
+    return {
+        "mono": step.frame.time,
+        "sharpness": step.frame.sharpness,
+        "diff": diff,
+        "phase": step.after.phase,
+        "peak_mono": peak.time,
+        "peak_sharpness": peak.sharpness,
+        "ref": reference_sharpness(step.after, step.valley_ratio),
+        "event": detector_event(step),
+        "thumb": thumb_file_name(step.frame.time),
+    }
 
 
 @dataclass(frozen=True)
@@ -163,7 +205,13 @@ def build_pad_record(report: PadReport) -> dict:
     state は controller_state.format_state(report.state) の表記 (例: A+LS:0.8,0。何も押していなければ none)。
     ほかのキーは report の同名の値。
     """
-    raise NotImplementedError
+    return {
+        "mono": report.mono,
+        "source": report.source,
+        "state": format_state(report.state),
+        "ok": report.ok,
+        "error": report.error,
+    }
 
 
 def build_record_error_event(kind: str, error: str) -> dict:
@@ -171,7 +219,7 @@ def build_record_error_event(kind: str, error: str) -> dict:
 
     {"event": "record_error", "kind": kind ("frames" か "pad"), "error": error}
     """
-    raise NotImplementedError
+    return {"event": "record_error", "kind": kind, "error": error}
 
 
 def build_record_end_event(written: dict[str, int], dropped: dict[str, int]) -> dict:
@@ -180,4 +228,4 @@ def build_record_end_event(written: dict[str, int], dropped: dict[str, int]) -> 
     {"event": "record_end", "written": written, "dropped": dropped}。written と dropped は、種類 ("frames" と
     "pad") → 書いた件数・捨てた件数。種類ごとに written + dropped が記録しようとした件数になる。
     """
-    raise NotImplementedError
+    return {"event": "record_end", "written": written, "dropped": dropped}

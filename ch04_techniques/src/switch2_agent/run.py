@@ -53,6 +53,7 @@ from switch2_agent.advisors.claude_code_headless import (
 )
 from switch2_agent.capture_watcher import CaptureWatcher
 from switch2_agent.capture_with_history import CaptureWithHistory
+from switch2_agent.dashboard_recorder import DashboardRecorder, feed_detector
 from switch2_agent.decision_models import decisions_api, jev
 from switch2_agent.decision_models.base import DecisionModel
 from switch2_agent.decision_models.decisions_api import DecisionsApiModel
@@ -289,7 +290,11 @@ def build_request_log(run_dir: Path, args: argparse.Namespace) -> RequestLog | N
     --save-requests だけなら RequestLog(run_dir) (要求の行と、要求に載せた画像 frames/ を書く)。
     どちらも無ければ None。
     """
-    raise NotImplementedError
+    if args.record_dashboard:
+        return RequestLog(run_dir, save_frames=args.save_requests, record_thumbs=True)
+    if args.save_requests:
+        return RequestLog(run_dir)
+    return None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -370,22 +375,25 @@ def main(argv: list[str] | None = None) -> None:
     capture = None
     watcher = None
     advisor = None
+    recorder = None
     stop = threading.Event()
     try:
-        output = PadOutput(supervisor)
+        if args.record_dashboard:
+            recorder = DashboardRecorder(run_dir, run_log.write)
+            output = PadOutput(supervisor, on_report=recorder.record_pad)
+        else:
+            output = PadOutput(supervisor)
         detector = SharpnessValleyDetector(
             args.valley_ratio, MeanAbsDiffSimilarity(args.similarity_threshold)
         )
         store = MeaningfulFrameStore()
 
-        def keep_meaningful_frame(frame: TimedFrame) -> None:
-            meaningful = detector.feed(frame)
-            if meaningful is not None:
-                store.add(meaningful)
+        def feed_frame(frame: TimedFrame) -> None:
+            feed_detector(frame, detector, store, recorder)
 
         history = FrameHistory(args.history_seconds)
         capture = CaptureWithHistory(
-            args.ffmpeg_fps, args.process_fps, history, keep_meaningful_frame
+            args.ffmpeg_fps, args.process_fps, history, feed_frame
         )
         running_capture = capture
 
@@ -419,7 +427,7 @@ def main(argv: list[str] | None = None) -> None:
             )
 
         questions = build_questions()
-        request_log = RequestLog(run_dir) if args.save_requests else None
+        request_log = build_request_log(run_dir, args)
         pipeline = Pipeline(
             PipelineParts(
                 history=history,
@@ -450,14 +458,17 @@ def main(argv: list[str] | None = None) -> None:
         )
         if request_log is not None:
             request_log.write_header(args.model, build_instructions(), questions)
-        run_log.write(
-            {
-                "event": "start",
-                "game": args.game,
-                "model": args.model,
-                "run_dir": run_dir,
-            }
-        )
+        start: dict[str, object] = {
+            "event": "start",
+            "game": args.game,
+            "model": args.model,
+            "run_dir": run_dir,
+        }
+        if args.record_dashboard:
+            # ダッシュボードが、しきい値などの起動引数と、記録の時刻 (mono) の起点を読めるようにする
+            start["args"] = dict(vars(args))
+            start["origin_mono"] = pipeline.started_at
+        run_log.write(start)
         try:
             pipeline.run(stop)
         except KeyboardInterrupt:
@@ -473,6 +484,8 @@ def main(argv: list[str] | None = None) -> None:
             advisor.close()
         if capture is not None:
             capture.close()
+        if recorder is not None:
+            recorder.close()
         supervisor.close()
 
 

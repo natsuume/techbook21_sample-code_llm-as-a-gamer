@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 from switch2_agent.action_decision import PadAction
+from switch2_agent.dashboard_records import thumb_file_name
 from switch2_agent.decision_models.base import Decision
 from switch2_agent.decision_request import DecisionRequest
 from switch2_agent.operation_log import format_action
@@ -92,6 +93,8 @@ class RequestLog:
         frames_dir       画像を書くディレクトリー (run_dir / FRAMES_DIR_NAME。save_frames が False なら作らない)
         path             要求のログのファイル (run_dir / REQUEST_LOG_FILE_NAME)
         written_frames   この RequestLog で書いた画像のファイル名の集合
+        save_frames      要求に載せた画像を frames/ に書くか
+        record_thumbs    request の行の images に、縮小画像の名前 thumb を足すか
     """
 
     def __init__(
@@ -105,11 +108,12 @@ class RequestLog:
         どちらも build_request_record に同じ値を渡して行を組み立てる。
         run_dir は呼び出し側が作る。requests.jsonl に既にある行は残す。
         """
-        if not save_frames or record_thumbs:
-            raise NotImplementedError
         self.frames_dir = run_dir / FRAMES_DIR_NAME
         self.path = run_dir / REQUEST_LOG_FILE_NAME
-        self.frames_dir.mkdir(exist_ok=True)
+        self.save_frames = save_frames
+        self.record_thumbs = record_thumbs
+        if save_frames:
+            self.frames_dir.mkdir(exist_ok=True)
         self.written_frames: set[str] = set()
 
     def write_header(
@@ -178,13 +182,25 @@ class RequestLog:
             advisor_accepted          entry.advisor_accepted
         書き込みの OSError はそのまま出す。
         """
+        if self.save_frames:
+            self._write_frames(entry)
+        self._append_line(
+            build_request_record(
+                entry,
+                format_wall_time(time.time()),
+                save_frames=self.save_frames,
+                record_thumbs=self.record_thumbs,
+            )
+        )
+
+    def _write_frames(self, entry: RequestLogEntry) -> None:
+        """entry の画像の JPEG を frames/ に書く。この RequestLog で既に書いた名前なら書かない (write の docstring)。"""
         for image in entry.request.images:
             name = frame_file_name(image.frame_time - entry.origin)
             if name not in self.written_frames:
                 (self.frames_dir / name).write_bytes(image.jpeg)
                 # 書けたときだけ覚える (書けなかった画像は、次に載ったときに書き直す)
                 self.written_frames.add(name)
-        self._append_line(build_request_record(entry, format_wall_time(time.time())))
 
     def _append_line(self, record: dict[str, object]) -> None:
         """record を JSON の 1 行として requests.jsonl に追記する (ファイルを開いて書き、閉じる)。
@@ -210,8 +226,6 @@ def build_request_record(
     save_frames が False なら画像の file を None にする。record_thumbs が True なら、画像の各要素に
     "thumb": dashboard_records.thumb_file_name(image.frame_time) を足す。
     """
-    if not save_frames or record_thumbs:
-        raise NotImplementedError
     request = entry.request
     decision = entry.decision
     action = entry.action
@@ -219,15 +233,16 @@ def build_request_record(
     images = []
     for image in request.images:
         t = image.frame_time - entry.origin
-        images.append(
-            {
-                "label": image.label,
-                "t": t,
-                "file": f"{FRAMES_DIR_NAME}/{frame_file_name(t)}",
-                "bytes": len(image.jpeg),
-                "after_previous_operation": image.after_previous_operation,
-            }
-        )
+        image_record: dict[str, object] = {
+            "label": image.label,
+            "t": t,
+            "file": f"{FRAMES_DIR_NAME}/{frame_file_name(t)}" if save_frames else None,
+            "bytes": len(image.jpeg),
+            "after_previous_operation": image.after_previous_operation,
+        }
+        if record_thumbs:
+            image_record["thumb"] = thumb_file_name(image.frame_time)
+        images.append(image_record)
     return {
         "event": "request",
         "number": entry.number,

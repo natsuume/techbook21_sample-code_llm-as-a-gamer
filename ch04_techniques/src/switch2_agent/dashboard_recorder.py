@@ -14,16 +14,42 @@ frames と pad は、種類ごとに上限つきのキューと専用の書き�
 強制終了などで close を呼ばずに終わった実行には、record_end が無い。
 """
 
+import json
+import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TextIO
 
-from switch2_agent.dashboard_records import DetectorSnapshot, FrameStep, PadReport
+import numpy as np
+from switch2_remote.capture import DEVICE_HEIGHT
+
+from switch2_agent.dashboard_records import (
+    FRAMES_RECORD_FILE_NAME,
+    PAD_RECORD_FILE_NAME,
+    THUMB_JPEG_QUALITY,
+    THUMB_WIDTH,
+    THUMBS_DIR_NAME,
+    DetectorSnapshot,
+    FrameStep,
+    PadReport,
+    build_frame_record,
+    build_pad_record,
+    build_record_end_event,
+    build_record_error_event,
+    snapshot_detector,
+    thumb_file_name,
+)
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.frame_selection.meaningful_frames import (
     MeaningfulFrameStore,
     SharpnessValleyDetector,
 )
+from switch2_agent.image_metrics import mean_abs_diff, nv12_to_jpeg
 from switch2_agent.record_writer import BoundedRecordWriter
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # frames のキューの上限 (件)。10 枚/秒で 60 秒分
 FRAMES_QUEUE_CAPACITY = 600
@@ -31,6 +57,25 @@ FRAMES_QUEUE_CAPACITY = 600
 PAD_QUEUE_CAPACITY = 2000
 # close で、2 つのキューを書き切るのを待つ時間の上限 (秒。2 つ合わせて)
 RECORDER_CLOSE_WAIT_S = 3.0
+
+
+def _open_record_file(path: Path) -> TextIO:
+    """JSON Lines の記録のファイル path を、UTF-8 の追記で開く。
+
+    UTF-8 に符号化できない文字 (対になっていないサロゲート) は、errors="backslashreplace" で `\\udXXX` の形の
+    まま書く。JSON の文字列の中では同じ escape になるため、書いた行は JSON として読め、読むと元の文字に戻る。
+    追記にするのは、run.jsonl と同じく、同じ実行のディレクトリーに既にある行を消さないため。
+    """
+    return path.open("a", encoding="utf-8", errors="backslashreplace")
+
+
+def _write_record_line(file: TextIO, record: dict) -> None:
+    """record を JSON (ensure_ascii=False) の 1 行にし、改行まで 1 回の write で file に書いて flush する。
+
+    行の途中までがファイルに出ないよう 1 回の write で書き、ほかのプロセスから書いた行をすぐに読めるよう flush する。
+    """
+    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    file.flush()
 
 
 class DashboardRecorder:
@@ -67,7 +112,32 @@ class DashboardRecorder:
         (frames.jsonl か pad.jsonl。書き出しスレッドが最初の 1 件で開いたもの) を閉じる関数を渡す
         (開いていなければ何もしない)。
         """
-        raise NotImplementedError
+        self.run_dir = run_dir
+        self.log = log
+        (run_dir / THUMBS_DIR_NAME).mkdir(exist_ok=True)
+        # 開いている JSON Lines のファイル。それぞれの書き出しスレッドだけが読み書きする
+        self._frames_file: TextIO | None = None
+        self._pad_file: TextIO | None = None
+        # 書き出しスレッドが直前に扱ったフレームの縮小したグレー画像 (diff を求めるため)。
+        # frames の書き出しスレッドだけが読み書きする
+        self._previous_gray: np.ndarray | None = None
+        # 前回の frames の put で記録を捨てたか。record_frame を呼ぶフレームの読み取りスレッドだけが読み書きする
+        self._previous_frame_dropped = False
+        self._closed = False
+        self._frames_writer = BoundedRecordWriter(
+            "frames",
+            FRAMES_QUEUE_CAPACITY,
+            self._write_frame,
+            self._report_record_error,
+            on_finish=self._close_frames_file,
+        )
+        self._pad_writer = BoundedRecordWriter(
+            "pad",
+            PAD_QUEUE_CAPACITY,
+            self._write_pad,
+            self._report_record_error,
+            on_finish=self._close_pad_file,
+        )
 
     def record_frame(
         self,
@@ -83,14 +153,22 @@ class DashboardRecorder:
         FrameStep の after_drop は、この DashboardRecorder の前回の frames の put が False (捨てた) なら True にする。
         最初のフレームでは False。
         """
-        raise NotImplementedError
+        step = FrameStep(
+            frame=frame,
+            before=before,
+            after=after,
+            kept=kept,
+            valley_ratio=valley_ratio,
+            after_drop=self._previous_frame_dropped,
+        )
+        self._previous_frame_dropped = not self._frames_writer.put(step)
 
     def record_pad(self, report: PadReport) -> None:
         """report を pad の writer に put する。例外を出さない。
 
         PadOutput の on_report として、PadOutput のロックの中から呼ぶ。キューに入れる以外のことをしない。
         """
-        raise NotImplementedError
+        self._pad_writer.put(report)
 
     def close(self) -> None:
         """記録の受け付けをやめ、キューの分を書き切るのを待ってから、log に record_end を 1 回渡す。
@@ -102,7 +180,73 @@ class DashboardRecorder:
            {"frames": 捨てた件数, "pad": 捨てた件数})) を渡す。log の例外 (Exception) は捕まえて logging の警告にする
         例外を出さない。2 回目以降の呼び出しは何もしない。
         """
-        raise NotImplementedError
+        if self._closed:
+            return
+        self._closed = True
+        writers = {"frames": self._frames_writer, "pad": self._pad_writer}
+        for writer in writers.values():
+            writer.stop_accepting()
+        deadline = time.monotonic() + RECORDER_CLOSE_WAIT_S
+        for writer in writers.values():
+            writer.wait_until_written(deadline - time.monotonic())
+        record_end = build_record_end_event(
+            {kind: writer.written for kind, writer in writers.items()},
+            {kind: writer.dropped for kind, writer in writers.items()},
+        )
+        try:
+            self.log(record_end)
+        except Exception:
+            logger.warning("failed to log the end of dashboard records", exc_info=True)
+
+    def _write_frame(self, step: FrameStep) -> None:
+        """frames の 1 件を書く (frames の書き出しスレッドの write_item。手順はクラスの docstring)。"""
+        frame = step.frame
+        thumb = nv12_to_jpeg(frame.nv12, DEVICE_HEIGHT, THUMB_WIDTH, THUMB_JPEG_QUALITY)
+        (self.run_dir / thumb_file_name(frame.time)).write_bytes(thumb)
+        previous_gray = self._previous_gray
+        self._previous_gray = frame.gray_small
+        # 直前の記録を捨てたときは、直前に扱ったフレームが 1 つ前のフレームではないため、差分を求めない
+        if previous_gray is None or step.after_drop:
+            diff = None
+        else:
+            diff = mean_abs_diff(previous_gray, frame.gray_small)
+        if self._frames_file is None:
+            self._frames_file = _open_record_file(
+                self.run_dir / FRAMES_RECORD_FILE_NAME
+            )
+        _write_record_line(self._frames_file, build_frame_record(step, diff))
+
+    def _write_pad(self, report: PadReport) -> None:
+        """pad の 1 件を pad.jsonl に書く (pad の書き出しスレッドの write_item)。"""
+        if self._pad_file is None:
+            self._pad_file = _open_record_file(self.run_dir / PAD_RECORD_FILE_NAME)
+        _write_record_line(self._pad_file, build_pad_record(report))
+
+    def _close_frames_file(self) -> None:
+        """frames.jsonl を開いていれば閉じる (frames の書き出しスレッドの on_finish)。"""
+        file = self._frames_file
+        self._frames_file = None
+        if file is not None:
+            file.close()
+
+    def _close_pad_file(self) -> None:
+        """pad.jsonl を開いていれば閉じる (pad の書き出しスレッドの on_finish)。"""
+        file = self._pad_file
+        self._pad_file = None
+        if file is not None:
+            file.close()
+
+    def _report_record_error(self, kind: str, error: str) -> None:
+        """書き込みの失敗を log に record_error として渡す (BoundedRecordWriter の on_error。書き出しスレッドから呼ぶ)。
+
+        log の例外 (Exception) は捕まえて logging の警告にする。
+        """
+        try:
+            self.log(build_record_error_event(kind, error))
+        except Exception:
+            logger.warning(
+                "failed to log the record error of %s records", kind, exc_info=True
+            )
 
 
 def feed_detector(
@@ -120,4 +264,11 @@ def feed_detector(
            detector.valley_ratio)
     recorder が None なら、判定に入れて残したフレームを保管に足すだけ。
     """
-    raise NotImplementedError
+    before = snapshot_detector(detector)
+    kept = detector.feed(frame)
+    if kept is not None:
+        store.add(kept)
+    if recorder is not None:
+        recorder.record_frame(
+            frame, before, snapshot_detector(detector), kept, detector.valley_ratio
+        )
