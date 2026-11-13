@@ -9,8 +9,10 @@ I/O を持たない。
 """
 
 SECONDS_PER_DAY = 86400.0
-# start の行より後の行で、start の時刻との差がこの秒数の負 (-12 時間) より小さければ、日付をまたいだとみなす
-DAY_WRAP_THRESHOLD_S = 43200.0
+# start の行の時刻との前後のずれとして、日付をまたいだとみなさずにそのまま返す差の上限 (秒)。
+# 第4章の RunLog.write は時刻をロックの外で取るため、start と同時に別のスレッドが書いた行は、ファイルの順と
+# 時刻の順が数ミリ秒食い違うことがある。その食い違いを十分に含む幅にする
+DAY_WRAP_TOLERANCE_S = 60.0
 
 
 def parse_wall_time(value: object) -> float | None:
@@ -26,14 +28,14 @@ def run_log_elapsed(line_time: float, start_time: float, after_start: bool) -> f
     """run.jsonl の 1 行の経過秒を返す。
 
     line_time はその行の time、start_time は start の行の time (どちらも parse_wall_time の秒)。
-    差 line_time - start_time を返す。after_start が真 (その行が start の行より後にある) で、差が
-    -DAY_WRAP_THRESHOLD_S より小さければ、日付をまたいだとみなして SECONDS_PER_DAY を足す。
-    それ以外は、差が負でもそのまま返す:
-        - after_start が偽 (start の行より前の行。起動直後の record_error など)。差が -DAY_WRAP_THRESHOLD_S より
-          小さくても足さない
-        - after_start が真で、差が -DAY_WRAP_THRESHOLD_S 以上の負 (数ミリ秒の負など)。第4章の RunLog.write は
-          時刻をロックの外で取るため、start と同時に別のスレッドが書いた行は、ファイルでは start の行より後でも、
-          時刻がわずかに前になることがある
+    差 line_time - start_time を、日付をまたいだかどうかで直して返す:
+        - after_start が真 (その行が start の行より後にある): 差が -DAY_WRAP_TOLERANCE_S より小さければ、
+          日付をまたいだとみなして SECONDS_PER_DAY を足す。-DAY_WRAP_TOLERANCE_S 以上の負の差 (start と同時に
+          別のスレッドが書いた行の数ミリ秒の負など) は、負のまま返す
+        - after_start が偽 (start の行より前の行。起動直後の record_error など): 差が +DAY_WRAP_TOLERANCE_S より
+          大きければ、日付をまたいだ (start が 0 時の直後で、その行が前日の 23 時台) とみなして SECONDS_PER_DAY を
+          引く。それ以外 (負の差と、+DAY_WRAP_TOLERANCE_S 以下の正の差) はそのまま返す
+    24 時間 - DAY_WRAP_TOLERANCE_S より長い実行の行は、正しく直せない。
     """
     raise NotImplementedError
 

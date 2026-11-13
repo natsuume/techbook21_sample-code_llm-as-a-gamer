@@ -1,7 +1,7 @@
 import pytest
 
 from run_dashboard.elapsed_time import (
-    DAY_WRAP_THRESHOLD_S,
+    DAY_WRAP_TOLERANCE_S,
     SECONDS_PER_DAY,
     mono_elapsed,
     parse_wall_time,
@@ -9,9 +9,9 @@ from run_dashboard.elapsed_time import (
 )
 
 
-def test_seconds_per_day_and_day_wrap_threshold():
+def test_seconds_per_day_and_day_wrap_tolerance():
     assert SECONDS_PER_DAY == 86400.0
-    assert DAY_WRAP_THRESHOLD_S == 43200.0
+    assert DAY_WRAP_TOLERANCE_S == 60.0
 
 
 # --- parse_wall_time ---
@@ -70,11 +70,16 @@ def test_run_log_elapsed_of_start_line_itself_is_zero():
     assert run_log_elapsed(86390.0, 86390.0, after_start=True) == 0.0
 
 
-def test_run_log_elapsed_after_start_adds_a_day_when_below_minus_twelve_hours():
+def test_run_log_elapsed_after_start_adds_a_day_when_below_minus_tolerance():
     # start が 23:59:50.000、その後の行が 00:00:02.750 (日付をまたいだ。差は -86387.25 秒)
     assert run_log_elapsed(2.75, 86390.0, after_start=True) == pytest.approx(12.75)
-    # 差が -12 時間を 1 秒下回る
-    assert run_log_elapsed(43189.0, 86390.0, after_start=True) == pytest.approx(43199.0)
+    # 差が -60 秒を 1 秒下回る
+    assert run_log_elapsed(86329.0, 86390.0, after_start=True) == pytest.approx(86339.0)
+
+
+def test_run_log_elapsed_after_start_adds_a_day_in_run_longer_than_twelve_hours():
+    # start が 23:00:00.000、日付をまたいで 12.5 時間後の 11:30:00.000 に書いた行 (差は -41400 秒)
+    assert run_log_elapsed(41400.0, 82800.0, after_start=True) == pytest.approx(45000.0)
 
 
 def test_run_log_elapsed_after_start_keeps_small_negative_difference():
@@ -84,10 +89,8 @@ def test_run_log_elapsed_after_start_keeps_small_negative_difference():
     )
 
 
-def test_run_log_elapsed_after_start_keeps_difference_of_exactly_minus_twelve_hours():
-    assert run_log_elapsed(43190.0, 86390.0, after_start=True) == pytest.approx(
-        -43200.0
-    )
+def test_run_log_elapsed_after_start_keeps_difference_of_exactly_minus_tolerance():
+    assert run_log_elapsed(86330.0, 86390.0, after_start=True) == pytest.approx(-60.0)
 
 
 def test_run_log_elapsed_before_start_keeps_negative_difference():
@@ -95,12 +98,18 @@ def test_run_log_elapsed_before_start_keeps_negative_difference():
     assert run_log_elapsed(86389.5, 86390.0, after_start=False) == pytest.approx(-0.5)
 
 
-def test_run_log_elapsed_before_start_keeps_difference_below_minus_twelve_hours():
+def test_run_log_elapsed_before_start_keeps_large_negative_difference():
     assert run_log_elapsed(2.75, 86390.0, after_start=False) == pytest.approx(-86387.25)
 
 
-def test_run_log_elapsed_before_start_keeps_positive_difference():
+def test_run_log_elapsed_before_start_keeps_small_positive_difference():
     assert run_log_elapsed(86391.0, 86390.0, after_start=False) == pytest.approx(1.0)
+    assert run_log_elapsed(86450.0, 86390.0, after_start=False) == pytest.approx(60.0)
+
+
+def test_run_log_elapsed_before_start_subtracts_a_day_when_above_tolerance():
+    # start が 00:00:01.000、その前の行が前日の 23:59:59.900 (差は +86398.9 秒)
+    assert run_log_elapsed(86399.9, 1.0, after_start=False) == pytest.approx(-1.1)
 
 
 # --- mono_elapsed ---
