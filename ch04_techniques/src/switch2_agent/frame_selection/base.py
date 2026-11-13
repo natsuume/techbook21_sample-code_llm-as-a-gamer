@@ -7,7 +7,7 @@ from switch2_agent.frame_history import TimedFrame
 
 
 class RecentFrameSelector(Protocol):
-    """直近の区間のフレームから、要求に載せるフレームを選ぶ。"""
+    """直近の区間のフレームから、advisor に渡すフレームを選ぶ。"""
 
     def select(self, frames: Sequence[TimedFrame], max_count: int) -> list[TimedFrame]:
         """古い順の frames から最大 max_count 枚を選び、古い順に返す。"""

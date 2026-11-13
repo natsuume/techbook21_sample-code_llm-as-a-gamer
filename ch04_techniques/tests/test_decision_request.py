@@ -4,6 +4,7 @@ from switch2_remote.controller_state import PadState
 from switch2_agent.action_decision import PadAction
 from switch2_agent.decision_request import (
     DEFAULT_HISTORY_COUNT,
+    LATEST_LABEL,
     ROLE_DESCRIPTION,
     DecisionRequest,
     JpegCache,
@@ -12,10 +13,9 @@ from switch2_agent.decision_request import (
     build_instructions,
     format_operation_history,
     format_previous_operation,
-    label_frames,
+    label_latest_frame,
 )
 from switch2_agent.frame_history import TimedFrame
-from switch2_agent.frame_selection.request_frames import RequestFrames
 from switch2_agent.game_notes import format_game_notes
 from switch2_agent.operation_log import NeutralRecord, OperationRecord
 from switch2_agent.questions import Question
@@ -26,14 +26,16 @@ QUESTIONS = [
     Question("press_A", "今、A ボタン を押した状態にするべきか。", "press", "A"),
     Question("advisor", "今、advisor に戦略の更新を求めるべきか。", "advisor", ""),
 ]
-# sample_frames の now (100.0) と異なる、経過秒の起点
+# 要求の時刻と、要求に載せるフレーム (フレームの履歴の最新のフレーム) の時刻
+NOW = 100.0
+LATEST_TIME = 99.79
+# NOW と異なる、経過秒の起点
 ORIGIN = 40.0
 HISTORY_HEADING = "## 直近の応答と送った操作 (古い順、最大 5 回)"
 EXPECTED_ROLE_DESCRIPTION_LINES = [
     "あなたは Nintendo Switch 2 のゲームを操作するコントローラーの判断をする。",
-    "画像は時刻の古い順に並んでいる。各画像の前のラベルに、実行を始めてからの経過秒 (t) と、何秒前の画像かを書いてある。",
-    "「過去の場面」は今より前の場面の代表の画像、「直近」は前回の判断から今までの画像である。",
-    "「直近」のラベルの「前回の操作の前」「前回の操作の後」は、前回の操作 (操作の履歴の最後の行。前回の判断で決めた操作か、その後にコントローラーを中立に戻したこと) の前の画像か、後の画像かを表す。",
+    "画像は、ゲームの画面のフレームの履歴のうち、最新の 1 枚である。画像の前のラベルに、実行を始めてからの経過秒 (t) と、何秒前の画像かを書いてある。",
+    "ラベルの「前回の操作の前」「前回の操作の後」は、前回の操作 (操作の履歴の最後の行。前回の判断で決めた操作か、その後にコントローラーを中立に戻したこと) の前の画像か、後の画像かを表す。",
     "操作が画面に出るまでには遅れがあるため、「前回の操作の後」の画像でも、操作の前の画面のことがある。",
     "直近の応答と送った操作の履歴に、最近の判断で送った操作と、コントローラーを中立に戻したことを、その時刻とともに書いてある。",
     "ゲームの情報 (操作方法・攻略情報・進行状況・戦略) を参考にし、各問いには、ほかの問いの答えと関係なく独立に答える。",
@@ -65,12 +67,9 @@ class CountingEncoder:
         return f"jpeg@{frame.time}#{len(self.calls)}".encode()
 
 
-def sample_frames() -> RequestFrames:
-    # now = 100.0 として、意味のあるフレーム 2 枚と直近の区間のフレーム 3 枚
-    return RequestFrames(
-        recent=[frame(99.79), frame(99.9), frame(100.0)],
-        meaningful=[frame(87.66), frame(95.0)],
-    )
+def latest_frame() -> TimedFrame:
+    """要求に載せるフレーム (NOW の 0.21 秒前の、フレームの履歴の最新のフレーム) を返す。"""
+    return frame(LATEST_TIME)
 
 
 def operation(received_at: float, taps: set[str] | None = None) -> OperationRecord:
@@ -94,54 +93,59 @@ def neutral(
     return NeutralRecord(neutralized_at=neutralized_at, reason=reason)
 
 
-# --- label_frames ---
+# --- label_latest_frame ---
 
 
-def test_label_frames_orders_meaningful_then_recent():
-    frames = sample_frames()
-    labeled = label_frames(frames, 100.0, ORIGIN, 99.9)
-    assert [f for _, f, _ in labeled] == [*frames.meaningful, *frames.recent]
+def test_latest_label_value():
+    assert LATEST_LABEL == "最新"
 
 
-def test_label_frames_labels_first_request_with_elapsed_and_seconds_ago():
-    # 前回の操作が無い (最初の要求) ときは、直近のラベルに前回の操作の前後を書かない
-    labeled = label_frames(sample_frames(), 100.0, ORIGIN, None)
-    assert [(label, after) for label, _, after in labeled] == [
-        ("過去の場面 1/2 (t=47.66 秒、12.34 秒前)", False),
-        ("過去の場面 2/2 (t=55.00 秒、5.00 秒前)", False),
-        ("直近 1/3 (t=59.79 秒、0.21 秒前)", False),
-        ("直近 2/3 (t=59.90 秒、0.10 秒前)", False),
-        ("直近 3/3 (t=60.00 秒、0.00 秒前)", False),
-    ]
+def test_label_latest_frame_without_previous_operation():
+    # 前回の操作が無い (最初の要求) ときは、ラベルに前回の操作の前後を書かない
+    latest = latest_frame()
+    assert label_latest_frame(latest, NOW, ORIGIN, None) == (
+        "最新 (t=59.79 秒、0.21 秒前)",
+        latest,
+        False,
+    )
 
 
-def test_label_frames_marks_recent_frames_before_and_after_previous_operation():
-    # 前回の操作の時刻 (99.9) ちょうどのフレームは「後」
-    labeled = label_frames(sample_frames(), 100.0, ORIGIN, 99.9)
-    assert [(label, after) for label, _, after in labeled] == [
-        ("過去の場面 1/2 (t=47.66 秒、12.34 秒前)", False),
-        ("過去の場面 2/2 (t=55.00 秒、5.00 秒前)", False),
-        ("直近 1/3 (t=59.79 秒、0.21 秒前、前回の操作の前)", False),
-        ("直近 2/3 (t=59.90 秒、0.10 秒前、前回の操作の後)", True),
-        ("直近 3/3 (t=60.00 秒、0.00 秒前、前回の操作の後)", True),
-    ]
+def test_label_latest_frame_after_previous_operation():
+    latest = latest_frame()
+    assert label_latest_frame(latest, NOW, ORIGIN, 99.5) == (
+        "最新 (t=59.79 秒、0.21 秒前、前回の操作の後)",
+        latest,
+        True,
+    )
 
 
-def test_label_frames_never_marks_meaningful_frames_after_previous_operation():
-    # 前回の操作の時刻がすべてのフレームより前でも、過去の場面のラベルは変わらず、3 つ目の値は False
-    labeled = label_frames(sample_frames(), 100.0, ORIGIN, 80.0)
-    assert [(label, after) for label, _, after in labeled[:2]] == [
-        ("過去の場面 1/2 (t=47.66 秒、12.34 秒前)", False),
-        ("過去の場面 2/2 (t=55.00 秒、5.00 秒前)", False),
-    ]
-    assert [after for _, _, after in labeled[2:]] == [True, True, True]
+def test_label_latest_frame_at_previous_operation_is_after():
+    # 前回の操作の時刻ちょうどのフレームは「後」
+    latest = latest_frame()
+    assert label_latest_frame(latest, NOW, ORIGIN, LATEST_TIME) == (
+        "最新 (t=59.79 秒、0.21 秒前、前回の操作の後)",
+        latest,
+        True,
+    )
 
 
-def test_label_frames_without_meaningful_frames():
-    frames = RequestFrames(recent=[frame(9.5)], meaningful=[])
-    assert label_frames(frames, 10.0, 2.0, None) == [
-        ("直近 1/1 (t=7.50 秒、0.50 秒前)", frames.recent[0], False)
-    ]
+def test_label_latest_frame_before_previous_operation():
+    latest = latest_frame()
+    assert label_latest_frame(latest, NOW, ORIGIN, 99.9) == (
+        "最新 (t=59.79 秒、0.21 秒前、前回の操作の前)",
+        latest,
+        False,
+    )
+
+
+def test_label_latest_frame_writes_elapsed_and_seconds_ago_from_origin_and_now():
+    # 起点と今の時刻が変わると、t と秒前が変わる
+    latest = frame(129.89)
+    assert label_latest_frame(latest, 130.1, 2.0, 129.0) == (
+        "最新 (t=127.89 秒、0.21 秒前、前回の操作の後)",
+        latest,
+        True,
+    )
 
 
 # --- format_operation_history / format_previous_operation ---
@@ -214,8 +218,14 @@ def test_format_previous_operation_writes_time_of_neutral_record():
 # --- build_instructions / build_decision_request ---
 
 
-def test_role_description_explains_timeline_and_history():
+def test_role_description_explains_latest_image_and_history():
     assert ROLE_DESCRIPTION.splitlines() == EXPECTED_ROLE_DESCRIPTION_LINES
+
+
+def test_role_description_does_not_explain_past_scenes_or_recent_images():
+    # 要求の画像は最新の 1 枚だけなので、advisor に渡す画像のラベルの語は説明しない
+    assert "「過去の場面」" not in ROLE_DESCRIPTION
+    assert "「直近」" not in ROLE_DESCRIPTION
 
 
 def test_instructions_contain_safety_rules():
@@ -228,7 +238,7 @@ def test_instructions_start_with_role_description():
 
 def test_build_decision_request_uses_instructions_and_notes():
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, []
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, []
     )
     assert isinstance(request, DecisionRequest)
     assert request.instructions == build_instructions()
@@ -238,7 +248,7 @@ def test_build_decision_request_uses_instructions_and_notes():
 
 def test_build_decision_request_state_text_contains_four_kinds():
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, []
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, []
     )
     for heading in [
         "## ゲームの操作方法",
@@ -250,52 +260,47 @@ def test_build_decision_request_state_text_contains_four_kinds():
     assert "右へ進む" in request.state_text
 
 
-def test_build_decision_request_encodes_images_in_label_order():
-    frames = sample_frames()
-    records = [operation(97.0), operation(99.9)]
+def test_build_decision_request_has_only_given_frame_as_image():
+    records = [operation(97.0), operation(99.5)]
     request = build_decision_request(
-        frames, 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, records
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, records
     )
-    expected = [
+    assert request.images == [
         LabeledImage(
-            label=label,
-            jpeg=fake_encode(f),
-            frame_time=f.time,
-            after_previous_operation=after,
+            label="最新 (t=59.79 秒、0.21 秒前、前回の操作の後)",
+            jpeg=fake_encode(latest_frame()),
+            frame_time=LATEST_TIME,
+            after_previous_operation=True,
         )
-        for label, f, after in label_frames(frames, 100.0, ORIGIN, 99.9)
     ]
-    assert request.images == expected
+
+
+def test_build_decision_request_encodes_frame_once():
+    encoder = CountingEncoder()
+    build_decision_request(latest_frame(), NOW, NOTES, QUESTIONS, encoder, ORIGIN, [])
+    assert encoder.calls == [LATEST_TIME]
 
 
 def test_build_decision_request_uses_latest_record_as_previous_operation():
-    # 前回の操作の時刻は、最後 (最新) の記録の received_at (99.95)。最初の記録 (99.85) ではない
-    records = [operation(99.85), operation(99.95)]
+    # 前回の操作の時刻は、最後 (最新) の記録の received_at (99.85)。最初の記録 (99.7) なら「後」になる
+    records = [operation(99.7), operation(99.85)]
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, records
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, records
     )
-    assert [image.after_previous_operation for image in request.images] == [
-        False,
-        False,
-        False,
-        False,
-        True,
-    ]
-    assert request.images[2].label.endswith("、前回の操作の前)")
-    assert request.images[4].label.endswith("、前回の操作の後)")
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=59.79 秒、0.21 秒前、前回の操作の前)", False)]
 
 
 def test_build_decision_request_uses_neutral_record_as_previous_operation():
     # 操作を送った (99.0) 後に中立に戻した (99.95) なら、前回の操作の時刻は中立に戻した時刻
     records = [operation(99.0, {"UP"}), neutral(99.95)]
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, records
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, records
     )
-    assert [image.label for image in request.images][2:] == [
-        "直近 1/3 (t=59.79 秒、0.21 秒前、前回の操作の前)",
-        "直近 2/3 (t=59.90 秒、0.10 秒前、前回の操作の前)",
-        "直近 3/3 (t=60.00 秒、0.00 秒前、前回の操作の後)",
-    ]
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=59.79 秒、0.21 秒前、前回の操作の前)", False)]
     assert request.history_text.endswith(
         "\n- t=59.95 秒 (0.05 秒前): 中立に戻した (Decision Model の失敗) (前回の操作)"
     )
@@ -307,9 +312,9 @@ def test_build_decision_request_uses_neutral_record_as_previous_operation():
 def test_build_decision_request_has_history_and_previous_operation_text():
     records = [operation(97.0, {"UP"}), operation(99.9, {"HOME"})]
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, records
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, records
     )
-    assert request.history_text == format_operation_history(records, 100.0, ORIGIN)
+    assert request.history_text == format_operation_history(records, NOW, ORIGIN)
     assert request.history_text == (
         f"{HISTORY_HEADING}\n"
         "- t=57.00 秒 (3.00 秒前): 押下 none / 短押し UP\n"
@@ -321,23 +326,20 @@ def test_build_decision_request_has_history_and_previous_operation_text():
 
 
 def test_build_decision_request_without_operations():
-    # 最初の要求: 履歴は「まだ操作を送っていない」、区切りの文は無く、どの画像も「後」ではない
+    # 最初の要求: 履歴は「まだ操作を送っていない」、区切りの文は無く、画像は「後」ではない
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, QUESTIONS, fake_encode, ORIGIN, []
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, []
     )
     assert request.history_text == f"{HISTORY_HEADING}\n(まだ操作を送っていない)"
     assert request.previous_operation_text is None
-    assert [image.after_previous_operation for image in request.images] == [False] * 5
-    assert [image.label for image in request.images][2:] == [
-        "直近 1/3 (t=59.79 秒、0.21 秒前)",
-        "直近 2/3 (t=59.90 秒、0.10 秒前)",
-        "直近 3/3 (t=60.00 秒、0.00 秒前)",
-    ]
+    assert [
+        (image.label, image.after_previous_operation) for image in request.images
+    ] == [("最新 (t=59.79 秒、0.21 秒前)", False)]
 
 
 def test_build_decision_request_keeps_questions():
     request = build_decision_request(
-        sample_frames(), 100.0, NOTES, tuple(QUESTIONS), fake_encode, ORIGIN, ()
+        latest_frame(), NOW, NOTES, tuple(QUESTIONS), fake_encode, ORIGIN, ()
     )
     assert request.questions == QUESTIONS
 

@@ -3,6 +3,8 @@
 1 つのプロセスで、キャプチャー (CaptureWithHistory) とその見張り (CaptureWatcher)、コントローラーのブリッジ
 (BridgeSupervisor)、押下状態の送信 (PadOutput)、advisor (ClaudeCodeHeadlessAdvisor)、Decision Model、
 判断のループ (Pipeline) を動かす。
+Decision Model が TypeSafe Jev (--model jev) なら、直前の応答が返ってから jev.JEV_MIN_REQUEST_INTERVAL_S 秒 (0.2 秒)
+空けて次の要求を送る (Pipeline の min_request_interval_s)。OpenAI Decisions API (--model decisions) では空けない。
 Ctrl+C で止まる。
 
 起動引数:
@@ -301,7 +303,8 @@ def main(argv: list[str] | None = None) -> None:
         9. Pipeline (encode は image_width と jpeg_quality で nv12_to_jpeg する関数を包んだ JpegCache。
            bridge_failed は supervisor.state == "failed"、bridge_recovering は supervisor.state == "recovering"、
            capture_ended は capture.ended、capture_lost は watcher.lost。request_log は、--save-requests が
-           付いていれば RequestLog(実行のディレクトリー)、付いていなければ None)
+           付いていれば RequestLog(実行のディレクトリー)、付いていなければ None。min_request_interval_s は、
+           --model が jev なら jev.JEV_MIN_REQUEST_INTERVAL_S、decisions なら 0.0)
         10. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
            Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
@@ -419,6 +422,9 @@ def main(argv: list[str] | None = None) -> None:
                 request_log=request_log,
             ),
             max_consecutive_errors=args.max_consecutive_errors,
+            min_request_interval_s=(
+                jev.JEV_MIN_REQUEST_INTERVAL_S if args.model == "jev" else 0.0
+            ),
         )
         if request_log is not None:
             request_log.write_header(args.model, build_instructions(), questions)

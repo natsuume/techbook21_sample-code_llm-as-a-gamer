@@ -1,18 +1,22 @@
 """判断のループ。フレームを選んで Decision Model に送り、応答から決めた操作を送ることを止まるまで繰り返す。
 
-応答待ちの要求は常に 1 つ。応答を受け取ったら操作を送り、すぐ次の要求に進む。
+応答待ちの要求は常に 1 つ。応答を受け取ったら操作を送り、次の要求に進む。min_request_interval_s が 0 より大きければ、
+直前の応答 (失敗を含む) が返ってからその時間が過ぎるまで、次の要求のフレームを選ばずに待つ (Jev では 0.2 秒)。
 コントローラーのブリッジが復旧中 (recovering) の間は要求を送らず、復旧が終わるのを待つ
 (送った操作は届かず、要求のたびに Decision Model の料金がかかるため)。
 Decision Model の応答は同期で待つ。その間にキャプチャーが止まったら、別のスレッドの見張り
 (capture_watcher.CaptureWatcher) が押下状態を中立に戻し、Pipeline は capture_lost でその判定を読んで止まる。
 1 回の要求 (run_once) の流れ:
-    1. キャプチャーが終わっていないか (見張りが止まったと判定していないか)、新しいフレームが届いているかを確かめる
-    2. 要求に載せるフレームを選ぶ (前回の要求の送信から今までの直近の区間 + それより前の意味のあるフレーム)
-    3. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
-    4. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
+    1. 直前の応答から min_request_interval_s が過ぎていなければ、残りの時間だけ待つ
+    2. キャプチャーが終わっていないか (見張りが止まったと判定していないか)、ブリッジが復旧中になっていないか、
+       新しいフレームが届いているかを確かめる
+    3. 要求に載せるフレームとして、フレームの履歴の最新の 1 枚を選ぶ
+    4. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
+    5. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
        そうでなければ、問いごとの確率から操作を決めて PadOutput に渡す (すぐ戻る)
-    5. advisor を呼ぶ答えなら、Advisor.request_update を呼ぶ (すぐ戻る)
-    6. 要求のログ (request_log) があれば、要求ごとの入出力を書く
+    6. advisor を呼ぶ答えで、advisor が実行中でなければ、advisor に渡す画像を要求とは別に選び
+       (意味のあるフレーム + フレームの履歴から等間隔に選んだもの)、Advisor.request_update を呼ぶ (すぐ戻る)
+    7. 要求のログ (request_log) があれば、要求ごとの入出力を書く
 時間はすべて clock の差で測る。画像のラベルと操作の履歴の経過秒は、Pipeline の開始時刻 (started_at) を起点にする。
 """
 
@@ -26,6 +30,7 @@ from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds, decide_action
+from switch2_agent.advisor_images import build_advisor_images
 from switch2_agent.advisors.base import Advisor, AdvisorContext
 from switch2_agent.decision_models.base import (
     Decision,
@@ -35,18 +40,18 @@ from switch2_agent.decision_models.base import (
 from switch2_agent.decision_request import (
     DEFAULT_HISTORY_COUNT,
     DecisionRequest,
+    LabeledImage,
     build_decision_request,
 )
 from switch2_agent.frame_history import FrameHistory, TimedFrame
+from switch2_agent.frame_selection.advisor_frames import select_advisor_frames
 from switch2_agent.frame_selection.base import RecentFrameSelector
 from switch2_agent.frame_selection.meaningful_frames import MeaningfulFrameStore
-from switch2_agent.frame_selection.request_frames import select_request_frames
 from switch2_agent.operation_log import (
     NeutralRecord,
     OperationLog,
     OperationRecord,
     format_action,
-    record_time,
 )
 from switch2_agent.pad_output import OutputStoppedError
 from switch2_agent.questions import Question
@@ -110,7 +115,7 @@ class PipelineParts:
 
     history          フレームの履歴
     store            意味のあるフレームの保管
-    selector         直近の区間のフレームの選び方
+    selector         advisor に渡す画像を、フレームの履歴から選ぶ選び方
     model            Decision Model
     output           操作を送る先
     advisor          advisor
@@ -167,16 +172,20 @@ class Pipeline:
         stale_frame_timeout_s    最初の要求を送った後、新しいフレームが無い状態がこの秒数以上続いたら止まる
         first_frame_timeout_s    まだ 1 回も要求を送っていない間、新しいフレームが無い状態がこの秒数以上続いたら止まる
         bridge_wait_s            ブリッジの復旧を待つ間の確認の間隔 (秒)
+        min_request_interval_s   直前の応答が返ってから (model.decide が戻るか DecisionModelError を出してから)、
+                                 次の要求のフレームを選ぶまでに空ける時間 (秒)。0.0 なら空けない
         started_at               パイプラインの開始時刻 (__init__ での clock())。最初の advisor の操作の記録の起点で、
-                                 要求の画像のラベルと操作の履歴に書く経過秒 (t) の起点
+                                 要求と advisor に渡す画像のラベルと、操作の履歴に書く経過秒 (t) の起点
         request_sent             1 回でも model.decide を呼んだら (要求を送ったら) True
         request_count            送った要求の数 (0 始まり)。model.decide を呼ぶ前に 1 増やし、増やした後の値を
                                  その要求の通し番号 (requests.jsonl と run.jsonl の number) にする
-        previous_sent_at         前回の要求の送信時刻。まだ送っていなければ None
-        last_sent_frame_time     前回の要求に載せた最新のフレームの time。まだ送っていなければ None
+        last_sent_frame_time     最後に成功した要求 (run_once の 10 まで進んだ要求) に載せたフレームの time。
+                                 まだ無ければ None
+        last_response_at         直前の model.decide が戻った (応答を受け取ったか DecisionModelError を出した) 時刻
+                                 (clock() の値)。まだ model.decide を呼んでいなければ None
         last_advisor_at          操作の記録の起点 (advisor が受け付けた要求の received_at。最初は started_at)
-        no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。直近の区間に新しいフレームがあると
-                                 分かったら、要求を送る前に None に戻す (要求の成否によらない)
+        no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。新しいフレームがあると分かったら、
+                                 要求を送る前に None に戻す (要求の成否によらない)
         consecutive_errors       Decision Model の連続の失敗の回数。model.decide が成功したら 0 に戻す
     """
 
@@ -189,8 +198,12 @@ class Pipeline:
         stale_frame_timeout_s: float = DEFAULT_STALE_FRAME_TIMEOUT_S,
         first_frame_timeout_s: float = DEFAULT_FIRST_FRAME_TIMEOUT_S,
         bridge_wait_s: float = DEFAULT_BRIDGE_WAIT_S,
+        min_request_interval_s: float = 0.0,
     ):
-        """属性を入れる。started_at と last_advisor_at は parts.clock() の値にし、request_count は 0 にする。"""
+        """属性を入れる。
+
+        started_at と last_advisor_at は parts.clock() の値にし、request_count は 0、last_response_at は None にする。
+        """
         self.parts = parts
         self.max_consecutive_errors = max_consecutive_errors
         self.error_backoff_s = error_backoff_s
@@ -198,10 +211,11 @@ class Pipeline:
         self.stale_frame_timeout_s = stale_frame_timeout_s
         self.first_frame_timeout_s = first_frame_timeout_s
         self.bridge_wait_s = bridge_wait_s
+        self.min_request_interval_s = min_request_interval_s
+        self.last_response_at: float | None = None
         self.started_at = parts.clock()
         self.request_sent = False
         self.request_count = 0
-        self.previous_sent_at: float | None = None
         self.last_sent_frame_time: float | None = None
         self.last_advisor_at = self.started_at
         self.no_new_frame_since: float | None = None
@@ -210,23 +224,30 @@ class Pipeline:
     def run_once(self) -> None:
         """1 回の要求と応答を行う。
 
-        1. capture_ended() が真なら、output.neutral() して CaptureStoppedError("capture ended") を出す。
-           続けて reason = capture_lost() が None でなければ、output.neutral() して CaptureStoppedError(reason) を出す
-        2. history.latest() が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
-           このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る
-        3. now = clock()。select_request_frames(history, store, selector, previous_sent_at, now,
-           previous_operation_at=operation_log の最新の記録の operation_log.record_time (記録が無ければ None))
-           で選ぶ (意味のあるフレームは、常に前回の操作より前のフレームになる)。
-           直近の区間 (recent) が空なら、2 と同じく要求を送らず「新しいフレームが無いときの扱い」をして戻る。
-           空でなければ、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
+        1. last_response_at が None でなければ、remaining = last_response_at + min_request_interval_s - clock() とし、
+           remaining > 0 なら sleep(remaining) する。待った秒数 interval_wait_s は remaining (待たなければ 0.0)。
+           待つのは 2 の確認と 3 のフレームの選択より前 (選ぶ 1 枚が、待つ前の古い画面にならないようにするため)
+        2. capture_ended() が真なら、output.neutral() して CaptureStoppedError("capture ended") を出す。
+           続けて reason = capture_lost() が None でなければ、output.neutral() して CaptureStoppedError(reason) を出す。
+           続けて bridge_recovering() が真なら、要求を送らずに戻る (decision の log は渡さない)。run は始めに
+           ブリッジが復旧中でないことを確かめてから run_once を呼ぶが、1 の待ちの間に復旧中に変わることがあり、
+           そのまま送ると、届かない操作のために料金のかかる要求を 1 回送ってしまうため。中立に戻すことと
+           NeutralRecord の記録は、次の回の run の始めの _wait_for_bridge_recovery に任せる
+        3. frame = history.latest() とする。要求に載せるフレームは、この 1 枚だけ (意味のあるフレームは載せない)。
+           frame が None か、その time が last_sent_frame_time 以下なら、新しいフレームが無い。
+           このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る。
+           新しいフレームなら now = clock() とし、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
-        4. notes = read_notes()、build_decision_request(frames, now, notes, questions, encode,
+        4. notes = read_notes()、build_decision_request(frame, now, notes, questions, encode,
            origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT))。
+           画像のラベルの前回の操作の前後は、operation_log の最新の記録の時刻 (operation_log.record_time) で決まる。
            組み立て終えたら encoded_at = clock() (model.decide を呼ぶ直前の時刻)
         5. request_sent = True、request_count を 1 増やす (増やした後の値 number がこの要求の通し番号)。
-           sent_at = now、decision = model.decide(request)、received_at = clock()。
-           model.decide が DecisionModelError を出したら、まず output.neutral() し (要求のログの書き込みで、
-           中立に戻すのを遅らせないため)、operation_log.add(NeutralRecord(clock(), DECISION_ERROR_NEUTRAL_REASON))
+           sent_at = now、decision = model.decide(request)。戻ったら received_at = clock() とし、
+           last_response_at = received_at にする。
+           model.decide が DecisionModelError を出したら、すぐ last_response_at = clock() にする。続けて
+           output.neutral() し (要求のログの書き込みで、中立に戻すのを遅らせないため)、
+           operation_log.add(NeutralRecord(clock(), DECISION_ERROR_NEUTRAL_REASON))
            で中立に戻したことを記録する (次の要求の履歴に出し、画像のラベルの前回の操作の時刻にするため)。
            その後に要求のログに result="error"、error=例外の文字列 (str)、received_at・decision・action は None の
            記録を書いてから、その例外をそのまま出す (run の DecisionModelError の扱いでも、もう一度
@@ -246,21 +267,30 @@ class Pipeline:
            apply が送信の例外 (RuntimeError / OSError) を出したら、要求のログに result="error"、
            error=describe_error(例外)、decision は応答、action は決めた操作の記録を書き、OutputSendError に包んで出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
-        8. action.advisor_requested なら AdvisorContext を作って advisor.request_update を呼ぶ。
-           AdvisorContext は game、request.images、notes の strategy (無ければ空文字)、
+        8. action.advisor_requested が真で、advisor.is_busy() が偽のときだけ、advisor に渡す画像を要求とは別に選び、
+           AdvisorContext を作って advisor.request_update を呼ぶ。is_busy() が真なら、画像を選ばず request_update も
+           呼ばない (advisor_accepted は False。advisor の実行中に、要求のたびに最大 10 枚を符号化して、
+           速い層を遅らせないため)。
+           画像は、advisor_now = clock() として、frame_selection.advisor_frames.select_advisor_frames(history, store,
+           selector, advisor_now) で選んだフレームを、advisor_images.build_advisor_images(選んだフレーム, advisor_now,
+           origin=started_at, encode) で JPEG にしたもの (意味のあるフレーム → フレームの履歴から選んだもの、どちらも古い順)。
+           AdvisorContext は game、その画像、notes の strategy (無ければ空文字)、
            operation_log.format_since(last_advisor_at, received_at)、action.advisor_probability、
            time.strftime("%H:%M:%S") の壁時計の時刻からなる。
            受け付けられたら (True)、last_advisor_at = received_at (次の操作の記録の起点)
         9. 要求のログに result="ok"、error=None、decision は応答、action は送った操作、
            advisor_accepted=request_update の結果 (呼ばなければ False) の記録を書く
-        10. previous_sent_at = sent_at、last_sent_frame_time = 載せた直近の区間の最新のフレームの time。
+        10. last_sent_frame_time = frame.time。5・6 の例外で終わった要求では進めない (そのため、DecisionModelError や
+           送信の失敗の後は、新しいフレームが届いていなくても、同じフレームで次の要求を送る)。
            log に次の辞書を渡す:
              {"event": "decision", "number": この要求の通し番号 (requests.jsonl の行と突き合わせるため),
-              "select_s": 3 の時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
-              (HTTP を含む), "apply_s": output.apply の時間, "images": 画像の枚数,
-              "payload_bytes": 画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
+              "interval_wait_s": 1 で待った秒数 (待たなければ 0.0),
+              "select_s": 3 で now を取ってから 4 を始めるまでの時間, "encode_s": 4 の時間, "decide_s": model.decide の時間
+              (HTTP を含む), "apply_s": output.apply の時間, "images": 要求の画像の枚数 (1),
+              "payload_bytes": 要求の画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
               "advisor_probability", "advisor_requested", "advisor_accepted": request_update の結果
               (呼ばなければ False), "refusals": decision.refusals}
+           ブリッジが復旧中で戻るときと、新しいフレームが無くて戻るときと、例外で終わるときは、この辞書を渡さない。
 
         要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
         (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
@@ -278,6 +308,7 @@ class Pipeline:
         OutputSendError に包んで出す (扱いは run が決める)。
         """
         parts = self.parts
+        interval_wait_s = self._wait_for_request_interval()
         if parts.capture_ended():
             parts.output.neutral()
             raise CaptureStoppedError("capture ended")
@@ -285,36 +316,24 @@ class Pipeline:
         if lost_reason is not None:
             parts.output.neutral()
             raise CaptureStoppedError(lost_reason)
-        latest = parts.history.latest()
-        if latest is None or (
+        if parts.bridge_recovering():
+            # 待つ間にブリッジの復旧が始まった。中立に戻すことは、次の回の run の始めの復旧の待ちに任せる
+            return
+        frame = parts.history.latest()
+        if frame is None or (
             self.last_sent_frame_time is not None
-            and latest.time <= self.last_sent_frame_time
+            and frame.time <= self.last_sent_frame_time
         ):
             self._wait_for_new_frame()
             return
 
         now = parts.clock()
-        latest_records = parts.operation_log.recent(1)
-        previous_operation_at = (
-            record_time(latest_records[0]) if latest_records else None
-        )
-        frames = select_request_frames(
-            parts.history,
-            parts.store,
-            parts.selector,
-            self.previous_sent_at,
-            now,
-            previous_operation_at=previous_operation_at,
-        )
-        if not frames.recent:
-            self._wait_for_new_frame()
-            return
         self.no_new_frame_since = None
         selected_at = parts.clock()
 
         notes = parts.read_notes()
         request = build_decision_request(
-            frames,
+            frame,
             now,
             notes,
             parts.questions,
@@ -331,6 +350,8 @@ class Pipeline:
         try:
             decision = parts.model.decide(request)
         except DecisionModelError as e:
+            # 失敗の応答も、次の要求までの間隔の起点にする
+            self.last_response_at = parts.clock()
             # 中立に戻し、そのことを操作の記録に足してから要求のログを書く。例外は run に任せる
             parts.output.neutral()
             parts.operation_log.add(
@@ -341,6 +362,7 @@ class Pipeline:
             )
             raise
         received_at = parts.clock()
+        self.last_response_at = received_at
         self.consecutive_errors = 0
         # 応答を待つ間にキャプチャーが止まっていたら、古い画面への応答なので操作を反映しない
         lost_reason = parts.capture_lost()
@@ -399,11 +421,12 @@ class Pipeline:
 
         parts.operation_log.add(OperationRecord(sent_at, received_at, action))
         advisor_accepted = False
-        if action.advisor_requested:
+        # advisor の実行中は、画像を選んで符号化する時間で速い層を遅らせないよう、何もしない
+        if action.advisor_requested and not parts.advisor.is_busy():
             advisor_accepted = parts.advisor.request_update(
                 AdvisorContext(
                     game=parts.game,
-                    images=request.images,
+                    images=self._select_advisor_images(),
                     current_strategy=notes.get("strategy", ""),
                     operation_log_text=parts.operation_log.format_since(
                         self.last_advisor_at, received_at
@@ -427,12 +450,12 @@ class Pipeline:
             advisor_accepted=advisor_accepted,
         )
 
-        self.previous_sent_at = sent_at
-        self.last_sent_frame_time = max(frame.time for frame in frames.recent)
+        self.last_sent_frame_time = frame.time
         parts.log(
             {
                 "event": "decision",
                 "number": number,
+                "interval_wait_s": interval_wait_s,
                 "select_s": selected_at - now,
                 "encode_s": encoded_at - selected_at,
                 "decide_s": received_at - encoded_at,
@@ -452,7 +475,8 @@ class Pipeline:
 
         各回の始めに、bridge_recovering() が真で capture_lost() が None なら、run_once を呼ばずに
         _wait_for_bridge_recovery(stop) で復旧が終わるのを待ち、その後は while の条件の確認に戻る (復旧中は要求を
-        送らない)。送信の失敗で復旧が始まった場合も、次の回の始めの確認で待つ。capture_lost() が理由を返すときは、
+        送らない)。送信の失敗で復旧が始まった場合と、run_once の 1 の待ちの間に復旧が始まった場合 (run_once は
+        要求を送らずに戻る) も、次の回の始めの確認で待つ。capture_lost() が理由を返すときは、
         復旧中でも待たずに run_once を呼び、その始めの確認で止まる。run_once の例外は次のように扱う:
         - DecisionModelError: output.neutral() し (中立に戻したことは run_once が operation_log に記録済みのため、
           記録は足さない)、log に {"event": "decision_error", "error": <説明>} を渡し、
@@ -572,6 +596,28 @@ class Pipeline:
             request_log.write(entry)
         except (OSError, ValueError) as e:
             self.parts.log({"event": "request_log_error", "error": describe_error(e)})
+
+    def _wait_for_request_interval(self) -> float:
+        """直前の応答から min_request_interval_s が過ぎるまで待ち、待った秒数を返す (run_once の 1)。
+
+        last_response_at が None か、残りの時間が 0 以下なら、待たずに 0.0 を返す。
+        """
+        if self.last_response_at is None:
+            return 0.0
+        remaining = (
+            self.last_response_at + self.min_request_interval_s - self.parts.clock()
+        )
+        if remaining <= 0:
+            return 0.0
+        self.parts.sleep(remaining)
+        return remaining
+
+    def _select_advisor_images(self) -> list[LabeledImage]:
+        """advisor に渡す画像を、今の時刻 (clock()) で要求とは別に選んで JPEG にする (run_once の 8)。"""
+        parts = self.parts
+        now = parts.clock()
+        frames = select_advisor_frames(parts.history, parts.store, parts.selector, now)
+        return build_advisor_images(frames, now, self.started_at, parts.encode)
 
     def _wait_for_new_frame(self) -> None:
         """新しいフレームが無いときの扱い (run_once の docstring のとおり)。"""

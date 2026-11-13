@@ -7,6 +7,7 @@ from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_agent import run
+from switch2_agent.decision_models import jev
 from switch2_agent.decision_request import JpegCache, build_instructions
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.game_notes import NOTE_KINDS
@@ -32,6 +33,8 @@ def recorder(tmp_path, monkeypatch):
 
     偽物は本物と同じ引数だけを受け取り、ほかの引数を渡すと TypeError になる。
     偽の Pipeline の run は、rec.pipeline_error があればそれを送出し、無ければすぐ戻る。
+    偽の Pipeline の min_request_interval_s は、渡されなければ None のまま残す (run.main が明示的に渡したかを
+    確かめるため。本物の既定値は 0.0)。
     """
     rec = Recorder()
     (tmp_path / ".claude" / "skills").mkdir(parents=True)
@@ -121,9 +124,10 @@ def recorder(tmp_path, monkeypatch):
         pass
 
     class FakePipeline:
-        def __init__(self, parts, max_consecutive_errors):
+        def __init__(self, parts, max_consecutive_errors, min_request_interval_s=None):
             self.parts = parts
             self.max_consecutive_errors = max_consecutive_errors
+            self.min_request_interval_s = min_request_interval_s
             rec.pipeline = self
             rec.events.append("pipeline created")
 
@@ -388,6 +392,21 @@ def test_main_uses_decisions_model_with_openai_key(recorder, monkeypatch):
     run.main(["--game", "zelda", "--model", "decisions"])
     assert "FakeDecisionsApiModel created" in recorder.events
     assert recorder.model.api_key == TEST_API_KEY
+
+
+def test_jev_min_request_interval_is_0_2_seconds():
+    assert jev.JEV_MIN_REQUEST_INTERVAL_S == 0.2
+
+
+def test_main_spaces_jev_requests_by_min_request_interval(recorder):
+    run.main(REQUIRED)
+    assert recorder.pipeline.min_request_interval_s == jev.JEV_MIN_REQUEST_INTERVAL_S
+
+
+def test_main_does_not_space_decisions_requests(recorder, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_API_KEY)
+    run.main(["--game", "zelda", "--model", "decisions"])
+    assert recorder.pipeline.min_request_interval_s == 0.0
 
 
 def test_main_stops_on_keyboard_interrupt_and_closes_parts(recorder):
