@@ -4,7 +4,8 @@
     button            そのボタンを押さないか、押した状態にするか、1 回だけ短く押すか (選択肢の問い)
     stick_direction   そのスティックを、その軸 (左右か上下) のどちらに倒すか、倒さないか (選択肢の問い)
     stick_strength    そのスティックをその軸に倒す場合、傾きをその段階以上にするべきか (確率の問い)
-    advisor           advisor に戦略の更新を求めるべきか (確率の問い)
+    advisor           その役割の advisor (advisor_roles.ADVISOR_ROLES) に、ゲームの情報の更新や助言を求めるべきか
+                      (確率の問い。役割ごとに 1 問)
 答えの型は 2 つ (AnswerType):
     choice        選択肢の問い。「なし」(NONE_CHOICE) を含む選択肢の中から 1 つを選ぶ問いで、選択肢ごとの確率で答えさせる
     probability   確率の問い。真である確率で答えさせる
@@ -83,7 +84,7 @@ class Question:
     kind          問いの種類 (button / stick_direction / stick_strength / advisor)
     target        button はボタン名 (BUTTON_ORDER の要素)、stick_direction は `LS_x` のような
                   スティック名と軸を _ でつないだもの、stick_strength は `LS_x_50` のような
-                  スティック名・軸・段階を _ でつないだもの、advisor は空文字
+                  スティック名・軸・段階を _ でつないだもの、advisor は役割の name (advisor_roles.AdvisorRole.name)
     answer_type   答えの型。button と stick_direction は "choice"、stick_strength と advisor は "probability"
     choices       選択肢の問いの選択肢 (build_questions の docstring の順。先頭は NONE_CHOICE)。
                   確率の問いでは空のタプル
@@ -119,7 +120,7 @@ STICK_DIRECTION_CHOICES = {
 
 
 def build_questions() -> list[Question]:
-    """問いの一覧 (34 問) を次の順で返す。
+    """問いの一覧 (37 問) を次の順で返す。
 
     呼び名は BUTTON_LABELS と STICK_LABELS の値で、呼び名と「を」の間に空白を入れない。
     選択肢は、Jev が先頭の選択肢に寄りやすいと公式ドキュメントに書かれているため、「なし」(NONE_CHOICE) を先頭に置く。
@@ -142,8 +143,8 @@ def build_questions() -> list[Question]:
        - 50 と 75 の文は「<スティックの呼び名>を<向き>に倒す場合、傾きを <段階>% 以上にするべきか。」
          (例: 「左スティックを左右に倒す場合、傾きを 50% 以上にするべきか。」)
        - 100 の文は「<スティックの呼び名>を<向き>に倒す場合、傾きをいっぱい (100%) にするべきか。」
-    4. advisor の問い 1 問。name が ADVISOR_QUESTION_NAME、文が ADVISOR_QUESTION_TEXT、kind が advisor、
-       target が空文字の、確率の問い
+    4. advisor の問い 4 問 (advisor_roles.ADVISOR_ROLES の順。最後に置く)。役割ごとに、name は role.question_name
+       (例: advisor_strategy)、文は role.question_text、kind は advisor、target は role.name、確率の問い
     """
     return [
         *build_button_questions(),
@@ -158,6 +159,11 @@ def build_questions() -> list[Question]:
             choices=(),
         ),
     ]
+
+
+def build_advisor_questions() -> list[Question]:
+    """advisor の問い 4 問 (build_questions の 4) を、advisor_roles.ADVISOR_ROLES の順で返す。"""
+    raise NotImplementedError
 
 
 def build_button_questions() -> list[Question]:

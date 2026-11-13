@@ -2,7 +2,8 @@
 決める純粋な関数。
 
 ボタンとスティックの方向は選択肢の問い、スティックの強さと advisor は確率の問い (questions のモジュールの docstring)。
-しきい値と比べるのは advisor の問いだけで、確率がしきい値を超えた (>) ときに真とする。しきい値ちょうどは偽。
+しきい値と比べるのは advisor の問い (役割ごとに 1 問) だけで、確率がしきい値を超えた (>) ときに真とする。
+しきい値ちょうどは偽。
 I/O・スレッド・時刻を扱わない。
 """
 
@@ -40,7 +41,7 @@ def probabilities_equal(a: float, b: float) -> bool:
 
 @dataclass(frozen=True)
 class Thresholds:
-    """しきい値。advisor の問いの確率がこれを超えたら (>) 真にする。0〜1 (両端を含む)。範囲外は ValueError。
+    """しきい値。advisor の問いの確率がこれを超えたら (>) 真にする (4 つの役割で共通)。0〜1 (両端を含む)。範囲外は ValueError。
 
     ボタンとスティックの問いは、選択肢の問いと段階の確率の問いで決めるため、しきい値を使わない (decide_action)。
     """
@@ -57,16 +58,16 @@ class Thresholds:
 class PadAction:
     """1 回の応答から決めた操作。
 
-    held                  押した状態にするボタンと、倒すスティック (次の判断まで続く)
-    taps                  今 1 回だけ短く押すボタン名の集合 (held のボタンとは重ならない)
-    advisor_requested     advisor に戦略の更新を求めるか
-    advisor_probability   advisor の問いの確率
+    held                    押した状態にするボタンと、倒すスティック (次の判断まで続く)
+    taps                    今 1 回だけ短く押すボタン名の集合 (held のボタンとは重ならない)
+    advisor_probabilities   advisor の役割の name → その役割の問いの確率 (advisor_roles.ADVISOR_ROLES の順)
+    advisor_requested       advisor に求める役割の name の集合 (問いの確率が Thresholds.advisor を超えた役割)
     """
 
     held: PadState
     taps: frozenset[str]
-    advisor_requested: bool
-    advisor_probability: float
+    advisor_probabilities: Mapping[str, float]
+    advisor_requested: frozenset[str]
 
 
 def decide_action(
@@ -99,8 +100,9 @@ def decide_action(
        強さ s = STICK_MIN_STRENGTH + STICK_STRENGTH_STEP × (q50 + q75 + q100) (0.25〜1.0)。
        軸の値は、正の向き (right / up) なら +s、負の向き (left / down) なら −s、方向が none なら 0
        (questions.STICK_AXIS_DIRECTIONS)。x と y の両方が 0 のスティックは held に入れない
-    5. advisor: advisor_requested = probabilities["advisor"] > thresholds.advisor (同じ値なら偽)、
-       advisor_probability = probabilities["advisor"]
+    5. advisor: advisor_roles.ADVISOR_ROLES の順に、役割ごとの問い (role.question_name) の確率を
+       advisor_probabilities[role.name] に入れる。advisor_requested は、確率が thresholds.advisor を超えた (>) 役割の
+       name の集合 (同じ値なら入れない)。しきい値は 4 つの役割で共通
     """
     check_answers(probabilities, choices, questions)
     adopted = adopt_buttons(choices, questions)
@@ -113,8 +115,12 @@ def decide_action(
     return PadAction(
         held=PadState(held_buttons, decide_sticks(probabilities, choices, questions)),
         taps=taps,
-        advisor_requested=advisor_probability > thresholds.advisor,
-        advisor_probability=advisor_probability,
+        advisor_probabilities={ADVISOR_QUESTION_NAME: advisor_probability},
+        advisor_requested=(
+            frozenset({ADVISOR_QUESTION_NAME})
+            if advisor_probability > thresholds.advisor
+            else frozenset()
+        ),
     )
 
 

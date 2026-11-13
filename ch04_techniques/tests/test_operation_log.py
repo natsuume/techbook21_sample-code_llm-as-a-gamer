@@ -1,6 +1,7 @@
 from switch2_remote.controller_state import PadState
 
 from switch2_agent.action_decision import PadAction
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.operation_log import (
     NeutralRecord,
     OperationLog,
@@ -15,13 +16,16 @@ def make_action(
     buttons: set[str] | None = None,
     sticks: dict[str, tuple[float, float]] | None = None,
     taps: set[str] | None = None,
-    advisor_probability: float = 0.0,
+    **advisor_probabilities: float,
 ) -> PadAction:
+    """操作を返す。advisor の問いの確率は、advisor_probabilities (役割の name → 確率) の役割のほかは 0.0 にする。"""
+    probabilities = {role.name: 0.0 for role in ADVISOR_ROLES}
+    probabilities.update(advisor_probabilities)
     return PadAction(
         held=PadState(frozenset(buttons or ()), dict(sticks or {})),
         taps=frozenset(taps or ()),
-        advisor_requested=False,
-        advisor_probability=advisor_probability,
+        advisor_probabilities=probabilities,
+        advisor_requested=frozenset(),
     )
 
 
@@ -126,21 +130,38 @@ def test_format_since_writes_one_line_per_record():
                 buttons={"A"},
                 sticks={"LS": (0.8, 0.0)},
                 taps={"B"},
-                advisor_probability=0.12,
+                strategy=0.12,
             ),
         )
     )
-    log.add(record(9.5, make_action(advisor_probability=0.9)))
-    assert log.format_since(2.0, 10.0) == (
+    log.add(record(9.5, make_action(strategy=0.9)))
+    assert log.format_since(2.0, 10.0, "strategy") == (
         "-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12\n"
         "-0.50 秒: 押下 none / 短押し none / advisor 0.90"
+    )
+
+
+def test_format_since_writes_probability_of_given_role():
+    log = OperationLog()
+    log.add(
+        record(9.5, make_action(controls=0.25, strategy=0.5, advice=0.75, tips=0.4))
+    )
+    # 行の advisor の確率は、渡した役割の問いの確率
+    assert log.format_since(0.0, 10.0, "controls") == (
+        "-0.50 秒: 押下 none / 短押し none / advisor 0.25"
+    )
+    assert log.format_since(0.0, 10.0, "advice") == (
+        "-0.50 秒: 押下 none / 短押し none / advisor 0.75"
+    )
+    assert log.format_since(0.0, 10.0, "tips") == (
+        "-0.50 秒: 押下 none / 短押し none / advisor 0.40"
     )
 
 
 def test_format_since_is_empty_without_records():
     log = OperationLog()
     log.add(record(1.0))
-    assert log.format_since(1.0, 2.0) == ""
+    assert log.format_since(1.0, 2.0, "strategy") == ""
 
 
 # --- 中立に戻した記録 ---
@@ -181,12 +202,12 @@ def test_format_since_writes_neutral_record_without_advisor_probability():
                 buttons={"A"},
                 sticks={"LS": (0.8, 0.0)},
                 taps={"B"},
-                advisor_probability=0.12,
+                strategy=0.12,
             ),
         )
     )
     log.add(neutral(8.95))
-    assert log.format_since(2.0, 10.0) == (
+    assert log.format_since(2.0, 10.0, "strategy") == (
         "-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12\n"
         "-1.05 秒: 中立に戻した (Decision Model の失敗)"
     )

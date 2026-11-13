@@ -3,6 +3,8 @@ from collections import Counter
 
 from switch2_remote.controller_state import BUTTON_ORDER
 
+from switch2_agent import questions as questions_module
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.questions import (
     BUTTON_LABELS,
     HOLD_CHOICE,
@@ -14,10 +16,10 @@ from switch2_agent.questions import (
     build_questions,
 )
 
-ADVISOR_TEXT = (
-    "今、advisor (戦略を考える上位のモデル) に戦略の更新を求めるべきか。"
-    "今の戦略が画面の状況に合わないとき、新しい場面に入ったとき、"
-    "同じ失敗を繰り返しているときに真にする。"
+STRATEGY_TEXT = (
+    "今、advisor (目標と戦略を考える上位のモデル) に、目標と戦略の更新を求めるべきか。"
+    "今の目標を達成したとき、今の目標が達成できないと分かったとき、"
+    "新しい場面に入って今の戦略が画面の状況に合わないときに真にする。"
 )
 BUTTON_CHOICES = (
     Choice("none", "押さない"),
@@ -49,8 +51,8 @@ def questions_of_kind(kind: str) -> list:
 # --- 一覧の全体 ---
 
 
-def test_build_questions_returns_34_questions():
-    assert len(build_questions()) == 34
+def test_build_questions_returns_37_questions():
+    assert len(build_questions()) == 37
 
 
 def test_question_names_are_unique():
@@ -69,7 +71,7 @@ def test_question_counts_per_kind():
         "button": 17,
         "stick_direction": 4,
         "stick_strength": 12,
-        "advisor": 1,
+        "advisor": 4,
     }
 
 
@@ -79,7 +81,7 @@ def test_questions_are_ordered_buttons_directions_strengths_then_advisor():
         ["button"] * 17
         + ["stick_direction"] * 4
         + ["stick_strength"] * 12
-        + ["advisor"]
+        + ["advisor"] * 4
     )
 
 
@@ -87,9 +89,9 @@ def test_choice_questions_have_choices_starting_with_none():
     questions = build_questions()
     choice_questions = [q for q in questions if q.answer_type == "choice"]
     probability_questions = [q for q in questions if q.answer_type == "probability"]
-    # ボタンとスティックの方向の 21 問が選択肢の問い、強さと advisor の 13 問が確率の問い
+    # ボタンとスティックの方向の 21 問が選択肢の問い、強さと advisor の 16 問が確率の問い
     assert len(choice_questions) == 21
-    assert len(probability_questions) == 13
+    assert len(probability_questions) == 16
     for question in choice_questions:
         assert question.choices[0].name == NONE_CHOICE, question.name
         for choice in question.choices:
@@ -187,13 +189,32 @@ def test_stick_strength_question_text():
 # --- advisor の問い ---
 
 
-def test_advisor_question_is_last_probability_question():
-    questions = build_questions()
-    advisor = questions[-1]
-    assert advisor.name == "advisor"
-    assert (advisor.kind, advisor.target) == ("advisor", "")
-    assert advisor.text == ADVISOR_TEXT
-    assert (advisor.answer_type, advisor.choices) == ("probability", ())
+def test_advisor_questions_are_last_four_in_role_order():
+    advisors = build_questions()[-4:]
+    assert [q.name for q in advisors] == [
+        "advisor_controls",
+        "advisor_strategy",
+        "advisor_advice",
+        "advisor_tips",
+    ]
+    assert [q.target for q in advisors] == ["controls", "strategy", "advice", "tips"]
+    assert {q.kind for q in advisors} == {"advisor"}
+    for question in advisors:
+        assert (question.answer_type, question.choices) == ("probability", ())
+
+
+def test_advisor_questions_use_role_question_texts():
+    by_name = questions_by_name()
+    assert by_name["advisor_strategy"].text == STRATEGY_TEXT
+    for role in ADVISOR_ROLES:
+        assert by_name[role.question_name].text == role.question_text
+
+
+def test_single_advisor_question_constants_are_removed():
+    # advisor の問いは役割ごとの 4 問になり、1 問だけの advisor の問いの name と文は無い
+    assert not hasattr(questions_module, "ADVISOR_QUESTION_NAME")
+    assert not hasattr(questions_module, "ADVISOR_QUESTION_TEXT")
+    assert "advisor" not in questions_by_name()
 
 
 # --- 定数 ---

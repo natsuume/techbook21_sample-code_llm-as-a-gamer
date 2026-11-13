@@ -8,6 +8,7 @@ from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_agent import run
 from switch2_agent.action_decision import Thresholds
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.decision_models import jev
 from switch2_agent.decision_request import JpegCache, build_instructions
 from switch2_agent.frame_history import TimedFrame
@@ -26,6 +27,10 @@ class Recorder:
         self.events: list[str] = []
         self.bridge_error: Exception | None = None
         self.pipeline_error: BaseException | None = None
+        # 役割の name → 作った偽の advisor (作った順)
+        self.advisors: dict = {}
+        # この役割の advisor を作るときに送出する例外 (役割の name → 例外)
+        self.advisor_errors: dict[str, Exception] = {}
 
 
 @pytest.fixture
@@ -101,16 +106,27 @@ def recorder(tmp_path, monkeypatch):
 
     class FakeAdvisor:
         def __init__(
-            self, workdir, notes_dir, runs_dir, game, timeout_s, hidden_env_names, log
+            self,
+            workdir,
+            notes_dir,
+            runs_dir,
+            game,
+            role,
+            timeout_s,
+            hidden_env_names,
+            log,
         ):
+            if role.name in rec.advisor_errors:
+                raise rec.advisor_errors[role.name]
             self.args = (workdir, notes_dir, runs_dir, game, timeout_s)
+            self.role = role
             self.hidden_env_names = hidden_env_names
             self.log = log
-            rec.advisor = self
-            rec.events.append("advisor created")
+            rec.advisors[role.name] = self
+            rec.events.append(f"advisor {role.name} created")
 
         def close(self):
-            rec.events.append("advisor closed")
+            rec.events.append(f"advisor {self.role.name} closed")
 
     class FakeModel:
         def __init__(self, api_key):
@@ -177,7 +193,10 @@ def test_main_starts_parts_in_order(recorder):
         "output created",
         "capture created",
         "watcher created",
-        "advisor created",
+        "advisor controls created",
+        "advisor strategy created",
+        "advisor advice created",
+        "advisor tips created",
         "FakeJevModel created",
         "pipeline created",
     ]
@@ -186,11 +205,15 @@ def test_main_starts_parts_in_order(recorder):
 
 def test_main_closes_parts_in_order(recorder):
     run.main(REQUIRED)
+    # advisor は ADVISOR_ROLES の順にすべて閉じる
     assert closed(recorder) == [
         "watcher closed",
         "output neutral",
         "output closed",
-        "advisor closed",
+        "advisor controls closed",
+        "advisor strategy closed",
+        "advisor advice closed",
+        "advisor tips closed",
         "capture closed",
         "supervisor closed",
     ]
@@ -217,21 +240,52 @@ def test_main_creates_game_notes_and_run_log(recorder):
     assert events[0] == "start"
 
 
-def test_main_passes_run_dir_and_notes_dir_to_advisor(recorder):
-    run.main([*REQUIRED, "--advisor-timeout", "120"])
-    workdir, notes_dir, runs_dir, game, timeout_s = recorder.advisor.args
-    assert workdir == recorder.workdir
-    assert notes_dir == recorder.workdir / "game_notes" / "zelda"
-    assert runs_dir.parent == recorder.workdir / "runs"
-    assert (game, timeout_s) == ("zelda", 120.0)
-
-
-def test_main_hides_api_keys_from_advisor(recorder):
+def test_main_creates_one_advisor_for_each_role(recorder):
     run.main(REQUIRED)
-    assert set(recorder.advisor.hidden_env_names) == {
-        "TYPESAFE_API_KEY",
-        "OPENAI_API_KEY",
-    }
+    assert list(recorder.advisors) == [role.name for role in ADVISOR_ROLES]
+    assert [advisor.role for advisor in recorder.advisors.values()] == list(
+        ADVISOR_ROLES
+    )
+
+
+def test_main_passes_run_dir_notes_dir_and_timeout_to_every_advisor(recorder):
+    run.main([*REQUIRED, "--advisor-timeout", "120"])
+    run_dirs = set()
+    for advisor in recorder.advisors.values():
+        workdir, notes_dir, runs_dir, game, timeout_s = advisor.args
+        assert workdir == recorder.workdir
+        assert notes_dir == recorder.workdir / "game_notes" / "zelda"
+        assert runs_dir.parent == recorder.workdir / "runs"
+        assert (game, timeout_s) == ("zelda", 120.0)
+        run_dirs.add(runs_dir)
+    # 役割どうしで同じ実行のディレクトリーを使う
+    assert len(run_dirs) == 1
+
+
+def test_main_hides_api_keys_from_every_advisor(recorder):
+    run.main(REQUIRED)
+    assert len(recorder.advisors) == 4
+    for advisor in recorder.advisors.values():
+        assert set(advisor.hidden_env_names) == {
+            "TYPESAFE_API_KEY",
+            "OPENAI_API_KEY",
+        }
+
+
+def test_main_closes_advisors_created_before_one_fails(recorder):
+    # 3 つ目の役割 (advice) の advisor を作るのに失敗しても、作れた 2 つを順に閉じる
+    recorder.advisor_errors["advice"] = RuntimeError("cannot create advisor")
+    with pytest.raises(RuntimeError, match="cannot create advisor"):
+        run.main(REQUIRED)
+    assert closed(recorder) == [
+        "watcher closed",
+        "output neutral",
+        "output closed",
+        "advisor controls closed",
+        "advisor strategy closed",
+        "capture closed",
+        "supervisor closed",
+    ]
 
 
 def test_main_wires_pipeline_parts(recorder):
@@ -247,7 +301,7 @@ def test_main_wires_pipeline_parts(recorder):
     parts = recorder.pipeline.parts
     assert recorder.pipeline.max_consecutive_errors == 3
     assert parts.output is recorder.output
-    assert parts.advisor is recorder.advisor
+    assert dict(parts.advisors) == recorder.advisors
     assert parts.model is recorder.model
     assert recorder.model.api_key == TEST_API_KEY
     assert parts.history is recorder.capture.history
@@ -432,7 +486,10 @@ def test_main_closes_parts_and_raises_pipeline_error(recorder):
         "watcher closed",
         "output neutral",
         "output closed",
-        "advisor closed",
+        "advisor controls closed",
+        "advisor strategy closed",
+        "advisor advice closed",
+        "advisor tips closed",
         "capture closed",
         "supervisor closed",
     ]

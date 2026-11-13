@@ -7,6 +7,7 @@ from switch2_remote.bridge_supervisor import BridgeReconnectingError
 from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.decision_models.base import Decision, DecisionModelError
 from switch2_agent.decision_request import DecisionRequest, LabeledImage
@@ -24,7 +25,7 @@ from switch2_agent.pipeline import (
 from switch2_agent.questions import NONE_CHOICE, build_questions
 from switch2_agent.request_log import RequestLogEntry
 
-NOTES = {"controls": "A で決定", "tips": "", "progress": "1 面", "strategy": "右へ進む"}
+NOTES = {"controls": "A で決定", "tips": "", "strategy": "右へ進む", "advice": ""}
 HISTORY_HEADING = "## 直近の応答と送った操作 (古い順、最大 5 回)"
 DECISION_LOG_KEYS = {
     "number",
@@ -36,7 +37,7 @@ DECISION_LOG_KEYS = {
     "images",
     "payload_bytes",
     "action",
-    "advisor_probability",
+    "advisor_probabilities",
     "advisor_requested",
     "advisor_accepted",
     "refusals",
@@ -140,14 +141,21 @@ class FakeOutput:
 
 
 class FakeAdvisor:
-    """偽の Advisor。受け取った文脈を記録し、answers の先頭 (空なら True) を返す。is_busy は busy を返す。"""
+    """偽の Advisor (役割 name の advisor)。受け取った文脈を記録し、answers の先頭 (空なら True) を返す。
 
-    def __init__(self):
+    is_busy は busy を返す。request_update を呼ばれたら、役割の間で共有する calls に `request <name>` を足す
+    (役割どうしの呼ばれた順を確かめるため)。
+    """
+
+    def __init__(self, name: str, calls: list[str]):
+        self.name = name
+        self.calls = calls
         self.contexts: list[AdvisorContext] = []
         self.answers: list[bool] = []
         self.busy = False
 
     def request_update(self, context: AdvisorContext) -> bool:
+        self.calls.append(f"request {self.name}")
         self.contexts.append(context)
         return self.answers.pop(0) if self.answers else True
 
@@ -180,7 +188,12 @@ class Env:
         self.store = MeaningfulFrameStore()
         self.model = FakeModel(clock)
         self.output = FakeOutput()
-        self.advisor = FakeAdvisor()
+        # 役割の name → その役割の偽の advisor。advisor_calls は役割の間で共有する呼び出しの記録
+        self.advisor_calls: list[str] = []
+        self.advisors = {
+            role.name: FakeAdvisor(role.name, self.advisor_calls)
+            for role in ADVISOR_ROLES
+        }
         self.operation_log = OperationLog()
         self.logs: list[dict] = []
         self.sleeps: list[float] = []
@@ -196,6 +209,13 @@ class Env:
     def events(self, name: str) -> list[dict]:
         return [event for event in self.logs if event.get("event") == name]
 
+    def contexts(self) -> dict[str, list[AdvisorContext]]:
+        """役割の name → その役割の advisor が受け取った文脈を返す。"""
+        return {name: advisor.contexts for name, advisor in self.advisors.items()}
+
+    def no_advisor_was_called(self) -> bool:
+        return self.advisor_calls == []
+
 
 def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
     """時刻 now で作った Pipeline と、その偽の部品を返す。kwargs は Pipeline に渡す。"""
@@ -206,7 +226,7 @@ def make_pipeline(now: float = 9.0, **kwargs) -> tuple[Pipeline, Env]:
         selector=EvenIntervalSelector(),
         model=env.model,
         output=env.output,
-        advisor=env.advisor,
+        advisors=env.advisors,
         read_notes=lambda: dict(NOTES),
         questions=build_questions(),
         thresholds=Thresholds(),
@@ -417,30 +437,94 @@ def test_applies_decided_action_and_records_operation():
 # --- advisor ---
 
 
-def test_advisor_is_requested_when_probability_exceeds_threshold():
+def test_advisor_of_requested_role_is_called_with_its_context():
     pipeline, env = make_pipeline()
-    env.model.outcomes = [decision(advisor=0.9)]
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_tips=0.2)]
     env.add_frames(9.9)
     env.clock.now = 10.0
     pipeline.run_once()
-    assert len(env.advisor.contexts) == 1
-    context = env.advisor.contexts[0]
+    # しきい値を超えた strategy の advisor だけを呼ぶ
+    assert [len(contexts) for contexts in env.contexts().values()] == [0, 1, 0, 0]
+    context = env.advisors["strategy"].contexts[0]
     assert context.game == "zelda"
     assert context.current_strategy == "右へ進む"
     assert context.trigger_probability == 0.9
     assert context.trigger_time_text
-    # パイプラインの開始 (9.0) からの応答 1 件が操作の記録に入る
-    assert len(context.operation_log_text.splitlines()) == 1
-    assert "advisor 0.90" in context.operation_log_text
+    # パイプラインの開始 (9.0) からの応答 1 件が、その役割の確率とともに操作の記録に入る
+    assert context.operation_log_text == (
+        "0.00 秒: 押下 none / 短押し none / advisor 0.90"
+    )
     log = env.events("decision")[0]
-    assert log["advisor_requested"] is True
-    assert log["advisor_accepted"] is True
+    assert log["advisor_requested"] == ["strategy"]
+    assert log["advisor_accepted"] == ["strategy"]
+
+
+def test_each_role_gets_probability_of_its_own_question():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [
+        decision(
+            advisor_controls=0.6,
+            advisor_strategy=0.7,
+            advisor_advice=0.8,
+            advisor_tips=0.9,
+        )
+    ]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    for name, probability in [
+        ("controls", 0.6),
+        ("strategy", 0.7),
+        ("advice", 0.8),
+        ("tips", 0.9),
+    ]:
+        context = env.advisors[name].contexts[0]
+        assert context.trigger_probability == probability
+        assert context.operation_log_text.endswith(f" / advisor {probability:.2f}")
+
+
+def test_advisors_are_called_in_role_order():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(advisor_advice=0.9, advisor_strategy=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # ADVISOR_ROLES の順 (strategy が advice より先。名前の順ではない)
+    assert env.advisor_calls == ["request strategy", "request advice"]
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] == ["strategy", "advice"]
+    assert log["advisor_accepted"] == ["strategy", "advice"]
+
+
+def test_busy_role_is_skipped_and_other_requested_role_is_called():
+    pipeline, env = make_pipeline()
+    env.advisors["strategy"].busy = True
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_advice=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.advisor_calls == ["request advice"]
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] == ["strategy", "advice"]
+    assert log["advisor_accepted"] == ["advice"]
+    # 呼ばなかった役割の操作の記録の起点は、パイプラインの開始のまま
+    assert pipeline.last_advisor_at == {
+        "controls": 9.0,
+        "strategy": 9.0,
+        "advice": pytest.approx(10.2),
+        "tips": 9.0,
+    }
+
+
+def test_last_advisor_at_starts_at_pipeline_start_for_every_role():
+    pipeline, _ = make_pipeline(now=9.0)
+    assert pipeline.last_advisor_at == {role.name: 9.0 for role in ADVISOR_ROLES}
 
 
 def test_advisor_context_has_images_selected_for_advisor():
     # 経過秒の起点は 4.0。意味のあるフレームは、フレームの履歴から選んだ最初のフレーム (9.1) より前の 5.0 だけ
     pipeline, env = make_pipeline(now=4.0)
-    env.model.outcomes = [decision(advisor=0.9)]
+    env.model.outcomes = [decision(advisor_strategy=0.9)]
     env.store.add(frame(5.0))
     env.store.add(frame(9.2))
     env.add_frames(9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.8, 9.9)
@@ -457,7 +541,7 @@ def test_advisor_context_has_images_selected_for_advisor():
         ("直近 4/5 (t=5.70 秒、0.50 秒前)", 9.7),
         ("直近 5/5 (t=5.90 秒、0.30 秒前)", 9.9),
     ]
-    assert env.advisor.contexts[0].images == [
+    assert env.advisors["strategy"].contexts[0].images == [
         LabeledImage(
             label=label,
             jpeg=fake_encode(frame(time)),
@@ -478,39 +562,63 @@ def recording_encode(encoded: list[float]) -> Callable[[TimedFrame], bytes]:
     return encode
 
 
-def test_advisor_is_not_requested_while_busy():
+def test_advisor_images_are_selected_once_for_all_requested_roles():
     pipeline, env = make_pipeline()
     encoded: list[float] = []
     pipeline.parts.encode = recording_encode(encoded)
-    env.advisor.busy = True
-    env.model.outcomes = [decision(advisor=0.9)]
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_tips=0.9)]
     env.store.add(frame(5.0))
     env.add_frames(9.5, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
-    # advisor の実行中は request_update を呼ばず、advisor の画像も符号化しない (要求の画像だけを符号化する)
-    assert env.advisor.contexts == []
+    # 要求の画像 (9.9) と、advisor の画像 (5.0, 9.5, 9.9) を 1 回ずつだけ符号化し、2 つの役割で使い回す
+    assert encoded == [9.9, 5.0, 9.5, 9.9]
+    strategy_images = env.advisors["strategy"].contexts[0].images
+    assert [image.frame_time for image in strategy_images] == [5.0, 9.5, 9.9]
+    assert env.advisors["tips"].contexts[0].images == strategy_images
+
+
+def test_no_advisor_images_are_selected_when_all_requested_roles_are_busy():
+    pipeline, env = make_pipeline()
+    encoded: list[float] = []
+    pipeline.parts.encode = recording_encode(encoded)
+    env.advisors["strategy"].busy = True
+    env.advisors["tips"].busy = True
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_tips=0.9)]
+    env.store.add(frame(5.0))
+    env.add_frames(9.5, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    # 実行中の役割には request_update を呼ばず、advisor の画像も符号化しない (要求の画像だけを符号化する)
+    assert env.no_advisor_was_called()
     assert encoded == [9.9]
     log = env.events("decision")[0]
-    assert log["advisor_requested"] is True
-    assert log["advisor_accepted"] is False
+    assert log["advisor_requested"] == ["strategy", "tips"]
+    assert log["advisor_accepted"] == []
 
 
 def test_advisor_is_not_requested_at_threshold():
     pipeline, env = make_pipeline()
     encoded: list[float] = []
     pipeline.parts.encode = recording_encode(encoded)
-    env.model.outcomes = [decision(advisor=0.5)]
+    env.model.outcomes = [
+        decision(
+            advisor_controls=0.5,
+            advisor_strategy=0.5,
+            advisor_advice=0.5,
+            advisor_tips=0.5,
+        )
+    ]
     env.store.add(frame(5.0))
     env.add_frames(9.5, 9.9)
     env.clock.now = 10.0
     pipeline.run_once()
-    assert env.advisor.contexts == []
+    assert env.no_advisor_was_called()
     # advisor を呼ばない要求では、advisor の画像を選ばず、要求の画像だけを符号化する
     assert encoded == [9.9]
     log = env.events("decision")[0]
-    assert log["advisor_requested"] is False
-    assert log["advisor_accepted"] is False
+    assert log["advisor_requested"] == []
+    assert log["advisor_accepted"] == []
 
 
 def run_three_requests(env: Env, pipeline: Pipeline) -> None:
@@ -521,32 +629,46 @@ def run_three_requests(env: Env, pipeline: Pipeline) -> None:
         pipeline.run_once()
 
 
-def test_advisor_operation_log_starts_after_last_accepted_request():
+def test_operation_log_of_each_role_starts_after_its_last_accepted_request():
     pipeline, env = make_pipeline()
+    # 応答は 10.2・10.7・11.2 に受け取る。strategy は 1 回目と 3 回目、tips は毎回、advisor を呼ぶ
     env.model.outcomes = [
-        decision(advisor=0.9),
-        decision(advisor=0.1),
-        decision(advisor=0.9),
+        decision(advisor_strategy=0.9, advisor_tips=0.9),
+        decision(advisor_strategy=0.1, advisor_tips=0.9),
+        decision(advisor_strategy=0.9, advisor_tips=0.9),
     ]
     run_three_requests(env, pipeline)
-    assert len(env.advisor.contexts) == 2
-    # 受け付けられた 1 回目の応答の後の、2 回目と 3 回目の応答だけが入る
-    assert len(env.advisor.contexts[1].operation_log_text.splitlines()) == 2
+    strategy = env.advisors["strategy"].contexts
+    tips = env.advisors["tips"].contexts
+    assert (len(strategy), len(tips)) == (2, 3)
+    # strategy は 1 回目 (10.2) の後の 2 回目と 3 回目、tips は 2 回目 (10.7) の後の 3 回目だけが入る
+    assert len(strategy[1].operation_log_text.splitlines()) == 2
+    assert len(tips[2].operation_log_text.splitlines()) == 1
+    assert pipeline.last_advisor_at == {
+        "controls": 9.0,
+        "strategy": pytest.approx(11.2),
+        "advice": 9.0,
+        "tips": pytest.approx(11.2),
+    }
 
 
-def test_rejected_advisor_request_keeps_operation_log_start():
+def test_rejected_advisor_request_keeps_operation_log_start_of_that_role():
     pipeline, env = make_pipeline()
     env.model.outcomes = [
-        decision(advisor=0.9),
-        decision(advisor=0.1),
-        decision(advisor=0.9),
+        decision(advisor_strategy=0.9),
+        decision(advisor_strategy=0.1),
+        decision(advisor_strategy=0.9),
     ]
-    env.advisor.answers = [False, True]
+    env.advisors["strategy"].answers = [False, True]
     run_three_requests(env, pipeline)
-    assert len(env.advisor.contexts) == 2
+    contexts = env.advisors["strategy"].contexts
+    assert len(contexts) == 2
     # 1 回目は受け付けられなかったので、起点はパイプラインの開始のまま
-    assert len(env.advisor.contexts[1].operation_log_text.splitlines()) == 3
-    assert env.events("decision")[0]["advisor_accepted"] is False
+    assert len(contexts[1].operation_log_text.splitlines()) == 3
+    logs = env.events("decision")
+    assert logs[0]["advisor_accepted"] == []
+    assert logs[2]["advisor_accepted"] == ["strategy"]
+    assert pipeline.last_advisor_at["strategy"] == pytest.approx(11.2)
 
 
 # --- 新しいフレームが無いとき ---
@@ -681,9 +803,27 @@ def test_decision_log_has_measurement_items():
     assert log["images"] == 1
     assert log["payload_bytes"] == sum(len(image.jpeg) for image in request.images)
     assert log["action"] == format_action(env.output.applied[0])
-    assert log["advisor_probability"] == 0.0
     assert log["refusals"] == 2
     assert log["number"] == 1
+
+
+def test_decision_log_has_advisor_items_of_each_role():
+    pipeline, env = make_pipeline()
+    env.model.outcomes = [decision(advisor_controls=0.25, advisor_advice=0.75)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    log = env.events("decision")[0]
+    assert log["advisor_probabilities"] == {
+        "controls": 0.25,
+        "strategy": 0.0,
+        "advice": 0.75,
+        "tips": 0.0,
+    }
+    # 役割の name のリスト (JSON に書けるよう、集合ではなくリスト)
+    assert log["advisor_requested"] == ["advice"]
+    assert log["advisor_accepted"] == ["advice"]
+    assert "advisor_probability" not in log
 
 
 # --- 直前の応答からの間隔 ---
@@ -921,9 +1061,9 @@ def test_run_waits_for_bridge_recovery_when_it_starts_during_interval_wait():
 @pytest.mark.parametrize("accepted", [True, False])
 def test_request_log_records_successful_request(accepted):
     pipeline, env, request_log = make_pipeline_with_request_log(now=9.0)
-    sent_decision = decision(advisor=0.9)
+    sent_decision = decision(advisor_strategy=0.9)
     env.model.outcomes = [sent_decision]
-    env.advisor.answers = [accepted]
+    env.advisors["strategy"].answers = [accepted]
     env.add_frames(9.9)
     env.clock.now = 10.0
     pipeline.run_once()
@@ -936,7 +1076,9 @@ def test_request_log_records_successful_request(accepted):
     assert entry.request is env.model.requests[0]
     assert entry.decision is sent_decision
     assert entry.action == env.output.applied[0]
-    assert entry.advisor_accepted is accepted
+    assert entry.advisor_accepted == (
+        frozenset({"strategy"}) if accepted else frozenset()
+    )
     assert entry.result == "ok"
     assert entry.error is None
 
@@ -1013,7 +1155,7 @@ def test_request_log_records_decision_error_and_raises():
     assert entry.received_at is None
     assert entry.decision is None
     assert entry.action is None
-    assert entry.advisor_accepted is False
+    assert entry.advisor_accepted == frozenset()
 
 
 def test_request_log_records_discarded_decision_when_capture_is_lost():
@@ -1037,7 +1179,7 @@ def test_request_log_records_discarded_decision_when_capture_is_lost():
     assert entry.decision is sent_decision
     # 操作を決める前に応答を捨てた
     assert entry.action is None
-    assert entry.advisor_accepted is False
+    assert entry.advisor_accepted == frozenset()
 
 
 def test_request_log_records_discarded_decision_when_capture_ends():
@@ -1111,7 +1253,7 @@ def test_neutralizes_before_writing_request_log_when_decide_fails():
 
 def test_request_log_records_discarded_decision_when_output_is_stopped():
     pipeline, env, request_log = make_pipeline_with_request_log()
-    sent_decision = decision(advisor=0.9)
+    sent_decision = decision(chosen={"button_A": "hold"})
     env.model.outcomes = [sent_decision]
     env.output.apply_errors = [OutputStoppedError("pad output was stopped")]
     env.add_frames(9.9)
@@ -1125,9 +1267,8 @@ def test_request_log_records_discarded_decision_when_output_is_stopped():
     assert entry.decision is sent_decision
     # 操作は決めたが、送られていない
     assert entry.action is not None
-    assert entry.action.advisor_requested is True
-    assert entry.advisor_accepted is False
-    assert env.advisor.contexts == []
+    assert entry.action.held.buttons == frozenset({"A"})
+    assert entry.advisor_accepted == frozenset()
 
 
 def test_request_log_uses_reason_from_watcher_when_output_is_stopped():
@@ -1157,7 +1298,7 @@ def test_request_log_uses_reason_from_watcher_when_output_is_stopped():
 )
 def test_request_log_records_send_error(error):
     pipeline, env, request_log = make_pipeline_with_request_log()
-    sent_decision = decision(advisor=0.9)
+    sent_decision = decision(chosen={"button_A": "hold"})
     env.model.outcomes = [sent_decision]
     env.output.apply_errors = [error]
     env.add_frames(9.9)
@@ -1170,11 +1311,10 @@ def test_request_log_records_send_error(error):
     assert entry.error == describe_error(error)
     assert entry.received_at == pytest.approx(10.2)
     assert entry.decision is sent_decision
-    # 応答から決めた操作を記録する (送信に失敗したので、advisor は呼ばない)
+    # 応答から決めた操作を記録する
     assert entry.action is not None
-    assert entry.action.advisor_requested is True
-    assert entry.advisor_accepted is False
-    assert env.advisor.contexts == []
+    assert entry.action.held.buttons == frozenset({"A"})
+    assert entry.advisor_accepted == frozenset()
 
 
 def test_request_log_write_error_does_not_stop_requests():
@@ -1503,7 +1643,7 @@ def sleep_failing_the_test(env: Env) -> Callable[[float], None]:
 
 def test_run_discards_decision_when_capture_is_lost_while_waiting_for_it():
     pipeline, env = make_pipeline()
-    env.model.outcomes = [decision(advisor=0.9)]
+    env.model.outcomes = [decision(advisor_strategy=0.9)]
 
     def lose_capture():
         env.capture_lost = "no new frame for 2.0 seconds"
@@ -1519,7 +1659,7 @@ def test_run_discards_decision_when_capture_is_lost_while_waiting_for_it():
     assert env.output.applied == []
     assert env.output.events == ["neutral"]
     assert env.operation_log.since(0.0) == []
-    assert env.advisor.contexts == []
+    assert env.no_advisor_was_called()
     assert env.events("decision") == []
     assert env.events("capture_stopped") == [
         {"event": "capture_stopped", "error": "no new frame for 2.0 seconds"}
@@ -1552,7 +1692,7 @@ def test_run_discards_decision_when_capture_ends_while_waiting_for_it():
 def test_run_discards_decision_when_output_is_stopped_before_apply():
     # 応答の後の確認では止まっていなかったが、apply までの間に見張りが出力を止めた場合
     pipeline, env = make_pipeline()
-    env.model.outcomes = [decision(advisor=0.9)]
+    env.model.outcomes = [decision(advisor_strategy=0.9)]
     env.output.apply_errors = [OutputStoppedError("pad output was stopped")]
     pipeline.parts.sleep = sleep_failing_the_test(env)
     env.add_frames(9.9)
@@ -1563,7 +1703,7 @@ def test_run_discards_decision_when_output_is_stopped_before_apply():
     assert len(env.model.requests) == 1
     assert env.output.applied == []
     assert env.operation_log.since(0.0) == []
-    assert env.advisor.contexts == []
+    assert env.no_advisor_was_called()
     assert env.events("decision") == []
     assert env.events("send_error") == []
     assert env.events("capture_stopped") == [
@@ -1879,7 +2019,10 @@ def test_request_after_bridge_wait_shows_neutral_as_previous_operation():
 
 def test_advisor_operation_log_includes_neutral_after_decision_error():
     pipeline, env = make_pipeline(now=9.0)
-    env.model.outcomes = [DecisionModelError("HTTP 500"), decision(advisor=0.9)]
+    env.model.outcomes = [
+        DecisionModelError("HTTP 500"),
+        decision(advisor_advice=0.9),
+    ]
     env.add_frames(9.9)
     env.clock.now = 10.0
     # 1 回目の要求は 10.2 に失敗し、中立に戻した
@@ -1888,9 +2031,9 @@ def test_advisor_operation_log_includes_neutral_after_decision_error():
     env.add_frames(10.4)
     env.clock.now = 10.5
     pipeline.run_once()
-    assert len(env.advisor.contexts) == 1
-    # advisor に渡す記録にも、中立に戻したことの行が入る (advisor の確率は書かない)
-    assert env.advisor.contexts[0].operation_log_text == (
+    assert len(env.advisors["advice"].contexts) == 1
+    # advisor に渡す記録にも、中立に戻したことの行が入る (中立に戻した行には advisor の確率は書かない)
+    assert env.advisors["advice"].contexts[0].operation_log_text == (
         "-0.50 秒: 中立に戻した (Decision Model の失敗)\n"
         "0.00 秒: 押下 none / 短押し none / advisor 0.90"
     )
