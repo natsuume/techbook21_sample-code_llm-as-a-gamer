@@ -71,13 +71,6 @@ from switch2_agent.safety import SAFETY_RULES
 logger = logging.getLogger(__name__)
 
 CLAUDE_EXECUTABLE = "claude"
-# advisor に使わせる Skill の名前 (.claude/skills/<名前>/SKILL.md)
-ADVISOR_SKILLS = (
-    "record-controls",
-    "record-tips",
-    "record-progress",
-    "record-strategy",
-)
 DEFAULT_MAX_TURNS = 30  # claude -p の --max-turns の既定値
 DEFAULT_ADVISOR_TIMEOUT_S = 300.0  # 1 回の advisor の実行の上限 (秒)
 # terminate してから kill するまでに、子プロセスが終わるのを待つ時間 (秒)
@@ -97,7 +90,7 @@ def advisor_run_dir_name(role_name: str, index: int) -> str:
 
     名前は `advisor-<role_name>-<index を 3 桁の 0 埋め>` (例: advisor-strategy-001)。
     """
-    return f"advisor-{index:03d}"
+    return f"advisor-{role_name}-{index:03d}"
 
 
 def image_file_name(index: int) -> str:
@@ -130,6 +123,7 @@ def write_advisor_inputs(
             "# advisor への文脈",
             "",
             f"- ゲーム: {context.game}",
+            f"- 役割: {role.title}",
             (
                 f"- きっかけ: {context.trigger_time_text} の要求で、advisor の問いの確率が "
                 f"{context.trigger_probability:.2f} だった"
@@ -143,7 +137,7 @@ def write_advisor_inputs(
             "",
             strategy,
             "",
-            "## 前回 advisor を呼んでからの応答と送った操作",
+            "## この役割の advisor を前回呼んでからの応答と送った操作",
             "",
             operation_log,
             "",
@@ -175,21 +169,22 @@ def build_advisor_prompt(
     note_lines = "\n".join(
         f"   - {notes_dir / f'{kind}.md'} ({NOTE_TITLES[kind]})" for kind in NOTE_KINDS
     )
+    note_file = f"{role.note_kind}.md"
     return f"""\
-あなたは、Nintendo Switch 2 のゲーム「{game}」を遊ぶ速い層 (画面の画像を見て、問いごとに型付きの判断を返すモデル) のために、戦略を考える advisor である。ゲーム名は {game}。
+あなたは、Nintendo Switch 2 のゲーム「{game}」を遊ぶ速い層のために、{role.title}を受け持つ advisor である。
+速い層は、画面の画像を見て、問いごとに型付きの判断を返すモデルである。ゲーム名は {game}。
 
 手順:
 1. {context_path} を読む。そこに並ぶ画像 (同じディレクトリーの frame-01.jpg など) も読む。
-2. ゲームの情報の 4 ファイルを読む。
+2. ゲームの情報の 4 ファイルをすべて読む。
 {note_lines}
-3. 新しく分かったことがあれば、種別ごとの Skill で更新する。操作方法は record-controls、攻略情報は record-tips、進行状況は record-progress。
-4. 戦略は record-strategy で必ず更新する。
-5. 最後に、更新した内容を 3 行以内で答える。
+3. {role.task}{role.skill} の Skill の手順で {note_file} を書き換える。
+4. 最後に、更新した内容を 3 行以内で答える。
 
 守ること:
-- 4 ファイルは速い層の要求に毎回そのまま入るため、短く保つ。
-- 4 ファイル以外のファイルを書き換えない。
-- 次の安全のための規則を守り、戦略にも反映する。
+- 書き換えてよいのは {note_file} だけで、ほかの 3 ファイルは読むだけにする。
+- ファイルは速い層の要求に毎回そのまま入るため、短く保つ。
+- 次の安全のための規則を守る。
 
 {SAFETY_RULES}"""
 
@@ -210,8 +205,8 @@ def build_allowed_tools(
     return [
         f"Read(/{notes_dir_relative}/**)",
         f"Read(/{runs_dir_relative}/**)",
-        *(f"Edit(/{notes_dir_relative}/{kind}.md)" for kind in NOTE_KINDS),
-        *(f"Skill({name})" for name in ADVISOR_SKILLS),
+        f"Edit(/{notes_dir_relative}/{role.note_kind}.md)",
+        f"Skill({role.skill})",
     ]
 
 
@@ -294,6 +289,7 @@ def build_log_event(run_dir: Path, record: dict, role: AdvisorRole) -> dict:
     output = record["output"]
     return {
         "event": "advisor",
+        "role": role.name,
         "run_dir": str(run_dir),
         "returncode": record["returncode"],
         "duration_s": record["duration_s"],

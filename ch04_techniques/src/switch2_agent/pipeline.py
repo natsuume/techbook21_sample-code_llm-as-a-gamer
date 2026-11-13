@@ -22,6 +22,7 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
 """
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -32,7 +33,7 @@ from switch2_remote.error_message import describe_error
 from switch2_agent.action_decision import PadAction, Thresholds, decide_action
 from switch2_agent.advisor_images import build_advisor_images
 from switch2_agent.advisor_roles import ADVISOR_ROLES
-from switch2_agent.advisors.base import Advisor
+from switch2_agent.advisors.base import Advisor, AdvisorContext
 from switch2_agent.decision_models.base import (
     Decision,
     DecisionModel,
@@ -626,7 +627,34 @@ class Pipeline:
 
         notes はその要求で読んだゲームの情報 (種別 → 中身)、received_at はその要求の応答を受け取った時刻。
         """
-        raise NotImplementedError
+        parts = self.parts
+        targets = [
+            role.name
+            for role in ADVISOR_ROLES
+            if role.name in action.advisor_requested
+            and not parts.advisors[role.name].is_busy()
+        ]
+        if not targets:
+            return frozenset()
+        # 呼ぶ役割が複数でも、画像は 1 回だけ選んで符号化し、使い回す
+        images = self._select_advisor_images()
+        trigger_time_text = time.strftime("%H:%M:%S")
+        accepted: set[str] = set()
+        for name in targets:
+            context = AdvisorContext(
+                game=parts.game,
+                images=images,
+                current_strategy=notes.get("strategy", ""),
+                operation_log_text=parts.operation_log.format_since(
+                    self.last_advisor_at[name], received_at, name
+                ),
+                trigger_probability=action.advisor_probabilities[name],
+                trigger_time_text=trigger_time_text,
+            )
+            if parts.advisors[name].request_update(context):
+                self.last_advisor_at[name] = received_at
+                accepted.add(name)
+        return frozenset(accepted)
 
     def _select_advisor_images(self) -> list[LabeledImage]:
         """advisor に渡す画像を、今の時刻 (clock()) で要求とは別に選んで JPEG にする (run_once の 8)。"""

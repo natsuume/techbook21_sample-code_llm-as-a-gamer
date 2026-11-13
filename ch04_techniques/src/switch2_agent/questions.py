@@ -18,6 +18,8 @@ from typing import Literal
 
 from switch2_remote.controller_state import BUTTON_ORDER
 
+from switch2_agent.advisor_roles import ADVISOR_ROLES
+
 QuestionKind = Literal["button", "stick_direction", "stick_strength", "advisor"]
 AnswerType = Literal["choice", "probability"]
 
@@ -54,13 +56,6 @@ BUTTON_LABELS = {
 STICK_LABELS = {"LS": "左スティック", "RS": "右スティック"}
 # スティックの軸 → 問いの文で使う倒す向きの呼び名。並びは問いの順でもある
 STICK_AXIS_LABELS = {"x": "左右", "y": "上下"}
-# advisor の問いの name
-ADVISOR_QUESTION_NAME = "advisor"
-ADVISOR_QUESTION_TEXT = (
-    "今、advisor (戦略を考える上位のモデル) に戦略の更新を求めるべきか。"
-    "今の戦略が画面の状況に合わないとき、新しい場面に入ったとき、"
-    "同じ失敗を繰り返しているときに真にする。"
-)
 
 
 @dataclass(frozen=True)
@@ -150,20 +145,23 @@ def build_questions() -> list[Question]:
         *build_button_questions(),
         *build_stick_direction_questions(),
         *build_stick_strength_questions(),
-        Question(
-            name=ADVISOR_QUESTION_NAME,
-            text=ADVISOR_QUESTION_TEXT,
-            kind="advisor",
-            target="",
-            answer_type="probability",
-            choices=(),
-        ),
+        *build_advisor_questions(),
     ]
 
 
 def build_advisor_questions() -> list[Question]:
     """advisor の問い 4 問 (build_questions の 4) を、advisor_roles.ADVISOR_ROLES の順で返す。"""
-    raise NotImplementedError
+    return [
+        Question(
+            name=role.question_name,
+            text=role.question_text,
+            kind="advisor",
+            target=role.name,
+            answer_type="probability",
+            choices=(),
+        )
+        for role in ADVISOR_ROLES
+    ]
 
 
 def build_button_questions() -> list[Question]:

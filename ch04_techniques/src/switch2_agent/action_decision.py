@@ -13,8 +13,8 @@ from dataclasses import dataclass
 
 from switch2_remote.controller_state import PadState
 
+from switch2_agent.advisor_roles import ADVISOR_ROLES
 from switch2_agent.questions import (
-    ADVISOR_QUESTION_NAME,
     HOLD_CHOICE,
     NONE_CHOICE,
     STICK_AXIS_DIRECTIONS,
@@ -111,15 +111,17 @@ def decide_action(
         b for b, (kind, _) in adopted.items() if kind == HOLD_CHOICE
     )
     taps = frozenset(b for b, (kind, _) in adopted.items() if kind == TAP_CHOICE)
-    advisor_probability = probabilities[ADVISOR_QUESTION_NAME]
+    advisor_probabilities = {
+        role.name: probabilities[role.question_name] for role in ADVISOR_ROLES
+    }
     return PadAction(
         held=PadState(held_buttons, decide_sticks(probabilities, choices, questions)),
         taps=taps,
-        advisor_probabilities={ADVISOR_QUESTION_NAME: advisor_probability},
-        advisor_requested=(
-            frozenset({ADVISOR_QUESTION_NAME})
-            if advisor_probability > thresholds.advisor
-            else frozenset()
+        advisor_probabilities=advisor_probabilities,
+        advisor_requested=frozenset(
+            name
+            for name, probability in advisor_probabilities.items()
+            if probability > thresholds.advisor
         ),
     )
 
