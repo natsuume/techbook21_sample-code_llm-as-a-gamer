@@ -1,7 +1,8 @@
 """OpenAI Decisions API (POST /v1/decisions) を Decision Model として使う。
 
 要求と応答の形は公式ドキュメント (https://developers.openai.com/api/docs/guides/decisions と
-https://developers.openai.com/api/reference/resources/decisions/methods/create、2026-11-12 に確認) に合わせる。
+https://developers.openai.com/api/reference/resources/decisions/methods/create、2026-11-12 に確認。
+選択肢の問い (choice) の形は 2026-11-13 に確認) に合わせる。
 
 要求の形:
     {
@@ -18,13 +19,23 @@ https://developers.openai.com/api/reference/resources/decisions/methods/create�
         {"type": "input_image", "image_url": "data:image/jpeg;base64,<その画像の base64>"},
         ...
       ]}],
-      "questions": [{"type": "predicate", "name": <Question.name>, "instructions": <Question.text>}, ...]
+      "questions": [
+        {"type": "predicate", "name": <確率の問いの Question.name>, "instructions": <Question.text>},
+        {"type": "choice", "name": <選択肢の問いの Question.name>, "instructions": <Question.text>,
+         "choices": [{"value": <Choice.name>, "description": <Choice.description>}, ...]},
+        ...
+      ]
     }
+questions は request.questions の順で、choices は Question.choices の順。
 history_text (直近の応答と送った操作の履歴) のテキストは、空文字なら置かない。previous_operation_text
 (前回の操作を送った時点の区切りの文) は、前回の操作の後 (after_previous_operation が True) の最初の画像の
 ラベルの直前に 1 回だけ置き、previous_operation_text が None か、前回の操作の後の画像が無ければ置かない。
-応答の形: {"answers": [{"type": "predicate", "name": ..., "probability": ...}, ...], "model": ..., "usage": ...}。
-answer は {"type": "refusal", "name": ...} (probability が無い) のこともある。
+応答の形: {"answers": [<answer>, ...], "model": ..., "usage": ...}。answer は次のどれか:
+    {"type": "predicate", "name": ..., "probability": <0〜1>}                         確率の問いの答え
+    {"type": "choice", "name": ..., "choice": <確率が最も高い選択肢の value>,
+     "probabilities": [{"value": <選択肢の value>, "probability": <0〜1>}, ...], "confidence": ...}   選択肢の問いの答え
+    {"type": "refusal", "name": ...}                                                  回答の拒否 (確率が無い)
+選択肢の問いの答えは probabilities だけを読み、choice と confidence は使わない。
 
 未確認 (公式ドキュメントに記載なし): Decisions API のエラーの本文の形、画像の枚数・大きさの上限、レート制限、タイムアウト。
 2xx 以外の応答はすべて DecisionModelError にする。JPEG の data URL の MIME 型 (image/jpeg) は、
@@ -44,6 +55,7 @@ from switch2_agent.decision_models.base import (
     read_probability,
 )
 from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.questions import Question
 
 DECISIONS_URL = "https://api.openai.com/v1/decisions"
 DEFAULT_DECISIONS_MODEL = "gpt-6-luna"  # Decisions API で使える唯一のモデル
@@ -74,7 +86,10 @@ def build_decisions_payload(
     (input_text) と画像 (input_image、jpeg_data_url) を 1 組ずつ置く。after_previous_operation が True の
     最初の画像の組の直前 (ラベルのテキストの前) には、request.previous_operation_text が None でなければ、
     その文の input_text を 1 回だけ置く。各画像の本体は要求の中に 1 回だけ入る。
-    questions は request.questions の順に、{"type": "predicate", "name": name, "instructions": text}。
+    questions は request.questions の順に、確率の問い (answer_type が "probability") なら
+    {"type": "predicate", "name": name, "instructions": text}、選択肢の問い (answer_type が "choice") なら
+    {"type": "choice", "name": name, "instructions": text,
+     "choices": [{"value": Choice.name, "description": Choice.description}, ...]} (choices は Question.choices の順)。
     """
     content: list[dict[str, str]] = [
         {"type": "input_text", "text": request.instructions},
@@ -108,17 +123,25 @@ def build_decisions_payload(
 
 
 def parse_decisions_response(
-    body: Mapping[str, object], names: Sequence[str]
+    body: Mapping[str, object], questions: Sequence[Question]
 ) -> Decision:
-    """応答の本文 body から、names (要求した問いの name) それぞれの確率を読み、Decision にする。
+    """応答の本文 body から、questions (要求した問い) それぞれの答えを読み、Decision にする。
 
     body["answers"] の各 answer を name で照合する (answers の並びには頼らない)。
-    - type が "predicate" の answer は probability を確率にする (base.read_probability で検証する)
-    - type が "refusal" の answer は確率 0.0 とし、refusals に数える
-    names のうち answer が無い問い、answers がリストでない応答、answer が object でないもの、name が文字列でない
-    (name が無いものを含む) か type が predicate / refusal 以外の answer は DecisionModelError にする。
-    names に無い name の answer は無視する。
+    - type が "predicate" の answer は、確率の問いの答え。probability を確率にし (base.read_probability で検証する)、
+      Decision.probabilities に入れる
+    - type が "choice" の answer は、選択肢の問いの答え。probabilities (value と probability を持つ object のリスト) を
+      value → probability の対応にして base.read_choice_probabilities で読み、Decision.choices に入れる。
+      choice と confidence は読まない
+    - type が "refusal" の answer は、確率の問いなら確率 0.0、選択肢の問いなら NONE_CHOICE の確率を 1.0、ほかの
+      選択肢を 0.0 とし (何もしない側に倒す)、refusals に数える
+    questions のうち answer が無い問い、answers がリストでない応答、answer が object でないもの、name が文字列でない
+    (name が無いものを含む) か type が predicate / choice / refusal 以外の answer、type が問いの答えの型と合わない
+    answer (確率の問いに choice、選択肢の問いに predicate)、choice の answer で probabilities がリストでないか、
+    その要素が object でないか value が文字列でないものは DecisionModelError にする。
+    questions に無い name の answer は無視する。raw_response は None (DecisionsApiModel.decide が応答の本文を入れる)。
     """
+    names = [question.name for question in questions]
     answers = body.get("answers")
     if not isinstance(answers, list):
         raise DecisionModelError("decisions response has no answers list")
@@ -150,7 +173,7 @@ def parse_decisions_response(
         raise DecisionModelError(
             f"decisions response has no answer for: {' '.join(missing)}"
         )
-    return Decision(probabilities=probabilities, refusals=refusals)
+    return Decision(probabilities=probabilities, choices={}, refusals=refusals)
 
 
 class DecisionsApiModel:
@@ -190,7 +213,5 @@ class DecisionsApiModel:
             build_decisions_payload(request, self.model),
             self.timeout_s,
         )
-        decision = parse_decisions_response(
-            body, [question.name for question in request.questions]
-        )
+        decision = parse_decisions_response(body, request.questions)
         return replace(decision, raw_response=body)

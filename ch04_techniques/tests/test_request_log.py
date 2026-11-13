@@ -10,7 +10,7 @@ from switch2_agent.action_decision import PadAction
 from switch2_agent.decision_models.base import Decision
 from switch2_agent.decision_request import DecisionRequest, LabeledImage
 from switch2_agent.operation_log import format_action
-from switch2_agent.questions import Question
+from switch2_agent.questions import Choice, Question
 from switch2_agent.request_log import (
     FRAMES_DIR_NAME,
     REQUEST_LOG_FILE_NAME,
@@ -22,9 +22,28 @@ from switch2_agent.request_log import (
 TIME_PATTERN = re.compile(r"\d{2}:\d{2}:\d{2}\.\d{3}")
 ORIGIN = 100.0
 QUESTIONS = [
-    Question("press_A", "今、A ボタンを押した状態にするべきか。", "press", "A"),
-    Question("advisor", "今、advisor に戦略の更新を求めるべきか。", "advisor", ""),
+    Question(
+        "button_A",
+        "今、A ボタンをどうするか。",
+        "button",
+        "A",
+        "choice",
+        (
+            Choice("none", "押さない"),
+            Choice("hold", "押した状態にする。押した状態は次の判断まで続く"),
+            Choice("tap", "1 回だけ短く押す"),
+        ),
+    ),
+    Question(
+        "advisor",
+        "今、advisor に戦略の更新を求めるべきか。",
+        "advisor",
+        "",
+        "probability",
+        (),
+    ),
 ]
+CHOICES = {"button_A": {"none": 0.1, "hold": 0.8, "tap": 0.1}}
 HISTORY_TEXT = (
     "## 直近の応答と送った操作 (古い順、最大 5 回)\n"
     "- t=2.00 秒 (1.00 秒前): 押下 none / 短押し A (前回の操作)"
@@ -33,7 +52,12 @@ PREVIOUS_OPERATION_TEXT = "── t=2.00 秒 (1.00 秒前) に、前回の応答
 RAW_RESPONSE = {
     "model": "jev-1.14.0",
     "answers": {
-        "press_A": {"type": "noul", "noul": 0.9},
+        "button_A": {
+            "type": "choice",
+            "choice": "hold",
+            "confidence": 0.8,
+            "probabilities": {"none": 0.1, "hold": 0.8, "tap": 0.1},
+        },
         "advisor": {"type": "noul", "noul": 0.7},
     },
 }
@@ -70,7 +94,8 @@ def sample_action() -> PadAction:
 
 def sample_decision() -> Decision:
     return Decision(
-        probabilities={"press_A": 0.9, "advisor": 0.7},
+        probabilities={"advisor": 0.7},
+        choices=CHOICES,
         refusals=1,
         raw_response=RAW_RESPONSE,
     )
@@ -157,14 +182,25 @@ def test_write_header_writes_model_instructions_and_questions(tmp_path):
         "instructions": "あなたはコントローラーの判断をする。",
         "questions": [
             {
-                "name": "press_A",
-                "text": "今、A ボタンを押した状態にするべきか。",
-                "kind": "press",
+                "name": "button_A",
+                "text": "今、A ボタンをどうするか。",
+                "kind": "button",
+                "answer_type": "choice",
+                "choices": [
+                    {"name": "none", "description": "押さない"},
+                    {
+                        "name": "hold",
+                        "description": "押した状態にする。押した状態は次の判断まで続く",
+                    },
+                    {"name": "tap", "description": "1 回だけ短く押す"},
+                ],
             },
             {
                 "name": "advisor",
                 "text": "今、advisor に戦略の更新を求めるべきか。",
                 "kind": "advisor",
+                "answer_type": "probability",
+                "choices": [],
             },
         ],
     }
@@ -212,13 +248,37 @@ def test_write_ok_entry_writes_request_line(tmp_path):
     assert line["state_text"] == "## 戦略\n右へ進む"
     assert line["history_text"] == HISTORY_TEXT
     assert line["previous_operation_text"] == PREVIOUS_OPERATION_TEXT
-    assert line["probabilities"] == {"press_A": 0.9, "advisor": 0.7}
+    assert line["probabilities"] == {"advisor": 0.7}
     assert line["refusals"] == 1
     assert line["raw_response"] == RAW_RESPONSE
     assert line["action"] == format_action(entry.action)
     assert line["advisor_requested"] is True
     assert line["advisor_probability"] == 0.7
     assert line["advisor_accepted"] is True
+
+
+def test_write_ok_entry_writes_choices_of_decision(tmp_path):
+    RequestLog(tmp_path).write(ok_entry())
+    line = request_lines(tmp_path)[0]
+    # 選択肢の問いの答えは probabilities ではなく choices に書く
+    assert line["choices"] == CHOICES
+    assert "button_A" not in line["probabilities"]
+
+
+def test_write_error_entry_has_null_choices(tmp_path):
+    RequestLog(tmp_path).write(
+        ok_entry(
+            received_at=None,
+            decision=None,
+            action=None,
+            advisor_accepted=False,
+            result="error",
+            error="HTTP 500",
+        )
+    )
+    line = request_lines(tmp_path)[0]
+    assert "choices" in line
+    assert line["choices"] is None
 
 
 def test_write_lists_images_with_elapsed_time_and_file(tmp_path):
@@ -318,7 +378,7 @@ def test_write_discarded_entry_with_decision_but_without_action(tmp_path):
     assert line["result"] == "discarded"
     assert line["error"] == "no new frame for 2.0 seconds"
     assert line["t_received"] == pytest.approx(3.5)
-    assert line["probabilities"] == {"press_A": 0.9, "advisor": 0.7}
+    assert line["probabilities"] == {"advisor": 0.7}
     assert line["raw_response"] == RAW_RESPONSE
     assert line["action"] is None
 
@@ -333,7 +393,7 @@ def test_write_send_error_entry_with_decision_and_action(tmp_path):
     line = request_lines(tmp_path)[0]
     assert line["result"] == "error"
     assert line["error"] == "bridge did not acknowledge the report"
-    assert line["probabilities"] == {"press_A": 0.9, "advisor": 0.7}
+    assert line["probabilities"] == {"advisor": 0.7}
     assert line["action"] == format_action(entry.action)
     assert line["advisor_accepted"] is False
 

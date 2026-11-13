@@ -1,7 +1,8 @@
 """TypeSafe Jev (System One、POST /v1/systemone) を Decision Model として使う。
 
 要求と応答の形は公式ドキュメント (https://docs.typesafe.ai/api/system-one、https://docs.typesafe.ai/images、
-https://docs.typesafe.ai/models、2026-11-12 に確認) に合わせる。
+https://docs.typesafe.ai/models、2026-11-12 に確認) に合わせる。選択肢の問い (choice) の形は
+https://docs.typesafe.ai/api/system-one.md (2026-11-13 に確認) に合わせる。
 
 要求の形 (画像は base64 の JSON で送り、multipart は使わない):
     {
@@ -13,8 +14,15 @@ https://docs.typesafe.ai/models、2026-11-12 に確認) に合わせる。
         "frames": [{"label": <画像 1 のラベル>, "image": <画像 1 の参照文字列>}, ...]
       },
       "assets": {<画像 1 の参照文字列>: {"type": "image", "format": "jpg", "data_base64": <base64>}, ...},
-      "questions": {<Question.name>: {"type": "noul", "instructions": <Question.text>}, ...}
+      "questions": {
+        <確率の問いの Question.name>: {"type": "noul", "instructions": <Question.text>},
+        <選択肢の問いの Question.name>: {"type": "choice", "instructions": <Question.text>,
+                                          "criteria": {<Choice.name>: <Choice.description>, ...}},
+        ...
+      }
     }
+questions は request.questions の順で、criteria は Question.choices の順の map。公式ドキュメントには、Jev は
+先頭の選択肢に寄りやすいと書かれているため、選択肢の問いの先頭は「なし」(questions.NONE_CHOICE) にしてある。
 state のキーは instructions、game_notes、operation_history、frames の順。operation_history (直近の応答と送った
 操作の履歴) は、history_text が空文字なら入れない。frames のラベルは DecisionRequest の画像のラベルをそのまま使う。
 前回の操作の前か後かはラベルに書いてあるため、前回の操作を送った時点の区切りの文 (previous_operation_text) は入れない。
@@ -22,16 +30,20 @@ state のキーは instructions、game_notes、operation_history、frames の順
 参照文字列は書くたびに同じ画像が足されるため、問いの文には書かない。どこからも参照しない asset は 400 になるため、
 登録した asset はすべて state から参照する。画像が無い要求では assets を入れない (assets は 1 個以上の map)。
 画像を含む要求には TypeSafe-Danger-Zone-Images: true のヘッダーを付ける。
-応答の形: {"model": ..., "answers": {<問いの ID>: {"type": "noul", "noul": <0〜1>}, ...}, "usage": ...}。
+応答の形: {"model": ..., "answers": {<問いの ID>: <answer>, ...}, "usage": ...}。answer は、確率の問いなら
+{"type": "noul", "noul": <0〜1>}、選択肢の問いなら {"type": "choice", "choice": <確率が最も高い選択肢の name>,
+"confidence": <0〜1>, "probabilities": {<選択肢の name>: <0〜1>, ...}}。選択肢の問いの答えは probabilities だけを
+読み、choice と confidence は使わない。上の応答の形には回答の拒否が無いため、Decision の refusals は常に 0 にする。
 
 画像の制約: PNG か JPEG の静止画、各辺 280〜1568 px。1280x720 は範囲に収まる。
 未確認 (公式ドキュメントに記載なし): 画像 1 枚が何トークンになるか。文脈長は要求全体で 64k トークン、
-問い 1 つあたり 32k トークンで、画像 1 枚と 43 問が収まるかは未確認。超えると 400 (max_tokens_exceeded)。
+問い 1 つあたり 32k トークンで、画像 1 枚と 34 問が収まるかは未確認。超えると 400 (max_tokens_exceeded)。
 """
 
 import base64
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 
 import httpx
 
@@ -42,6 +54,7 @@ from switch2_agent.decision_models.base import (
     read_probability,
 )
 from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.questions import Question
 
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 # 再現性のため、別名 (jev-latest) ではなくバージョン付きの ID に固定する
@@ -87,7 +100,10 @@ def build_jev_payload(
     を 1 回だけ登録し、state の frames に request.images の順で {"label": ラベル (画像の label のまま),
     "image": 参照文字列} を置く。
     base64 は標準のアルファベットで、= のパディングを付け、改行も data: の接頭辞も付けない (base64.b64encode)。
-    questions は request.questions の name をキーにし、値を {"type": "noul", "instructions": text} にする。
+    questions は request.questions の順に、name をキーにして置く。値は、確率の問い (answer_type が "probability")
+    なら {"type": "noul", "instructions": text}、選択肢の問い (answer_type が "choice") なら
+    {"type": "choice", "instructions": text, "criteria": {Choice.name: Choice.description, ...}}
+    (criteria は Question.choices の順)。
     画像が無ければ assets を入れない。
     """
     frames: list[dict[str, str]] = []
@@ -121,27 +137,32 @@ def build_jev_payload(
 
 
 def parse_jev_response(
-    body: Mapping[str, object], names: Sequence[str]
-) -> dict[str, float]:
-    """応答の本文 body から、names (要求した問いの ID) それぞれの確率 (Noul の値 noul) を読む。
+    body: Mapping[str, object], questions: Sequence[Question]
+) -> Decision:
+    """応答の本文 body から、questions (要求した問い) それぞれの答えを読み、Decision にする。
 
-    body["answers"] は問いの ID → answer の map。各 answer の type が "noul" で、noul を確率にする
-    (base.read_probability で検証する)。names のうち answer が無い問い、answers が object でない応答、
-    answer が object でないか type が noul でないものは DecisionModelError にする。
-    names に無い ID の answer は無視する。
+    body["answers"] は問いの ID → answer の map。
+    - 確率の問い (answer_type が "probability"): answer の type が "noul" で、noul を確率にする
+      (base.read_probability で検証する)。Decision.probabilities に入れる
+    - 選択肢の問い (answer_type が "choice"): answer の type が "choice" で、probabilities (選択肢の name → 確率の
+      object) を base.read_choice_probabilities で読む。Decision.choices に入れる。choice と confidence は読まない
+    questions のうち answer が無い問い、answers が object でない応答、answer が object でないもの、answer の type が
+    問いの答えの型と合わないもの (確率の問いで noul でない、選択肢の問いで choice でない)、選択肢の問いで
+    probabilities が object でないものは DecisionModelError にする。questions に無い ID の answer は無視する。
+    refusals は 0、raw_response は None (JevModel.decide が応答の本文を入れる)。
     """
     answers = body.get("answers")
     if not isinstance(answers, dict):
         raise DecisionModelError("jev response has no answers object")
     probabilities: dict[str, float] = {}
-    for name in names:
+    for name in [question.name for question in questions]:
         if name not in answers:
             raise DecisionModelError(f"jev response has no answer for: {name}")
         answer = answers[name]
         if not isinstance(answer, dict) or answer.get("type") != "noul":
             raise DecisionModelError(f"jev answer of {name} is not a noul: {answer!r}")
         probabilities[name] = read_probability(answer.get("noul"), name)
-    return probabilities
+    return Decision(probabilities=probabilities, choices={}, refusals=0)
 
 
 class JevModel:
@@ -168,7 +189,8 @@ class JevModel:
         self.model = model
 
     def decide(self, request: DecisionRequest) -> Decision:
-        """request を JEV_URL に POST し、Decision(parse_jev_response の結果, refusals=0, raw_response=応答の本文) を返す。
+        """request を JEV_URL に POST し、parse_jev_response(応答の本文, request.questions) の結果の raw_response に
+        応答の本文を入れて返す。
 
         応答の本文は post_json の結果の JSON の object。
         ヘッダーは build_jev_headers(api_key, 画像があるか)、本文は build_jev_payload(request, model)。
@@ -181,7 +203,5 @@ class JevModel:
             build_jev_payload(request, self.model),
             self.timeout_s,
         )
-        probabilities = parse_jev_response(
-            body, [question.name for question in request.questions]
-        )
-        return Decision(probabilities=probabilities, refusals=0, raw_response=body)
+        decision = parse_jev_response(body, request.questions)
+        return replace(decision, raw_response=body)
