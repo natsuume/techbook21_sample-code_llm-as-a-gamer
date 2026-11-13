@@ -35,6 +35,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
@@ -44,6 +45,7 @@ from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisors.base import Advisor
 from switch2_agent.advisors.claude_code_headless import (
     DEFAULT_ADVISOR_TIMEOUT_S,
     ClaudeCodeHeadlessAdvisor,
@@ -302,8 +304,8 @@ def main(argv: list[str] | None = None) -> None:
     --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。
     Ctrl+C (KeyboardInterrupt) で stop を立てて止まる。Pipeline が止まった理由の例外は、片付けの後にそのまま出す。
     終了時は、作れた部品だけを watcher.close()、output.neutral()、output.close()、作れた advisor の close()
-    (ADVISOR_ROLES の順)、capture.close()、supervisor.close() の順に閉じる (見張りが片付けの途中で on_lost を
-    呼ばないよう、見張りを最初に止める)。
+    (close_advisors ですべてを同時に)、capture.close()、supervisor.close() の順に閉じる (見張りが片付けの途中で
+    on_lost を呼ばないよう、見張りを最初に止める)。
     """
     args = parse_args(argv)
     workdir = Path.cwd()
@@ -437,12 +439,23 @@ def main(argv: list[str] | None = None) -> None:
         if output is not None:
             output.neutral()
             output.close()
-        # 作れた advisor を ADVISOR_ROLES の順に閉じる (辞書は作った順を保つ)
-        for advisor in advisors.values():
-            advisor.close()
+        close_advisors(advisors.values())
         if capture is not None:
             capture.close()
         supervisor.close()
+
+
+def close_advisors(advisors: Iterable[Advisor]) -> None:
+    """advisors の close() を、advisor ごとの別のスレッドで同時に呼び、すべてが戻るまで待つ。
+
+    close() は実行中の claude の子プロセスを止め、その終了を待つ。1 つずつ順に呼ぶと、前の advisor を待つ間も
+    後の advisor の子プロセスが動き続け (ゲームの情報のファイルを書き換えられる)、待ち時間も advisor の数だけ延びる。
+    """
+    threads = [threading.Thread(target=advisor.close) for advisor in advisors]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 if __name__ == "__main__":
