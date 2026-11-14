@@ -82,6 +82,8 @@ export const neutralTimesFromEvents: (events: readonly EventItem[]) => number[] 
  *   decision の行の受信時刻を起点に求めるため、要求 i の後に同じミリ秒で書いた出来事は tr_i と同じ時刻になる)
  * - 同じボタンが押下と短押しの両方にあれば短押しとして扱う
  * - events の時刻は run.jsonl の壁時計から求めるため、要求の時刻と数十ミリ秒ずれることがある
+ * - pad の記録が無い実行のための近似で、実際に送ったレポートとは一致しない (操作を送るまでの遅れ、短押しの
+ *   開始を待つ間隔、送信の失敗は再現しない)。画面は source で組み立てに使った記録を表示する
  */
 export const controllerAtFromRequests: (
   requests: readonly RequestItem[],
