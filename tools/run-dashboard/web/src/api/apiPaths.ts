@@ -31,13 +31,24 @@ export const notePath = (run: string, version: number): string =>
 export const advisorPath = (run: string, name: string): string =>
   `${summaryPath(run)}/advisor/${encodeURIComponent(name)}`;
 
+/** /live のクエリーに位置を付ける順 */
+const LIVE_CURSOR_ORDER: readonly (keyof LiveCursors)[] = ["run", "requests", "frames", "pad"];
+
 /**
  * 実行中の記録を送るサーバー送信イベント (SSE) のパス "/api/runs/<run>/live" を返す。
  * run は encodeURIComponent で符号化する。null でない cursor を run・requests・frames・pad の順で
  * "?run=1&requests=2…" と付ける (URLSearchParams)。0 は付ける。すべて null なら "?" を付けない
  */
-export const livePath = (_run: string, _cursors: LiveCursors): string => {
-  throw new Error("not implemented");
+export const livePath = (run: string, cursors: LiveCursors): string => {
+  const query = new URLSearchParams();
+  for (const name of LIVE_CURSOR_ORDER) {
+    const cursor = cursors[name];
+    if (cursor !== null) {
+      query.append(name, String(cursor));
+    }
+  }
+  const search = query.toString();
+  return `${summaryPath(run)}/live${search === "" ? "" : `?${search}`}`;
 };
 
 /**

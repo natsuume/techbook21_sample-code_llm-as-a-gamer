@@ -20,8 +20,19 @@
   cursor: pointer;
 }
 
-.option:hover {
+.option:hover:not([aria-disabled="true"]) {
   box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* 押せない選択肢は、薄い表示・破線の枠・カーソルの形で示す (色だけに頼らない。フォーカスの枠は global.css のまま) */
+.option[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.option[aria-disabled="true"]:not(:focus-visible) {
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
 }
 
 /* 選んでいる選択肢は accent の地と太字で示す */

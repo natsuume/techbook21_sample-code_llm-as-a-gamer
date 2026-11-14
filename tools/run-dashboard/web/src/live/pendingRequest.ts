@@ -1,6 +1,7 @@
 // ライブで、最後の要求の後の応答待ちの区間 (経過秒) を求める純粋な関数。
 // 送った時刻の記録は応答を受けた後にしか書かれないため、最後の要求の受信から今までを応答待ちとみなす近似。
 import type { RangeResponse, RequestItem } from "../api/apiTypes.ts";
+import { requestPosition } from "../requests/requestNavigation.ts";
 
 /** 応答待ちの区間 (経過秒)。start < end */
 export type PendingSpan = { start: number; end: number };
@@ -13,8 +14,14 @@ export type PendingSpan = { start: number; end: number };
  * - end <= start なら null
  */
 export const pendingRequestSpan = (
-  _requests: RangeResponse<RequestItem>,
-  _tEnd: number | null,
+  requests: RangeResponse<RequestItem>,
+  tEnd: number | null,
 ): PendingSpan | null => {
-  throw new Error("not implemented");
+  const last = requests.available ? requests.items.at(-1) : undefined;
+  if (last === undefined) {
+    return null;
+  }
+  const start = requestPosition(last);
+  const end = tEnd ?? start;
+  return end <= start ? null : { start, end };
 };

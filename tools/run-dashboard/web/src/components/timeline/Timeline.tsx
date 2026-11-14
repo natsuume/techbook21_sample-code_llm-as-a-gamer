@@ -133,6 +133,8 @@ const TimelineContent = ({ view, className }: TimelineContentProps) => {
             range={range}
             selectedN={selectedN}
             onSelect={selectRequest}
+            pending={view.pending}
+            onHover={showReadout}
           />
           <AdoptedCountLane
             oldFormat={summary.old_format}

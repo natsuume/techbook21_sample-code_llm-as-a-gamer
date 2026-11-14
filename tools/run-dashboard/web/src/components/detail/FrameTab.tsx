@@ -2,7 +2,11 @@
 // 判定の値 (鮮明度・判定の状態・今の区間の山・谷とみなす値・直前との差分・谷までの残り)、表示中の区間のまとめを出す。
 import { useMemo, useRef } from "react";
 import { filePath } from "../../api/apiPaths.ts";
-import { frameTabNotice, NO_REQUEST_RECORD_NOTICE } from "../../detail/detailNotices.ts";
+import {
+  FRAME_OPEN_GUIDE,
+  frameTabNotice,
+  NO_REQUEST_RECORD_NOTICE,
+} from "../../detail/detailNotices.ts";
 import {
   FRAME_REQUEST_CANDIDATES,
   formatDecimal,
@@ -15,9 +19,11 @@ import {
 } from "../../detail/frameDetail.ts";
 import { formatSeconds } from "../../format/formatValues.ts";
 import { requestsAfter, summarizeFrames, valleyDistance } from "../../frames/frameMetrics.ts";
+import { requestPosition } from "../../requests/requestNavigation.ts";
 import type { TimedFrame } from "../../state/runView.ts";
 import type { RunView } from "../../state/useRunView.ts";
 import { useViewState } from "../../state/ViewStateContext.tsx";
+import { isFollowing } from "../../state/viewState.ts";
 import { NO_RECORD_NOTICE } from "../../timeline/laneNotice.ts";
 import { indexRangeWithin } from "../../timeline/rangeSearch.ts";
 import { describeFrameSummary, describeRange } from "../../timeline/timelineTexts.ts";
@@ -32,17 +38,28 @@ import styles from "./FrameTab.module.css";
 import { useRequestDetails } from "./useRequestDetails.ts";
 import { useScrollIntoView } from "./useScrollIntoView.ts";
 
-/** フレームのタブ。フレームの記録が無い実行では、理由の文言だけを出す */
+/**
+ * フレームのタブ。フレームの記録が無い実行では、理由の文言だけを出す。開くフレームは resolveFrameIndex で決め、
+ * 位置はライブで最新を追っている間は詳細ペインで開いた要求の時刻 (開いていなければ null)、それ以外は再生位置。
+ * フレームを選んでおらず位置も無ければ、開き方の案内を出す
+ */
 export const FrameTab = ({ view }: { view: RunView }) => {
   const { state } = useViewState();
   const notice = frameTabNotice(view.frames, view.timedFrames.length);
-  const index = resolveFrameIndex(state.frameIndex, view.frameTimes, view.position);
+  const position = isFollowing(state)
+    ? view.detailRequest === null
+      ? null
+      : requestPosition(view.detailRequest)
+    : view.position;
+  const index = resolveFrameIndex(state.frameIndex, view.frameTimes, position);
   const frame = index === null ? undefined : view.timedFrames[index];
   if (notice !== null || index === null || frame === undefined) {
     return (
       <>
         <h3 className={content.heading}>フレーム</h3>
-        <EmptyState>{notice ?? NO_RECORD_NOTICE}</EmptyState>
+        <EmptyState>
+          {notice ?? (view.timedFrames.length > 0 ? FRAME_OPEN_GUIDE : NO_RECORD_NOTICE)}
+        </EmptyState>
       </>
     );
   }

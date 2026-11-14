@@ -19,6 +19,10 @@ const LEGEND_GROUPS: readonly LegendGroup[] = [
       { swatches: ["requestAdvisor"], text: "advisor を呼んだ要求 (高い棒)" },
       { swatches: ["requestSelected"], text: "選んでいる要求 (最も高い棒)" },
       { swatches: ["requestFailed"], text: "失敗・破棄した要求 (破線の枠)" },
+      {
+        swatches: ["requestPending"],
+        text: "応答待ち (最後の要求の受信から今まで。中立の色の破線の枠)",
+      },
     ],
   },
   {

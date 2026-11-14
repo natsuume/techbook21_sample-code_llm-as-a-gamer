@@ -11,7 +11,12 @@ import type {
 import { neutralTimesFromEvents } from "../controller/controllerTimeline.ts";
 import { listRewrites, type NoteRewrite } from "../notes/noteHistory.ts";
 import { playbackPosition, requestPosition } from "../requests/requestNavigation.ts";
-import { computeViewWindow, type TimeRange, type ViewWidth } from "../timeline/viewWindow.ts";
+import {
+  computeLiveWindow,
+  computeViewWindow,
+  type TimeRange,
+  type ViewWidth,
+} from "../timeline/viewWindow.ts";
 
 /** t が null でないフレーム */
 export type TimedFrame = FrameItem & { t: number };
@@ -115,16 +120,16 @@ export const selectPlayback = (
 };
 
 /** 最後の要求 (requests.items の最後) の n を返す。要求の記録が無い (available が false) か、要求が無ければ null */
-export const latestRequestN = (_data: Pick<RunData, "requests">): number | null => {
-  throw new Error("not implemented");
-};
+export const latestRequestN = (data: Pick<RunData, "requests">): number | null =>
+  data.requests.available ? (data.requests.items.at(-1)?.n ?? null) : null;
 
 /**
  * 番号 n の要求を返す (requestIndexByN で引く)。要求の記録が無い (available が false)、n が null、
  * n の要求が無いときは null
  */
-export const findRequest = (_data: RunData, _n: number | null): RequestItem | null => {
-  throw new Error("not implemented");
+export const findRequest = (data: RunData, n: number | null): RequestItem | null => {
+  const index = data.requests.available && n !== null ? data.requestIndexByN.get(n) : undefined;
+  return index === undefined ? null : (data.requests.items[index] ?? null);
 };
 
 /**
@@ -134,6 +139,12 @@ export const findRequest = (_data: RunData, _n: number | null): RequestItem | nu
  * - position: playbackPosition(selectedRequest, summary.t_end)
  * - range: computeLiveWindow(width, summary.t_end) (右端を今にする)
  */
-export const selectLivePlayback = (_data: RunData, _width: ViewWidth): PlaybackSelection => {
-  throw new Error("not implemented");
+export const selectLivePlayback = (data: RunData, width: ViewWidth): PlaybackSelection => {
+  const selectedRequest = data.requests.available ? (data.requests.items.at(-1) ?? null) : null;
+  return {
+    selectedRequest,
+    nextRequestPosition: null,
+    position: playbackPosition(selectedRequest, data.summary.t_end),
+    range: computeLiveWindow(width, data.summary.t_end),
+  };
 };

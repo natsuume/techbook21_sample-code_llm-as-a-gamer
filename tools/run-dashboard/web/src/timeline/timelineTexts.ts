@@ -94,9 +94,8 @@ export const describeRequestBar = (request: RequestItem): string => {
  * 応答待ちの棒の説明 "応答待ち · t=<start>–<end> 秒 (最後の要求の受信から、次の要求の記録が届くまで)"
  * (秒は小数 2 桁)
  */
-export const describePendingSpan = (_span: PendingSpan): string => {
-  throw new Error("not implemented");
-};
+export const describePendingSpan = (span: PendingSpan): string =>
+  `応答待ち · ${timeSpanText(span.start, span.end, 2)} 秒 (最後の要求の受信から、次の要求の記録が届くまで)`;
 
 /** ボタンの入力の区間の説明 "<押下|短押し> <ボタン> · t=<start>–<end>" */
 export const describeButtonSpan = (span: ButtonSpan): string =>

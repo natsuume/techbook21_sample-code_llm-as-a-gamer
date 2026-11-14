@@ -6,6 +6,9 @@ import { NO_RECORD_NOTICE, OLD_FORMAT_NOTICE, rangeLaneNotice } from "../timelin
 export const NO_REQUEST_RECORD_NOTICE = "要求の記録なし";
 /** 要求が 1 件も無い (選べる要求が無い) ときの文言 */
 export const NO_REQUESTS_NOTICE = "要求なし";
+/** ライブで最新を追っている間に、フレームのタブで開くフレームがまだ無いときの、開き方の案内 */
+export const FRAME_OPEN_GUIDE =
+  "タイムラインの折れ線か、上の段の映像を押すと、ここにフレームを出す";
 
 /** 区間 API の応答のうち、文言を決めるのに使う部分 */
 type RangeAvailability = Pick<RangeResponse<unknown>, "available" | "reason">;

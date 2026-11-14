@@ -37,8 +37,12 @@ export const computeViewWindow = (
  * - "all": computeViewWindow と同じ ({ from: 0, to: end }。ただし end が 0 なら { from: 0, to: 1 })
  * - 数の幅 w: { from: end - w, to: end } (end < w なら from は負になり、始まったばかりの実行は左に空きができる)
  */
-export const computeLiveWindow = (_width: ViewWidth, _tEnd: number | null): TimeRange => {
-  throw new Error("not implemented");
+export const computeLiveWindow = (width: ViewWidth, tEnd: number | null): TimeRange => {
+  const end = Math.max(tEnd ?? 0, 0);
+  if (width === "all") {
+    return computeViewWindow(end, width, end);
+  }
+  return { from: end - width, to: end };
 };
 
 /** 時刻 t の区間の中の位置 (t - from) / (to - from) を、0〜1 に切り詰めて返す */

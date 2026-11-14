@@ -1,16 +1,20 @@
 // サーバー送信イベント (/live) で届いた記録を、TanStack Query のキャッシュ (summary・区間 API・advisor の実行の
 // 詳細) の値に足す純粋な関数。渡した値は変えず、変わった値だけを新しいオブジェクトにして返す。
-import type {
-  AdvisorDetail,
-  AdvisorStep,
-  EventItem,
-  FrameItem,
-  LiveEnd,
-  LiveEvent,
-  PadItem,
-  RangeResponse,
-  RequestItem,
-  RunSummary,
+import {
+  type AdvisorDetail,
+  type AdvisorStep,
+  type EventItem,
+  type FrameItem,
+  type LiveEnd,
+  type LiveEvent,
+  type LiveStats,
+  type PadItem,
+  type RangeResponse,
+  type RequestItem,
+  ROLE_ORDER,
+  type RunSummary,
+  type SummaryAdvisorRun,
+  type SummaryNoteVersion,
 } from "../api/apiTypes.ts";
 
 /** イベントを足すキャッシュの値。まだ読めていない (キャッシュに無い) ものは undefined */
@@ -47,6 +51,96 @@ export type LiveMergeResult = {
   end: LiveEnd | null;
 };
 
+/** JSON の値 (null・真偽値・数・文字列・配列・object) が同じか */
+const isJsonEqual = (left: unknown, right: unknown): boolean => {
+  if (left === right) {
+    return true;
+  }
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => isJsonEqual(value, right[index]))
+    );
+  }
+  const leftEntries = Object.entries(left);
+  const rightRecord = Object.fromEntries(Object.entries(right));
+  return (
+    leftEntries.length === Object.keys(rightRecord).length &&
+    leftEntries.every(
+      ([key, value]) => Object.hasOwn(rightRecord, key) && isJsonEqual(value, rightRecord[key]),
+    )
+  );
+};
+
+/** 読み直すキャッシュを、同じものが 1 つになるように比べる文字列 */
+const invalidationKey = (invalidation: LiveInvalidation): string => JSON.stringify(invalidation);
+
+/** 区間 API の応答の items の末尾に足した応答 (available を true にし、reason を除く。cursor は変えない) */
+const appendItems = <T>(
+  range: RangeResponse<T> | undefined,
+  items: readonly T[],
+): RangeResponse<T> | undefined =>
+  range === undefined || items.length === 0
+    ? range
+    : { available: true, items: [...range.items, ...items], cursor: range.cursor };
+
+/** 役割の順の位置。知らない役割は最後 */
+const roleRank = (run: Pick<SummaryAdvisorRun, "role">): number => {
+  const index = ROLE_ORDER.indexOf(run.role);
+  return index < 0 ? ROLE_ORDER.length : index;
+};
+
+/** 名前の末尾の連番 (数)。読めなければ Infinity (その役割の最後に並べる) */
+const serialOf = (run: Pick<SummaryAdvisorRun, "name">): number => {
+  const match = /(\d+)$/.exec(run.name);
+  return match?.[1] === undefined ? Number.POSITIVE_INFINITY : Number(match[1]);
+};
+
+/** advisor の実行を、役割の順・同じ役割の中は連番の昇順に並べるときの比較 */
+const compareAdvisorRuns = (left: SummaryAdvisorRun, right: SummaryAdvisorRun): number =>
+  roleRank(left) - roleRank(right) || serialOf(left) - serialOf(right);
+
+/**
+ * 並んだ items の中の同じものを item に置き換え、無ければ並びの位置に挿した新しい配列を返す (replaced は置き換えて
+ * 値が変わったか)。値が同じなら items をそのまま返す。same は existing が item と同じものか、
+ * placedAfter は item を existing の後に並べるか (items は placedAfter が true の要素から先に並んでいる)
+ */
+const upsert = <T>(
+  items: T[],
+  item: T,
+  same: (existing: T) => boolean,
+  placedAfter: (existing: T) => boolean,
+): { items: T[]; replaced: boolean } => {
+  const index = items.findIndex(same);
+  if (index >= 0) {
+    return isJsonEqual(items[index], item)
+      ? { items, replaced: false }
+      : { items: items.with(index, item), replaced: true };
+  }
+  const position = items.findIndex((existing) => !placedAfter(existing));
+  const next = [...items];
+  next.splice(position < 0 ? next.length : position, 0, item);
+  return { items: next, replaced: false };
+};
+
+/** summary に stats を入れた summary。値が同じなら summary をそのまま返す */
+const withStats = (summary: RunSummary, stats: LiveStats): RunSummary =>
+  summary.t_end === stats.t_end &&
+  summary.decide_s_median === stats.decide_s_median &&
+  isJsonEqual(summary.counts, stats.counts)
+    ? summary
+    : {
+        ...summary,
+        t_end: stats.t_end,
+        counts: stats.counts,
+        decide_s_median: stats.decide_s_median,
+      };
+
 /**
  * 届いた順のイベント events をキャッシュ caches に足す。
  * - 変わらなかったキャッシュは同じオブジェクトをそのまま返す。変わったキャッシュは新しいオブジェクト
@@ -70,11 +164,146 @@ export type LiveMergeResult = {
  * - summary が undefined なら note_version・advisor_run・stats は捨てる
  */
 export const applyLiveEvents = (
-  _caches: LiveCaches,
-  _events: readonly LiveEvent[],
+  caches: LiveCaches,
+  events: readonly LiveEvent[],
 ): LiveMergeResult => {
-  throw new Error("not implemented");
+  const invalidations: LiveInvalidation[] = [];
+  const invalidated = new Set<string>();
+  const invalidate = (invalidation: LiveInvalidation): void => {
+    const key = invalidationKey(invalidation);
+    if (!invalidated.has(key)) {
+      invalidated.add(key);
+      invalidations.push(invalidation);
+    }
+  };
+  /** その種類に初めて足すとき、記録が無かった (available が false) なら summary を読み直す */
+  const noteFirstItem = (range: RangeResponse<unknown>, addedCount: number): void => {
+    if (addedCount === 0 && !range.available) {
+      invalidate({ type: "summary" });
+    }
+  };
+
+  const added = {
+    requests: [] as RequestItem[],
+    frames: [] as FrameItem[],
+    pad: [] as PadItem[],
+    events: [] as EventItem[],
+  };
+  let summary = caches.summary;
+  const advisorSteps = new Map<string, AdvisorStep[]>();
+  let end: LiveEnd | null = null;
+
+  for (const event of events) {
+    switch (event.kind) {
+      case "request": {
+        const requests = caches.requests;
+        if (requests === undefined) {
+          break;
+        }
+        noteFirstItem(requests, added.requests.length);
+        const last = requests.items.at(-1);
+        if (added.requests.length === 0 && last !== undefined) {
+          invalidate({ type: "request", n: last.n });
+        }
+        added.requests.push(event.data);
+        break;
+      }
+      case "frame":
+        if (caches.frames !== undefined) {
+          noteFirstItem(caches.frames, added.frames.length);
+          added.frames.push(event.data);
+        }
+        break;
+      case "pad":
+        if (caches.pad !== undefined) {
+          noteFirstItem(caches.pad, added.pad.length);
+          added.pad.push(event.data);
+        }
+        break;
+      case "run":
+        if (caches.events !== undefined) {
+          noteFirstItem(caches.events, added.events.length);
+          if (event.data.event === "start") {
+            invalidate({ type: "summary" });
+          }
+          added.events.push(event.data);
+        }
+        break;
+      case "note_version": {
+        if (summary === undefined) {
+          break;
+        }
+        const version = event.data;
+        const result = upsert<SummaryNoteVersion>(
+          summary.note_versions,
+          version,
+          (existing) => existing.version === version.version,
+          (existing) => existing.version < version.version,
+        );
+        if (result.items !== summary.note_versions) {
+          summary = { ...summary, note_versions: result.items };
+        }
+        if (result.replaced) {
+          invalidate({ type: "note", version: version.version });
+        }
+        break;
+      }
+      case "advisor_run": {
+        if (summary === undefined) {
+          break;
+        }
+        const run = event.data;
+        const result = upsert<SummaryAdvisorRun>(
+          summary.advisor_runs,
+          run,
+          (existing) => existing.name === run.name,
+          (existing) => compareAdvisorRuns(existing, run) <= 0,
+        );
+        if (result.items !== summary.advisor_runs) {
+          summary = { ...summary, advisor_runs: result.items };
+        }
+        if (result.replaced) {
+          invalidate({ type: "advisor", name: run.name });
+        }
+        break;
+      }
+      case "advisor_step": {
+        const { name, ...step } = event.data;
+        const steps = advisorSteps.get(name);
+        if (steps === undefined) {
+          advisorSteps.set(name, [step]);
+        } else {
+          steps.push(step);
+        }
+        break;
+      }
+      case "stats":
+        if (summary !== undefined) {
+          summary = withStats(summary, event.data);
+        }
+        break;
+      case "end":
+        end = event.data;
+        break;
+    }
+  }
+
+  return {
+    caches: {
+      summary,
+      requests: appendItems(caches.requests, added.requests),
+      frames: appendItems(caches.frames, added.frames),
+      pad: appendItems(caches.pad, added.pad),
+      events: appendItems(caches.events, added.events),
+    },
+    invalidations,
+    advisorSteps,
+    end,
+  };
 };
+
+/** step が同じかを比べる文字列 (t・tool・summary。kind は比べない) */
+const stepKey = (step: AdvisorStep): string => JSON.stringify([step.t, step.tool, step.summary]);
 
 /**
  * advisor の実行の詳細 detail の steps の末尾に、steps を順に足す。
@@ -84,8 +313,19 @@ export const applyLiveEvents = (
  * - 渡した detail は変えない
  */
 export const appendAdvisorSteps = (
-  _detail: AdvisorDetail,
-  _steps: readonly AdvisorStep[],
+  detail: AdvisorDetail,
+  steps: readonly AdvisorStep[],
 ): AdvisorDetail => {
-  throw new Error("not implemented");
+  const known = new Set(detail.steps.map(stepKey));
+  const fresh: AdvisorStep[] = [];
+  for (const step of steps) {
+    const key = stepKey(step);
+    if (!known.has(key)) {
+      known.add(key);
+      fresh.push(step);
+    }
+  }
+  return fresh.length === 0
+    ? detail
+    : { ...detail, steps_available: true, steps: [...detail.steps, ...fresh] };
 };

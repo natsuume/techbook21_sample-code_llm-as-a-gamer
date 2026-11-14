@@ -1,6 +1,14 @@
-// run-dashboard のサーバーの API を読む TanStack Query のフック。終わった実行の記録は変わらないため、
-// 一度読んだ値を古くならないものとして使い続ける。
-import { QueryClient, skipToken, type UseQueryResult, useQuery } from "@tanstack/react-query";
+// run-dashboard のサーバーの API を読む TanStack Query のフックと、その queryKey を作る関数。読んだ値は古くならない
+// ものとして使い続け、実行中の実行の記録は、ライブのイベントをキャッシュに足すか、無効にして読み直して最新にする。
+// 実行の一覧だけは、新しく始まった実行と実行中かどうかを知るため、一定の間隔で読み直す。
+import {
+  keepPreviousData,
+  QueryClient,
+  skipToken,
+  type UseQueryResult,
+  useQuery,
+} from "@tanstack/react-query";
+import { RUN_LIST_REFRESH_MS } from "../live/liveTiming.ts";
 import {
   advisorPath,
   notePath,
@@ -33,6 +41,42 @@ export type RangeItemOf = {
   events: EventItem;
 };
 
+/** 区間 API の種類のすべて */
+export const RANGE_KINDS: readonly RangeKind[] = ["requests", "frames", "pad", "events"];
+
+/** 実行の一覧の queryKey ["runs"] */
+export const runsQueryKey = (): readonly ["runs"] => ["runs"];
+/** 実行の summary の queryKey ["summary", run] */
+export const summaryQueryKey = (run: string | null): readonly ["summary", string | null] => [
+  "summary",
+  run,
+];
+/** 区間 API の queryKey ["range", run, kind] */
+export const rangeQueryKey = (
+  run: string | null,
+  kind: RangeKind,
+): readonly ["range", string | null, RangeKind] => ["range", run, kind];
+/** 要求の詳細の queryKey ["request", run, n] */
+export const requestQueryKey = (
+  run: string | null,
+  n: number | null,
+): readonly ["request", string | null, number | null] => ["request", run, n];
+/** ゲームの情報の版の queryKey ["note", run, version] */
+export const noteQueryKey = (
+  run: string | null,
+  version: number | null,
+): readonly ["note", string | null, number | null] => ["note", run, version];
+/** advisor の実行の詳細の queryKey ["advisor", run, name] */
+export const advisorQueryKey = (
+  run: string | null,
+  name: string | null,
+): readonly ["advisor", string | null, string | null] => ["advisor", run, name];
+/** 実行 run の、すべての advisor の実行の詳細に当たる queryKey の前半 ["advisor", run] */
+export const advisorQueryKeyPrefix = (run: string): readonly ["advisor", string] => [
+  "advisor",
+  run,
+];
+
 /**
  * 画面の QueryClient を作る。すべての query を staleTime: Infinity (読み直さない)、
  * refetchOnWindowFocus: false、retry: 1 (失敗したら 1 回だけ読み直す) にする
@@ -44,17 +88,21 @@ export const createQueryClient = (): QueryClient =>
     },
   });
 
-/** 実行の一覧 (/api/runs) を読む。queryKey は ["runs"] */
+/**
+ * 実行の一覧 (/api/runs) を読む。queryKey は ["runs"]。RUN_LIST_REFRESH_MS ごとに読み直す
+ * (画面が隠れている間は止まる)。読み直しに失敗しても、前に読めた一覧は data に残る
+ */
 export const useRuns = (): UseQueryResult<RunListItem[]> =>
   useQuery({
-    queryKey: ["runs"],
+    queryKey: runsQueryKey(),
     queryFn: ({ signal }) => fetchJson<RunListItem[]>(runsPath(), signal),
+    refetchInterval: RUN_LIST_REFRESH_MS,
   });
 
 /** 実行の summary を読む。queryKey は ["summary", run]。run が null なら読まない */
 export const useRunSummary = (run: string | null): UseQueryResult<RunSummary> =>
   useQuery({
-    queryKey: ["summary", run],
+    queryKey: summaryQueryKey(run),
     queryFn:
       run === null ? skipToken : ({ signal }) => fetchJson<RunSummary>(summaryPath(run), signal),
   });
@@ -68,7 +116,7 @@ export const useRangeItems = <K extends RangeKind>(
   kind: K,
 ): UseQueryResult<RangeResponse<RangeItemOf[K]>> =>
   useQuery({
-    queryKey: ["range", run, kind],
+    queryKey: rangeQueryKey(run, kind),
     queryFn:
       run === null
         ? skipToken
@@ -77,19 +125,22 @@ export const useRangeItems = <K extends RangeKind>(
 
 /**
  * 要求の詳細を読む。queryKey は ["request", run, n]。古い形の実行では RequestDetailOldFormat が返る
- * (isOldFormatRequestDetail で判定する)。run か n が null なら読まない
+ * (isOldFormatRequestDetail で判定する)。run か n が null なら読まない。
+ * n を変えたとき、新しい要求の詳細が届くまで前の要求の詳細を data に残す (placeholderData: keepPreviousData。
+ * ライブで最新を追う間、骨組みに戻さないため)。そのため data の n は、渡した n と違うことがある
  */
 export const useRequestDetail = (
   run: string | null,
   n: number | null,
 ): UseQueryResult<RequestDetail | RequestDetailOldFormat> =>
   useQuery({
-    queryKey: ["request", run, n],
+    queryKey: requestQueryKey(run, n),
     queryFn:
       run === null || n === null
         ? skipToken
         : ({ signal }) =>
             fetchJson<RequestDetail | RequestDetailOldFormat>(requestDetailPath(run, n), signal),
+    placeholderData: keepPreviousData,
   });
 
 /** ゲームの情報の版を読む。queryKey は ["note", run, version]。run か version が null なら読まない */
@@ -98,7 +149,7 @@ export const useNoteDetail = (
   version: number | null,
 ): UseQueryResult<NoteDetail> =>
   useQuery({
-    queryKey: ["note", run, version],
+    queryKey: noteQueryKey(run, version),
     queryFn:
       run === null || version === null
         ? skipToken
@@ -111,7 +162,7 @@ export const useAdvisorDetail = (
   name: string | null,
 ): UseQueryResult<AdvisorDetail> =>
   useQuery({
-    queryKey: ["advisor", run, name],
+    queryKey: advisorQueryKey(run, name),
     queryFn:
       run === null || name === null
         ? skipToken

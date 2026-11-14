@@ -52,6 +52,13 @@ describe("computeAxisTicks", () => {
     expect(ticks).toEqual([1000.5, 1001, 1001.5, 1002, 1002.5, 1003, 1003.5, 1004, 1004.5]);
   });
 
+  it("from が負の区間では負の目盛りも返し、0 の目盛りは -0 にしない", () => {
+    const ticks = computeAxisTicks({ from: -0.5, to: 29.5 });
+    expect(ticks).toEqual([0, 5, 10, 15, 20, 25]);
+    expect(Object.is(ticks[0], 0)).toBe(true);
+    expect(computeAxisTicks({ from: -12, to: 18 })).toEqual([-10, -5, 0, 5, 10, 15]);
+  });
+
   it("区間の端が有限の数でなければ [] を返す", () => {
     expect(computeAxisTicks({ from: 0, to: Number.NaN })).toEqual([]);
     expect(computeAxisTicks({ from: 0, to: Number.POSITIVE_INFINITY })).toEqual([]);

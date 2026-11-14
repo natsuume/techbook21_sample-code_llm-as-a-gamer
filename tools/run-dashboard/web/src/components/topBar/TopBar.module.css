@@ -22,6 +22,32 @@
   max-width: 22rem;
 }
 
+/* ライブの操作。中身が変わっても幅を変えない (状態の文言の幅を先に確保する) */
+.live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+
+/*
+ * 接続の状態の文言。最も長い文言 (記録が止まって終わった実行として表示したとき) の幅を先に確保し、空のときも
+ * 場所を空けておく。狭い画面では末尾を省略し、全文は title で読める。状態は文言で示す (色は muted だけ)
+ */
+.liveStatus {
+  display: block;
+  inline-size: 28rem;
+  max-inline-size: 100%;
+  min-block-size: 1.5em;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .position {
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;

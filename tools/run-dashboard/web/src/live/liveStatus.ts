@@ -45,11 +45,27 @@ export const LIVE_STATUS_TEXTS = {
  * - ended: recordEnd なら recordEnded、そうでなければ stalled
  */
 export const liveStatusText = (
-  _connection: LiveConnection,
-  _display: DisplayMode,
-  _follow: boolean,
+  connection: LiveConnection,
+  display: DisplayMode,
+  follow: boolean,
 ): string => {
-  throw new Error("not implemented");
+  switch (connection.state) {
+    case "idle":
+      return "";
+    case "connecting":
+      return LIVE_STATUS_TEXTS.connecting;
+    case "open":
+      if (display === "replay") {
+        return LIVE_STATUS_TEXTS.replaying;
+      }
+      return follow ? LIVE_STATUS_TEXTS.following : LIVE_STATUS_TEXTS.paused;
+    case "reconnecting":
+      return connection.failures === 0
+        ? LIVE_STATUS_TEXTS.reconnecting
+        : `接続が切れた · ${Math.ceil(connection.retryInMs / 1000)} 秒後につなぎ直す (${connection.failures} 回失敗)`;
+    case "ended":
+      return connection.recordEnd ? LIVE_STATUS_TEXTS.recordEnded : LIVE_STATUS_TEXTS.stalled;
+  }
 };
 
 /**
@@ -59,10 +75,19 @@ export const liveStatusText = (
  * - ended: endReason が recordEnd なら liveRecordEnded、stalled なら liveStalled
  */
 export const liveToggleReason = (
-  _liveSession: LiveSession,
-  _endReason: LiveEndReason | null,
+  liveSession: LiveSession,
+  endReason: LiveEndReason | null,
 ): string | null => {
-  throw new Error("not implemented");
+  switch (liveSession) {
+    case "active":
+      return null;
+    case "none":
+      return LIVE_STATUS_TEXTS.liveNotInProgress;
+    case "ended":
+      return endReason === "recordEnd"
+        ? LIVE_STATUS_TEXTS.liveRecordEnded
+        : LIVE_STATUS_TEXTS.liveStalled;
+  }
 };
 
 /**
@@ -71,8 +96,11 @@ export const liveToggleReason = (
  * - live で follow (最新を追っている): resumeFollowing
  * - live で follow でない (一時停止中): null
  */
-export const resumeButtonReason = (_display: DisplayMode, _follow: boolean): string | null => {
-  throw new Error("not implemented");
+export const resumeButtonReason = (display: DisplayMode, follow: boolean): string | null => {
+  if (display === "replay") {
+    return LIVE_STATUS_TEXTS.resumeInReplay;
+  }
+  return follow ? LIVE_STATUS_TEXTS.resumeFollowing : null;
 };
 
 /** 実行の一覧の 1 件の、選んでいる実行の in_progress と、その一覧を読み終えた時刻 (query の dataUpdatedAt) */
@@ -88,9 +116,12 @@ export type ListedRun = { inProgress: boolean; readAt: number };
  * true のまま変わらないことがあるため、「終わった後に読み終えた一覧が実行中と言うか」で決める
  */
 export const shouldReopenLive = (
-  _listed: ListedRun | null,
-  _liveSession: LiveSession,
-  _inactiveSince: number | null,
+  listed: ListedRun | null,
+  liveSession: LiveSession,
+  inactiveSince: number | null,
 ): boolean => {
-  throw new Error("not implemented");
+  if (liveSession === "active" || listed === null || inactiveSince === null) {
+    return false;
+  }
+  return listed.inProgress && listed.readAt > inactiveSince;
 };

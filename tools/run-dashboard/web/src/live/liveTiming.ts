@@ -8,15 +8,17 @@ export const RUN_LIST_REFRESH_MS = 5000;
 /** つなぎ直すまでの待ちの上限 (ミリ秒) */
 export const RECONNECT_MAX_MS = 10000;
 
+/** 1 回目の失敗の後の待ち (ミリ秒)。失敗が続くたびに倍にする */
+const RECONNECT_BASE_MS = 1000;
+
 /**
  * 次に記録を足すまでの待ち (ミリ秒) を返す。lastFlushAt は前に足した時刻 (まだ足していなければ null)、
  * now は今の時刻。
  * - lastFlushAt が null なら 0
  * - それ以外は max(0, lastFlushAt + LIVE_FLUSH_INTERVAL_MS - now)
  */
-export const nextFlushDelayMs = (_lastFlushAt: number | null, _now: number): number => {
-  throw new Error("not implemented");
-};
+export const nextFlushDelayMs = (lastFlushAt: number | null, now: number): number =>
+  lastFlushAt === null ? 0 : Math.max(0, lastFlushAt + LIVE_FLUSH_INTERVAL_MS - now);
 
 /**
  * 区間 API を読み直してつなぎ直すまでの待ち (ミリ秒) を返す。failures は、接続が切れてから続けて失敗した
@@ -24,6 +26,5 @@ export const nextFlushDelayMs = (_lastFlushAt: number | null, _now: number): num
  * - 0 なら 0 (切れたらすぐ読み直す)
  * - 1 以上は min(1000 × 2^(failures - 1), RECONNECT_MAX_MS)
  */
-export const reconnectDelayMs = (_failures: number): number => {
-  throw new Error("not implemented");
-};
+export const reconnectDelayMs = (failures: number): number =>
+  failures <= 0 ? 0 : Math.min(RECONNECT_BASE_MS * 2 ** (failures - 1), RECONNECT_MAX_MS);

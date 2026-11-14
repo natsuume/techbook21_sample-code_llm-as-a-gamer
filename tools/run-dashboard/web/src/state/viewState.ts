@@ -91,6 +91,15 @@ export const initialViewState: ViewState = {
   detailN: null,
 };
 
+/** ライブで最新を追っている (display が live で follow) か */
+export const isFollowing = (state: Pick<ViewState, "display" | "follow">): boolean =>
+  state.display === "live" && state.follow;
+
+/** 選ぶ操作で変える follow。追従中の navigate は一時停止 (false) にし、それ以外は変えない */
+const pauseIfNavigating = (state: ViewState, via: SelectVia): Pick<ViewState, "follow"> => ({
+  follow: isFollowing(state) && via === "navigate" ? false : state.follow,
+});
+
 /**
  * 操作に応じて次の状態を返す。「追従中」は display が live で follow、「一時停止中」は display が live で
  * follow でない状態。
@@ -118,34 +127,78 @@ export const initialViewState: ViewState = {
  * - detailN を変えるのは selectRun・runLoaded・selectRequest だけ (タブを切り替えるだけでは開く要求を固定しない)
  */
 export const viewReducer = (state: ViewState, action: ViewAction): ViewState => {
+  const following = isFollowing(state);
+  const paused = state.display === "live" && !state.follow;
   switch (action.type) {
     case "selectRun":
-      return { ...initialViewState, run: action.run };
+      return action.inProgress
+        ? { ...initialViewState, run: action.run, display: "live", liveSession: "active" }
+        : { ...initialViewState, run: action.run };
     case "runLoaded":
       return {
         ...state,
         selectedN: action.firstN,
+        detailN: state.display === "live" ? null : action.firstN,
         width: action.firstN === null ? "all" : 30,
       };
-    case "selectRequest":
+    case "followLatest":
+      return following ? { ...state, selectedN: action.latestN } : state;
+    case "selectRequest": {
+      const opened = { ...state, detailN: action.n, focusQuestion: action.question ?? null };
+      if (following && action.via === "open") {
+        return { ...opened, tab: "request" };
+      }
       return {
-        ...state,
+        ...opened,
+        ...pauseIfNavigating(state, action.via),
         selectedN: action.n,
-        focusQuestion: action.question ?? null,
         tab: "request",
       };
+    }
     case "selectFrame":
-      return { ...state, frameIndex: action.index, tab: "frame" };
+      return {
+        ...state,
+        ...pauseIfNavigating(state, action.via),
+        frameIndex: action.index,
+        tab: "frame",
+      };
     case "selectAdvisor":
-      return { ...state, advisorName: action.name, tab: "advisor" };
+      return {
+        ...state,
+        ...pauseIfNavigating(state, action.via),
+        advisorName: action.name,
+        tab: "advisor",
+      };
     case "selectFile":
-      return { ...state, file: action.file, tab: "file" };
-    case "followLatest":
+      return { ...state, ...pauseIfNavigating(state, action.via), file: action.file, tab: "file" };
     case "resumeFollow":
+      return paused ? { ...state, follow: true } : state;
     case "setDisplay":
-    case "liveEnded":
+      if (action.display === "live") {
+        if (paused) {
+          return { ...state, follow: true };
+        }
+        return state.display === "replay" && state.liveSession === "active"
+          ? { ...state, display: "live", follow: true }
+          : state;
+      }
+      if (following) {
+        return { ...state, display: "replay", selectedN: action.latestN, follow: true };
+      }
+      return paused ? { ...state, display: "replay", follow: true } : state;
+    case "liveEnded": {
+      const ended: ViewState = {
+        ...state,
+        liveSession: "ended",
+        endReason: action.recordEnd ? "recordEnd" : "stalled",
+      };
+      if (following) {
+        return { ...ended, display: "replay", selectedN: action.latestN, follow: true };
+      }
+      return paused ? { ...ended, display: "replay", follow: true } : ended;
+    }
     case "reopenLive":
-      throw new Error("not implemented");
+      return { ...state, liveSession: "active", endReason: null, display: "live", follow: true };
     case "setTab":
       return { ...state, tab: action.tab };
     case "setWidth":

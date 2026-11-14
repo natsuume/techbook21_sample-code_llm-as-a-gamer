@@ -28,7 +28,7 @@ export const resolveFrameIndex = (
     return Math.min(Math.max(frameIndex, 0), count - 1);
   }
   if (position === null) {
-    throw new Error("not implemented");
+    return null;
   }
   return Math.max(lastIndexAtOrBefore(frameTimes, position), 0);
 };

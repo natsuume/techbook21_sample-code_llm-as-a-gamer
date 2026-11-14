@@ -1,5 +1,5 @@
 // 上の段の「選んでいる要求」。決めた操作、判断の所要時間と画像、4 つの役割の advisor の問いの確率、問いの値の
-// 上位 3 件を出し、「詳細」で詳細ペインの要求のタブを開く。
+// 上位 3 件を出し、「詳細」でその要求を詳細ペインの要求のタブに開く。
 import type { RequestItem } from "../../api/apiTypes.ts";
 import { useRequestDetail } from "../../api/queries.ts";
 import { toQueryView } from "../../api/queryView.ts";
@@ -9,6 +9,7 @@ import {
   decisionFacts,
   topQuestionRows,
 } from "../../requests/selectedRequestSummary.ts";
+import { requestShownWithDetail } from "../../requests/shownRequest.ts";
 import type { RunView } from "../../state/useRunView.ts";
 import { useViewState } from "../../state/ViewStateContext.tsx";
 import { Button } from "../common/Button.tsx";
@@ -90,7 +91,11 @@ type SelectedRequestContentProps = {
   className?: string;
 };
 
-/** 選んでいる要求の中身。要求の詳細 (所要時間・画像・advisor の確率) は要求の詳細の API から読む */
+/**
+ * 選んでいる要求の中身。要求の詳細 (所要時間・画像・advisor の確率) は要求の詳細の API から読む。
+ * 新しい要求の詳細が届くまでは前の要求の詳細を出し続け、見出しの番号や決めた操作も、その前の要求のものにする
+ * (骨組みに戻すのは、出す詳細が 1 つも無いときだけ)。「詳細」は、出している要求を詳細ペインで開く (追従は止めない)
+ */
 const SelectedRequestContent = ({ view, request, className }: SelectedRequestContentProps) => {
   const { dispatch } = useViewState();
   const detailView = toQueryView(useRequestDetail(view.run, request.n));
@@ -98,27 +103,28 @@ const SelectedRequestContent = ({ view, request, className }: SelectedRequestCon
     detailView.state === "ready" && !isOldFormatRequestDetail(detailView.data)
       ? detailView.data
       : null;
+  const shown = requestShownWithDetail(request, detail);
   const pending = detailView.state === "loading" || detailView.state === "idle";
   const facts = detail === null ? null : decisionFacts(detail);
-  const topRows = topQuestionRows(view.summary.questions, request.p, TOP_QUESTION_COUNT);
+  const topRows = topQuestionRows(view.summary.questions, shown.p, TOP_QUESTION_COUNT);
   const threshold = view.summary.thresholds.advisor;
 
   return (
     <Panel
-      title={`${TITLE} #${request.n}`}
-      meta={<Chip>{request.result}</Chip>}
+      title={`${TITLE} #${shown.n}`}
+      meta={<Chip>{shown.result}</Chip>}
       actions={
-        <Button onClick={() => dispatch({ type: "setTab", tab: "request" })}>
+        <Button onClick={() => dispatch({ type: "selectRequest", n: shown.n, via: "open" })}>
           詳細
           <Icon name="detail" size="small" />
         </Button>
       }
-      busy={pending}
+      busy={pending || shown !== request}
       className={className}
     >
       <dl className={styles.facts}>
         <dt>決めた操作</dt>
-        <dd className={styles.data}>{request.action ?? "—"}</dd>
+        <dd className={styles.data}>{shown.action ?? "—"}</dd>
         <dt>判断</dt>
         <dd className={styles.data}>
           {pending ? (
@@ -151,7 +157,7 @@ const SelectedRequestContent = ({ view, request, className }: SelectedRequestCon
               label="advisor の問いの確率"
               rows={advisorProbabilityRows(
                 detail.advisor_probabilities,
-                request.advisor_accepted,
+                shown.advisor_accepted,
               ).map((row) => ({
                 key: row.role,
                 name: row.role,

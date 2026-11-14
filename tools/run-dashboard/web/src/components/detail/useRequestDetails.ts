@@ -4,6 +4,7 @@ import { useQueries } from "@tanstack/react-query";
 import { requestDetailPath } from "../../api/apiPaths.ts";
 import type { RequestDetail, RequestDetailOldFormat } from "../../api/apiTypes.ts";
 import { fetchJson } from "../../api/fetchJson.ts";
+import { requestQueryKey } from "../../api/queries.ts";
 
 /** 複数の要求の詳細の読み込みの状態。details は numbers と同じ並び (読めていない要求は undefined) */
 export type RequestDetailsState = {
@@ -20,7 +21,7 @@ export type RequestDetailsState = {
 export const useRequestDetails = (run: string, numbers: readonly number[]): RequestDetailsState =>
   useQueries({
     queries: numbers.map((n) => ({
-      queryKey: ["request", run, n],
+      queryKey: requestQueryKey(run, n),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         fetchJson<RequestDetail | RequestDetailOldFormat>(requestDetailPath(run, n), signal),
     })),
