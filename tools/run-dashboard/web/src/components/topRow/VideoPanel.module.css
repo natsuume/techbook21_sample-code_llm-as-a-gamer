@@ -1,0 +1,57 @@
+/* 縮小画像の枠。16:9 で大きさを予約し、画像の読み込みの前後で大きさを変えない */
+.screen {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-media);
+  background: var(--video);
+  color: var(--fg);
+}
+
+button.screen {
+  cursor: pointer;
+}
+
+button.screen:hover {
+  border-color: var(--accent);
+}
+
+.image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.time {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  padding: 0.0625rem var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.skeleton {
+  display: block;
+  aspect-ratio: 16 / 9;
+}

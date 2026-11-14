@@ -1,0 +1,32 @@
+.group {
+  display: inline-flex;
+  min-inline-size: 0;
+  gap: 0.1875rem;
+  margin: 0;
+  padding: 0.1875rem;
+  border: 0;
+  border-radius: 0.5625rem;
+  background: var(--surface-2);
+}
+
+.option {
+  min-height: var(--control-height);
+  padding: 0 var(--space-layout);
+  border: 0;
+  border-radius: 0.4375rem;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.option:hover {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* 選んでいる選択肢は accent の地と太字で示す */
+.option[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}

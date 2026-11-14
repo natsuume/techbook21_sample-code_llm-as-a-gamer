@@ -1,0 +1,56 @@
+.button {
+  min-height: var(--control-height);
+  padding: 0 var(--space-layout);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-button);
+  font-size: var(--text-md);
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.default {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg);
+}
+
+.button:hover:not([aria-disabled="true"]) {
+  border-color: var(--accent);
+}
+
+/* 選んでいる状態 (aria-pressed) は accent の地と太字で示す */
+.button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* 押せない状態は、薄い表示・破線の枠・カーソルの形で示す (色だけに頼らない) */
+.button[aria-disabled="true"] {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.square {
+  width: var(--control-height);
+  padding: 0;
+}

@@ -1,0 +1,122 @@
+/*
+ * 画面全体の design token (CSS 変数)。色・文字・余白・角丸・操作部品の大きさは、ここの変数を使って指定する。
+ * 色は明るいテーマを :root に書き、暗いテーマを OS の設定 (prefers-color-scheme) と data-theme="dark" の 2 か所に
+ * 同じ値で書く。canvas で読む色 (heat 系・hot 系・bar・accent・tap・surface-2) は 6 桁の hex にする。
+ */
+:root {
+  color-scheme: light;
+
+  /* 色 */
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #edf0f4;
+  --line: #d3d9e2;
+  --line-strong: #b9c1cd;
+  --fg: #151a22;
+  --muted: #566170;
+  --accent: #2c6bd1;
+  --accent-soft: #dce7f8;
+  --on-accent: #ffffff;
+  --tap: #0b1f44;
+  --on-tap: #ffffff;
+  --series-2: #7a4cc2;
+  --bar: #8c96a5;
+  --hot: #e8930c;
+  --hot-soft: #fbebd2;
+  --warn-text: #8f5300;
+  --danger: #c23434;
+  --danger-soft: #f8dada;
+  --video: #dce1e8;
+  --heat-low: #edf0f4;
+  --heat-high: #2c6bd1;
+
+  /* 字形 */
+  --font-text: "Inter", "Noto Sans JP", system-ui, sans-serif;
+  --font-head: "Noto Sans JP", "Inter", system-ui, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, monospace;
+
+  /* 文字の大きさ (10・11・12・13・14・15px) */
+  --text-xs: 0.625rem;
+  --text-sm: 0.6875rem;
+  --text-md: 0.75rem;
+  --text-base: 0.8125rem;
+  --text-lg: 0.875rem;
+  --text-xl: 0.9375rem;
+
+  /* 余白 (4・6・8・12px)。--space-layout は区画の間と区画の内側の 10px、--space-page はページの左右の 16px */
+  --space-1: 0.25rem;
+  --space-2: 0.375rem;
+  --space-3: 0.5rem;
+  --space-4: 0.75rem;
+  --space-layout: 0.625rem;
+  --space-page: 1rem;
+
+  /* 角丸 */
+  --radius-panel: 0.625rem;
+  --radius-button: 0.5rem;
+  --radius-chip: 999px;
+  --radius-media: 0.375rem;
+  --radius-small: 0.25rem;
+  --radius-bar: 0.1875rem;
+
+  /* 操作部品の最小の高さ (ボタン・select・タブ / chip のボタン) */
+  --control-height: 2.125rem;
+  --chip-height: 1.875rem;
+
+  /* タイムラインのレーンの見出しの幅 */
+  --label-w: 7.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0b0d11;
+    --surface: #161a21;
+    --surface-2: #1c212a;
+    --line: #2a303b;
+    --line-strong: #3a4150;
+    --fg: #e7eaee;
+    --muted: #a3acba;
+    --accent: #6aa8ff;
+    --accent-soft: #1e2c44;
+    --on-accent: #0e1014;
+    --tap: #d6e6ff;
+    --on-tap: #0e1014;
+    --series-2: #b79bff;
+    --bar: #5d6878;
+    --hot: #f5a524;
+    --hot-soft: #3a2e1a;
+    --warn-text: #f5d9a8;
+    --danger: #ff7a7a;
+    --danger-soft: #3a2224;
+    --video: #0b0d10;
+    --heat-low: #1c212a;
+    --heat-high: #6aa8ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0d11;
+  --surface: #161a21;
+  --surface-2: #1c212a;
+  --line: #2a303b;
+  --line-strong: #3a4150;
+  --fg: #e7eaee;
+  --muted: #a3acba;
+  --accent: #6aa8ff;
+  --accent-soft: #1e2c44;
+  --on-accent: #0e1014;
+  --tap: #d6e6ff;
+  --on-tap: #0e1014;
+  --series-2: #b79bff;
+  --bar: #5d6878;
+  --hot: #f5a524;
+  --hot-soft: #3a2e1a;
+  --warn-text: #f5d9a8;
+  --danger: #ff7a7a;
+  --danger-soft: #3a2224;
+  --video: #0b0d10;
+  --heat-low: #1c212a;
+  --heat-high: #6aa8ff;
+}

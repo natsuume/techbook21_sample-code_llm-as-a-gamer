@@ -1,0 +1,12 @@
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.figureSkeleton {
+  display: block;
+  max-width: 14.75rem;
+  aspect-ratio: 320 / 168;
+}

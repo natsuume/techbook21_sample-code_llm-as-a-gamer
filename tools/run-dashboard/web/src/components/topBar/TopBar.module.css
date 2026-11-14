@@ -1,0 +1,68 @@
+.bar {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.appName {
+  margin: 0;
+  font-family: var(--font-head);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.runSelect {
+  max-width: 22rem;
+}
+
+.position {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stats {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.stat {
+  white-space: nowrap;
+}
+
+.number {
+  color: var(--fg);
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.chipsLabel {
+  white-space: nowrap;
+}
+
+/* 押せない状態 (実行の無い役割・書き換えの無い起動時のまま) は chip にせず、文字だけで出す */
+.plainText {
+  color: var(--fg);
+  white-space: nowrap;
+}
