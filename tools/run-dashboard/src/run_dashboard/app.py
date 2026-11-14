@@ -18,12 +18,13 @@ Host の名前 (ポートを除く) が ALLOWED_HOSTS 以外の要求は、ど�
 runs/ には何も書かない。
 """
 
+import json
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from run_dashboard.advisor_runs import AdvisorRun, build_advisor_runs
@@ -81,6 +82,23 @@ TimeFrom = Annotated[float | None, Query(alias="from", allow_inf_nan=False)]
 TimeTo = Annotated[float | None, Query(allow_inf_nan=False)]
 
 
+class RecordJSONResponse(JSONResponse):
+    """記録の文字列をそのまま返す JSON の応答。API のルートの既定の応答の型にする。
+
+    第4章の記録は、UTF-8 にできない対になっていないサロゲート (応答の JSON の `\\ud800` のエスケープを読んだ値など) を、
+    JSON の `\\udXXX` のエスケープのまま書く。そのため、読んだ文字列にその文字が入ることがある。
+    Starlette の JSONResponse は UTF-8 に符号化するときにその文字で失敗するため、render では
+    errors="backslashreplace" で符号化し、JSON の文字列の中で有効な `\\udXXX` のエスケープとして返す
+    (読むと元の文字に戻る)。
+    """
+
+    def render(self, content: object) -> bytes:
+        """content を、区切りの空白の無い JSON (ensure_ascii=False、allow_nan=False) の UTF-8 のバイト列にして返す。"""
+        return json.dumps(
+            content, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8", errors="backslashreplace")
+
+
 def file_media_type(path: Path) -> str:
     """files の API で返すファイル path の content-type を、拡張子 (小文字にしたもの) で決めて返す。
 
@@ -118,12 +136,13 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     web_dist_dir があってディレクトリーなら、API のルートの後に、/ に StaticFiles(directory=web_dist_dir,
     html=True) を mount して画面を配信する (/ では index.html を返す)。無ければ (None か、ディレクトリーでなければ)、
     GET / で BUILD_INSTRUCTIONS_TEXT を text/plain で返す。CORS の設定は足さない。
+    API のルートの応答は RecordJSONResponse で返す (記録の文字列に対になっていないサロゲートがあっても 500 にしない)。
     files の API は、ファイルを 1 回で読んだバイト列を Response(content=..., media_type=file_media_type(...)) で
     返す (Content-Length は返す本文の長さ)。FileResponse は Content-Length を stat の大きさで決めた後に
     ファイルの終わりまで読むため、送る間に伸びるファイル (書いている途中の stream.jsonl など) では、
     宣言した長さと本文の長さがずれる。読めなければ (OSError) 404。
     """
-    app = FastAPI(title="run-dashboard")
+    app = FastAPI(title="run-dashboard", default_response_class=RecordJSONResponse)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
     @app.get("/api/runs")

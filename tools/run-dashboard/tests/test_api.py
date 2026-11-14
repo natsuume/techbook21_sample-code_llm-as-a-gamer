@@ -13,6 +13,7 @@ from synthetic_runs import (
     RUN_NAMES_NEWEST_FIRST,
     STRATEGY_NOTE_FIRST,
     STRATEGY_NOTE_SECOND,
+    STRATEGY_RUN_NAME,
     TIPS_NOTE,
 )
 
@@ -1185,3 +1186,47 @@ def test_request_with_allowed_host_is_served(client, host):
     response = client.get("/", headers={"host": host})
     assert response.status_code == 200
     assert response.text == BUILD_INSTRUCTIONS_TEXT
+
+
+def test_unpaired_surrogate_in_record_is_returned_as_escape(runs, client):
+    # 第4章の記録は、対になっていないサロゲートを JSON の \udXXX のエスケープのまま書く
+    stream_path = runs.dashboard.run_dir / STRATEGY_RUN_NAME / "stream.jsonl"
+    line = {
+        "mono": 1004.5,
+        "data": {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_surrogate",
+                        "content": "a\ud800b",
+                    }
+                ]
+            },
+        },
+    }
+    with stream_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(line) + "\n")
+    response = client.get(
+        f"/api/runs/{runs.dashboard.name}/advisor/{STRATEGY_RUN_NAME}"
+    )
+    assert response.status_code == 200
+    assert b"\\ud800" in response.content
+    summaries = [step["summary"] for step in response.json()["steps"]]
+    assert "a\ud800b" in summaries
+
+
+def test_non_finite_number_in_record_is_returned_as_null(runs, client):
+    # Python の json は NaN を書けて、読める (JSON の仕様の外の値)
+    frames_path = runs.dashboard.run_dir / "frames.jsonl"
+    with frames_path.open("a", encoding="utf-8") as file:
+        file.write(
+            '{"mono": 1014.0, "sharpness": NaN, "diff": null, "phase": "rising", '
+            '"peak_mono": 1014.0, "peak_sharpness": 1.0, "ref": 0.5, "event": null, '
+            '"thumb": "thumbs/1014000000.jpg"}\n'
+        )
+    items = get_json(client, f"/api/runs/{runs.dashboard.name}/frames?from=14&to=14")[
+        "items"
+    ]
+    assert [item["sharpness"] for item in items] == [None]
