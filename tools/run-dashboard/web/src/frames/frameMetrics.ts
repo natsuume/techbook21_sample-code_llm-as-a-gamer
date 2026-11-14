@@ -64,8 +64,9 @@ export const summarizeFrames = (
 };
 
 /**
- * 要求に載せた画像に当たるフレームの index を返す。thumb が一致するフレームがあればその index、無ければ
- * lastIndexAtOrBefore(frameTimes, image.t)。どちらも無ければ -1。
+ * 要求に載せた画像に当たるフレームの index を返す。thumb が null でなければ thumb が一致するフレームの index
+ * (無ければ -1)。thumb が null なら lastIndexAtOrBefore(frameTimes, image.t) (無ければ -1)。
+ * thumb が一致しないのは、そのフレームの記録が捨てられたときなので、時刻の近い別のフレームを返さない。
  * frameTimes は frames の t の配列 (呼び出し側が frames と同じ並びにそろえる)
  */
 export const frameIndexOfImage = (
@@ -74,8 +75,10 @@ export const frameIndexOfImage = (
   image: Pick<RequestImage, "thumb" | "t">,
 ): number => {
   const thumb = image.thumb;
-  const matchedIndex = thumb === null ? -1 : frames.findIndex((frame) => frame.thumb === thumb);
-  return matchedIndex >= 0 ? matchedIndex : lastIndexAtOrBefore(frameTimes, image.t);
+  if (thumb === null) {
+    return lastIndexAtOrBefore(frameTimes, image.t);
+  }
+  return frames.findIndex((frame) => frame.thumb === thumb);
 };
 
 /** t_sent >= t の要求の n を、配列の順に最大 limit 件返す (フレームを載せた要求の候補) */

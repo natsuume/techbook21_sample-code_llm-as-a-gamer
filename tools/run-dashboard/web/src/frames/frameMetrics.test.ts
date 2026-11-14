@@ -163,16 +163,16 @@ describe("frameIndexOfImage", () => {
     expect(frameIndexOfImage(frames, frameTimes, { thumb: "thumbs/a.jpg", t: 2.9 })).toBe(0);
   });
 
-  it("thumb が一致しなければ、画像の時刻以前の最後のフレームの index を返す", () => {
-    expect(frameIndexOfImage(frames, frameTimes, { thumb: "thumbs/zzz.jpg", t: 3.5 })).toBe(2);
+  it("thumb が null でなく一致するフレームが無ければ、画像の時刻以前のフレームがあっても -1 を返す", () => {
+    expect(frameIndexOfImage(frames, frameTimes, { thumb: "thumbs/zzz.jpg", t: 3.5 })).toBe(-1);
+    expect(frameIndexOfImage(frames, frameTimes, { thumb: "thumbs/zzz.jpg", t: 2 })).toBe(-1);
   });
 
   it("thumb が null なら、画像の時刻以前の最後のフレームの index を返す", () => {
     expect(frameIndexOfImage(frames, frameTimes, { thumb: null, t: 2.5 })).toBe(1);
   });
 
-  it("thumb が一致せず、画像の時刻以前のフレームも無ければ -1 を返す", () => {
-    expect(frameIndexOfImage(frames, frameTimes, { thumb: "thumbs/zzz.jpg", t: 0.5 })).toBe(-1);
+  it("thumb が null で、画像の時刻以前のフレームも無ければ -1 を返す", () => {
     expect(frameIndexOfImage(frames, frameTimes, { thumb: null, t: 0.5 })).toBe(-1);
   });
 
