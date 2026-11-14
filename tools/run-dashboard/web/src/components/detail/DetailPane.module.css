@@ -1,0 +1,41 @@
+/*
+ * 詳細ペインの枠。タブの列の下に本文を置く。広い画面では本文 (tabpanel) だけが縦にスクロールし、
+ * 幅 1024px 未満か高さ 620px 未満ではスクロールをやめてページと一緒に伸ばす。
+ */
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+/* タブの列と本文の外枠は、ペインの残りの高さを埋める */
+.tabs {
+  flex: 1 1 auto;
+}
+
+.body {
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-4) var(--space-page);
+}
+
+/*
+ * 本文の中身。区画 (見出しと中身のまとまり) を縦に並べる。中の absolute の要素 (画面に出さない文など) の基準にして、
+ * スクロールする本文の外 (ページ) にはみ出さないようにする
+ */
+.content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+@media (max-width: 1023.98px), (max-height: 619.98px) {
+  .body {
+    overflow-y: visible;
+  }
+}

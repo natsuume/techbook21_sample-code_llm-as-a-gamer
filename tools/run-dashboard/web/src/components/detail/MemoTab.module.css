@@ -1,0 +1,180 @@
+/* 凡例の一覧。幅に合わせて列の数を変える */
+.legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11.875rem, 1fr));
+  gap: var(--space-1) var(--space-4);
+  font-size: var(--text-md);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 色の見本を置く枠。見本の幅によらず文言の位置をそろえる */
+.swatchSlot {
+  flex: none;
+  width: 1.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 色の見本。タイムラインの描き方と同じ色と形にする */
+.swatch {
+  display: inline-block;
+  flex: none;
+  width: 0.875rem;
+  height: 0.5rem;
+}
+
+/* 要求の棒 */
+.requestOther {
+  background: var(--bar);
+}
+
+.requestOperation {
+  background: var(--tap);
+}
+
+.requestAdvisor {
+  height: 0.875rem;
+  background: var(--hot);
+}
+
+.requestSelected {
+  height: 1rem;
+  border: 1px solid var(--fg);
+  background: var(--accent);
+}
+
+.requestFailed {
+  height: 0.875rem;
+  border: 1px dashed var(--danger);
+}
+
+/* 操作に採った数の帯 */
+.adoptedZero {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.adoptedOne {
+  background: var(--hot-soft);
+}
+
+.adoptedMany {
+  background: var(--hot);
+}
+
+/* ヒートマップ */
+.heat {
+  width: 1.75rem;
+  border: 1px solid var(--line);
+  background: linear-gradient(90deg, var(--heat-low), var(--heat-high));
+}
+
+.heatOver {
+  background: var(--hot);
+}
+
+/* コントローラー入力 */
+.inputHold {
+  background: var(--accent);
+}
+
+.inputTap {
+  width: 0.375rem;
+  background: var(--tap);
+}
+
+/* スティックは倒した大きさを濃さで示す (不透明度 0.3〜1) */
+.inputStick {
+  width: 1.75rem;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 30%, transparent),
+    var(--accent)
+  );
+}
+
+/* 折れ線 */
+.line {
+  height: 0;
+  border-top: 2px solid var(--accent);
+}
+
+.lineRef,
+.lineThreshold {
+  border-top-style: dashed;
+  border-top-color: var(--hot);
+}
+
+.lineDiff {
+  border-top-color: var(--series-2);
+}
+
+.peak {
+  width: 0.5625rem;
+  height: 0.5625rem;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+/* advisor の区間と書き換えの印 */
+.advisorSpan {
+  height: 0.75rem;
+  border: 1px solid var(--hot);
+  border-radius: var(--radius-bar);
+  background: var(--hot-soft);
+}
+
+.advisorRunning {
+  border-style: dashed;
+}
+
+.rewrite,
+.rewriteExternal {
+  width: 0.5rem;
+  height: 0.5rem;
+  margin: 0 0.1875rem;
+  transform: rotate(45deg);
+  background: var(--hot);
+}
+
+.rewriteExternal {
+  border: 2px solid var(--danger);
+  background: var(--surface);
+}
+
+/* イベント */
+.decisionError {
+  width: 0.5625rem;
+  height: 0.5625rem;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.captureStopped {
+  width: 0.5625rem;
+  height: 0.5625rem;
+  background: var(--warn-text);
+}
+
+.bridgeWait {
+  height: 0.75rem;
+  border: 1px solid var(--hot);
+  border-radius: var(--radius-bar);
+  background: var(--hot-soft);
+}
+
+.bridgeOpen {
+  border-style: dashed;
+}

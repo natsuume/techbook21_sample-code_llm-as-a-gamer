@@ -1,0 +1,152 @@
+/* 詳細ペインのタブの中身で共通に使う部品 (見出しの行・区画・項目と値の表・テキストの枠・カード・ボタンの列) */
+
+/* 見出しの行。見出しの右に補足と操作を並べ、幅が足りなければ折り返す */
+.headRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-layout);
+  min-width: 0;
+}
+
+.heading {
+  margin: 0 auto 0 0;
+  font-family: var(--font-head);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.headMeta {
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.headActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* 見出し (h4) と中身のまとまり */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.subheading {
+  margin: 0 auto 0 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* 項目と値の表 (dl) */
+.facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.1875rem var(--space-4);
+  font-size: var(--text-md);
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+/* テキストの枠 (直近の応答・advisor の答えなど)。中身は pre で、HTML として解釈しない */
+.textBox {
+  min-width: 0;
+  padding: var(--space-2) var(--space-layout);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-media);
+  background: var(--surface-2);
+}
+
+.textBox summary {
+  cursor: pointer;
+  font-size: var(--text-md);
+}
+
+.pre {
+  margin: 0;
+  font-family: var(--font-data);
+  font-size: var(--text-md);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.textBox summary + .pre {
+  margin-top: var(--space-2);
+}
+
+/* カード (advisor の実行など)。選んでいるカードは accent の枠を太くする */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-layout) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-button);
+  scroll-margin-top: var(--space-4);
+}
+
+.selectedCard {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.cardName {
+  margin: 0 auto 0 0;
+  font-family: var(--font-data);
+  font-size: var(--text-base);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ボタンの列。幅が足りなければ折り返す */
+.buttonRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* ボタンの中の長い文言 (ファイルのパスなど) は折り返す (Button の nowrap より強い指定にする) */
+button.wrapButton {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* 受け持ちの advisor 以外を示す文言 */
+.external {
+  color: var(--danger);
+  font-weight: 600;
+}

@@ -1,0 +1,124 @@
+/* 問いの答えの行の列 (名前・棒・値・注記) を全行でそろえるため、リストを grid にし、行は subgrid にする */
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: fit-content(10rem) minmax(2.5rem, 1fr) auto auto;
+  gap: 0.3125rem var(--space-3);
+  font-size: var(--text-md);
+}
+
+.row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  row-gap: 0.125rem;
+  min-width: 0;
+  padding: 0.125rem 0;
+  border-radius: var(--radius-bar);
+  scroll-margin: var(--space-4);
+}
+
+/* 強調する問い (focusQuestion) は accent の枠と地で示す */
+.focused {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  background: var(--accent-soft);
+}
+
+.name {
+  min-width: 0;
+  font-family: var(--font-data);
+  overflow-wrap: anywhere;
+}
+
+.bar {
+  position: relative;
+  height: 0.5625rem;
+  border-radius: var(--radius-bar);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* 確率の問いの棒 */
+.fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: var(--radius-bar);
+  background: var(--bar);
+}
+
+/* しきい値を超えた値は hot の棒 (しきい値の縦線との位置でも分かる) */
+.over {
+  background: var(--hot);
+}
+
+/* 選択肢の積み上げ棒の区切り。押下は accent、短押しは tap、スティックの方向は accent と series-2 */
+.segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.hold,
+.directionA {
+  background: var(--accent);
+}
+
+.tap {
+  background: var(--tap);
+}
+
+.directionB {
+  background: var(--series-2);
+}
+
+/* 採った選択肢の区切りは fg の枠で囲む */
+.adoptedSegment {
+  box-shadow: inset 0 0 0 1px var(--fg);
+}
+
+.threshold {
+  position: absolute;
+  top: -0.1875rem;
+  bottom: -0.1875rem;
+  width: 1px;
+  background: var(--fg);
+}
+
+.value {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.note {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+/* 採った答え (採用・requested) は warn の太字。不採用は muted のまま (文言で区別する) */
+.adopted {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
+/* 選択肢ごとの確率の文 (棒の下の行) */
+.breakdown {
+  grid-column: 2 / -1;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.adoptedChoice {
+  color: var(--warn-text);
+  font-weight: 600;
+}
