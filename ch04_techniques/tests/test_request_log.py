@@ -532,3 +532,12 @@ def test_write_keeps_timeline_text_of_request(tmp_path):
     request = replace(sample_request(), timeline_text="## 画面の変化\n- 変わった")
     log.write(ok_entry(request=request))
     assert request_lines(tmp_path)[0]["timeline_text"] == "## 画面の変化\n- 変わった"
+
+
+def test_write_lists_forced_roles_in_role_order(tmp_path):
+    log = RequestLog(tmp_path)
+    log.write(ok_entry())
+    log.write(ok_entry(advisor_forced=frozenset({"advice", "strategy"})))
+    lines = request_lines(tmp_path)
+    assert lines[0]["advisor_forced"] == []
+    assert lines[1]["advisor_forced"] == ["strategy", "advice"]

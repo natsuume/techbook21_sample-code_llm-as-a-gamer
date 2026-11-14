@@ -15,7 +15,8 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
        系列情報 (parts.timeline) があれば、読んだゲームの情報を渡してから系列情報の文を作り、要求に足す
     5. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
        そうでなければ、問いごとの答え (選択肢ごとの確率と、真である確率) から操作を決めて PadOutput に渡す (すぐ戻る)
-    6. advisor を呼ぶ答えの役割 (advisor_roles.ADVISOR_ROLES) のうち、その役割の advisor が実行中でないものがあれば、
+    6. advisor を呼ぶ答えの役割 (advisor_roles.ADVISOR_ROLES) と、強制の呼び出し (parts.advisor_trigger) の役割を
+       合わせ、そのうち advisor が実行中でないものがあれば、
        advisor に渡す画像を要求とは別に 1 回だけ選び (意味のあるフレーム + フレームの履歴から等間隔に選んだもの)、
        その役割ごとに Advisor.request_update を呼ぶ (すぐ戻る)
     7. 要求のログ (request_log) があれば、要求ごとの入出力を書く
@@ -34,6 +35,7 @@ from switch2_remote.error_message import describe_error
 from switch2_agent.action_decision import PadAction, Thresholds, decide_action
 from switch2_agent.advisor_images import build_advisor_images
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisor_triggers.base import AdvisorCallState, AdvisorTrigger
 from switch2_agent.advisors.base import Advisor, AdvisorContext
 from switch2_agent.decision_models.base import (
     Decision,
@@ -158,6 +160,8 @@ class PipelineParts:
                      None なら書かない
     timeline         系列情報の文を作る部品 (run では --timeline の節が 1 つ以上あれば timeline.builder.TimelineBuilder)。
                      None なら系列情報を足さない (要求の timeline_text は空文字)
+    advisor_trigger  advisor の強制の呼び出しの方式 (run では --advisor-idle-seconds が 0 より大きければ
+                     advisor_triggers.idle_timer.IdleTimerTrigger)。None なら強制では呼ばない
     """
 
     history: FrameHistory
@@ -181,6 +185,7 @@ class PipelineParts:
     capture_lost: Callable[[], str | None]
     request_log: RequestLogLike | None = None
     timeline: TimelineLike | None = None
+    advisor_trigger: AdvisorTrigger | None = None
 
 
 class Pipeline:
@@ -207,6 +212,8 @@ class Pipeline:
                                  (clock() の値)。まだ model.decide を呼んでいなければ None
         last_advisor_at          advisor の役割の name → その役割の操作の記録の起点 (その役割の advisor が
                                  受け付けた要求の received_at。最初はどの役割も started_at)
+        last_accepted_at         advisor の役割の name → その役割の advisor が最後に受け付けた要求の received_at。
+                                 まだ受け付けていない役割は含まない (強制の呼び出しの AdvisorCallState に渡す)
         no_new_frame_since       「新しいフレームが無い」と最初に分かった時刻。新しいフレームがあると分かったら、
                                  要求を送る前に None に戻す (要求の成否によらない)
         consecutive_errors       Decision Model の連続の失敗の回数。model.decide が成功したら 0 に戻す
@@ -226,7 +233,7 @@ class Pipeline:
         """属性を入れる。
 
         started_at は parts.clock() の値、last_advisor_at は advisor_roles.ADVISOR_ROLES のどの役割も started_at に
-        し、request_count は 0、last_response_at は None にする。
+        し、last_accepted_at は空の辞書、request_count は 0、last_response_at は None にする。
         """
         self.parts = parts
         self.max_consecutive_errors = max_consecutive_errors
@@ -244,6 +251,7 @@ class Pipeline:
         self.last_advisor_at: dict[str, float] = {
             role.name: self.started_at for role in ADVISOR_ROLES
         }
+        self.last_accepted_at: dict[str, float] = {}
         self.no_new_frame_since: float | None = None
         self.consecutive_errors = 0
 
@@ -295,11 +303,16 @@ class Pipeline:
            apply が送信の例外 (RuntimeError / OSError) を出したら、要求のログに result="error"、
            error=describe_error(例外)、decision は応答、action は決めた操作の記録を書き、OutputSendError に包んで出す
         7. operation_log.add(OperationRecord(sent_at, received_at, action))
-        8. action.advisor_requested が空でなければ、_request_advisor_updates(action, notes, received_at) で
-           役割ごとの advisor に求め、受け付けた役割の name の集合を advisor_accepted にする (空なら呼ばず、
-           advisor_accepted は空の集合)。_request_advisor_updates は次を行う:
-           - advisor_roles.ADVISOR_ROLES の順に、action.advisor_requested に入っていて、advisors[name].is_busy() が偽の
-             役割だけを対象にする。is_busy() が真の役割には request_update を呼ばない
+        8. 強制の呼び出し forced = _forced_calls(action, received_at) (役割の name → 理由の文) を求める:
+           advisor_trigger があれば、advisor_trigger.due(AdvisorCallState(started_at, last_accepted_at,
+           action.advisor_probabilities), received_at) の役割のうち、action.advisor_requested に無いものを返す
+           (advisor の問いで求めた役割は、問いで呼んだものとして扱う)。advisor_trigger が無ければ空。
+           action.advisor_requested か forced が空でなければ、_request_advisor_updates(action, forced, notes, received_at)
+           で役割ごとの advisor に求め、(受け付けた役割の name の集合, 強制で求めた役割の name の集合) を
+           (advisor_accepted, advisor_forced) にする (どちらも空なら呼ばず、どちらも空の集合)。
+           _request_advisor_updates は次を行う:
+           - advisor_roles.ADVISOR_ROLES の順に、action.advisor_requested か forced に入っていて、
+             advisors[name].is_busy() が偽の役割だけを対象にする。is_busy() が真の役割には request_update を呼ばない
            - 対象が 1 つ以上あれば、advisor に渡す画像をその回に 1 回だけ選んで符号化し (_select_advisor_images)、
              対象のすべての役割で使い回す (advisor の実行中や、複数の役割を呼ぶときに、何度も最大 10 枚を符号化して
              速い層を遅らせないため)。対象が無ければ画像を選ばない。
@@ -309,12 +322,15 @@ class Pipeline:
            - 対象の役割ごとに (ADVISOR_ROLES の順に) AdvisorContext を作って advisors[name].request_update を呼ぶ。
              AdvisorContext は game、その画像、notes の strategy (無ければ空文字)、
              operation_log.format_since(last_advisor_at[name], received_at, name)、action.advisor_probabilities[name]、
-             time.strftime("%H:%M:%S") の壁時計の時刻からなる
-           - 受け付けられた (True) 役割の last_advisor_at[name] を received_at にし (その役割の次の操作の記録の起点)、
-             timeline があれば timeline.record_advisor_call(name, received_at) を呼んで、
-             受け付けた役割の name の frozenset を返す
+             time.strftime("%H:%M:%S") の壁時計の時刻、強制で求めた役割なら forced[name] の理由 (trigger_reason。
+             問いで求めた役割なら None) からなる
+           - 受け付けられた (True) 役割の last_advisor_at[name] と last_accepted_at[name] を received_at にし
+             (その役割の次の操作の記録の起点と、強制の呼び出しの数え始め)、timeline があれば
+             timeline.record_advisor_call(name, received_at) を呼ぶ
+           - (受け付けた役割の name の frozenset, 対象のうち forced に入っていた役割の name の frozenset) を返す
         9. 要求のログに result="ok"、error=None、decision は応答、action は送った操作、
-           advisor_accepted=受け付けた役割の name の frozenset (呼ばなければ空の集合) の記録を書く
+           advisor_accepted=受け付けた役割の name の frozenset (呼ばなければ空の集合)、
+           advisor_forced=強制で求めた役割の name の frozenset (呼ばなければ空の集合) の記録を書く
         10. last_sent_frame_time = frame.time。5・6 の例外で終わった要求では進めない (そのため、DecisionModelError や
            送信の失敗の後は、新しいフレームが届いていなくても、同じフレームで次の要求を送る)。
            log に次の辞書を渡す:
@@ -325,13 +341,15 @@ class Pipeline:
               "payload_bytes": 要求の画像の JPEG の合計バイト数, "action": operation_log.format_action(action),
               "advisor_probabilities": 役割の name → その役割の問いの確率の辞書 (action.advisor_probabilities),
               "advisor_requested": action.advisor_requested の役割の name のリスト,
-              "advisor_accepted": 受け付けた役割の name のリスト, "refusals": decision.refusals}
+              "advisor_accepted": 受け付けた役割の name のリスト,
+              "advisor_forced": 強制で求めた役割の name のリスト, "refusals": decision.refusals}
              (役割の name のリストは advisor_roles.ADVISOR_ROLES の順)
            ブリッジが復旧中で戻るときと、新しいフレームが無くて戻るときと、例外で終わるときは、この辞書を渡さない。
 
         要求のログ: parts.request_log が None でなければ、1 回の要求につき 1 件の request_log.RequestLogEntry
         (number、origin=started_at、sent_at、encoded_at、received_at、request、decision、action、advisor_accepted
-        (受け付けた役割の name の frozenset。ok 以外は空の集合)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
+        (受け付けた役割の name の frozenset。ok 以外は空の集合)、advisor_forced (強制で求めた役割の name の frozenset。
+        ok 以外は空の集合)、result、error) を request_log.write に渡す。write が OSError か ValueError (文字の符号化の
         失敗など) を出したら、判断のループを止めないよう捕まえ、log に {"event": "request_log_error",
         "error": describe_error(例外)} を渡して続ける
         (write が失敗しても、5・6 で出す例外は 5・6 のとおりに出す)。
@@ -462,11 +480,13 @@ class Pipeline:
         applied_at = parts.clock()
 
         parts.operation_log.add(OperationRecord(sent_at, received_at, action))
-        advisor_accepted: frozenset[str] = (
-            self._request_advisor_updates(action, notes, received_at)
-            if action.advisor_requested
-            else frozenset()
-        )
+        forced = self._forced_calls(action, received_at)
+        advisor_accepted: frozenset[str] = frozenset()
+        advisor_forced: frozenset[str] = frozenset()
+        if action.advisor_requested or forced:
+            advisor_accepted, advisor_forced = self._request_advisor_updates(
+                action, forced, notes, received_at
+            )
         self._write_request_log(
             number,
             sent_at,
@@ -478,6 +498,7 @@ class Pipeline:
             decision=decision,
             action=action,
             advisor_accepted=advisor_accepted,
+            advisor_forced=advisor_forced,
         )
 
         self.last_sent_frame_time = frame.time
@@ -501,6 +522,9 @@ class Pipeline:
                 ],
                 "advisor_accepted": [
                     role.name for role in ADVISOR_ROLES if role.name in advisor_accepted
+                ],
+                "advisor_forced": [
+                    role.name for role in ADVISOR_ROLES if role.name in advisor_forced
                 ],
                 "refusals": decision.refusals,
             }
@@ -606,6 +630,7 @@ class Pipeline:
         decision: Decision | None = None,
         action: PadAction | None = None,
         advisor_accepted: frozenset[str] = frozenset(),
+        advisor_forced: frozenset[str] = frozenset(),
     ) -> None:
         """parts.request_log があれば、要求 1 回分の RequestLogEntry (origin は started_at) を書く。
 
@@ -625,6 +650,7 @@ class Pipeline:
             decision=decision,
             action=action,
             advisor_accepted=advisor_accepted,
+            advisor_forced=advisor_forced,
             result=result,
             error=error,
         )
@@ -648,22 +674,48 @@ class Pipeline:
         self.parts.sleep(remaining)
         return remaining
 
-    def _request_advisor_updates(
-        self, action: PadAction, notes: Mapping[str, str], received_at: float
-    ) -> frozenset[str]:
-        """action.advisor_requested の役割の advisor に求め、受け付けた役割の name の集合を返す (run_once の 8)。
+    def _forced_calls(self, action: PadAction, now: float) -> dict[str, str]:
+        """強制で呼ぶ役割の name → 理由の文を返す (run_once の 8)。
 
-        notes はその要求で読んだゲームの情報 (種別 → 中身)、received_at はその要求の応答を受け取った時刻。
+        advisor_trigger が無ければ空の辞書。あれば、advisor_trigger.due の役割のうち、action.advisor_requested に
+        無いもの (advisor の問いで求めていない役割) だけを返す。
+        """
+        trigger = self.parts.advisor_trigger
+        if trigger is None:
+            return {}
+        state = AdvisorCallState(
+            started_at=self.started_at,
+            last_accepted=dict(self.last_accepted_at),
+            advisor_probabilities=dict(action.advisor_probabilities),
+        )
+        return {
+            call.role_name: call.reason
+            for call in trigger.due(state, now)
+            if call.role_name not in action.advisor_requested
+        }
+
+    def _request_advisor_updates(
+        self,
+        action: PadAction,
+        forced: Mapping[str, str],
+        notes: Mapping[str, str],
+        received_at: float,
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """action.advisor_requested と forced の役割の advisor に求める (run_once の 8)。
+
+        (受け付けた役割の name の集合, 強制で求めた役割の name の集合) を返す。
+        forced は _forced_calls の結果、notes はその要求で読んだゲームの情報 (種別 → 中身)、
+        received_at はその要求の応答を受け取った時刻。
         """
         parts = self.parts
         targets = [
             role.name
             for role in ADVISOR_ROLES
-            if role.name in action.advisor_requested
+            if (role.name in action.advisor_requested or role.name in forced)
             and not parts.advisors[role.name].is_busy()
         ]
         if not targets:
-            return frozenset()
+            return frozenset(), frozenset()
         # 呼ぶ役割が複数でも、画像は 1 回だけ選んで符号化し、使い回す
         images = self._select_advisor_images()
         trigger_time_text = time.strftime("%H:%M:%S")
@@ -678,13 +730,17 @@ class Pipeline:
                 ),
                 trigger_probability=action.advisor_probabilities[name],
                 trigger_time_text=trigger_time_text,
+                trigger_reason=forced.get(name),
             )
             if parts.advisors[name].request_update(context):
                 self.last_advisor_at[name] = received_at
+                self.last_accepted_at[name] = received_at
                 if parts.timeline is not None:
                     parts.timeline.record_advisor_call(name, received_at)
                 accepted.add(name)
-        return frozenset(accepted)
+        return frozenset(accepted), frozenset(
+            name for name in targets if name in forced
+        )
 
     def _select_advisor_images(self) -> list[LabeledImage]:
         """advisor に渡す画像を、今の時刻 (clock()) で要求とは別に選んで JPEG にする (run_once の 8)。"""

@@ -12,6 +12,7 @@ from switch2_remote.controller_state import PadState
 from switch2_agent import run
 from switch2_agent.action_decision import Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisor_triggers.idle_timer import IdleTimerTrigger
 from switch2_agent.dashboard_records import PadReport
 from switch2_agent.decision_models import jev
 from switch2_agent.decision_request import (
@@ -860,9 +861,81 @@ def test_parse_args_uses_defaults():
         "timeline": SECTION_NAMES,
         "timeline_window": 120.0,
         "screen_change_threshold": 2.0,
+        "advisor_idle_seconds": 60.0,
+        "advisor_idle_scope": "any",
+        "advisor_idle_roles": ("strategy", "advice"),
         "save_requests": False,
         "record_dashboard": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("advice", ("advice",)),
+        # ADVISOR_ROLES の順に並べ直す。前後の空白は除く
+        ("tips, controls", ("controls", "tips")),
+    ],
+)
+def test_parse_args_reads_advisor_idle_roles(value, expected):
+    args = run.parse_args([*REQUIRED, "--advisor-idle-roles", value])
+    assert args.advisor_idle_roles == expected
+
+
+@pytest.mark.parametrize("value", ["unknown", "advice,advice", "advice,", ""])
+def test_parse_args_rejects_bad_advisor_idle_roles(value, capsys):
+    with pytest.raises(SystemExit):
+        run.parse_args([*REQUIRED, "--advisor-idle-roles", value])
+    assert "--advisor-idle-roles" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["-1", "inf", "nan"])
+def test_parse_args_rejects_bad_advisor_idle_seconds(value, capsys):
+    with pytest.raises(SystemExit):
+        run.parse_args([*REQUIRED, "--advisor-idle-seconds", value])
+    assert "--advisor-idle-seconds" in capsys.readouterr().err
+
+
+def test_parse_args_rejects_unknown_advisor_idle_scope(capsys):
+    with pytest.raises(SystemExit):
+        run.parse_args([*REQUIRED, "--advisor-idle-scope", "sometimes"])
+    assert "--advisor-idle-scope" in capsys.readouterr().err
+
+
+def test_main_wires_idle_timer_trigger_by_default(recorder):
+    run.main(REQUIRED)
+    trigger = recorder.pipeline.parts.advisor_trigger
+    assert isinstance(trigger, IdleTimerTrigger)
+    assert (trigger.interval_s, trigger.roles, trigger.scope) == (
+        60.0,
+        ("strategy", "advice"),
+        "any",
+    )
+
+
+def test_main_wires_idle_timer_trigger_from_options(recorder):
+    run.main(
+        [
+            *REQUIRED,
+            "--advisor-idle-seconds",
+            "90",
+            "--advisor-idle-scope",
+            "each",
+            "--advisor-idle-roles",
+            "tips",
+        ]
+    )
+    trigger = recorder.pipeline.parts.advisor_trigger
+    assert (trigger.interval_s, trigger.roles, trigger.scope) == (
+        90.0,
+        ("tips",),
+        "each",
+    )
+
+
+def test_main_with_zero_idle_seconds_has_no_trigger(recorder):
+    run.main([*REQUIRED, "--advisor-idle-seconds", "0"])
+    assert recorder.pipeline.parts.advisor_trigger is None
 
 
 @pytest.mark.parametrize(

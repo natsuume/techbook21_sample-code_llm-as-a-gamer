@@ -8,6 +8,7 @@ from switch2_remote.error_message import describe_error
 
 from switch2_agent.action_decision import PadAction, Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisor_triggers.base import AdvisorCallState, ForcedCall
 from switch2_agent.advisors.base import AdvisorContext
 from switch2_agent.decision_models.base import Decision, DecisionModelError
 from switch2_agent.decision_request import DecisionRequest, LabeledImage
@@ -40,6 +41,7 @@ DECISION_LOG_KEYS = {
     "advisor_probabilities",
     "advisor_requested",
     "advisor_accepted",
+    "advisor_forced",
     "refusals",
 }
 
@@ -2095,3 +2097,126 @@ def test_timeline_records_only_accepted_advisor_calls():
     assert [c for c in timeline.calls if c[0] == "record_advisor_call"] == [
         ("record_advisor_call", "strategy", pytest.approx(received_at))
     ]
+
+
+# --- advisor の強制の呼び出し ---
+
+
+class FakeTrigger:
+    """偽の AdvisorTrigger。due に渡された (状態, 時刻) を記録し、calls を返す。"""
+
+    def __init__(self, *calls: ForcedCall):
+        self.calls = list(calls)
+        self.received: list[tuple[AdvisorCallState, float]] = []
+
+    def due(self, state: AdvisorCallState, now: float) -> list[ForcedCall]:
+        self.received.append((state, now))
+        return list(self.calls)
+
+
+FORCED_REASON = (
+    "どの役割の advisor も 60 秒呼ばれていなかったため、定期の呼び出しで呼んだ"
+)
+
+
+def test_forced_role_is_called_with_reason_even_if_question_is_false():
+    pipeline, env = make_pipeline()
+    pipeline.parts.advisor_trigger = FakeTrigger(ForcedCall("strategy", FORCED_REASON))
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    [context] = env.advisors["strategy"].contexts
+    assert context.trigger_reason == FORCED_REASON
+    assert context.trigger_probability == 0.0
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] == []
+    assert log["advisor_accepted"] == ["strategy"]
+    assert log["advisor_forced"] == ["strategy"]
+
+
+def test_role_requested_by_question_is_not_treated_as_forced():
+    pipeline, env = make_pipeline()
+    pipeline.parts.advisor_trigger = FakeTrigger(
+        ForcedCall("strategy", FORCED_REASON), ForcedCall("advice", FORCED_REASON)
+    )
+    env.model.outcomes = [decision(advisor_strategy=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.advisors["strategy"].contexts[0].trigger_reason is None
+    assert env.advisors["advice"].contexts[0].trigger_reason == FORCED_REASON
+    # 役割の順に呼ぶ
+    assert env.advisor_calls == ["request strategy", "request advice"]
+    log = env.events("decision")[0]
+    assert log["advisor_requested"] == ["strategy"]
+    assert log["advisor_forced"] == ["advice"]
+
+
+def test_busy_forced_role_is_not_called_nor_logged_as_forced():
+    pipeline, env = make_pipeline()
+    pipeline.parts.advisor_trigger = FakeTrigger(ForcedCall("strategy", FORCED_REASON))
+    env.advisors["strategy"].busy = True
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.no_advisor_was_called()
+    assert env.events("decision")[0]["advisor_forced"] == []
+
+
+def test_images_are_selected_once_for_requested_and_forced_roles():
+    pipeline, env = make_pipeline()
+    encoded: list[float] = []
+    pipeline.parts.encode = recording_encode(encoded)
+    pipeline.parts.advisor_trigger = FakeTrigger(ForcedCall("advice", FORCED_REASON))
+    env.model.outcomes = [decision(advisor_strategy=0.9)]
+    env.store.add(frame(5.0))
+    env.add_frames(9.5, 9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert encoded == [9.9, 5.0, 9.5, 9.9]
+    assert (
+        env.advisors["advice"].contexts[0].images
+        == env.advisors["strategy"].contexts[0].images
+    )
+
+
+def test_trigger_receives_last_accepted_times_and_response_time():
+    pipeline, env = make_pipeline()
+    trigger = FakeTrigger()
+    pipeline.parts.advisor_trigger = trigger
+    env.advisors["tips"].answers = [False]
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_tips=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    first_state, first_now = trigger.received[0]
+    assert first_state.started_at == 9.0
+    assert first_state.last_accepted == {}
+    assert first_state.advisor_probabilities["strategy"] == 0.9
+    assert first_now == pytest.approx(10.0 + env.model.decide_s)
+    env.add_frames(10.5)
+    env.clock.now = 11.0
+    pipeline.run_once()
+    second_state, _ = trigger.received[1]
+    # 受け付けた strategy だけが入る (tips は受け付けなかった)
+    assert second_state.last_accepted == {"strategy": pytest.approx(first_now)}
+
+
+def test_forced_call_is_written_to_request_log():
+    pipeline, env, request_log = make_pipeline_with_request_log()
+    pipeline.parts.advisor_trigger = FakeTrigger(ForcedCall("advice", FORCED_REASON))
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    [entry] = request_log.entries
+    assert entry.advisor_forced == frozenset({"advice"})
+    assert entry.advisor_accepted == frozenset({"advice"})
+
+
+def test_without_trigger_no_advisor_is_called_when_questions_are_false():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.no_advisor_was_called()
+    assert env.events("decision")[0]["advisor_forced"] == []

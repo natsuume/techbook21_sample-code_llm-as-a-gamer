@@ -3,6 +3,7 @@ import os
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -501,6 +502,30 @@ def test_write_advisor_inputs_writes_role_line(tmp_path):
     )
     lines = context_path.read_text(encoding="utf-8").splitlines()
     assert "- 役割: 攻略情報・Tips の更新" in lines
+
+
+def test_write_advisor_inputs_writes_trigger_line_of_question(tmp_path):
+    context_path = write_advisor_inputs(
+        tmp_path / "advisor-strategy-001", sample_context(), ROLE
+    )
+    lines = context_path.read_text(encoding="utf-8").splitlines()
+    assert "- きっかけ: 12:34:56 の要求で、advisor の問いの確率が 0.87 だった" in lines
+
+
+def test_write_advisor_inputs_writes_trigger_line_of_forced_call(tmp_path):
+    context = replace(
+        sample_context(),
+        trigger_reason="どの役割の advisor も 60 秒呼ばれていなかったため、定期の呼び出しで呼んだ",
+    )
+    context_path = write_advisor_inputs(
+        tmp_path / "advisor-strategy-001", context, ROLE
+    )
+    lines = context_path.read_text(encoding="utf-8").splitlines()
+    assert (
+        "- きっかけ: 12:34:56 の要求の後に、どの役割の advisor も 60 秒呼ばれていなかったため、"
+        "定期の呼び出しで呼んだ (この役割の advisor の問いの確率は 0.87 だった)"
+    ) in lines
+    assert not any("の要求で、advisor の問いの確率が" in line for line in lines)
 
 
 # --- ClaudeCodeHeadlessAdvisor ---

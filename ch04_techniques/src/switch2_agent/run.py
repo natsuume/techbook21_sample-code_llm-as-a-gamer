@@ -26,6 +26,10 @@ Ctrl+C で止まる。
                                  all ならすべて、none なら足さない。既定 all)
     --timeline-window S          系列情報の操作のまとめに入れる直近の秒数 (0 より大きい有限の値、既定 120)
     --screen-change-threshold D  系列情報の画面の変化で、画面が変わったとみなす差分の下限 (0〜255、既定 2.0)
+    --advisor-idle-seconds S     advisor がこの秒数呼ばれていなければ、強制で呼ぶ (0 以上の有限の値、既定 60。0 なら
+                                 強制では呼ばない)。数え始めるのは、advisor が要求を受け付けた時刻
+    --advisor-idle-scope {any,each}  強制の呼び出しで数える範囲 (any: どの役割も呼ばれていない、each: 役割ごと。既定 any)
+    --advisor-idle-roles ROLES   強制で呼ぶ役割 (advisor_roles.ADVISOR_ROLES の name をカンマで区切ったもの、既定 strategy,advice)
     --save-requests              要求ごとの入出力 (画像・ゲームの情報・問いごとの答え・応答の本文・操作) を
                                  runs/<実行>/requests.jsonl と frames/ に書く (容量が大きくなるため既定はオフ)
     --record-dashboard           ダッシュボードが読む記録を runs/<実行>/ に書く (既定はオフ): フレームの判定と縮小画像
@@ -54,6 +58,13 @@ from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
+from switch2_agent.advisor_triggers.idle_timer import (
+    DEFAULT_IDLE_ROLES,
+    DEFAULT_IDLE_SCOPE,
+    DEFAULT_IDLE_SECONDS,
+    IDLE_SCOPES,
+    IdleTimerTrigger,
+)
 from switch2_agent.advisors.base import Advisor
 from switch2_agent.advisors.claude_code_headless import (
     DEFAULT_ADVISOR_TIMEOUT_S,
@@ -150,6 +161,38 @@ def parse_timeline_sections(text: str) -> tuple[str, ...]:
     return tuple(name for name in SECTION_NAMES if name in names)
 
 
+def parse_advisor_roles(text: str) -> tuple[str, ...]:
+    """--advisor-idle-roles の値を、役割の name のタプル (advisor_roles.ADVISOR_ROLES の順) にする。
+
+    カンマで区切った名前 (前後の空白を除く) を ADVISOR_ROLES の順に並べ直す。ADVISOR_ROLES に無い名前、
+    重複した名前、空の名前は argparse.ArgumentTypeError にする。
+    """
+    role_names = [role.name for role in ADVISOR_ROLES]
+    names = [name.strip() for name in text.split(",")]
+    unknown = [name for name in names if name not in role_names]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown advisor role: {', '.join(repr(n) for n in unknown)} "
+            f"(choose from {', '.join(role_names)})"
+        )
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError(f"duplicate advisor role: {text}")
+    return tuple(name for name in role_names if name in names)
+
+
+def build_advisor_trigger(args: argparse.Namespace) -> IdleTimerTrigger | None:
+    """起動引数 args に応じて、advisor の強制の呼び出しの方式を作って返す。
+
+    --advisor-idle-seconds が 0 なら None (強制では呼ばない)。そうでなければ
+    IdleTimerTrigger(advisor_idle_seconds, advisor_idle_roles, advisor_idle_scope)。
+    """
+    if args.advisor_idle_seconds == 0:
+        return None
+    return IdleTimerTrigger(
+        args.advisor_idle_seconds, args.advisor_idle_roles, args.advisor_idle_scope
+    )
+
+
 def operation_log_capacity(timeline_window_s: float) -> int:
     """操作の記録 (OperationLog) の上限を返す。
 
@@ -187,6 +230,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
     max_consecutive_errors (int、既定 5)、timeline (節の名前のタプル、既定 timeline.builder.SECTION_NAMES。
     parse_timeline_sections で読む)、timeline_window (float、既定 120.0)、screen_change_threshold (float、既定 2.0)、
+    advisor_idle_seconds (float、既定 60.0)、advisor_idle_scope ("any" / "each"、既定 "any")、
+    advisor_idle_roles (役割の name のタプル、既定 ("strategy", "advice")。parse_advisor_roles で読む)、
     save_requests (bool、既定 False。--save-requests を付けたら True)、
     record_dashboard (bool、既定 False。--record-dashboard を付けたら True)。
 
@@ -299,6 +344,32 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--advisor-idle-seconds",
+        type=float,
+        default=DEFAULT_IDLE_SECONDS,
+        help=(
+            "advisor がこの秒数呼ばれていなければ、強制で呼ぶ (0 以上の有限の値。0 なら強制では呼ばない)。"
+            "数え始めるのは、advisor が要求を受け付けた時刻"
+        ),
+    )
+    parser.add_argument(
+        "--advisor-idle-scope",
+        choices=IDLE_SCOPES,
+        default=DEFAULT_IDLE_SCOPE,
+        help="強制の呼び出しで数える範囲 (any: どの役割も呼ばれていない、each: 役割ごと)",
+    )
+    parser.add_argument(
+        "--advisor-idle-roles",
+        type=parse_advisor_roles,
+        default=DEFAULT_IDLE_ROLES,
+        metavar="ROLES",
+        help=(
+            "強制で呼ぶ役割 ("
+            f"{', '.join(role.name for role in ADVISOR_ROLES)} をカンマで区切って指定する。"
+            f"既定 {','.join(DEFAULT_IDLE_ROLES)})"
+        ),
+    )
+    parser.add_argument(
         "--save-requests",
         action="store_true",
         help=(
@@ -325,8 +396,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def range_errors(args: argparse.Namespace) -> list[str]:
     """parse_args の結果の範囲の誤りを、起動引数の名前を含むメッセージのリストにする (誤りが無ければ空)。
 
-    nan は、どの範囲にも入らないものとして扱う。--history-seconds、--advisor-timeout、--timeline-window は有限の値に
-    限り、inf も誤りにする。
+    nan は、どの範囲にも入らないものとして扱う。--history-seconds、--advisor-timeout、--timeline-window、
+    --advisor-idle-seconds は有限の値に限り、inf も誤りにする。
     """
     errors = []
     if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
@@ -397,6 +468,13 @@ def range_errors(args: argparse.Namespace) -> list[str]:
             f"--screen-change-threshold must be {SIMILARITY_THRESHOLD_MIN:g}.."
             f"{SIMILARITY_THRESHOLD_MAX:g}: {args.screen_change_threshold}"
         )
+    if not (
+        math.isfinite(args.advisor_idle_seconds) and args.advisor_idle_seconds >= 0
+    ):
+        errors.append(
+            "--advisor-idle-seconds must be a finite number of 0 or more: "
+            f"{args.advisor_idle_seconds}"
+        )
     return errors
 
 
@@ -452,7 +530,8 @@ def main(argv: list[str] | None = None) -> None:
            build_request_log(実行のディレクトリー, 起動引数)。min_request_interval_s は、
            --model が jev なら jev.JEV_MIN_REQUEST_INTERVAL_S、decisions なら 0.0。operation_log は
            OperationLog(operation_log_capacity(timeline_window))。timeline は build_timeline(起動引数, operation_log,
-           6 の ScreenChangeTracker (無ければ None)) で、--timeline の節が無ければ None)
+           6 の ScreenChangeTracker (無ければ None)) で、--timeline の節が無ければ None。advisor_trigger は
+           build_advisor_trigger(起動引数) で、--advisor-idle-seconds が 0 なら None)
         11. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
            Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
         12. run.jsonl に start の行 {"event": "start", "game", "model", "run_dir"} を書く。--record-dashboard が
@@ -587,6 +666,7 @@ def main(argv: list[str] | None = None) -> None:
                 capture_lost=watcher.lost,
                 request_log=request_log,
                 timeline=build_timeline(args, operation_log, screen),
+                advisor_trigger=build_advisor_trigger(args),
             ),
             max_consecutive_errors=args.max_consecutive_errors,
             min_request_interval_s=(
