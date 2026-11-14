@@ -899,7 +899,8 @@ def write_dashboard_run(runs_dir: Path, name: str = DASHBOARD_RUN_NAME) -> Dashb
     run_dir = runs_dir / name
     run_dir.mkdir(parents=True)
     origin_mono = DASHBOARD_ORIGIN_MONO
-    args = dict(vars(parse_agent_args(DASHBOARD_AGENT_ARGV)))
+    # run.jsonl から読んだ args と比べられるよう、JSON を通した値にする (起動引数の tuple はリストになる)
+    args = json.loads(json.dumps(vars(parse_agent_args(DASHBOARD_AGENT_ARGV))))
     frames = write_dashboard_frames(run_dir, origin_mono)
     write_dashboard_pad(run_dir, origin_mono)
     events: list[tuple[float, dict]] = [
