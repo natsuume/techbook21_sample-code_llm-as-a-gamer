@@ -57,6 +57,38 @@ export const initialViewState: ViewState = {
  * - selectFrame: frameIndex と tab "frame"。selectAdvisor: advisorName と tab "advisor"。selectFile: file と tab "file"
  * - setTab・setWidth・setFileView はその値だけを変える。toggleHeatmap・toggleAllQuestions は反転する
  */
-export const viewReducer: (state: ViewState, action: ViewAction) => ViewState = () => {
-  throw new Error("not implemented");
+export const viewReducer = (state: ViewState, action: ViewAction): ViewState => {
+  switch (action.type) {
+    case "selectRun":
+      return { ...initialViewState, run: action.run };
+    case "runLoaded":
+      return {
+        ...state,
+        selectedN: action.firstN,
+        width: action.firstN === null ? "all" : 30,
+      };
+    case "selectRequest":
+      return {
+        ...state,
+        selectedN: action.n,
+        focusQuestion: action.question ?? null,
+        tab: "request",
+      };
+    case "selectFrame":
+      return { ...state, frameIndex: action.index, tab: "frame" };
+    case "selectAdvisor":
+      return { ...state, advisorName: action.name, tab: "advisor" };
+    case "selectFile":
+      return { ...state, file: action.file, tab: "file" };
+    case "setTab":
+      return { ...state, tab: action.tab };
+    case "setWidth":
+      return { ...state, width: action.width };
+    case "setFileView":
+      return { ...state, fileView: action.view };
+    case "toggleHeatmap":
+      return { ...state, heatmapOpen: !state.heatmapOpen };
+    case "toggleAllQuestions":
+      return { ...state, allQuestions: !state.allQuestions };
+  }
 };

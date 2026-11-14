@@ -10,9 +10,21 @@ export type RequestCategory = "selected" | "failed" | "advisor" | "operation" | 
  * n === selectedN → selected、result !== "ok" → failed、advisor_accepted.length > 0 → advisor、
  * action !== null && action !== NO_OPERATION_ACTION → operation、それ以外 → other
  */
-export const categorizeRequest: (
+export const categorizeRequest = (
   request: RequestItem,
   selectedN: number | null,
-) => RequestCategory = () => {
-  throw new Error("not implemented");
+): RequestCategory => {
+  if (request.n === selectedN) {
+    return "selected";
+  }
+  if (request.result !== "ok") {
+    return "failed";
+  }
+  if (request.advisor_accepted.length > 0) {
+    return "advisor";
+  }
+  if (request.action !== null && request.action !== NO_OPERATION_ACTION) {
+    return "operation";
+  }
+  return "other";
 };

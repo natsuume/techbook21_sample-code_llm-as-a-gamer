@@ -12,8 +12,32 @@ export type BinCell = { start: number; value: number | null; owner: number | nul
  * 区間を覆う列の番号の範囲を返す。first = floor(from / 0.5)、last = ceil(to / 0.5) - 1。
  * ただし last < first なら last = first
  */
-export const binIndexRange: (range: TimeRange) => { first: number; last: number } = () => {
-  throw new Error("not implemented");
+export const binIndexRange = (range: TimeRange): { first: number; last: number } => {
+  const first = Math.floor(range.from / BIN_SECONDS);
+  const last = Math.max(first, Math.ceil(range.to / BIN_SECONDS) - 1);
+  return { first, last };
+};
+
+/** 列の番号 first〜last の、値の無い列を作る */
+const emptyCells = (first: number, last: number): BinCell[] =>
+  Array.from({ length: last - first + 1 }, (_, offset) => ({
+    start: (first + offset) * BIN_SECONDS,
+    value: null,
+    owner: null,
+  }));
+
+/** 要求の送信時刻が入る列の、cells の中の位置を返す。first〜last の外なら -1 */
+const cellOffset = (tSent: number, first: number, last: number): number => {
+  const index = Math.floor(tSent / BIN_SECONDS);
+  return index < first || index > last ? -1 : index - first;
+};
+
+/** 列の値より大きい値なら、その値と要求の番号を列に入れる (同じ値なら先に入れた要求を残す) */
+const keepMaximum = (cell: BinCell | undefined, value: number, owner: number): void => {
+  if (cell !== undefined && (cell.value === null || value > cell.value)) {
+    cell.value = value;
+    cell.owner = owner;
+  }
 };
 
 /**
@@ -23,19 +47,41 @@ export const binIndexRange: (range: TimeRange) => { first: number; last: number 
  * 列ごとに、adopted_count が null でない要求の最大値を value、その最大値を持つ最初の要求 (配列の順) の
  * n を owner にする。該当なしは両方 null
  */
-export const binAdoptedCounts: (requests: readonly RequestItem[], range: TimeRange) => BinCell[] =
-  () => {
-    throw new Error("not implemented");
-  };
+export const binAdoptedCounts = (requests: readonly RequestItem[], range: TimeRange): BinCell[] => {
+  const { first, last } = binIndexRange(range);
+  const cells = emptyCells(first, last);
+  for (const request of requests) {
+    const offset = cellOffset(request.t_sent, first, last);
+    if (offset >= 0 && request.adopted_count !== null) {
+      keepMaximum(cells[offset], request.adopted_count, request.n);
+    }
+  }
+  return cells;
+};
 
 /**
  * 問いごと・列ごとの、問いの値の最大値を返す。結果は [問いの番号][列]。
  * 要求の p が null の要求と、p[i] が null の値は無視する。ほかは binAdoptedCounts と同じ規則
  */
-export const binQuestionValues: (
+export const binQuestionValues = (
   requests: readonly RequestItem[],
   questionCount: number,
   range: TimeRange,
-) => BinCell[][] = () => {
-  throw new Error("not implemented");
+): BinCell[][] => {
+  const { first, last } = binIndexRange(range);
+  const rows = Array.from({ length: questionCount }, () => emptyCells(first, last));
+  for (const request of requests) {
+    const offset = cellOffset(request.t_sent, first, last);
+    const values = request.p;
+    if (offset < 0 || values === null) {
+      continue;
+    }
+    rows.forEach((cells, questionIndex) => {
+      const value = values[questionIndex];
+      if (value !== null && value !== undefined) {
+        keepMaximum(cells[offset], value, request.n);
+      }
+    });
+  }
+  return rows;
 };

@@ -51,4 +51,9 @@ describe("computeAxisTicks", () => {
     const ticks = computeAxisTicks({ from: 1000.1, to: 1004.6 });
     expect(ticks).toEqual([1000.5, 1001, 1001.5, 1002, 1002.5, 1003, 1003.5, 1004, 1004.5]);
   });
+
+  it("区間の端が有限の数でなければ [] を返す", () => {
+    expect(computeAxisTicks({ from: 0, to: Number.NaN })).toEqual([]);
+    expect(computeAxisTicks({ from: 0, to: Number.POSITIVE_INFINITY })).toEqual([]);
+  });
 });
