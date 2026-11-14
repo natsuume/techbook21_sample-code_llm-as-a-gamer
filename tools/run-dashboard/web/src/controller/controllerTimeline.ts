@@ -24,8 +24,10 @@ export type InputSpans = { buttons: ButtonSpan[]; sticks: StickSpan[]; source: "
  * pad の記録から、時刻 t のコントローラー入力を返す (source は "pad")。
  * - 使う行は ok === true、t !== null、parsePadState(state) !== null のもの。t の昇順 (同じ t は配列の順)
  * - 行 i の状態は [t_i, t_{i+1}) に効く。最初の行より前は何も押していない
- * - 行 i の source が apply か tap_start で、次の行 i+1 の source が tap_release のとき、行 i のボタンのうち
- *   行 i+1 の状態に無いものが tap、ほかは hold。それ以外の行のボタンはすべて hold
+ * - 行 i のボタン b は、使う行のうち行 i より後で b が最初に状態から消える行の source が tap_release なら tap、
+ *   それ以外 (apply・neutral・stop_output の行で消える、または最後まで消えない) なら hold。第4章の短押しは
+ *   apply か tap_start の行で始まり、後の apply をまたいでも、離す時刻の tap_release の行で消える。押下のボタンは
+ *   tap_release の行では消えない
  * - スティックは押下として扱い、{ x: 0, y: 0 } は入れない
  */
 export const controllerAtFromPad: (pad: readonly PadItem[], t: number) => ControllerSnapshot =
@@ -58,9 +60,11 @@ export const neutralTimesFromEvents: (events: readonly EventItem[]) => number[] 
  * 要求の決めた操作から、時刻 t のコントローラー入力を返す (source は "requests")。
  * - 使う要求は result === "ok"、t_received !== null、parseOperation(action) !== null のもの。ほかの要求は飛ばす
  * - neutralTimes は中立に戻した時刻 (neutralTimesFromEvents の結果。昇順)
- * - 使う要求 i の押下とスティックは、受信時刻 tr_i から、その後で最初に来る「使う要求の受信時刻」か
- *   「neutralTimes の時刻」の前まで効く。中立に戻す時刻と使う要求の受信時刻が同じなら、要求の操作が効く。
- *   短押しは [tr_i, tr_i + TAP_SECONDS) に効く
+ * - 使う要求 i の押下とスティックは、受信時刻 tr_i から、その後で最初に来る「次の使う要求の受信時刻」か
+ *   「tr_i 以上の neutralTimes の時刻」の前まで効く。短押しは、tr_i + TAP_SECONDS と、tr_i 以上の最初の
+ *   neutralTimes の時刻の、早いほうの前まで効く (第4章の中立は短押しも消す。次の要求では消えない)
+ * - 中立に戻す時刻が tr_i と同じなら、要求 i の押下・スティック・短押しは効かない (サーバーは run.jsonl の時刻を
+ *   decision の行の受信時刻を起点に求めるため、要求 i の後に同じミリ秒で書いた出来事は tr_i と同じ時刻になる)
  * - 同じボタンが押下と短押しの両方にあれば短押しとして扱う
  * - events の時刻は run.jsonl の壁時計から求めるため、要求の時刻と数十ミリ秒ずれることがある
  */

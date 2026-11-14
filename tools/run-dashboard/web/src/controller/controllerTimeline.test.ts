@@ -148,7 +148,7 @@ describe("controllerAtFromPad", () => {
     });
   });
 
-  it("apply の次の行が tap_release なら、次の行の状態に無いボタンを tap にする", () => {
+  it("apply の行のボタンは、最初に消える行が tap_release なら tap、neutral なら hold にする", () => {
     const rows = [
       padRow(1, "apply", "A+B"),
       padRow(1.12, "tap_release", "A"),
@@ -164,7 +164,7 @@ describe("controllerAtFromPad", () => {
     });
   });
 
-  it("tap_start の次の行が tap_release なら、次の行の状態に無いボタンを tap にする", () => {
+  it("tap_start の行のボタンも、最初に消える行が tap_release なら tap にする", () => {
     const rows = [
       padRow(1, "tap_start", "X+Y"),
       padRow(1.12, "tap_release", "Y"),
@@ -180,7 +180,7 @@ describe("controllerAtFromPad", () => {
     });
   });
 
-  it("次の行が tap_release でなければ、ボタンはすべて hold にする", () => {
+  it("最初に消える行が tap_release でないボタンと、最後まで消えないボタンは hold にする", () => {
     const rows = [padRow(1, "apply", "A+B"), padRow(1.12, "neutral", "A")];
     expect(sortButtons(controllerAtFromPad(rows, 1.05))).toEqual({
       buttons: [
@@ -192,14 +192,49 @@ describe("controllerAtFromPad", () => {
     });
   });
 
-  it("行の source が apply・tap_start でなければ、次の行が tap_release でもボタンはすべて hold にする", () => {
+  it("tap_release の行に残ったボタンも、後の tap_release の行で消えれば tap にする", () => {
     const rows = [
       padRow(1, "tap_release", "A"),
       padRow(1.12, "tap_release", "none"),
       padRow(2, "neutral", "none"),
     ];
     expect(sortButtons(controllerAtFromPad(rows, 1.05))).toEqual({
-      buttons: [{ name: "A", kind: "hold" }],
+      buttons: [{ name: "A", kind: "tap" }],
+      sticks: {},
+      source: "pad",
+    });
+  });
+
+  it("間に tap_start と別のボタンの tap_release を挟んでも、ボタンごとに消える行で tap を決める", () => {
+    const rows = [
+      padRow(1, "apply", "A+C"),
+      padRow(1.1, "tap_start", "A+B+C"),
+      padRow(1.12, "tap_release", "A+B"),
+      padRow(1.22, "tap_release", "A"),
+      padRow(2, "neutral", "none"),
+    ];
+    expect(sortButtons(controllerAtFromPad(rows, 1.05))).toEqual({
+      buttons: [
+        { name: "A", kind: "hold" },
+        { name: "C", kind: "tap" },
+      ],
+      sticks: {},
+      source: "pad",
+    });
+    expect(sortButtons(controllerAtFromPad(rows, 1.11))).toEqual({
+      buttons: [
+        { name: "A", kind: "hold" },
+        { name: "B", kind: "tap" },
+        { name: "C", kind: "tap" },
+      ],
+      sticks: {},
+      source: "pad",
+    });
+    expect(sortButtons(controllerAtFromPad(rows, 1.15))).toEqual({
+      buttons: [
+        { name: "A", kind: "hold" },
+        { name: "B", kind: "tap" },
+      ],
       sticks: {},
       source: "pad",
     });
@@ -320,13 +355,52 @@ describe("controllerAtFromRequests", () => {
     });
   });
 
-  it("中立に戻す時刻と使う要求の受信時刻が同じなら、要求の操作が効く", () => {
+  it("中立に戻す時刻が使う要求の受信時刻と同じなら、その要求の押下と短押しは効かない", () => {
     const sameTime = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
-      request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 X / 短押し none" }),
+      request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 X / 短押し B" }),
     ];
     expect(controllerAtFromRequests(sameTime, [2], 2)).toEqual({
-      buttons: [{ name: "X", kind: "hold" }],
+      buttons: [],
+      sticks: {},
+      source: "requests",
+    });
+    expect(controllerAtFromRequests(sameTime, [2], 2.05)).toEqual({
+      buttons: [],
+      sticks: {},
+      source: "requests",
+    });
+  });
+
+  it("中立に戻す時刻で短押しも閉じる", () => {
+    const tapThenNeutral = [
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し B" }),
+    ];
+    expect(sortButtons(controllerAtFromRequests(tapThenNeutral, [1.05], 1.04))).toEqual({
+      buttons: [
+        { name: "A", kind: "hold" },
+        { name: "B", kind: "tap" },
+      ],
+      sticks: {},
+      source: "requests",
+    });
+    expect(controllerAtFromRequests(tapThenNeutral, [1.05], 1.06)).toEqual({
+      buttons: [],
+      sticks: {},
+      source: "requests",
+    });
+  });
+
+  it("短押しは次の使う要求の受信時刻では閉じない", () => {
+    const tapAcrossNext = [
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 none / 短押し B" }),
+      request({ n: 2, t_sent: 0.9, t_received: 1.05, action: "押下 A / 短押し none" }),
+    ];
+    expect(sortButtons(controllerAtFromRequests(tapAcrossNext, [], 1.1))).toEqual({
+      buttons: [
+        { name: "A", kind: "hold" },
+        { name: "B", kind: "tap" },
+      ],
       sticks: {},
       source: "requests",
     });
