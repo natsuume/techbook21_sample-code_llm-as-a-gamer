@@ -35,9 +35,11 @@ export const controllerAtFromPad: (pad: readonly PadItem[], t: number) => Contro
 
 /**
  * 要求の決めた操作から、時刻 t のコントローラー入力を返す (source は "requests")。
- * - 使う要求は result === "ok"、t_received !== null、parseOperation(action) !== null のもの (配列の順)
- * - 要求 i の押下とスティックは [tr_i, tr_{i+1}) (tr は t_received。次は次の使う要求)、
- *   短押しは [tr_i, tr_i + TAP_SECONDS) に効く
+ * - 使う要求は result === "ok"、t_received !== null、parseOperation(action) !== null のもの
+ * - result が "ok" でない要求は、その時刻 (t_received ?? t_sent) で中立に戻す (第4章は判断の失敗・出力の停止・
+ *   送信の失敗のときに中立のレポートを送る)。ok で使わない要求は飛ばす (前の押下が続く)
+ * - 要求を配列の順に見て、使う要求 i の押下とスティックは、受信時刻 tr_i から、その後で最初に来る使う要求の
+ *   受信時刻か ok でない要求の時刻の前まで効く。短押しは [tr_i, tr_i + TAP_SECONDS) に効く
  * - 同じボタンが押下と短押しの両方にあれば短押しとして扱う
  */
 export const controllerAtFromRequests: (
@@ -64,7 +66,8 @@ export const inputSpansFromPad: (
 
 /**
  * 要求の決めた操作から、range と重なる入力の区間を range に切り詰めて返す (source は "requests")。
- * 要求の選び方・効く区間・短押しの扱いは controllerAtFromRequests と同じ。最後の使う要求の押下は tEnd まで効く。
+ * 要求の選び方・中立に戻す要求・効く区間・短押しの扱いは controllerAtFromRequests と同じ。最後の使う要求の押下は、
+ * その後に ok でない要求が無ければ tEnd まで効く。
  * つなぎ方と並びは inputSpansFromPad と同じ
  */
 export const inputSpansFromRequests: (

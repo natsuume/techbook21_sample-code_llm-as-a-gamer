@@ -278,21 +278,47 @@ describe("controllerAtFromRequests", () => {
     });
   });
 
-  it("result が ok でない要求は使わない (前の要求の押下が続く)", () => {
+  it("result が ok でない要求の時刻 (t_received が null なら t_sent) で中立に戻す", () => {
     const withFailures = [
-      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A+LS:1,0 / 短押し none" }),
       request({ n: 2, t_sent: 1.5, t_received: null, result: "error", action: null }),
+      request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 X / 短押し none" }),
+    ];
+    expect(sortButtons(controllerAtFromRequests(withFailures, 1.49))).toEqual({
+      buttons: [{ name: "A", kind: "hold" }],
+      sticks: { LS: { x: 1, y: 0 } },
+      source: "requests",
+    });
+    expect(controllerAtFromRequests(withFailures, 1.5)).toEqual({
+      buttons: [],
+      sticks: {},
+      source: "requests",
+    });
+    expect(controllerAtFromRequests(withFailures, 3)).toEqual({
+      buttons: [{ name: "X", kind: "hold" }],
+      sticks: {},
+      source: "requests",
+    });
+  });
+
+  it("受信時刻のある ok でない要求 (discarded) は、受信時刻で中立に戻し、その操作は使わない", () => {
+    const withDiscarded = [
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
       request({
-        n: 3,
+        n: 2,
         t_sent: 1.8,
         t_received: 2,
         result: "discarded",
         action: "押下 B / 短押し none",
       }),
-      request({ n: 4, t_sent: 2.5, t_received: 3, action: "押下 X / 短押し none" }),
     ];
-    expect(sortButtons(controllerAtFromRequests(withFailures, 2.5))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(withDiscarded, 1.9))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
+      sticks: {},
+      source: "requests",
+    });
+    expect(controllerAtFromRequests(withDiscarded, 2.5)).toEqual({
+      buttons: [],
       sticks: {},
       source: "requests",
     });
@@ -492,15 +518,30 @@ describe("inputSpansFromRequests", () => {
     });
   });
 
-  it("使わない要求を飛ばし、押下を次の使う要求の受信時刻まで続ける", () => {
+  it("ok で使わない要求は飛ばして押下を続け、ok でない要求の時刻で押下を閉じる", () => {
     const requests = [
-      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 X / 短押し none" }),
-      request({ n: 2, t_sent: 1.5, t_received: null, result: "error", action: null }),
-      request({ n: 3, t_sent: 1.8, t_received: 2, action: "押下 JUMP / 短押し none" }),
-      request({ n: 4, t_sent: 2.5, t_received: 3, action: "押下 none / 短押し none" }),
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 X+LS:1,0 / 短押し none" }),
+      request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 JUMP / 短押し none" }),
+      request({ n: 3, t_sent: 2.2, t_received: null, result: "error", action: null }),
+      request({ n: 4, t_sent: 2.5, t_received: 3, action: "押下 Y / 短押し none" }),
     ];
     expect(inputSpansFromRequests(requests, WIDE_RANGE, 5)).toEqual({
-      buttons: [{ button: "X", kind: "hold", start: 1, end: 3 }],
+      buttons: [
+        { button: "X", kind: "hold", start: 1, end: 2.2 },
+        { button: "Y", kind: "hold", start: 3, end: 5 },
+      ],
+      sticks: [{ stick: "LS", start: 1, end: 2.2, magnitude: expect.closeTo(1) }],
+      source: "requests",
+    });
+  });
+
+  it("最後の使う要求の後に ok でない要求があれば、押下をその時刻で閉じる", () => {
+    const requests = [
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 Y / 短押し none" }),
+      request({ n: 2, t_sent: 1.8, t_received: 2, result: "discarded", action: null }),
+    ];
+    expect(inputSpansFromRequests(requests, WIDE_RANGE, 4)).toEqual({
+      buttons: [{ button: "Y", kind: "hold", start: 1, end: 2 }],
       sticks: [],
       source: "requests",
     });
