@@ -71,7 +71,7 @@ const RequestContent = ({ view, request }: RequestContentProps) => {
             disabledReason={previous.reason}
             onClick={() => {
               if (previous.n !== null) {
-                dispatch({ type: "selectRequest", n: previous.n });
+                dispatch({ type: "selectRequest", n: previous.n, via: "navigate" });
               }
             }}
           />
@@ -81,7 +81,7 @@ const RequestContent = ({ view, request }: RequestContentProps) => {
             disabledReason={next.reason}
             onClick={() => {
               if (next.n !== null) {
-                dispatch({ type: "selectRequest", n: next.n });
+                dispatch({ type: "selectRequest", n: next.n, via: "navigate" });
               }
             }}
           />
@@ -149,6 +149,7 @@ const RequestDetailBlocks = ({ view, detail }: RequestDetailBlocksProps) => {
                 dispatch({
                   type: "selectFile",
                   file: noteSelectionForVersion(noteVersions, noteVersion),
+                  via: "open",
                 })
               }
             >
@@ -198,7 +199,7 @@ const RequestImages = ({ view, images }: RequestImagesProps) => {
                   type="button"
                   className={styles.thumbButton}
                   aria-label={`${image.label} をフレームのタブで開く`}
-                  onClick={() => dispatch({ type: "selectFrame", index })}
+                  onClick={() => dispatch({ type: "selectFrame", index, via: "open" })}
                 >
                   {picture}
                 </button>

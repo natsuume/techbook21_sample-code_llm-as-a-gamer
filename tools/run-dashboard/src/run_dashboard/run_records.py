@@ -13,7 +13,7 @@ JSON Lines は jsonl_lines.read_json_lines で読む (改行で終わってい�
 """
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,12 +77,17 @@ class RunOverview:
     start              run.jsonl の、event が "start" の最初の行。無ければ None
     origin_mono        start の origin_mono。数 (bool を除く int と float) でなければ None
     has_requests_file  requests.jsonl を読めるか
+    run_log_mtime      run.jsonl の更新時刻 (os.stat の st_mtime。time.time() と同じ時計の秒)。run.jsonl が無い・
+                       シンボリックリンク・stat の OSError なら None
+    has_record_end     run.jsonl に event が "record_end" の行が 1 つでもあるか (run_activity.has_record_end_line)
     """
 
     name: str
     start: dict | None
     origin_mono: float | None
     has_requests_file: bool
+    run_log_mtime: float | None
+    has_record_end: bool
 
 
 @dataclass(frozen=True)
@@ -104,10 +109,15 @@ class RunRecords:
     skipped_lines     RECORD_KINDS の種類 → 読み飛ばした行の数。5 つの種類すべてのキーを持つ (0 を含む)
     has_requests_file requests.jsonl を読めたか
     has_stream_file   advisor_dirs のどれかに stream.jsonl があって読めたか
+    run_log_mtime     run.jsonl の更新時刻 (RunOverview.run_log_mtime と同じ求め方)
+    next_offsets      RECORD_FILE_NAMES の種類 ("run"・"requests"・"frames"・"pad" の 4 つ。いつも 4 つ) → そのファイルを
+                      読んだ ParsedLines.next_offset (読んだ最後の完全な行の次のバイトの位置)。ファイルが無い・読めない・
+                      シンボリックリンク・parts で読まなかった種類は 0。キャッシュで読んだときは、キャッシュの結果の next_offset
 
     load_run の parts で読む種類を絞ったときに、正しい値になるフィールド:
-        name・run_dir・start・origin_mono・args・advisor_dirs   いつも正しい (run.jsonl と advisor のディレクトリーの
-                                                                一覧はいつも読む)
+        name・run_dir・start・origin_mono・args・advisor_dirs・run_log_mtime   いつも正しい (run.jsonl と advisor の
+                                                                ディレクトリーの一覧はいつも読む)
+        next_offsets         いつも正しい (parts で読まなかった種類は 0)
         run_events の行      いつも正しい。t は、parts に requests があるときだけ正しい (起点に decision の行を使うため。
                              requests が無いと、起点は start の行だけになる)
         header・requests・has_requests_file   parts に requests があるときだけ正しい (無ければ None・[]・False)
@@ -131,6 +141,13 @@ class RunRecords:
     skipped_lines: dict[str, int]
     has_requests_file: bool
     has_stream_file: bool
+    run_log_mtime: float | None
+    next_offsets: dict[str, int]
+
+    @property
+    def has_record_end(self) -> bool:
+        """run_events に event が "record_end" の行が 1 つでもあれば True (run_activity.has_record_end_line)。"""
+        return False
 
     @property
     def overview(self) -> RunOverview:
@@ -140,6 +157,8 @@ class RunRecords:
             start=self.start,
             origin_mono=self.origin_mono,
             has_requests_file=self.has_requests_file,
+            run_log_mtime=self.run_log_mtime,
+            has_record_end=self.has_record_end,
         )
 
 
@@ -151,6 +170,7 @@ def load_run_overview(
     run_directory.find_run_dir(runs_dir, name) で照合し、一致しなければ None を返す。読むのは run.jsonl だけで、
     requests.jsonl は開けるかだけを確かめる (一覧では実行ごとに大きなファイルを読まないため)。start と origin_mono の
     決め方は load_run と同じ。has_requests_file は requests.jsonl を開けるか (無いか、OSError なら False)。
+    run_log_mtime と has_record_end の決め方は RunOverview の docstring (load_run の RunRecords と同じ値)。
     cache があれば、run.jsonl を cache で読む。
     """
     run_dir = find_run_dir(runs_dir, name)
@@ -181,6 +201,8 @@ def _overview_of(name: str, run_dir: Path, cache: JsonLinesCache | None) -> RunO
         start=start,
         origin_mono=_origin_mono_of(start),
         has_requests_file=_can_open(run_dir / REQUEST_LOG_FILE_NAME),
+        run_log_mtime=None,
+        has_record_end=False,
     )
 
 
@@ -273,6 +295,8 @@ def load_run(
         skipped_lines=skipped_lines,
         has_requests_file=parsed["requests"] is not None,
         has_stream_file=has_stream_file,
+        run_log_mtime=None,
+        next_offsets=dict.fromkeys(RECORD_FILE_NAMES, 0),
     )
 
 
@@ -333,7 +357,9 @@ def _read_lines(
     )
 
 
-def lighten_request_lines(records: list[dict]) -> list[dict]:
+def lighten_request_lines(
+    records: list[dict], previous: dict | None = None
+) -> list[dict]:
     """requests.jsonl の行 records を、API で持つための軽い形にした新しいリストを返す (行の数と順は同じ)。
 
     event が "request" の行は、UNUSED_REQUEST_KEYS (raw_response・refusals) のキーを除いた新しい辞書にする。
@@ -341,9 +367,12 @@ def lighten_request_lines(records: list[dict]) -> list[dict]:
     同じキーの値と同じ文字列なら、直前の行の文字列のオブジェクトを使う (値は変えない。要求ごとに同じ数千字の
     ゲームの情報が並ぶため、メモリーを減らし、版を比べるときの比較も速くする)。
     ほかの行 (header など) はそのまま入れる。records は変えない。
+    previous は、records の前にある (すでにこの関数で軽くした) 最後の要求の行。あれば、records の最初の要求の行の
+    直前の要求の行として previous を使う (追記の分だけを軽くするときに渡す。結果の値は、前の行と records を
+    まとめて 1 回で軽くしたときの records の分と同じ)。None なら、records の最初の要求の行は何とも共有しない。
     """
     lightened: list[dict] = []
-    previous: dict | None = None
+    previous_line: dict | None = None
     for record in records:
         if record.get("event") != "request":
             lightened.append(record)
@@ -353,13 +382,13 @@ def lighten_request_lines(records: list[dict]) -> list[dict]:
             for key, value in record.items()
             if key not in UNUSED_REQUEST_KEYS
         }
-        if previous is not None:
+        if previous_line is not None:
             for key in SHARED_REQUEST_TEXT_KEYS:
                 value = line.get(key)
-                if isinstance(value, str) and value == previous.get(key):
-                    line[key] = previous[key]
+                if isinstance(value, str) and value == previous_line.get(key):
+                    line[key] = previous_line[key]
         lightened.append(line)
-        previous = line
+        previous_line = line
     return lightened
 
 
@@ -432,6 +461,64 @@ def _build_run_events(
                 t = origin_t + run_log_elapsed(line_time, origin_time, after_start=True)
         events.append(RunEvent(t=t, record=line))
     return events
+
+
+@dataclass(frozen=True)
+class RunLogClock:
+    """run.jsonl の start の行より後の行の経過秒を、ファイルの順に 1 行ずつ求めるための状態。
+
+    求め方は load_run の docstring の「run.jsonl の行の経過秒 t」。load_run と、実行中の記録を 1 行ずつ読む
+    live_reader が同じ規則を使う。
+    start_time   start の行の time (elapsed_time.parse_wall_time の秒)
+    origin_t     今の起点の行の経過秒 (start の行は 0.0)
+    origin_time  今の起点の行の time (parse_wall_time の秒。読めなければ None)
+    """
+
+    start_time: float
+    origin_t: float
+    origin_time: float | None
+
+
+def start_run_log_clock(start_line: Mapping) -> RunLogClock | None:
+    """run.jsonl の start の行 start_line から、経過秒を求め始める時計を返す。
+
+    start_line の time が elapsed_time.parse_wall_time で読めれば RunLogClock(start_time, 0.0, start_time)。
+    読めなければ None (その実行の run.jsonl の行の t は、すべて None)。start の行自身の t は 0.0。
+    """
+    raise NotImplementedError
+
+
+def elapsed_before_start(clock: RunLogClock, line: Mapping) -> float | None:
+    """start の行より前にある run.jsonl の行 line の経過秒を返す。
+
+    elapsed_time.run_log_elapsed(line の time, clock.start_time, after_start=False)。line の time が
+    parse_wall_time で読めなければ None。
+    """
+    raise NotImplementedError
+
+
+def advance_run_log_clock(
+    clock: RunLogClock, line: Mapping, received_times: Mapping[object, float]
+) -> tuple[float | None, RunLogClock]:
+    """start の行より後にある run.jsonl の行 line の経過秒と、次の行に渡す時計を返す。
+
+    行はファイルの順に 1 行ずつ渡す。received_times は要求の number → 受信時刻 (add_received_time で作る辞書)。
+        - line が起点にする decision の行 (event が "decision" で、number がキーにできる値で、received_times に
+          その number がある行) なら、(その受信時刻, 起点をその行に置き換えた時計)。置き換えた時計の origin_t は
+          その受信時刻、origin_time は line の time (読めなければ None)
+        - それ以外は (clock.origin_t + run_log_elapsed(line の time, clock.origin_time, after_start=True), clock)。
+          line の time が読めないか、clock.origin_time が None なら、t は None
+    """
+    raise NotImplementedError
+
+
+def add_received_time(received_times: dict[object, float], request: Mapping) -> None:
+    """要求の行 request の number → t_received を received_times に足す (setdefault。同じ number は最初の行の値)。
+
+    number がキーにできない値 (list・dict) の行と、t_received が数 (bool を除く int と float) でない行は足さない。
+    足す値は float にする。
+    """
+    raise NotImplementedError
 
 
 def read_advisor_stream(

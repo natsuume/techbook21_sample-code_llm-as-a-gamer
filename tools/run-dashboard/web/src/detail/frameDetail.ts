@@ -11,13 +11,14 @@ export const FRAME_REQUEST_CANDIDATES = 10;
 
 /**
  * フレームのタブで開くフレームの位置 (frameTimes と同じ並びの位置) を返す。フレームが無ければ null。
- * frameIndex があれば 0〜count - 1 に切り詰める。無ければ再生位置以前の最後のフレーム
- * (lastIndexAtOrBefore(frameTimes, position))、それも無ければ最初のフレーム
+ * frameIndex があれば 0〜count - 1 に切り詰める (position によらない)。frameIndex が無く position も null なら
+ * null。frameIndex が無ければ再生位置 position 以前の最後のフレーム (lastIndexAtOrBefore(frameTimes, position))、
+ * それも無ければ最初のフレーム
  */
 export const resolveFrameIndex = (
   frameIndex: number | null,
   frameTimes: readonly number[],
-  position: number,
+  position: number | null,
 ): number | null => {
   const count = frameTimes.length;
   if (count === 0) {
@@ -25,6 +26,9 @@ export const resolveFrameIndex = (
   }
   if (frameIndex !== null) {
     return Math.min(Math.max(frameIndex, 0), count - 1);
+  }
+  if (position === null) {
+    throw new Error("not implemented");
   }
   return Math.max(lastIndexAtOrBefore(frameTimes, position), 0);
 };

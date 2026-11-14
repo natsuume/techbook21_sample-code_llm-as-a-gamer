@@ -1,8 +1,17 @@
 // run-dashboard のサーバーの API が返す JSON の型。
 // 時刻 (t、t_ で始まるキー、peak_t、candidate_t) はすべて経過秒 (number)。
 
-/** 区間 API (requests・frames・pad・events) の応答。記録が無ければ available が false で items は空 */
-export type RangeResponse<T> = { available: boolean; reason?: "old_format"; items: T[] };
+/**
+ * 区間 API (requests・frames・pad・events) の応答。記録が無ければ available が false で items は空。
+ * cursor は、その API が読んだファイルの、読んだ最後の完全な行の次のバイト位置 (ファイルが無ければ 0。
+ * events の API が読むファイルは run.jsonl)
+ */
+export type RangeResponse<T> = {
+  available: boolean;
+  reason?: "old_format";
+  items: T[];
+  cursor: number;
+};
 
 export type RunListItem = {
   run: string;
@@ -53,6 +62,7 @@ export type RunSummary = {
   game: string | null;
   model: string | null;
   started: string | null;
+  in_progress: boolean;
   args: Record<string, unknown> | null;
   thresholds: { advisor: number };
   thresholds_assumed: boolean;
@@ -180,4 +190,50 @@ export type AdvisorDetail = {
   steps_available: boolean;
   steps: AdvisorStep[];
   files: { path: string; bytes: number }[];
+};
+
+/** /live の stats の data。summary の t_end・counts・decide_s_median と同じ値 */
+export type LiveStats = Pick<RunSummary, "t_end" | "counts" | "decide_s_median">;
+/** /live の advisor_step の data。advisor の実行の詳細の steps の 1 件に、advisor の実行の名前を足したもの */
+export type LiveAdvisorStep = AdvisorStep & { name: string };
+/** /live の end の data。record_end は run.jsonl に record_end の行があるか */
+export type LiveEnd = { record_end: boolean };
+/** /live のイベントの種類 → data の型 */
+export type LiveEventDataOf = {
+  request: RequestItem;
+  frame: FrameItem;
+  pad: PadItem;
+  run: EventItem;
+  note_version: SummaryNoteVersion;
+  advisor_run: SummaryAdvisorRun;
+  advisor_step: LiveAdvisorStep;
+  stats: LiveStats;
+  end: LiveEnd;
+};
+export type LiveEventKind = keyof LiveEventDataOf;
+/** /live のイベントの種類のすべて */
+export const LIVE_EVENT_KINDS: readonly LiveEventKind[] = [
+  "request",
+  "frame",
+  "pad",
+  "run",
+  "note_version",
+  "advisor_run",
+  "advisor_step",
+  "stats",
+  "end",
+];
+/** /live の 1 件。kind で data の型が決まる */
+export type LiveEvent = {
+  [K in LiveEventKind]: { kind: K; data: LiveEventDataOf[K] };
+}[LiveEventKind];
+/**
+ * /live のクエリーの位置 (それぞれ run.jsonl・requests.jsonl・frames.jsonl・pad.jsonl のバイト位置)。
+ * null は省く (サーバーは接続した時点のファイルの終わりから送る)
+ */
+export type LiveCursors = {
+  run: number | null;
+  requests: number | null;
+  frames: number | null;
+  pad: number | null;
 };

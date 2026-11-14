@@ -1,5 +1,5 @@
 // 選んでいる実行の summary と区間 API の結果から、画面全体で使う値 (フレームの時刻・中立に戻した時刻・
-// 書き換えの一覧・選んでいる要求・再生位置・表示の区間) を求める純粋な関数。
+// 書き換えの一覧・選んでいる要求・再生位置・表示の区間) を求める純粋な関数。ライブで最新を追うときの選択も求める。
 import type {
   EventItem,
   FrameItem,
@@ -112,4 +112,28 @@ export const selectPlayback = (
     position,
     range: computeViewWindow(position, width, data.summary.t_end),
   };
+};
+
+/** 最後の要求 (requests.items の最後) の n を返す。要求の記録が無い (available が false) か、要求が無ければ null */
+export const latestRequestN = (_data: Pick<RunData, "requests">): number | null => {
+  throw new Error("not implemented");
+};
+
+/**
+ * 番号 n の要求を返す (requestIndexByN で引く)。要求の記録が無い (available が false)、n が null、
+ * n の要求が無いときは null
+ */
+export const findRequest = (_data: RunData, _n: number | null): RequestItem | null => {
+  throw new Error("not implemented");
+};
+
+/**
+ * ライブで最新を追うときの選択を返す。
+ * - selectedRequest: 最後の要求 (requests.items の最後)。要求の記録が無い (available が false) か、要求が無ければ null
+ * - nextRequestPosition: null
+ * - position: playbackPosition(selectedRequest, summary.t_end)
+ * - range: computeLiveWindow(width, summary.t_end) (右端を今にする)
+ */
+export const selectLivePlayback = (_data: RunData, _width: ViewWidth): PlaybackSelection => {
+  throw new Error("not implemented");
 };

@@ -101,7 +101,8 @@ def test_main_runs_uvicorn_on_localhost_with_given_port(tmp_path, fake_run):
     args, kwargs = fake_run.calls[0]
     assert len(args) == 1
     assert isinstance(args[0], FastAPI)
-    assert kwargs == {"host": "127.0.0.1", "port": 9000}
+    # 開いている SSE の接続 (/live) があっても、1 回の Ctrl+C から約 1 秒で止まるようにする
+    assert kwargs == {"host": "127.0.0.1", "port": 9000, "timeout_graceful_shutdown": 1}
 
 
 def test_main_uses_default_port_and_runs_dir_relative_to_cwd(
@@ -112,4 +113,4 @@ def test_main_uses_default_port_and_runs_dir_relative_to_cwd(
     main(["--runs-dir", "runs"])
     assert len(fake_run.calls) == 1
     _, kwargs = fake_run.calls[0]
-    assert kwargs == {"host": "127.0.0.1", "port": 8765}
+    assert kwargs == {"host": "127.0.0.1", "port": 8765, "timeout_graceful_shutdown": 1}

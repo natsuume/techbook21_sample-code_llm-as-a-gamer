@@ -29,7 +29,11 @@ const padRow = (t: number, source: PadItem["source"], state: string): PadItem =>
   error: null,
 });
 
-const range = <T>(items: T[], available = true): RangeResponse<T> => ({ available, items });
+const range = <T>(items: T[], available = true): RangeResponse<T> => ({
+  available,
+  items,
+  cursor: 0,
+});
 
 const input = (fields: Partial<PlaybackControllerInput>): PlaybackControllerInput => ({
   pad: range<PadItem>([], false),

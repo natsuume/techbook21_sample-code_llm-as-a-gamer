@@ -21,7 +21,8 @@ DEFAULT_MAX_FILES = 1024
 # を持ったまま、ほかの実行のファイルも持てる大きさにする。読んだ結果のメモリーは元の大きさの数倍になる
 DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 
-# 読んだ行の辞書のリストを受け取り、持つ形の行の辞書のリストを返す関数 (run_records.lighten_request_lines など)
+# 読んだ行の辞書のリストを受け取り、持つ形の行の辞書のリストを返す関数 (run_records.lighten_request_lines など)。
+# 行の数と順を変えず、各行の結果はその行と直前の行で決まるものにする
 RecordsTransform = Callable[[list[dict]], list[dict]]
 
 
@@ -65,13 +66,14 @@ class JsonLinesCache:
     属性:
         max_files    持つ結果の数の上限
         max_bytes    持つファイルの元の大きさの合計の上限 (バイト)
-        read_lines   ファイルを読む関数 (既定 jsonl_lines.read_json_lines)。テストでは呼ばれた回数を数える関数を渡す
+        read_lines   ファイルを読む関数 read_lines(path, offset) (offset は読み始めるバイトの位置。既定
+                     jsonl_lines.read_json_lines)。テストでは呼ばれた引数を記録する関数を渡す
     """
 
     def __init__(
         self,
         max_files: int = DEFAULT_MAX_FILES,
-        read_lines: Callable[[Path], ParsedLines] = read_json_lines,
+        read_lines: Callable[[Path, int], ParsedLines] = read_json_lines,
         max_bytes: int = DEFAULT_MAX_BYTES,
     ):
         """空のキャッシュを作る。"""
@@ -93,7 +95,7 @@ class JsonLinesCache:
     ) -> ParsedLines | None:
         """path の JSON Lines を読んだ結果を返す。前に読んだときと署名が同じなら、前の結果を返す。
 
-        署名 (file_signature) が前に読んだときと違うか、まだ読んでいなければ、read_lines(path) で読み直す
+        署名 (file_signature) が前に読んだときと違うか、まだ読んでいなければ、read_lines(path, 0) で読み直す
         (ファイルが伸びたときも、丸ごと読み直す)。transform があれば、読んだ records に 1 回だけ当てた結果
         (skipped と next_offset は読んだときの値) を持って返す。
         ファイルが無いか、読めない (OSError) なら None を返す (前に持っていた結果も捨てる)。
@@ -124,7 +126,7 @@ class JsonLinesCache:
                 self._entries.move_to_end(key)
                 return entry.lines
         try:
-            lines = self.read_lines(path)
+            lines = self.read_lines(path, 0)
         except OSError:
             self._discard(key)
             return None

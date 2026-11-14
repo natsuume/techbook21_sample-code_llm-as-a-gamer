@@ -65,7 +65,7 @@ export const AdvisorRunCard = ({ view, card, selected, cardRef }: AdvisorRunCard
           {requestSelectable && requestN !== null ? (
             <Button
               aria-label={`要求 #${requestN} を要求のタブで開く`}
-              onClick={() => dispatch({ type: "selectRequest", n: requestN })}
+              onClick={() => dispatch({ type: "selectRequest", n: requestN, via: "open" })}
             >
               #{requestN}
             </Button>
@@ -116,6 +116,7 @@ export const AdvisorRunCard = ({ view, card, selected, cardRef }: AdvisorRunCard
                   dispatch({
                     type: "selectFile",
                     file: { type: "note", kind: rewrite.kind, version: rewrite.version },
+                    via: "open",
                   })
                 }
               >
@@ -184,7 +185,11 @@ const AdvisorFiles = ({ detail }: { detail: AdvisorDetail }) => {
           className={content.wrapButton}
           aria-label={`${file.path} をファイルのタブで開く`}
           onClick={() =>
-            dispatch({ type: "selectFile", file: { type: "advisorFile", path: file.path } })
+            dispatch({
+              type: "selectFile",
+              file: { type: "advisorFile", path: file.path },
+              via: "open",
+            })
           }
         >
           {fileNameOf(file.path)} · {formatBytes(file.bytes)}

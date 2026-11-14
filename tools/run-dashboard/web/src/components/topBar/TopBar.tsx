@@ -29,7 +29,7 @@ export const TopBar = ({ className }: TopBarProps) => {
       <RunSelect
         className={styles.runSelect}
         value={state.run}
-        onSelect={(run) => dispatch({ type: "selectRun", run })}
+        onSelect={(run) => dispatch({ type: "selectRun", run, inProgress: false })}
       />
       {runView.status === "ready" ? <RunStats view={runView.view} /> : null}
       {runView.status === "loading" ? (

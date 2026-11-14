@@ -19,16 +19,21 @@ runs/ には何も書かない。
 """
 
 import json
-from collections.abc import Collection
+import time
+from collections.abc import AsyncIterable, Callable, Collection
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Response
+import anyio
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
 from run_dashboard.advisor_runs import AdvisorRun, build_advisor_runs
+from run_dashboard.live_events import encode_live_event_data
+from run_dashboard.live_reader import LIVE_POLL_INTERVAL_S, LiveCursors, stream_live
 from run_dashboard.record_cache import JsonLinesCache
 from run_dashboard.run_directory import (
     find_run_dir,
@@ -139,7 +144,13 @@ def load_advisor_runs(records: RunRecords) -> list[AdvisorRun]:
     )
 
 
-def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
+def create_app(
+    runs_dir: Path,
+    web_dist_dir: Path | None,
+    *,
+    clock: Callable[[], float] = time.time,
+    live_interval_s: float = LIVE_POLL_INTERVAL_S,
+) -> FastAPI:
     """runs_dir の実行の記録を返す API のルートを登録した FastAPI のアプリを返す。
 
     Starlette の TrustedHostMiddleware(allowed_hosts=ALLOWED_HOSTS) を足し、Host の名前が ALLOWED_HOSTS 以外の
@@ -159,18 +170,30 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     cache = JsonLinesCache()
 
+    def find_run_dir_or_404(run: str) -> Path:
+        """パスの実行の名前 run を run_directory.find_run_dir で照合した実行のディレクトリーを返す (/live の依存)。
+
+        一致しなければ HTTPException(404) を出す。SSE の応答が始まった後に出した例外は 404 にできないため、
+        ルートの本体 (ジェネレーター) の前に、依存で照合する。
+        """
+        run_dir = find_run_dir(runs_dir, run)
+        if run_dir is None:
+            raise HTTPException(status_code=404, detail=f"unknown run: {run}")
+        return run_dir
+
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
         # 一覧では実行ごとに run.jsonl だけを読む (requests.jsonl・frames.jsonl などの大きなファイルは読まない)
+        now = clock()
         return [
-            build_run_list_item(overview)
+            build_run_list_item(overview, now)
             for overview in list_run_overviews(runs_dir, cache)
         ]
 
     @app.get("/api/runs/{run}")
     def get_summary(run: str) -> dict:
         records = load_run_or_404(runs_dir, run, LOAD_PARTS, cache)
-        return build_summary(records, load_advisor_runs(records))
+        return build_summary(records, load_advisor_runs(records), clock())
 
     @app.get("/api/runs/{run}/requests")
     def get_requests(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
@@ -230,6 +253,28 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
         if detail is None:
             raise HTTPException(status_code=404, detail=f"unknown advisor run: {name}")
         return detail
+
+    @app.get("/api/runs/{run}/live", response_class=EventSourceResponse)
+    async def get_live(
+        run_dir: Annotated[Path, Depends(find_run_dir_or_404)],
+        # パスの run と別の引数名で、クエリーの run (run.jsonl の位置) を受け取る
+        run_cursor: Annotated[int | None, Query(alias="run", ge=0)] = None,
+        requests: Annotated[int | None, Query(ge=0)] = None,
+        frames: Annotated[int | None, Query(ge=0)] = None,
+        pad: Annotated[int | None, Query(ge=0)] = None,
+    ) -> AsyncIterable[ServerSentEvent]:
+        # ファイルの読み取りは stream_live がスレッドで行う (非同期のジェネレーターなので、クライアントが接続を
+        # 切ると、待っている sleep かスレッドの待ちで取り消され、それ以上は読まない)
+        async for event in stream_live(
+            run_dir,
+            LiveCursors(run=run_cursor, requests=requests, frames=frames, pad=pad),
+            clock=clock,
+            sleep=anyio.sleep,
+            interval_s=live_interval_s,
+        ):
+            yield ServerSentEvent(
+                event=event.kind, raw_data=encode_live_event_data(event.data)
+            )
 
     @app.get("/api/runs/{run}/files/{path:path}")
     def get_run_file(run: str, path: str) -> Response:

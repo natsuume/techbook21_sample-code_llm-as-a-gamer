@@ -81,6 +81,7 @@ export const NoteFileViewer = ({ view, stats, kind, version }: NoteFileViewerPro
               dispatch({
                 type: "selectFile",
                 file: { type: "note", kind, version: option.version },
+                via: "open",
               })
             }
           >

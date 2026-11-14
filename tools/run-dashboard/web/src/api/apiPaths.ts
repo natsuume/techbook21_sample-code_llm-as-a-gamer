@@ -1,5 +1,6 @@
 // run-dashboard のサーバーの API のパスを組み立てる純粋な関数。
 // 実行の名前と advisor の実行の名前は encodeURIComponent で符号化する。
+import type { LiveCursors } from "./apiTypes.ts";
 
 export type RangeKind = "requests" | "frames" | "pad" | "events";
 
@@ -29,6 +30,15 @@ export const notePath = (run: string, version: number): string =>
  */
 export const advisorPath = (run: string, name: string): string =>
   `${summaryPath(run)}/advisor/${encodeURIComponent(name)}`;
+
+/**
+ * 実行中の記録を送るサーバー送信イベント (SSE) のパス "/api/runs/<run>/live" を返す。
+ * run は encodeURIComponent で符号化する。null でない cursor を run・requests・frames・pad の順で
+ * "?run=1&requests=2…" と付ける (URLSearchParams)。0 は付ける。すべて null なら "?" を付けない
+ */
+export const livePath = (_run: string, _cursors: LiveCursors): string => {
+  throw new Error("not implemented");
+};
 
 /**
  * 実行のディレクトリーのファイルのパス "/api/runs/<run>/files/<path>" を返す。

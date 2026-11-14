@@ -32,6 +32,15 @@ describe("resolveFrameIndex", () => {
     expect(resolveFrameIndex(null, [], 1)).toBeNull();
     expect(resolveFrameIndex(0, [], 1)).toBeNull();
   });
+
+  it("選んでいなくて再生位置も null なら、フレームがあっても null", () => {
+    expect(resolveFrameIndex(null, times, null)).toBeNull();
+  });
+
+  it("選んだフレームがあれば、再生位置が null でもその位置を範囲に切り詰めて返す", () => {
+    expect(resolveFrameIndex(2, times, null)).toBe(2);
+    expect(resolveFrameIndex(9, times, null)).toBe(3);
+  });
 });
 
 describe("neighborFrameSlots", () => {

@@ -8,6 +8,7 @@ import {
   describeEventMark,
   describeFrame,
   describeFrameSummary,
+  describePendingSpan,
   describeQuestionCell,
   describeRange,
   describeRequestBar,
@@ -111,6 +112,20 @@ describe("describeRequestBar", () => {
         advisor_accepted: [],
       }),
     ).toBe("要求 #12 · t=1.00 · error · 操作なし");
+  });
+});
+
+describe("describePendingSpan", () => {
+  it("応答待ちの区間を小数 2 桁で書き、近似の意味を添える", () => {
+    expect(describePendingSpan({ start: 12.5, end: 15 })).toBe(
+      "応答待ち · t=12.50–15.00 秒 (最後の要求の受信から、次の要求の記録が届くまで)",
+    );
+  });
+
+  it("秒は ja-JP の書式 (桁区切りと小数 2 桁の丸め) にする", () => {
+    expect(describePendingSpan({ start: 1234.567, end: 1240 })).toBe(
+      "応答待ち · t=1,234.57–1,240.00 秒 (最後の要求の受信から、次の要求の記録が届くまで)",
+    );
   });
 });
 

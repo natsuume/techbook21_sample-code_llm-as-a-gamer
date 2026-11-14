@@ -47,7 +47,7 @@ export const VideoPanel = ({ view, className }: VideoPanelProps) => {
         type="button"
         className={styles.screen}
         aria-label={`t=${time} 秒のフレームをフレームのタブで開く`}
-        onClick={() => dispatch({ type: "selectFrame", index })}
+        onClick={() => dispatch({ type: "selectFrame", index, via: "navigate" })}
       >
         <FrameImage key={src} src={src} />
         <span className={styles.time} aria-hidden="true">

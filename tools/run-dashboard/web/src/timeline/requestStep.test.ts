@@ -15,7 +15,7 @@ const request = (n: number): RequestItem => ({
   adopted_count: null,
 });
 
-const available = { available: true, items: [request(3), request(5), request(9)] };
+const available = { available: true, items: [request(3), request(5), request(9)], cursor: 0 };
 
 describe("requestStep", () => {
   it("前と次の要求の番号を返す", () => {
@@ -29,18 +29,20 @@ describe("requestStep", () => {
   });
 
   it("要求の記録が無い実行では、形が古いかどうかで理由を変える", () => {
-    expect(requestStep({ available: false, items: [] }, null, 1)).toEqual({
+    expect(requestStep({ available: false, items: [], cursor: 0 }, null, 1)).toEqual({
       n: null,
       reason: STEP_REASONS.noRecord,
     });
-    expect(requestStep({ available: false, reason: "old_format", items: [] }, null, -1)).toEqual({
+    expect(
+      requestStep({ available: false, reason: "old_format", items: [], cursor: 0 }, null, -1),
+    ).toEqual({
       n: null,
       reason: STEP_REASONS.oldFormat,
     });
   });
 
   it("要求が無いか、選んでいる要求が無ければ noRequests", () => {
-    expect(requestStep({ available: true, items: [] }, null, 1)).toEqual({
+    expect(requestStep({ available: true, items: [], cursor: 0 }, null, 1)).toEqual({
       n: null,
       reason: STEP_REASONS.noRequests,
     });

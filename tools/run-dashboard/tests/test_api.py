@@ -11,10 +11,12 @@ from synthetic_runs import (
     CONTROLS_NOTE,
     JPEG,
     RUN_NAMES_NEWEST_FIRST,
+    STALE_RUN_LOG_MTIME,
     STRATEGY_NOTE_FIRST,
     STRATEGY_NOTE_SECOND,
     STRATEGY_RUN_NAME,
     TIPS_NOTE,
+    UNTERMINATED_FRAME_LINE,
 )
 
 from run_dashboard.app import (
@@ -602,9 +604,17 @@ DASHBOARD_FRAME_ITEMS = [
 ]
 
 
+def file_size(path: Path) -> int:
+    return path.stat().st_size
+
+
 def test_frames_of_dashboard_run(client, runs):
     body = get_json(client, f"/api/runs/{runs.dashboard.name}/frames")
-    assert body == {"available": True, "items": DASHBOARD_FRAME_ITEMS}
+    assert body == {
+        "available": True,
+        "items": DASHBOARD_FRAME_ITEMS,
+        "cursor": file_size(runs.dashboard.run_dir / "frames.jsonl"),
+    }
 
 
 def test_frames_in_range(client, runs):
@@ -614,7 +624,13 @@ def test_frames_in_range(client, runs):
 
 def test_frames_of_run_with_broken_lines_skip_unreadable_lines(client, runs):
     body = get_json(client, f"/api/runs/{runs.broken.name}/frames")
-    assert body == {"available": True, "items": DASHBOARD_FRAME_ITEMS}
+    # cursor は、改行で終わっていない最後の行の手前
+    assert body == {
+        "available": True,
+        "items": DASHBOARD_FRAME_ITEMS,
+        "cursor": file_size(runs.broken.run_dir / "frames.jsonl")
+        - len(UNTERMINATED_FRAME_LINE.encode("utf-8")),
+    }
 
 
 # --- GET /api/runs/{run}/pad ---
@@ -661,6 +677,7 @@ def test_pad_of_dashboard_run(client, runs):
                 "error": None,
             },
         ],
+        "cursor": file_size(runs.dashboard.run_dir / "pad.jsonl"),
     }
 
 
@@ -766,7 +783,12 @@ def test_events_without_start_line_are_unavailable(runs):
     )
     client = make_client(runs.runs_dir, None)
     body = get_json(client, "/api/runs/20261101-000000/events")
-    assert body == {"available": False, "items": []}
+    # start の行が無くても run.jsonl は読むので、cursor はその大きさ
+    assert body == {
+        "available": False,
+        "items": [],
+        "cursor": file_size(run_dir / "run.jsonl"),
+    }
 
 
 # --- 読んだ結果のキャッシュ ---
@@ -819,7 +841,8 @@ def test_cached_responses_equal_responses_of_new_app(client, runs):
 
 
 def test_kinds_without_records_are_unavailable(client, runs):
-    unavailable = {"available": False, "items": []}
+    # 記録のファイルが無いので、cursor は 0
+    unavailable = {"available": False, "items": [], "cursor": 0}
     no_dashboard = runs.no_dashboard.name
     assert get_json(client, f"/api/runs/{no_dashboard}/requests") == unavailable
     assert get_json(client, f"/api/runs/{no_dashboard}/frames") == unavailable
@@ -1108,6 +1131,7 @@ def test_old_format_runs_do_not_return_question_values_advisor_runs_or_notes(
         "available": False,
         "reason": "old_format",
         "items": [],
+        "cursor": file_size(run.run_dir / "requests.jsonl"),
     }
     assert get_json(client, f"/api/runs/{run.name}/requests/1") == {
         "available": False,
@@ -1276,3 +1300,220 @@ def test_non_finite_number_in_record_is_returned_as_null(runs, client):
         "items"
     ]
     assert [item["sharpness"] for item in items] == [None]
+
+
+# --- 区間 API の cursor ---
+
+# 区間 API の種類 → その API が読むファイル
+RANGE_FILES = {
+    "requests": "requests.jsonl",
+    "frames": "frames.jsonl",
+    "pad": "pad.jsonl",
+    "events": "run.jsonl",
+}
+
+
+@pytest.mark.parametrize("query", ["", "?from=1&to=5", "?from=100"])
+def test_range_cursor_is_position_after_last_complete_line(client, runs, query):
+    # どのファイルも改行で終わるので、cursor はファイルの大きさ。区間によらない。cursor は最後のキー
+    run = runs.dashboard
+    for kind, file_name in RANGE_FILES.items():
+        body = get_json(client, f"/api/runs/{run.name}/{kind}{query}")
+        assert body["cursor"] == file_size(run.run_dir / file_name), kind
+        assert list(body)[-1] == "cursor", kind
+
+
+@pytest.mark.parametrize("query", ["", "?from=1&to=5"])
+def test_range_cursor_of_broken_frames_stops_before_unterminated_line(
+    client, runs, query
+):
+    # 改行で終わっていない最後の行の手前
+    run = runs.broken
+    body = get_json(client, f"/api/runs/{run.name}/frames{query}")
+    assert body["cursor"] == file_size(run.run_dir / "frames.jsonl") - len(
+        UNTERMINATED_FRAME_LINE.encode("utf-8")
+    )
+    events = get_json(client, f"/api/runs/{run.name}/events{query}")
+    assert events["cursor"] == file_size(run.run_dir / "run.jsonl")
+
+
+# --- 実行中の判定 (in_progress) ---
+
+# record_end の行の無い実行 (run.jsonl が 10 秒以内に更新されていれば実行中)
+RUNS_WITHOUT_RECORD_END = {
+    "20261112-110000",
+    "20261112-100000",
+    "20261111-090000",
+    "20261110-090000",
+}
+
+
+def make_client_at(runs_dir: Path, now: float) -> TestClient:
+    """今の時刻を now にしたアプリ (画面のビルドの出力なし) の TestClient を返す。"""
+    return TestClient(create_app(runs_dir, None, clock=lambda: now), base_url=BASE_URL)
+
+
+@pytest.mark.parametrize(
+    "seconds_since_update, expected",
+    [
+        (5.0, RUNS_WITHOUT_RECORD_END),
+        # ちょうど 10 秒は実行中
+        (10.0, RUNS_WITHOUT_RECORD_END),
+        (10.5, set()),
+    ],
+)
+def test_run_list_in_progress_by_clock(runs, seconds_since_update, expected):
+    # run.jsonl の更新時刻は STALE_RUN_LOG_MTIME。record_end のある 2 つは実行中にしない
+    client = make_client_at(runs.runs_dir, STALE_RUN_LOG_MTIME + seconds_since_update)
+    items = get_json(client, "/api/runs")
+    assert {item["run"] for item in items if item["in_progress"] is True} == expected
+    assert all(isinstance(item["in_progress"], bool) for item in items)
+
+
+@pytest.mark.parametrize("seconds_since_update", [5.0, 10.0, 10.5])
+def test_summary_in_progress_by_clock(runs, seconds_since_update):
+    # 一覧と同じ規則。キーは started の次
+    client = make_client_at(runs.runs_dir, STALE_RUN_LOG_MTIME + seconds_since_update)
+    for name in RUN_NAMES_NEWEST_FIRST:
+        summary = get_json(client, f"/api/runs/{name}")
+        expected = name in RUNS_WITHOUT_RECORD_END and seconds_since_update <= 10.0
+        assert summary["in_progress"] is expected, name
+        keys = list(summary)
+        assert keys[keys.index("started") + 1] == "in_progress"
+
+
+def test_summary_in_progress_with_default_clock_is_false(client):
+    # 既定の時計 (time.time) では、ずっと前に更新された実行はどれも実行中でない
+    for name in RUN_NAMES_NEWEST_FIRST:
+        assert get_json(client, f"/api/runs/{name}")["in_progress"] is False
+
+
+# --- GET /api/runs/{run}/live (SSE) ---
+
+# ライブのイベントの種類 → 同じ形の項目を返す区間 API の種類
+LINE_EVENT_KINDS = {
+    "request": "requests",
+    "run": "events",
+    "frame": "frames",
+    "pad": "pad",
+}
+
+
+def parse_sse(text: str) -> list[tuple[str, object]]:
+    """SSE の本文 text を、(event の名前, data を JSON として読んだ値) のリストにして返す。
+
+    コメントの行 (: で始まる行) は除く。各イベントは event と data の 1 行ずつだけを持つことも確かめる。
+    """
+    events: list[tuple[str, object]] = []
+    for block in text.split("\n\n"):
+        lines = [
+            line for line in block.split("\n") if line and not line.startswith(":")
+        ]
+        if not lines:
+            continue
+        fields = dict(line.split(": ", 1) for line in lines)
+        assert sorted(fields) == ["data", "event"], block
+        assert len(lines) == 2, block
+        events.append((fields["event"], json.loads(fields["data"])))
+    return events
+
+
+def data_of(events: list[tuple[str, object]], kind: str) -> list:
+    return [data for event_kind, data in events if event_kind == kind]
+
+
+def test_live_of_finished_run_sends_snapshot_and_end(client, runs):
+    # 接続した時点で実行中でない実行 (cursor なし): advisor の実行・版のすべてと stats、続けて end
+    name = runs.dashboard.name
+    response = client.get(f"/api/runs/{name}/live")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+    assert response.headers["cache-control"] == "no-cache"
+    events = parse_sse(response.text)
+    assert [kind for kind, _ in events] == [
+        "advisor_run",
+        "advisor_run",
+        "note_version",
+        "note_version",
+        "note_version",
+        "stats",
+        "end",
+    ]
+    summary = get_json(client, f"/api/runs/{name}")
+    assert data_of(events, "advisor_run") == summary["advisor_runs"]
+    assert data_of(events, "note_version") == summary["note_versions"]
+    assert data_of(events, "stats") == [
+        {
+            "t_end": summary["t_end"],
+            "counts": summary["counts"],
+            "decide_s_median": summary["decide_s_median"],
+        }
+    ]
+    assert events[-1] == ("end", {"record_end": True})
+
+
+def test_live_of_finished_run_from_start_sends_all_lines(client, runs):
+    # cursor をすべて 0 にすると、4 つのファイルの全部の行を区間 API の項目と同じ順と値で送り、
+    # その後に snapshot と end
+    name = runs.dashboard.name
+    events = parse_sse(
+        client.get(f"/api/runs/{name}/live?run=0&requests=0&frames=0&pad=0").text
+    )
+    assert [kind for kind, _ in events] == (
+        ["request"] * 6
+        + ["run"] * 8
+        + ["frame"] * 7
+        + ["pad"] * 5
+        + ["advisor_run"] * 2
+        + ["note_version"] * 3
+        + ["stats", "end"]
+    )
+    for event_kind, range_kind in LINE_EVENT_KINDS.items():
+        items = get_json(client, f"/api/runs/{name}/{range_kind}")["items"]
+        assert data_of(events, event_kind) == items, event_kind
+    assert events[-1] == ("end", {"record_end": True})
+
+
+@pytest.mark.parametrize(
+    "url", ["/api/runs/20991231-000000/live", "/api/runs/%2e%2e/live"]
+)
+def test_live_of_unknown_run_is_404(client, url):
+    assert client.get(url).status_code == 404
+
+
+@pytest.mark.parametrize("name", ["run", "requests", "frames", "pad"])
+@pytest.mark.parametrize("value", ["-1", "abc", "1.5", ""])
+def test_live_with_invalid_cursor_is_422(client, runs, name, value):
+    # 負の数と、整数として読めない値は 422
+    response = client.get(f"/api/runs/{runs.dashboard.name}/live?{name}={value}")
+    assert response.status_code == 422
+
+
+def test_live_with_other_host_is_400(client, runs):
+    response = client.get(
+        f"/api/runs/{runs.dashboard.name}/live", headers={"host": "evil.example"}
+    )
+    assert response.status_code == 400
+
+
+def test_live_unpaired_surrogate_in_record_is_sent_as_escape(client, runs):
+    # 対になっていないサロゲートは \ud800 のエスケープで送り、読むと元の文字に戻る。
+    # 接続した時点で実行中でない実行の stream.jsonl の行は advisor_step にならない (接続後の行だけを送る) ため、
+    # requests.jsonl の行に入れ、requests=0 で全部の要求を送らせる
+    run = runs.dashboard
+    line = {
+        "event": "request",
+        "number": 7,
+        "t_sent": 14.5,
+        "t_received": 14.75,
+        "result": "ok",
+        "action": "a\ud800b",
+    }
+    with (run.run_dir / "requests.jsonl").open("a", encoding="utf-8") as file:
+        file.write(json.dumps(line) + "\n")
+    response = client.get(f"/api/runs/{run.name}/live?requests=0")
+    assert response.status_code == 200
+    assert b"\\ud800" in response.content
+    requests = data_of(parse_sse(response.text), "request")
+    assert requests[-1]["action"] == "a\ud800b"
+    assert requests == get_json(client, f"/api/runs/{run.name}/requests")["items"]

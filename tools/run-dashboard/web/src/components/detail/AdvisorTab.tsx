@@ -77,6 +77,7 @@ export const AdvisorTab = ({ view }: { view: RunView }) => {
                   dispatch({
                     type: "selectFile",
                     file: { type: "note", kind: rewrite.kind, version: rewrite.version },
+                    via: "open",
                   })
                 }
               >

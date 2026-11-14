@@ -16,18 +16,24 @@ run.jsonl から求めるもの (events と、summary の decide_s_median) は�
 """
 
 import statistics
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD
 from switch2_agent.frame_selection.meaningful_frames import (
     DEFAULT_SIMILARITY_THRESHOLD,
     DEFAULT_VALLEY_RATIO,
 )
+from switch2_agent.questions import Question
 
 from run_dashboard.advisor_runs import AdvisorRun, build_steps
 from run_dashboard.elapsed_time import mono_elapsed
 from run_dashboard.jsonl_lines import number_or_none
-from run_dashboard.note_versions import build_note_versions, note_version_of_request
+from run_dashboard.note_versions import (
+    NoteVersion,
+    build_note_versions,
+    note_version_of_request,
+)
 from run_dashboard.question_values import (
     adopted_count,
     header_question_list,
@@ -36,7 +42,7 @@ from run_dashboard.question_values import (
     request_adopted,
     request_question_values,
 )
-from run_dashboard.run_records import RunOverview, RunRecords
+from run_dashboard.run_records import RunEvent, RunOverview, RunRecords
 
 # 古い形の実行の reason
 OLD_FORMAT_REASON = "old_format"
@@ -72,13 +78,15 @@ def _arg_number(records: RunRecords, name: str, default: float) -> float:
     return default if value is None else value
 
 
-def build_run_list_item(overview: RunOverview) -> dict:
+def build_run_list_item(overview: RunOverview, now: float) -> dict:
     """実行の一覧 (GET /api/runs) の 1 件を返す。
 
-    overview は run_records.load_run_overview の結果か、RunRecords.overview。
+    overview は run_records.load_run_overview の結果か、RunRecords.overview。now は今の時刻 (time.time() と
+    同じ時計の秒)。
     {"run": overview.name, "game": start の game, "model": start の model, "started": start の time,
      "recorded": {"dashboard": origin_mono が None でないか, "requests": has_requests_file},
-     "in_progress": False}。start の行が無いか、そのキーが無ければ game・model・started は None。
+     "in_progress": run_activity.is_in_progress(overview.run_log_mtime, overview.has_record_end, now)}。
+    start の行が無いか、そのキーが無ければ game・model・started は None。
     """
     start = overview.start or {}
     return {
@@ -94,11 +102,15 @@ def build_run_list_item(overview: RunOverview) -> dict:
     }
 
 
-def build_summary(records: RunRecords, advisor_runs: Sequence[AdvisorRun]) -> dict:
+def build_summary(
+    records: RunRecords, advisor_runs: Sequence[AdvisorRun], now: float
+) -> dict:
     """実行の summary (GET /api/runs/{run}) を返す。advisor_runs は advisor_runs.build_advisor_runs の結果。
 
+    now は今の時刻 (time.time() と同じ時計の秒。in_progress に使う)。
     キー:
         run・game・model・started   build_run_list_item と同じ
+        in_progress                 build_run_list_item(records.overview, now) の in_progress (started の次のキー)
         args                        records.args (無ければ None)
         thresholds                  {"advisor": args の threshold_advisor}。args の threshold_advisor が数
                                     (bool を除く) でなければ switch2_agent.action_decision.DEFAULT_THRESHOLD (0.5)
@@ -129,7 +141,7 @@ def build_summary(records: RunRecords, advisor_runs: Sequence[AdvisorRun]) -> di
     # 古い形の実行は advisor の実行を返さないため、t_end にも使わない
     runs = [] if old_format else list(advisor_runs)
     threshold, threshold_assumed = _advisor_threshold(records)
-    list_item = build_run_list_item(records.overview)
+    list_item = build_run_list_item(records.overview, now)
     return {
         "run": list_item["run"],
         "game": list_item["game"],
@@ -253,6 +265,95 @@ def _request_item(
     }
 
 
+# --- 区間 API の 1 件と summary の部品 (区間 API・summary と、実行中の記録を 1 行ずつ読む live_reader が使う) ---
+
+
+@dataclass(frozen=True)
+class RequestItemContext:
+    """要求の区間 API の 1 件を作るのに使う、実行ごとに 1 回だけ求める値。
+
+    question_list  question_values.header_question_list(header)
+    questions      question_values.questions_for_decision(question_list)
+    threshold      advisor の問いのしきい値 (build_summary の thresholds の advisor の値)
+    """
+
+    question_list: list[dict]
+    questions: list[Question]
+    threshold: float
+
+
+def request_item_context(header: dict | None, args: dict | None) -> RequestItemContext:
+    """requests.jsonl の header と start の args から、要求の 1 件を作るのに使う値を返す。
+
+    threshold は args の threshold_advisor が数 (bool を除く) ならその値、そうでなければ
+    switch2_agent.action_decision.DEFAULT_THRESHOLD (build_summary の thresholds と同じ規則)。
+    """
+    raise NotImplementedError
+
+
+def build_request_item(request: dict, context: RequestItemContext) -> dict:
+    """要求の行 request の、要求の区間 API (build_request_items) の 1 件の項目を返す。
+
+    build_request_items の items の 1 件と同じキーと値 (adopted_count は
+    question_values.request_adopted(context.questions, request, context.threshold) から求める)。
+    """
+    raise NotImplementedError
+
+
+def build_frame_item(frame: dict, origin_mono: float) -> dict:
+    """frames.jsonl の行 frame の、フレームの判定の区間 API (build_frame_items) の 1 件の項目を返す。
+
+    経過秒は elapsed_time.mono_elapsed(値, origin_mono)。キーと値は build_frame_items の items の 1 件と同じ。
+    """
+    raise NotImplementedError
+
+
+def build_pad_item(report: dict, origin_mono: float) -> dict:
+    """pad.jsonl の行 report の、送ったレポートの区間 API (build_pad_items) の 1 件の項目を返す。
+
+    経過秒は elapsed_time.mono_elapsed(mono, origin_mono)。キーと値は build_pad_items の items の 1 件と同じ。
+    """
+    raise NotImplementedError
+
+
+def build_event_item(event: RunEvent) -> dict | None:
+    """run.jsonl の 1 行 event の、出来事の区間 API (build_event_items) の 1 件の項目を返す。
+
+    event の record の event が "decision" の行と、t が None の行は None を返す (区間 API に入れない行)。
+    それ以外は build_event_items の items の 1 件と同じ {"t": t, "event": その行の event, そのほかのキーと値}。
+    """
+    raise NotImplementedError
+
+
+def summary_advisor_run(run: AdvisorRun) -> dict:
+    """advisor の実行 run の、summary の advisor_runs の 1 件を返す。
+
+    {"name", "role", "request", "t_start", "t_end", "returncode", "denials", "result"} (AdvisorRun の同名の値)。
+    """
+    raise NotImplementedError
+
+
+def summary_note_version(version: NoteVersion) -> dict:
+    """ゲームの情報の版 version の、summary の note_versions の 1 件を返す。
+
+    {"version", "t", "request", "initial", "changed"} (NoteVersion の同名の値)。
+    """
+    raise NotImplementedError
+
+
+def decide_s_median(run_events: Sequence[RunEvent]) -> float | None:
+    """run.jsonl の行 run_events のうち event が "decision" の行の decide_s (数のもの) の中央値を返す。
+
+    statistics.median で求める。数の decide_s が 1 つも無ければ None (summary の decide_s_median と同じ規則)。
+    """
+    raise NotImplementedError
+
+
+def max_elapsed(values: Iterable[float | None]) -> float | None:
+    """経過秒 values のうち None を除いた最大値を返す。None でない値が 1 つも無ければ None。"""
+    raise NotImplementedError
+
+
 def build_request_items(
     records: RunRecords, t_from: float | None, t_to: float | None
 ) -> dict:
@@ -268,6 +369,8 @@ def build_request_items(
          "adopted_count": question_values.adopted_count(question_values.request_adopted(...))}
     questions の一覧は question_values.header_question_list(records.header)、adopted の判定に渡す問いは
     その questions_for_decision、しきい値は build_summary の thresholds の advisor の値。
+    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["requests"] (requests.jsonl の、読んだ最後の
+    完全な行の次のバイトの位置。t_from・t_to によらない) を足す。
     """
     if not records.has_requests_file:
         return _unavailable()
@@ -379,6 +482,7 @@ def build_frame_items(
          "ref", "event", "thumb"}
     経過秒は elapsed_time.mono_elapsed(値, origin_mono)。event が object なら、その candidate_mono を
     経過秒の candidate_t に置き換えた辞書 (ほかのキーはそのまま) にする。
+    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["frames"] (t_from・t_to によらない) を足す。
     """
     origin_mono = records.origin_mono
     if records.frames is None or origin_mono is None:
@@ -412,6 +516,7 @@ def build_pad_items(
     pad が None か origin_mono が None なら {"available": False, "items": []}。
     それ以外は {"available": True, "items": [...]}。items は経過秒 t が区間に入る pad の行 (ファイルの順) の
     {"t": mono の経過秒, "source", "state", "ok", "error"}。
+    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["pad"] (t_from・t_to によらない) を足す。
     """
     origin_mono = records.origin_mono
     if records.pad is None or origin_mono is None:
@@ -442,6 +547,8 @@ def build_event_items(
     それ以外は {"available": True, "items": [...]}。items は run_events のうち、event が "decision" でなく、
     t が数で区間に入る行 (ファイルの順) の {"t": t, "event": その行の event, そのほかのキーと値}。
     壁時計の time のキーは入れない。行に t のキーがあっても、経過秒の t で置き換える。
+    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["run"] (run.jsonl の位置。t_from・t_to に
+    よらない) を足す。
     """
     # run.jsonl が無い実行は、start の行も無い
     if records.start is None:

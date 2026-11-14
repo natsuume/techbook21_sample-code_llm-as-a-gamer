@@ -79,13 +79,13 @@ const FrameContent = ({ view, index, frame }: FrameContentProps) => {
             icon="prev"
             label="前のフレーム"
             disabledReason={index > 0 ? null : "最初のフレームを選んでいる"}
-            onClick={() => dispatch({ type: "selectFrame", index: index - 1 })}
+            onClick={() => dispatch({ type: "selectFrame", index: index - 1, via: "navigate" })}
           />
           <IconButton
             icon="next"
             label="次のフレーム"
             disabledReason={index < count - 1 ? null : "最後のフレームを選んでいる"}
-            onClick={() => dispatch({ type: "selectFrame", index: index + 1 })}
+            onClick={() => dispatch({ type: "selectFrame", index: index + 1, via: "navigate" })}
           />
         </div>
       </div>
@@ -156,7 +156,7 @@ const NeighborFrame = ({ view, neighbor, current }: NeighborFrameProps) => {
         className={styles.neighborButton}
         aria-current={current ? "true" : undefined}
         aria-label={`t=${time} 秒のフレーム`}
-        onClick={() => dispatch({ type: "selectFrame", index: neighbor })}
+        onClick={() => dispatch({ type: "selectFrame", index: neighbor, via: "navigate" })}
       >
         <DetailImage key={src} src={src} alt="" />
         <span className={styles.neighborTime}>{time}</span>
@@ -197,7 +197,7 @@ const FrameRequests = ({ view, frame }: FrameRequestsProps) => {
         <Button
           key={n}
           aria-label={`要求 #${n} を要求のタブで開く`}
-          onClick={() => dispatch({ type: "selectRequest", n })}
+          onClick={() => dispatch({ type: "selectRequest", n, via: "open" })}
         >
           #{n}
         </Button>

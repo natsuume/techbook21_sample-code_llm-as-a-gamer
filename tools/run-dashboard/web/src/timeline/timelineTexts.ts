@@ -5,6 +5,7 @@ import type { EventMark } from "../events/eventMarks.ts";
 import { formatProbability } from "../format/formatProbability.ts";
 import { formatSeconds } from "../format/formatValues.ts";
 import type { FrameRangeSummary } from "../frames/frameMetrics.ts";
+import type { PendingSpan } from "../live/pendingRequest.ts";
 import type { NoteRewrite } from "../notes/noteHistory.ts";
 import type { AdvisorSpan } from "./advisorRows.ts";
 import { BIN_SECONDS, type BinCell } from "./halfSecondBins.ts";
@@ -87,6 +88,14 @@ export const describeRequestBar = (request: RequestItem): string => {
       ? ` · advisor を呼んだ (${request.advisor_accepted.join(", ")})`
       : "";
   return `要求 #${request.n} · ${time} · ${request.result} · ${request.action ?? "操作なし"}${advisor}`;
+};
+
+/**
+ * 応答待ちの棒の説明 "応答待ち · t=<start>–<end> 秒 (最後の要求の受信から、次の要求の記録が届くまで)"
+ * (秒は小数 2 桁)
+ */
+export const describePendingSpan = (_span: PendingSpan): string => {
+  throw new Error("not implemented");
 };
 
 /** ボタンの入力の区間の説明 "<押下|短押し> <ボタン> · t=<start>–<end>" */
