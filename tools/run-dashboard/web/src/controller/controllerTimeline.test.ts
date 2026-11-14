@@ -207,8 +207,8 @@ describe("controllerAtFromPad", () => {
 
   it("間に tap_start と別のボタンの tap_release を挟んでも、ボタンごとに消える行で tap を決める", () => {
     const rows = [
-      padRow(1, "apply", "A+C"),
-      padRow(1.1, "tap_start", "A+B+C"),
+      padRow(1, "apply", "A+X"),
+      padRow(1.1, "tap_start", "A+B+X"),
       padRow(1.12, "tap_release", "A+B"),
       padRow(1.22, "tap_release", "A"),
       padRow(2, "neutral", "none"),
@@ -216,7 +216,7 @@ describe("controllerAtFromPad", () => {
     expect(sortButtons(controllerAtFromPad(rows, 1.05))).toEqual({
       buttons: [
         { name: "A", kind: "hold" },
-        { name: "C", kind: "tap" },
+        { name: "X", kind: "tap" },
       ],
       sticks: {},
       source: "pad",
@@ -225,7 +225,7 @@ describe("controllerAtFromPad", () => {
       buttons: [
         { name: "A", kind: "hold" },
         { name: "B", kind: "tap" },
-        { name: "C", kind: "tap" },
+        { name: "X", kind: "tap" },
       ],
       sticks: {},
       source: "pad",
