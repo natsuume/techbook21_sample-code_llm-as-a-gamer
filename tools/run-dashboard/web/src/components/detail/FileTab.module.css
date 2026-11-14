@@ -72,6 +72,20 @@
   font-weight: 600;
 }
 
+/* display: flex にすると summary の標準の開閉の印が出ないため、印を前に出す */
+.groupSummary::-webkit-details-marker {
+  display: none;
+}
+
+.groupSummary::before {
+  content: "▸";
+  flex: none;
+}
+
+.group[open] > .groupSummary::before {
+  content: "▾";
+}
+
 .groupName {
   font-family: var(--font-data);
   font-weight: 500;

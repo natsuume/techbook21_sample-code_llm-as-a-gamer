@@ -114,7 +114,8 @@
   padding: var(--space-layout) var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius-button);
-  scroll-margin-top: var(--space-4);
+  /* カードへスクロールしたとき、上の役割の見出しも見えるようにする */
+  scroll-margin-top: 2.5rem;
 }
 
 .selectedCard {

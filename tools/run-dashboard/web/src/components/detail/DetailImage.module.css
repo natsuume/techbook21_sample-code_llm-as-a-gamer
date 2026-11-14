@@ -28,5 +28,7 @@
   padding: var(--space-1);
   color: var(--muted);
   font-size: var(--text-sm);
+  /* 小さな枠でも「画像なし」を語の途中で折り返さない */
+  word-break: keep-all;
   text-align: center;
 }
