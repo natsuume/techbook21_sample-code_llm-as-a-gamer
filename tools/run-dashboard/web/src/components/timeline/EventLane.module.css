@@ -1,0 +1,49 @@
+/*
+ * イベントの印。種類を形と色で示す: Decision Model の失敗は danger の丸、キャプチャーの停止は warn-text の四角、
+ * ブリッジの復旧待ちは hot の枠の区間 (閉じる行の無い区間は破線)
+ */
+.mark {
+  position: absolute;
+}
+
+.decision_error,
+.capture_stopped {
+  top: 50%;
+  width: 0.5625rem;
+  height: 0.5625rem;
+  transform: translate(-50%, -50%);
+  z-index: 1;
+}
+
+.decision_error {
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.capture_stopped {
+  background: var(--warn-text);
+}
+
+.bridge_wait {
+  top: 0.1875rem;
+  bottom: 0.1875rem;
+  min-width: 2px;
+  border: 1px solid var(--hot);
+  border-radius: var(--radius-small);
+  background: var(--hot-soft);
+}
+
+.open {
+  border-style: dashed;
+}
+
+.empty {
+  position: absolute;
+  top: 50%;
+  left: var(--space-3);
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  white-space: nowrap;
+}

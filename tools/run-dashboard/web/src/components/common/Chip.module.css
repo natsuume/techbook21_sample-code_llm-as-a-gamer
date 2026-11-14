@@ -1,0 +1,45 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.125rem 0.5625rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+button.chip {
+  min-height: var(--chip-height);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button.chip:hover {
+  border-color: var(--accent);
+}
+
+/* tone の default は .chip の見た目のまま (class を足さない) */
+.live {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+/* 実行中は破線の枠と warn の文字 (文言にも「実行中」を入れる) */
+.running {
+  border-style: dashed;
+  border-color: var(--hot);
+  color: var(--warn-text);
+}
+
+/* 受け持ちの advisor 以外は danger の枠と文字 (文言にも「advisor 以外」を入れる) */
+.external {
+  border-color: var(--danger);
+  color: var(--danger);
+}

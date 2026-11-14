@@ -1,0 +1,41 @@
+/*
+ * 上の段。映像 (幅 18.75rem)・コントローラー入力 (幅 15.625rem)・選んでいる要求 (残りの幅) を横に並べる。
+ * 幅が足りないときは、選んでいる要求の最小の幅 (16rem) を残して、映像 (最小 10rem) とコントローラー入力
+ * (最小 11rem) を縮める
+ */
+.row {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  gap: var(--space-layout);
+}
+
+.video {
+  flex: 0 1 18.75rem;
+  min-width: 10rem;
+}
+
+.controller {
+  flex: 0 1 15.625rem;
+  min-width: 11rem;
+}
+
+.request {
+  flex: 1 1 17.5rem;
+  min-width: 16rem;
+}
+
+/* 幅 1024px 未満か高さ 620px 未満 (App.module.css と同じ条件) では折り返す */
+@media (max-width: 1023.98px), (max-height: 619.98px) {
+  .row {
+    flex-wrap: wrap;
+  }
+
+  .video {
+    flex: 1 1 18.75rem;
+  }
+
+  .controller {
+    flex: 1 1 15.625rem;
+  }
+}

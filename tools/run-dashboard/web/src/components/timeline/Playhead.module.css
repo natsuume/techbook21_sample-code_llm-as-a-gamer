@@ -1,0 +1,34 @@
+/* 再生位置の縦線。カーソルの操作を下のレーンに通す (pointer-events: none) */
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.right,
+.left {
+  position: absolute;
+  top: -1px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-bar);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.right {
+  left: var(--space-1);
+}
+
+.left {
+  right: var(--space-1);
+}

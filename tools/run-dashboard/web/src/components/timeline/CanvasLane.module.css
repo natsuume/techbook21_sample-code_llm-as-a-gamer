@@ -1,0 +1,38 @@
+/* canvas で描くレーン (操作に採った数の帯・問いの値のヒートマップ)。canvas を押せる領域 (button) で包む */
+.area {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-bar);
+  background: transparent;
+  cursor: pointer;
+}
+
+.area canvas {
+  display: block;
+  width: 100%;
+}
+
+/* 帯の高さ (描画の領域) */
+.strip {
+  height: 0.75rem;
+  border-radius: var(--radius-bar);
+}
+
+/* ヒートマップの見出しの列。まとまりの名前を、まとまりの行の上端に合わせて置く */
+.groups {
+  position: relative;
+  width: 100%;
+}
+
+.groupLabel {
+  position: absolute;
+  left: 0;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  line-height: 1;
+  white-space: nowrap;
+}

@@ -1,0 +1,51 @@
+.facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.1875rem var(--space-4);
+  font-size: var(--text-md);
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 数と単位を 1 つのまとまりとして折り返さない */
+.nowrap {
+  white-space: nowrap;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.subheading {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+/* 確率の行 4 行 (行の高さ 1.125rem、行の間 0.3125rem) の高さを予約する */
+.advisorRows {
+  min-height: 5.4375rem;
+}
+
+/* 問いの値の行 3 行の高さを予約する */
+.topRows {
+  min-height: 4rem;
+}

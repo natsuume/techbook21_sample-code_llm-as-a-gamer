@@ -1,0 +1,45 @@
+/* 開いているフレームの縮小画像 (ペインの幅) */
+.mainImage {
+  scroll-margin: var(--space-4);
+}
+
+/* 前後の小さな画像 (7 列)。空きの枠も列を取る */
+.neighbors {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--space-1);
+}
+
+.neighborButton {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius-media);
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.neighborButton:hover {
+  border-color: var(--line-strong);
+}
+
+/* 選んでいるフレームは accent の枠と太字で示す */
+.neighborButton[aria-current="true"] {
+  border-color: var(--accent);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.neighborTime {
+  overflow-wrap: anywhere;
+}

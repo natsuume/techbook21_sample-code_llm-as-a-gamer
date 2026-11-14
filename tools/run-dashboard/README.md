@@ -1,6 +1,6 @@
-# run-dashboard: 第4章の試行の記録を読む API サーバー
+# run-dashboard: 第4章の試行の記録を見るダッシュボード
 
-第4章のサンプル (`switch2-agent`) が書いた試行の記録 (`ch04_techniques/runs/<YYYYmmdd-HHMMSS>/`) を読み、画面に JSON で渡す読み取り専用のサーバーです。このディレクトリーの uv プロジェクトにあるパッケージ [`run_dashboard`](./src/run_dashboard/) を、コマンド `run-dashboard` で実行します。
+第4章のサンプル (`switch2-agent`) が書いた試行の記録 (`ch04_techniques/runs/<YYYYmmdd-HHMMSS>/`) を、終わった実行ごとに再生して見る読み取り専用のダッシュボードです。記録を読んで JSON で返す API サーバーと、[`web/`](./web/) の画面 (Vite + React + TypeScript) からなります。サーバーは、このディレクトリーの uv プロジェクトにあるパッケージ [`run_dashboard`](./src/run_dashboard/) を、コマンド `run-dashboard` で実行します。
 
 ## 読む記録
 
@@ -18,6 +18,7 @@
 
 - [uv](https://docs.astral.sh/uv/) と Python 3.12 以上
 - このリポジトリーの第4章のパッケージ (`ch04_techniques`) と第2章のパッケージ (`ch02_setup`)。どちらも path 依存で使うため、このディレクトリーをリポジトリーの中から動かさずに使う
+- 画面をビルドするときは、Node.js (22.12 以上の 22 系、24 系、または 26 以上) と npm。Vite と Vitest が求める版で、Node.js 24.22 で動作を確かめた
 
 ## セットアップ
 
@@ -45,7 +46,17 @@ uv run run-dashboard
 
 ## 画面
 
-画面はこのサーバーには含まれません。このディレクトリーの `web/dist/` に画面のビルドの出力 (`index.html` など) があれば、`/` で配信します。`web/dist/` が無ければ API だけを動かし、`/` では画面のビルドの手順を書いた文 (text/plain) を返します。
+画面は `web/` で依存パッケージを入れてビルドし、出力 (`index.html` など) を `web/dist/` に置きます。サーバーは `web/dist/` があれば `/` で画面を配信し、無ければ API だけを動かして、`/` では画面のビルドの手順を書いた文 (text/plain) を返します。
+
+```bash
+cd web
+npm ci
+npm run build
+```
+
+ビルドの後に `uv run run-dashboard` を起動し、ブラウザーで `http://127.0.0.1:8765/` を開きます。上部のバーで実行を選ぶと、その実行を最初の要求から表示します。要求の記録が無い実行 (`requests.jsonl` の無い実行と、記録の形が今の第4章と違う実行) は、実行の終わりの時点を表示します。
+
+画面は、選んだ実行を終わった実行として 1 回だけ読みます。実行中の実行を選ぶと、選んだ時点までの記録を表示し、その後に書き足された分は表示しません。書き足された分を読むには、ページを読み込み直します。
 
 ## API の一覧
 
@@ -93,6 +104,18 @@ uv run ruff format   # コードを整形する
 uv run ruff check    # 静的解析を行う
 uv run pytest        # テストを実行する (合成した記録を使い、実際の runs/ は読みません)
 ```
+
+画面のコマンドは `web` ディレクトリーで実行します。
+
+```bash
+npm run dev      # 開発用のサーバーを起動する (既定は http://localhost:5173/。使用中なら別のポートになるので、表示された URL を開く。/api の要求は 127.0.0.1:8765 へ中継する)
+npm test         # 純粋な関数 (区間・集計・差分・操作の文の解釈など) のテストを実行する
+npm run check    # Biome で整形と静的解析を確かめる
+npm run format   # Biome で整形する
+npm run build    # 型検査をして web/dist/ に出力する
+```
+
+`npm run dev` を使うときは、別の端末で `uv run run-dashboard` を起動しておきます。
 
 ## 注意事項
 

@@ -1,0 +1,35 @@
+/* 骨組みのタイムライン。並び方は Timeline.module.css と同じ */
+.scroll {
+  flex: none;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.lanes {
+  min-width: 42.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* トラックの骨組みは、見出しの残りの幅を埋める */
+.track {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 値の 1 行と同じ高さを予約する (HoverReadout.module.css と同じ大きさ) */
+.readout {
+  flex: none;
+  margin: 0;
+  min-height: calc(1.5em + 2 * var(--space-1));
+  padding-block: var(--space-1);
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,50 @@
+/* 目盛りのレーン。下端の線の上に、目盛りの短い縦線とラベルを置く */
+.axis {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 1.125rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding-bottom: var(--space-1);
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+/* 目盛りの位置の短い縦線 (ラベルの寄せ方によらず、目盛りの時刻に置く) */
+.tick::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: var(--space-1);
+  background: var(--line-strong);
+}
+
+.center {
+  transform: translateX(-50%);
+}
+
+.center::after {
+  left: 50%;
+}
+
+.start::after {
+  left: 0;
+}
+
+.end {
+  transform: translateX(-100%);
+}
+
+.end::after {
+  right: 0;
+}

@@ -1,0 +1,25 @@
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.select {
+  min-height: var(--control-height);
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.select:hover {
+  border-color: var(--accent);
+}

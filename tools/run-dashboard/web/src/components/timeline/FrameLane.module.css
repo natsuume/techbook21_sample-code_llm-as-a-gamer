@@ -1,0 +1,63 @@
+/* 意味のあるフレームのレーン。まとめの行の下に、折れ線 2 枚を並べる */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* 見出しの列の、線の見本と名前 (1 行に 1 つ) */
+.legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.swatchSharpness,
+.swatchRef,
+.swatchDiff,
+.swatchThreshold {
+  display: inline-block;
+  flex: none;
+  width: 0.875rem;
+  height: 0;
+  border-top: 2px solid var(--accent);
+}
+
+.swatchRef,
+.swatchThreshold {
+  border-top-style: dashed;
+  border-top-color: var(--hot);
+}
+
+.swatchDiff {
+  border-top-color: var(--series-2);
+}
+
+/* 折れ線。鮮明度は accent、谷とみなす値は hot の破線、差分は series-2、似ているとみなす上限は hot の破線 */
+.lineSharpness,
+.lineRef,
+.lineDiff,
+.lineThreshold {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.lineSharpness {
+  stroke: var(--accent);
+}
+
+.lineRef {
+  stroke: var(--hot);
+  stroke-dasharray: 5 4;
+}
+
+.lineDiff {
+  stroke: var(--series-2);
+  stroke-width: 1.2;
+}
+
+.lineThreshold {
+  stroke: var(--hot);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}

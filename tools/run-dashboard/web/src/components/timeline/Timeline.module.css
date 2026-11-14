@@ -1,0 +1,22 @@
+/*
+ * タイムラインの区画の中身。レーンは幅 42.5rem 未満で横にスクロールする (区画の枠は縦のスクロールを受け持つ)。
+ * 区画の中身は flex の列の子のため、レーンを包む要素は縮めない (flex: none)
+ */
+.scroll {
+  flex: none;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* 再生位置の縦線を重ねるため、レーンの並びを position: relative にする */
+.lanes {
+  position: relative;
+  min-width: 42.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.range {
+  font-family: var(--font-data);
+}

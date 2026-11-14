@@ -1,0 +1,88 @@
+/* 載せた画像の縮小画像の grid。幅に合わせて列の数を変える */
+.thumbs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.375rem, 1fr));
+  gap: var(--space-3);
+}
+
+.figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1875rem;
+  min-width: 0;
+}
+
+.thumbButton {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: none;
+  cursor: pointer;
+}
+
+.thumbButton:hover > span {
+  border-color: var(--accent);
+}
+
+.caption {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.captionMeta {
+  display: block;
+  color: var(--muted);
+}
+
+/* 所要時間の積み上げ棒。区間の色は 選択 muted・符号化 tap・判断 accent・操作の送信 hot */
+.timingBar {
+  position: relative;
+  height: 0.5625rem;
+  overflow: hidden;
+  border-radius: var(--radius-bar);
+  background: var(--surface-2);
+}
+
+.timingSegment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.select_s {
+  background: var(--muted);
+}
+
+.encode_s {
+  background: var(--tap);
+}
+
+.decide_s {
+  background: var(--accent);
+}
+
+.apply_s {
+  background: var(--hot);
+}
+
+/* 所要時間の表の 1 行 (dt と dd のまとまり)。表の grid の列にそのまま並べる */
+.timingRow {
+  display: contents;
+}
+
+/* 所要時間の表の、区間の色の見本 */
+.swatch {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.5rem;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-bar);
+  vertical-align: middle;
+}

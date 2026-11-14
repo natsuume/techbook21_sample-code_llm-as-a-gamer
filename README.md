@@ -41,10 +41,11 @@ ch04_techniques/         第4章: 型付きの判断を返すモデルと adviso
   .claude/skills/        advisor がゲームの情報を書き込む手順 (Skill)
   src/switch2_agent/     エージェントのパッケージ
   tests/                 パッケージのテスト
-tools/run-dashboard/     第4章の試行の記録を読み、画面に渡す読み取り専用の API サーバーの uv プロジェクト
+tools/run-dashboard/     第4章の試行の記録を見る読み取り専用のダッシュボード (API サーバーの uv プロジェクトと画面)
   pyproject.toml
   src/run_dashboard/     サーバーのパッケージ
   tests/                 パッケージのテスト
+  web/                   画面 (Vite + React + TypeScript)
 ```
 
 ### 章ディレクトリー
@@ -59,7 +60,7 @@ tools/run-dashboard/     第4章の試行の記録を読み、画面に渡す読
 
 | ディレクトリー | 内容 |
 |---|---|
-| [`tools/run-dashboard`](./tools/run-dashboard/) | 第4章の試行の記録を読み、画面に渡す読み取り専用の API サーバー |
+| [`tools/run-dashboard`](./tools/run-dashboard/) | 第4章の試行の記録を、終わった実行ごとに再生して見る読み取り専用のダッシュボード (API サーバーと画面) |
 
 ### パッケージ `ch02_setup/src/switch2_remote`
 

@@ -1,0 +1,57 @@
+/* タイムラインのレーン 1 行。左に見出し (幅 --label-w)、右にトラック */
+.lane {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.top {
+  align-items: flex-start;
+}
+
+.label {
+  width: var(--label-w);
+  flex: none;
+  padding-right: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-md);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.sub {
+  padding-left: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+/* トラックは描画の領域のため、高さを決めて置く (中に文字の箱は置かない) */
+.track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--radius-small);
+  background: var(--surface-2);
+}
+
+.bar {
+  height: 1.625rem;
+}
+
+.input {
+  height: 0.625rem;
+  border-radius: var(--radius-bar);
+}
+
+.advisor {
+  height: 1.5rem;
+}
+
+.event {
+  height: 1.25rem;
+}
+
+.notice {
+  flex: 1 1 auto;
+  min-width: 0;
+}

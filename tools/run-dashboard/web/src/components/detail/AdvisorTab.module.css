@@ -1,0 +1,56 @@
+/* 途中のツール呼び出しの一覧。行ごとに 時刻・種類・ツール・要約 を並べ、幅が足りなければ折り返す */
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1875rem;
+  font-size: var(--text-md);
+}
+
+.step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-3);
+  min-width: 0;
+  padding: 0.125rem var(--space-2);
+  border-left: 2px solid var(--line);
+}
+
+.stepTime {
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.stepKind {
+  font-weight: 600;
+}
+
+.stepTool {
+  font-family: var(--font-data);
+}
+
+.stepSummary {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-family: var(--font-data);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 拒否されたツール呼び出しは danger の線と文字 (種類の文言「拒否」でも示す) */
+.denied {
+  border-left-color: var(--danger);
+}
+
+.denied .stepKind {
+  color: var(--danger);
+}
+
+/* advisor 以外の書き換えのカードは danger の枠 (カードの枠の色より強い指定にする) */
+section.externalCard {
+  border-color: var(--danger);
+}

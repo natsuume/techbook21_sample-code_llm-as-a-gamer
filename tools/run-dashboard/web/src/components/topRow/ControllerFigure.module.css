@@ -1,0 +1,61 @@
+.figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  max-width: 14.75rem;
+  height: auto;
+}
+
+.key {
+  fill: var(--surface-2);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+/* 短押しは tap の色、押下は accent の色 (図の下の文でも区別する) */
+.tap {
+  fill: var(--tap);
+  stroke: var(--tap);
+}
+
+.hold {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+
+.keyText {
+  fill: var(--muted);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.onTap {
+  fill: var(--on-tap);
+}
+
+.onHold {
+  fill: var(--on-accent);
+}
+
+.stickDot {
+  fill: var(--muted);
+}
+
+.stickDotOn {
+  fill: var(--accent);
+}
+
+.caption {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
