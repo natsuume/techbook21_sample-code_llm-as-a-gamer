@@ -5,7 +5,8 @@
 新しい基準にし、その時刻を「画面が変わった時刻」にする。基準と同じに見える画面が続いている間は、変わった時刻を保つ。
 実機の記録 (2026-11-14 の実行) では、行き詰まっていた場面の止まっている画面の差は 0.8 以下 (時間の表示などの
 小さな変化を含む)、歩いたりスクロールしたりしている画面の差は 4 以上だったため、しきい値の既定値を 2.0 にしている。
-タイトル画面などの動きのある画面では、止まっていても差が 1.2〜2.1 になった区間がある。
+敵が動くゲームの画面 (何も押さなかった区間) では、主人公が止まっていても差が 1.2〜2.1 になった区間がある
+(画面全体の変化を見るため、主人公が動いたかどうかは分からない)。
 feed はキャプチャーのスレッド、static_since は Pipeline のスレッドから呼ぶため、読み書きは 1 つのロックの中で行う。
 """
 
@@ -63,14 +64,15 @@ class ScreenChangeTracker:
 def format_screen_change(static_since: float | None, now: float, origin: float) -> str:
     """画面の変化の節の文を返す。static_since が None (まだフレームが無い) なら空文字を返す。
 
-    1 行目は見出し `## 画面の変化`。now - static_since が STATIC_REPORT_MIN_S 未満なら
-    `- 最新の画面は、直前まで変わっていた (<now - static_since> 秒前までの画面と違う)`、
+    1 行目は見出し `## 画面の変化`。経過秒 elapsed = max(0, now - static_since) が STATIC_REPORT_MIN_S 未満なら
+    `- 最新の画面は、直前まで変わっていた (<elapsed> 秒前までの画面と違う)`、
     そうでなければ `- 最新の画面は、<format_moment(static_since)> から、ほぼ変わっていない (縮小した画像どうしの差がほとんど無い)`
-    を書く (秒は小数第 1 位まで)。
+    を書く (秒は小数第 1 位まで)。Pipeline が now を取った後に、キャプチャーのスレッドが新しいフレームを渡すと、
+    static_since が now より後になることがあるため、elapsed を 0 で下に切る。
     """
     if static_since is None:
         return ""
-    elapsed = now - static_since
+    elapsed = max(0.0, now - static_since)
     if elapsed < STATIC_REPORT_MIN_S:
         body = (
             f"- 最新の画面は、直前まで変わっていた ({elapsed:.1f} 秒前までの画面と違う)"

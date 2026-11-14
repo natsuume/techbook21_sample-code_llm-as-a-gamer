@@ -57,6 +57,13 @@ def test_format_screen_change_reports_recent_change():
     )
 
 
+def test_format_screen_change_clamps_change_after_request_time_to_zero():
+    # 要求の時刻 (10.0) の後に届いたフレーム (10.1) で画面が変わった
+    assert format_screen_change(10.1, now=10.0, origin=0.0) == (
+        "## 画面の変化\n- 最新の画面は、直前まで変わっていた (0.0 秒前までの画面と違う)"
+    )
+
+
 def test_format_screen_change_reports_static_screen():
     assert format_screen_change(210.4, now=310.2, origin=10.0) == (
         "## 画面の変化\n"
