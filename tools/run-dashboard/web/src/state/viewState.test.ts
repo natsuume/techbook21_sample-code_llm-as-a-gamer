@@ -352,6 +352,43 @@ describe("viewReducer の選ぶ操作とライブの追従", () => {
   );
 });
 
+describe("viewReducer の followLatest", () => {
+  it("追従中なら、再生位置の要求 selectedN を最新の要求にする (詳細ペインの要求とタブは変えない)", () => {
+    expect(viewReducer(followState, { type: "followLatest", latestN: 20 })).toEqual({
+      ...followState,
+      selectedN: 20,
+    });
+  });
+
+  it("追従中で要求がまだ無ければ、selectedN を null にする", () => {
+    expect(viewReducer(followState, { type: "followLatest", latestN: null })).toEqual({
+      ...followState,
+      selectedN: null,
+    });
+  });
+
+  it.each([
+    ["一時停止中", pausedState],
+    ["終わった実行の表示", replayState],
+    ["end を受け取った後", endedState],
+  ] as const)("%s なら変えない", (_label, state) => {
+    expect(viewReducer(state, { type: "followLatest", latestN: 20 })).toEqual(state);
+  });
+
+  it.each(selectOperations)(
+    "最新の要求を写した後に追従中の %s を navigate で選ぶと、一時停止中の再生位置は最新の要求のまま",
+    (_name, action, changed) => {
+      const followed = viewReducer(followState, { type: "followLatest", latestN: 20 });
+      expect(viewReducer(followed, action("navigate"))).toEqual({
+        ...followState,
+        ...changed,
+        selectedN: 20,
+        follow: false,
+      });
+    },
+  );
+});
+
 describe("viewReducer の resumeFollow", () => {
   it("一時停止中なら追従を再開し、選んでいた値とタブは変えない", () => {
     expect(viewReducer(pausedState, { type: "resumeFollow" })).toEqual({

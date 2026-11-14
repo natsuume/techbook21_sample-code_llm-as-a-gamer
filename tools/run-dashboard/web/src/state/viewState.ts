@@ -51,11 +51,12 @@ export type ViewState = {
  * 状態を変える操作。
  * - selectRun の inProgress は、実行の一覧のその実行の in_progress
  * - via は選ぶ操作の出どころ (SelectVia)
- * - setDisplay・liveEnded の latestN は、表示中のデータの最後の要求の n (latestRequestN)
+ * - followLatest・setDisplay・liveEnded の latestN は、表示中のデータの最後の要求の n (latestRequestN)
  */
 export type ViewAction =
   | { type: "selectRun"; run: string; inProgress: boolean }
   | { type: "runLoaded"; firstN: number | null }
+  | { type: "followLatest"; latestN: number | null }
   | { type: "selectRequest"; n: number; question?: string; via: SelectVia }
   | { type: "selectFrame"; index: number; via: SelectVia }
   | { type: "selectAdvisor"; name: string; via: SelectVia }
@@ -97,6 +98,8 @@ export const initialViewState: ViewState = {
  *   そうでなければ display replay・liveSession none
  * - runLoaded: selectedN = firstN。replay なら detailN = firstN、live なら detailN = null (null の間、詳細ペインの
  *   要求のタブは最新の要求を追う)。firstN が null なら width を "all"、そうでなければ 30
+ * - followLatest: 追従中なら selectedN = latestN (null を含む)。それ以外は変えない。追従中の再生位置の要求を
+ *   selectedN に写しておき、要求以外を選んで一時停止にしたときに、再生位置が古い要求に戻らないようにする
  * - selectRequest: selectedN と detailN を n、focusQuestion を question (無ければ null)、tab を "request"。
  *   追従中の navigate は follow も false (一時停止) にする。追従中の open は detailN・focusQuestion・tab だけを
  *   変える (selectedN と follow は変えない)
@@ -137,6 +140,7 @@ export const viewReducer = (state: ViewState, action: ViewAction): ViewState => 
       return { ...state, advisorName: action.name, tab: "advisor" };
     case "selectFile":
       return { ...state, file: action.file, tab: "file" };
+    case "followLatest":
     case "resumeFollow":
     case "setDisplay":
     case "liveEnded":
