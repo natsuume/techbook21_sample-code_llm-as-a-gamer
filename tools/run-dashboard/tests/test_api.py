@@ -783,12 +783,31 @@ def test_events_without_start_line_are_unavailable(runs):
     )
     client = make_client(runs.runs_dir, None)
     body = get_json(client, "/api/runs/20261101-000000/events")
-    # start の行が無くても run.jsonl は読むので、cursor はその大きさ
-    assert body == {
-        "available": False,
-        "items": [],
-        "cursor": file_size(run_dir / "run.jsonl"),
-    }
+    # 使えない区間 API の cursor は 0 (start の行を読む前の行を、ライブが start の行を読んだときに送れるように)
+    assert body == {"available": False, "items": [], "cursor": 0}
+
+
+def test_frames_and_pad_without_origin_mono_have_cursor_zero(runs):
+    # start の行に origin_mono が無ければ frames・pad は使えず、cursor は 0 (ファイルを読んでいても)
+    run_dir = runs.dashboard.run_dir
+    path = run_dir / "run.jsonl"
+    lines = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if record["event"] == "start":
+            record.pop("origin_mono")
+        lines.append(json.dumps(record, ensure_ascii=False))
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    client = make_client(runs.runs_dir, None)
+    for kind in ("frames", "pad"):
+        assert get_json(client, f"/api/runs/{runs.dashboard.name}/{kind}") == {
+            "available": False,
+            "items": [],
+            "cursor": 0,
+        }, kind
+    # events は start の行があるので使え、cursor は run.jsonl の大きさ
+    events = get_json(client, f"/api/runs/{runs.dashboard.name}/events")
+    assert (events["available"], events["cursor"]) == (True, file_size(path))
 
 
 # --- 読んだ結果のキャッシュ ---

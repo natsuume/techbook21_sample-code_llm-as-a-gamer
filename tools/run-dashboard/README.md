@@ -8,7 +8,7 @@
 
 - どちらの引数も付けていない実行や、記録の形が今の第4章と違う実行も一覧に出し、無い記録は「記録なし」として返す
 - 問いの値や操作に採った数などの判定と、ゲームの情報の書式は、第4章のパッケージ `switch2_agent` の関数を呼んで求める (同じ計算を書き直さない)
-- JSON Lines の記録 (`*.jsonl`) は、大きさ・更新時刻・inode が前回読んだときと同じなら、そのときに読んだ結果を使う。変わっていれば、ファイルを丸ごと読み直す。読んだ結果は、最近使ったものを優先して、元のファイルの大きさの合計で 256 MiB まで (1,024 ファイルまで) 持つ。読んだ結果のメモリーは、元のファイルの大きさの数倍になることがある
+- JSON Lines の記録 (`*.jsonl`) は、大きさ・更新時刻・inode が前回読んだときと同じなら、そのときに読んだ結果を使う。inode が同じで大きくなったファイル (実行中に追記されて伸びた記録) は、前回読んだ位置から後だけを読み足す。それ以外で変わっていれば (別のファイルに置き換わった・小さくなったなど)、ファイルを丸ごと読み直す。記録のファイルは追記だけで伸びる前提のため、同じ inode のまま書き換えて大きくしたファイルは見分けられない。読んだ結果は、最近使ったものを優先して、元のファイルの大きさの合計で 256 MiB まで (1,024 ファイルまで) 持つ。読んだ結果のメモリーは、元のファイルの大きさの数倍になることがある
 - API ごとに、応答に必要なファイルだけを読む
 - 実行中の記録は、読んだ時点で書き終わっている行までを返す (改行で終わっていない最後の行は、書いている途中とみなして読まない)
 - 記録のファイル (`run.jsonl`・`requests.jsonl`・`result.json` など) がシンボリックリンクなら、たどらずに「記録なし」として扱う。advisor のディレクトリーがシンボリックリンクなら、advisor の実行の一覧に入れない (実行のディレクトリーの外のファイルを返さないため。第4章はシンボリックリンクを作らない)
@@ -62,18 +62,22 @@ npm run build
 
 | パス | 内容 |
 |---|---|
-| `GET /api/runs` | 実行の一覧 (ディレクトリーの名前の新しい順) |
-| `GET /api/runs/{run}` | 実行の summary (起動引数、しきい値、問いの一覧、件数、advisor の実行の一覧、ゲームの情報の版の一覧、記録の有無、読み飛ばした行の数など) |
-| `GET /api/runs/{run}/requests?from=&to=` | 送信時刻が区間に入る要求の一覧 (問いの値と操作に採った数を含む) |
+| `GET /api/runs` | 実行の一覧 (ディレクトリーの名前の新しい順。実行中か (`in_progress`) を含む) |
+| `GET /api/runs/{run}` | 実行の summary (起動引数、しきい値、問いの一覧、件数、advisor の実行の一覧、ゲームの情報の版の一覧、記録の有無、読み飛ばした行の数、実行中か (`in_progress`) など) |
+| `GET /api/runs/{run}/requests?from=&to=` | 送信時刻が区間に入る要求の一覧 (問いの値と操作に採った数を含む) と `cursor` |
 | `GET /api/runs/{run}/requests/{n}` | 番号 `n` の要求の詳細 (画像、所要時間、問いごとの答えと採った操作、その時点のゲームの情報の版) |
-| `GET /api/runs/{run}/frames?from=&to=` | 処理したフレームの判定 (`frames.jsonl`) |
-| `GET /api/runs/{run}/pad?from=&to=` | コントローラーのブリッジに送ったレポート (`pad.jsonl`) |
-| `GET /api/runs/{run}/events?from=&to=` | `run.jsonl` の `decision` 以外の行 (起動、advisor の実行の結果、失敗、記録の件数など) |
+| `GET /api/runs/{run}/frames?from=&to=` | 処理したフレームの判定 (`frames.jsonl`) と `cursor` |
+| `GET /api/runs/{run}/pad?from=&to=` | コントローラーのブリッジに送ったレポート (`pad.jsonl`) と `cursor` |
+| `GET /api/runs/{run}/events?from=&to=` | `run.jsonl` の `decision` 以外の行 (起動、advisor の実行の結果、失敗、記録の件数など) と `cursor` |
+| `GET /api/runs/{run}/live?run=&requests=&frames=&pad=` | 実行中の記録を追うサーバー送信イベント (SSE)。下の「ライブ (`/live`)」 |
 | `GET /api/runs/{run}/notes/{version}` | ゲームの情報の版 (4 ファイルの中身、変わったファイルの種類、それを書き換えた advisor の実行) |
 | `GET /api/runs/{run}/advisor/{name}` | advisor の実行 (結果、途中経過、ディレクトリーのファイルの一覧) |
 | `GET /api/runs/{run}/files/{path}` | 実行のディレクトリーの `thumbs/`・`frames/`・`advisor-*/` の下のファイル |
 
 応答の形 (キーと値) は、[`src/run_dashboard/run_views.py`](./src/run_dashboard/run_views.py) の各関数の docstring に書いています。
+
+- `in_progress` は、`run.jsonl` に終了の記録 (`record_end` の行) が無く、かつ `run.jsonl` が 10 秒以内に更新された実行で true。`record_end` は強制終了などで書かれないことがあるため、更新が 10 秒止まった実行も実行中としない
+- 区間 API (`requests`・`frames`・`pad`・`events`) の `cursor` は、その API が読んだファイル (`events` は `run.jsonl`) の、読んだ最後の完全な行 (改行で終わった行) の次のバイトの位置。`from`・`to` によらない。ファイルが無ければ 0。`start` の行が無い、または `origin_mono` が無いために使えない `frames`・`pad`・`events` も 0 (`start` の行より前に書かれた行を、`/live` が `start` の行を読んだときに送るため)。`/live` のクエリーに渡す
 
 - 時刻のキー (`t`、`t_sent` のように `t_` で始まる名前、frames の `peak_t` と `candidate_t`) は、すべて経過秒 (秒、小数) で返す
 - `run.jsonl` の行の経過秒は、起点の行の経過秒に、その行との壁時計 (`HH:MM:SS.mmm`) の差を足して求める。起点は、ファイルの順でその行以前にある最後の `decision` の行 (同じ number の要求が `requests.jsonl` にある行。経過秒はその要求の受信時刻) で、そうした行が無ければ `start` の行 (経過秒 0)。`start` の行より前の行の起点は `start` の行
@@ -82,9 +86,34 @@ npm run build
 - `from`・`to` は経過秒の区間 (両端を含む)。どちらかを省くと、その側の制限を設けない
 - 知らない実行、許していないパス、読めないファイル、無い番号・版・名前は 404。`from` が `to` より大きいときと、数でない値 (`nan`・`inf` を含む) は 422
 
+### ライブ (`/live`)
+
+`GET /api/runs/{run}/live` は、実行のディレクトリーを 0.25 秒ごとに読み、追記された完全な行からイベントを作って送るサーバー送信イベント (`text/event-stream`) です。各イベントは `event: <種類>` と `data: <JSON の 1 行>` で、`id:`・`retry:` は付けません。区切りの空白の無い JSON で、ASCII 以外の文字と対になっていないサロゲートは `\uXXXX` のエスケープ、有限でない数は `null` にします。
+
+クエリーの `run`・`requests`・`frames`・`pad` は、それぞれ `run.jsonl`・`requests.jsonl`・`frames.jsonl`・`pad.jsonl` の読み始める位置 (区間 API の `cursor` の値) です。その位置より後の行から送り、省いたファイルは接続した時点の終わりから送ります。負の数と整数として読めない値は 422、知らない実行は 404 です。1 回の読み取りでは `requests.jsonl` を `run.jsonl` より先に読みます (`run.jsonl` の行の経過秒は、`decision` の行と同じ番号の要求の受信時刻を起点にするため)。
+
+| event | data | いつ送るか |
+|---|---|---|
+| `request` | 要求の区間 API の 1 件 | 送る `requests.jsonl` の要求の行ごと (`requests.jsonl` の無い実行と、問いの形が今の第4章と違う実行では送らない) |
+| `run` | events の区間 API の 1 件 | 送る `run.jsonl` の行のうち、`decision` でなく経過秒の分かる行ごと |
+| `frame` | frames の区間 API の 1 件 | 送る `frames.jsonl` の行ごと (`start` の行に `origin_mono` が無ければ送らない) |
+| `pad` | pad の区間 API の 1 件 | 送る `pad.jsonl` の行ごと (同上) |
+| `advisor_step` | advisor の実行の API の `steps` の 1 件に、advisor の実行の名前 `name` を足したもの | 接続した後に追記された `stream.jsonl` の行の途中経過ごと (接続した後にできた advisor のディレクトリーも追う) |
+| `advisor_run` | summary の `advisor_runs` の 1 件 | 接続した直後にすべて。以後は、増えた実行と、値が変わった実行 (終わって `result.json` ができたときなど) |
+| `note_version` | summary の `note_versions` の 1 件 | 接続した直後にすべて。以後は、増えた版と、値が変わった版 |
+| `stats` | `{"t_end", "counts", "decide_s_median"}` (summary の同名の値) | 接続した直後と、値が変わったとき |
+| `end` | `{"record_end": run.jsonl に record_end の行があるか}` | 実行中でなくなった読み取りの最後。送ったら接続を閉じる |
+
+- `request`・`run`・`frame`・`pad`・`advisor_step` は、`start` の行を読んだ後に送る。`start` の行より前に書かれた行は、`start` の行を読んだときにファイルの順に送る
+- `advisor_step` の `kind` は送った時点の値で、後で `permission_denied` に変わっても送り直さない (advisor の実行の API を読み直すと、変わった値になる)
+- 問いの形が今の第4章と違う実行では、`request`・`advisor_step`・`advisor_run`・`note_version` を送らない (`run`・`stats`・`end` は送る)
+- 接続した時点で実行中でなければ、位置より後の行と、`advisor_run`・`note_version` のすべてと `stats` を送ってから、すぐに `end` を送る
+- イベントが 15 秒無いときは、途中の経路で接続が切られないよう、コメントの行 (`: ping`) を送る (FastAPI の SSE の機能)
+- 接続ごとに、接続した時点で記録のファイルを先頭から読み直す (キャッシュを使わない)。クライアントが接続を切ると読むのをやめる
+
 ## 記録の形の違い
 
-実行ごとに、どの記録があるかは summary の `recorded` で返します。記録の無い種類の区間 API (`requests`・`frames`・`pad`・`events`) は `{"available": false, "items": []}` を返します。
+実行ごとに、どの記録があるかは summary の `recorded` で返します。記録の無い種類の区間 API (`requests`・`frames`・`pad`・`events`) は `{"available": false, "items": [], "cursor": 0}` を返します (`cursor` の規則は「API の一覧」の節)。
 
 | 実行 | 扱い |
 |---|---|

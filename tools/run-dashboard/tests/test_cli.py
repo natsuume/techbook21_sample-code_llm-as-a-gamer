@@ -101,7 +101,7 @@ def test_main_runs_uvicorn_on_localhost_with_given_port(tmp_path, fake_run):
     args, kwargs = fake_run.calls[0]
     assert len(args) == 1
     assert isinstance(args[0], FastAPI)
-    # 開いている SSE の接続 (/live) があっても、1 回の Ctrl+C から約 1 秒で止まるようにする
+    # 開いている接続 (/live の SSE) があっても、終了の猶予を GRACEFUL_SHUTDOWN_TIMEOUT_S (1) 秒で打ち切る
     assert kwargs == {"host": "127.0.0.1", "port": 9000, "timeout_graceful_shutdown": 1}
 
 

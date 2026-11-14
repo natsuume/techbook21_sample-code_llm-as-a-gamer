@@ -13,8 +13,9 @@ JSON Lines は jsonl_lines.read_json_lines で読む (改行で終わってい�
 """
 
 import json
+import os
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from switch2_agent.advisors.stream_json_log import STREAM_FILE_NAME
@@ -33,6 +34,7 @@ from run_dashboard.jsonl_lines import (
     read_json_lines,
 )
 from run_dashboard.record_cache import JsonLinesCache, RecordsTransform
+from run_dashboard.run_activity import has_record_end_line
 from run_dashboard.run_directory import (
     AdvisorRunDir,
     find_run_dir,
@@ -147,7 +149,7 @@ class RunRecords:
     @property
     def has_record_end(self) -> bool:
         """run_events に event が "record_end" の行が 1 つでもあれば True (run_activity.has_record_end_line)。"""
-        return False
+        return has_record_end_line(event.record for event in self.run_events)
 
     @property
     def overview(self) -> RunOverview:
@@ -201,9 +203,23 @@ def _overview_of(name: str, run_dir: Path, cache: JsonLinesCache | None) -> RunO
         start=start,
         origin_mono=_origin_mono_of(start),
         has_requests_file=_can_open(run_dir / REQUEST_LOG_FILE_NAME),
-        run_log_mtime=None,
-        has_record_end=False,
+        run_log_mtime=read_run_log_mtime(run_dir),
+        has_record_end=has_record_end_line(run_lines),
     )
+
+
+def read_run_log_mtime(run_dir: Path) -> float | None:
+    """run_dir の run.jsonl の更新時刻 (os.stat の st_mtime。time.time() と同じ時計の秒) を返す。
+
+    run.jsonl が無い、シンボリックリンク、stat の OSError なら None を返す。
+    """
+    path = run_dir / RUN_LOG_FILE_NAME
+    if path.is_symlink():
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
 
 
 def load_run(
@@ -295,8 +311,11 @@ def load_run(
         skipped_lines=skipped_lines,
         has_requests_file=parsed["requests"] is not None,
         has_stream_file=has_stream_file,
-        run_log_mtime=None,
-        next_offsets=dict.fromkeys(RECORD_FILE_NAMES, 0),
+        run_log_mtime=read_run_log_mtime(run_dir),
+        next_offsets={
+            kind: lines.next_offset if lines is not None else 0
+            for kind, lines in parsed.items()
+        },
     )
 
 
@@ -372,7 +391,7 @@ def lighten_request_lines(
     まとめて 1 回で軽くしたときの records の分と同じ)。None なら、records の最初の要求の行は何とも共有しない。
     """
     lightened: list[dict] = []
-    previous_line: dict | None = None
+    previous_line = previous
     for record in records:
         if record.get("event") != "request":
             lightened.append(record)
@@ -401,18 +420,15 @@ def _received_times(requests: list[dict]) -> dict[object, float]:
     """requests.jsonl の要求の行 requests から、number → 受信時刻 t_received の辞書を返す。
 
     t_received が数の行だけを入れる。number がキーにできない値 (list・dict) の行は入れない。同じ number の行が
-    複数あれば、最初の行の値。
+    複数あれば、最初の行の値 (add_received_time を 1 行ずつ当てた結果)。
     """
     received: dict[object, float] = {}
     for request in requests:
-        number = request.get("number")
-        t_received = request.get("t_received")
-        if is_json_scalar(number) and is_json_number(t_received):
-            received.setdefault(number, float(t_received))
+        add_received_time(received, request)
     return received
 
 
-def _anchor_t(line: dict, received_times: dict[object, float]) -> float | None:
+def _anchor_t(line: Mapping, received_times: Mapping[object, float]) -> float | None:
     """run.jsonl の行 line が時刻の起点にする decision の行なら、その経過秒 (同じ number の要求の受信時刻) を返す。
 
     起点にするのは、event が "decision" で、number と同じ number の要求の行が received_times (_received_times の
@@ -430,35 +446,21 @@ def _build_run_events(
     """run.jsonl の行 lines (ファイルの順) に経過秒 t を付けた RunEvent のリストを返す (load_run の docstring の t)。
 
     start_index は start の行の lines の中の位置 (start の行が無ければ None)。requests は requests.jsonl の
-    要求の行 (ファイルの順)。
+    要求の行 (ファイルの順)。各行の t は RunLogClock の関数で、ファイルの順に 1 行ずつ求める。
     """
-    start_time = (
-        parse_wall_time(lines[start_index].get("time"))
-        if start_index is not None
-        else None
-    )
-    if start_index is None or start_time is None:
+    clock = start_run_log_clock(lines[start_index]) if start_index is not None else None
+    if start_index is None or clock is None:
         return [RunEvent(t=None, record=line) for line in lines]
     received_times = _received_times(requests)
-    # 今の起点の行の経過秒と time (start の行から始め、起点にする decision の行が来るたびに置き換える)
-    origin_t: float = 0.0
-    origin_time: float | None = start_time
     events = []
     for index, line in enumerate(lines):
-        line_time = parse_wall_time(line.get("time"))
-        t: float | None = None
+        t: float | None
         if index < start_index:
-            if line_time is not None:
-                t = run_log_elapsed(line_time, start_time, after_start=False)
+            t = elapsed_before_start(clock, line)
         elif index == start_index:
             t = 0.0
         else:
-            anchor_t = _anchor_t(line, received_times)
-            if anchor_t is not None:
-                origin_t, origin_time = anchor_t, line_time
-                t = anchor_t
-            elif line_time is not None and origin_time is not None:
-                t = origin_t + run_log_elapsed(line_time, origin_time, after_start=True)
+            t, clock = advance_run_log_clock(clock, line, received_times)
         events.append(RunEvent(t=t, record=line))
     return events
 
@@ -485,7 +487,10 @@ def start_run_log_clock(start_line: Mapping) -> RunLogClock | None:
     start_line の time が elapsed_time.parse_wall_time で読めれば RunLogClock(start_time, 0.0, start_time)。
     読めなければ None (その実行の run.jsonl の行の t は、すべて None)。start の行自身の t は 0.0。
     """
-    raise NotImplementedError
+    start_time = parse_wall_time(start_line.get("time"))
+    if start_time is None:
+        return None
+    return RunLogClock(start_time=start_time, origin_t=0.0, origin_time=start_time)
 
 
 def elapsed_before_start(clock: RunLogClock, line: Mapping) -> float | None:
@@ -494,7 +499,10 @@ def elapsed_before_start(clock: RunLogClock, line: Mapping) -> float | None:
     elapsed_time.run_log_elapsed(line の time, clock.start_time, after_start=False)。line の time が
     parse_wall_time で読めなければ None。
     """
-    raise NotImplementedError
+    line_time = parse_wall_time(line.get("time"))
+    if line_time is None:
+        return None
+    return run_log_elapsed(line_time, clock.start_time, after_start=False)
 
 
 def advance_run_log_clock(
@@ -509,7 +517,17 @@ def advance_run_log_clock(
         - それ以外は (clock.origin_t + run_log_elapsed(line の time, clock.origin_time, after_start=True), clock)。
           line の time が読めないか、clock.origin_time が None なら、t は None
     """
-    raise NotImplementedError
+    line_time = parse_wall_time(line.get("time"))
+    anchor_t = _anchor_t(line, received_times)
+    if anchor_t is not None:
+        return anchor_t, replace(clock, origin_t=anchor_t, origin_time=line_time)
+    if line_time is None or clock.origin_time is None:
+        return None, clock
+    return (
+        clock.origin_t
+        + run_log_elapsed(line_time, clock.origin_time, after_start=True),
+        clock,
+    )
 
 
 def add_received_time(received_times: dict[object, float], request: Mapping) -> None:
@@ -518,7 +536,10 @@ def add_received_time(received_times: dict[object, float], request: Mapping) -> 
     number がキーにできない値 (list・dict) の行と、t_received が数 (bool を除く int と float) でない行は足さない。
     足す値は float にする。
     """
-    raise NotImplementedError
+    number = request.get("number")
+    t_received = request.get("t_received")
+    if is_json_scalar(number) and is_json_number(t_received):
+        received_times.setdefault(number, float(t_received))
 
 
 def read_advisor_stream(

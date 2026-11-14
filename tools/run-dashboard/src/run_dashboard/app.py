@@ -1,20 +1,28 @@
 """実行の記録を読む読み取り専用の API サーバー (FastAPI のアプリ) と、画面 (web/dist/) の配信。
 
 ルート:
-    GET /api/runs                              実行の一覧 (名前の新しい順)
-    GET /api/runs/{run}                        summary
-    GET /api/runs/{run}/requests?from=&to=     要求の区間
-    GET /api/runs/{run}/requests/{n}           要求の詳細
-    GET /api/runs/{run}/frames?from=&to=       フレームの判定の区間
-    GET /api/runs/{run}/pad?from=&to=          送ったレポートの区間
-    GET /api/runs/{run}/events?from=&to=       run.jsonl の出来事の区間
-    GET /api/runs/{run}/notes/{version}        ゲームの情報の版
-    GET /api/runs/{run}/advisor/{name}         advisor の実行
-    GET /api/runs/{run}/files/{path}           実行のディレクトリーの thumbs/・frames/・advisor-*/ の下のファイル
-    GET /                                      画面 (web/dist/ があれば配信し、無ければ画面のビルドの手順の文)
+    GET /api/runs                                     実行の一覧 (名前の新しい順。各実行の in_progress を含む)
+    GET /api/runs/{run}                               summary (in_progress を含む)
+    GET /api/runs/{run}/requests?from=&to=            要求の区間 (cursor を含む)
+    GET /api/runs/{run}/requests/{n}                  要求の詳細
+    GET /api/runs/{run}/frames?from=&to=              フレームの判定の区間 (cursor を含む)
+    GET /api/runs/{run}/pad?from=&to=                 送ったレポートの区間 (cursor を含む)
+    GET /api/runs/{run}/events?from=&to=              run.jsonl の出来事の区間 (cursor を含む)
+    GET /api/runs/{run}/live?run=&requests=&frames=&pad=
+                                                      実行中の記録を追うサーバー送信イベント (SSE。live_reader)
+    GET /api/runs/{run}/notes/{version}               ゲームの情報の版
+    GET /api/runs/{run}/advisor/{name}                advisor の実行
+    GET /api/runs/{run}/files/{path}                  実行のディレクトリーの thumbs/・frames/・advisor-*/ の下のファイル
+    GET /                                             画面 (web/dist/ があれば配信し、無ければ画面のビルドの手順の文)
 Host の名前 (ポートを除く) が ALLOWED_HOSTS 以外の要求は、どのルートも 400。
 知らない実行、許していないパス、読めないファイル、無い番号・版・名前は 404。from・to が数でない、
-有限でない (nan・inf) ときと、from が to より大きいときは 422。リクエストごとに記録を読み直し (キャッシュしない)、
+有限でない (nan・inf) ときと、from が to より大きいときは 422。/live のクエリーの位置が負の数か、整数として
+読めないときも 422。
+実行中の判定 (in_progress) は run_activity.is_in_progress (run.jsonl に record_end の行が無く、run.jsonl が
+IN_PROGRESS_WINDOW_S 秒以内に更新された実行)。区間 API の cursor は、その API が読んだファイルの、読んだ最後の
+完全な行の次のバイトの位置 (/live のクエリーに渡す。使えない区間は 0)。
+記録の JSON Lines は、アプリごとに 1 つのキャッシュ (record_cache.JsonLinesCache) で読み、変わっていないファイルは
+読み直さず、追記で伸びたファイルは追記の分だけ読み足す。/live は接続ごとにファイルを読む (キャッシュを使わない)。
 runs/ には何も書かない。
 """
 
@@ -164,7 +172,15 @@ def create_app(
     ファイルの終わりまで読むため、送る間に伸びるファイル (書いている途中の stream.jsonl など) では、
     宣言した長さと本文の長さがずれる。読めなければ (OSError) 404。
     記録の JSON Lines は、アプリごとに 1 つの record_cache.JsonLinesCache で読み、署名 (大きさ・更新時刻・inode) の
-    変わっていないファイルは読み直さない。API ごとに、応答に使う種類のファイルだけを読む (REQUEST_PARTS など)。
+    変わっていないファイルは読み直さず、inode が同じで大きくなったファイルは追記の分だけ読み足す。API ごとに、
+    応答に使う種類のファイルだけを読む (REQUEST_PARTS など)。
+    clock は今の時刻を返す関数 (time.time() と同じ時計の秒。monotonic ではない)。/api/runs と summary の
+    in_progress の判定に、要求ごとに 1 回呼ぶ。/live では読み取りのたびに呼ぶ。
+    /api/runs/{run}/live は live_reader.stream_live のイベントを、event にイベントの種類、data に
+    live_events.encode_live_event_data の JSON を入れた SSE (fastapi.sse.EventSourceResponse) で送る。
+    ディレクトリーを読む間隔は live_interval_s 秒 (テストで小さくする)。知らない実行は、応答を始める前に依存
+    (find_run_dir_or_404) で 404 にする。イベントが 15 秒無ければ、FastAPI がコメントの行 (: ping) を送る。
+    クライアントが接続を切ると、待っている間に取り消され、それ以上は読まない。
     """
     app = FastAPI(title="run-dashboard", default_response_class=RecordJSONResponse)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)

@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 
 # run.jsonl の更新からこの秒数以内なら実行中とする (秒)
 IN_PROGRESS_WINDOW_S = 10.0
+# 終了の記録の行の event
+RECORD_END_EVENT = "record_end"
 
 
 def is_in_progress(
@@ -23,7 +25,9 @@ def is_in_progress(
         - それ以外は now - run_log_mtime <= IN_PROGRESS_WINDOW_S (ちょうど IN_PROGRESS_WINDOW_S 秒は実行中。
           更新時刻が now より後 (差が負) も実行中)
     """
-    raise NotImplementedError
+    if run_log_mtime is None or has_record_end:
+        return False
+    return now - run_log_mtime <= IN_PROGRESS_WINDOW_S
 
 
 def has_record_end_line(run_lines: Iterable[Mapping]) -> bool:
@@ -31,4 +35,4 @@ def has_record_end_line(run_lines: Iterable[Mapping]) -> bool:
 
     event が文字列でない行と、event の無い行は、record_end の行ではない。
     """
-    raise NotImplementedError
+    return any(line.get("event") == RECORD_END_EVENT for line in run_lines)

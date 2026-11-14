@@ -95,6 +95,26 @@ def test_replay_steps_order_of_dashboard_run(runs):
     assert json.loads(steps[0].data)["event"] == "header"
 
 
+@pytest.mark.parametrize(
+    "attribute, decision_skew_s",
+    [("dashboard", 0.0), ("dashboard", 2.0), ("broken", 0.0), ("broken", 2.0)],
+)
+def test_record_end_line_is_written_after_all_other_lines(
+    runs, attribute, decision_skew_s
+):
+    # record_end の行は、経過秒の鍵によらず最後に書く。decision の行の壁時計を 2 秒進めると、record_end の行の
+    # 経過秒の鍵は、要求 6 の行や最後の frames の行より小さくなる
+    run_dir = getattr(runs, attribute).run_dir
+    if decision_skew_s:
+        shift_decision_times(run_dir, decision_skew_s)
+    steps = replay_steps(run_dir)
+    record_end = line_index(steps, "run.jsonl", event="record_end")
+    # record_end の行より後に書くのは、run.jsonl でその後にある行 (壊れた行のある実行の、読めない 1 行) だけ
+    after = steps[record_end + 1 :]
+    assert all(step.relative_path == "run.jsonl" for step in after)
+    assert len(after) == (1 if attribute == "broken" else 0)
+
+
 def test_unterminated_last_line_is_last_step_of_its_file_without_newline(runs):
     steps = [
         step

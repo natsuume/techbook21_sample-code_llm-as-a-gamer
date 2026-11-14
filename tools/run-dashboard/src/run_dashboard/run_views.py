@@ -42,6 +42,7 @@ from run_dashboard.question_values import (
     request_adopted,
     request_question_values,
 )
+from run_dashboard.run_activity import is_in_progress
 from run_dashboard.run_records import RunEvent, RunOverview, RunRecords
 
 # 古い形の実行の reason
@@ -50,9 +51,9 @@ OLD_FORMAT_REASON = "old_format"
 TIMING_KEYS = ("select_s", "encode_s", "decide_s", "apply_s")
 
 
-def _unavailable() -> dict:
-    """記録の無い種類の区間 API の辞書 {"available": False, "items": []} を返す。"""
-    return {"available": False, "items": []}
+def _unavailable(cursor: int) -> dict:
+    """使えない区間 API の辞書 {"available": False, "items": [], "cursor": cursor} を返す。"""
+    return {"available": False, "items": [], "cursor": cursor}
 
 
 def _in_range(t: float | None, t_from: float | None, t_to: float | None) -> bool:
@@ -64,9 +65,9 @@ def _in_range(t: float | None, t_from: float | None, t_to: float | None) -> bool
     return (t_from is None or t >= t_from) and (t_to is None or t <= t_to)
 
 
-def _advisor_threshold(records: RunRecords) -> tuple[float, bool]:
+def _advisor_threshold(args: dict | None) -> tuple[float, bool]:
     """advisor の問いのしきい値と、既定値を入れたか (args に数の threshold_advisor が無いか) を返す。"""
-    value = number_or_none((records.args or {}).get("threshold_advisor"))
+    value = number_or_none((args or {}).get("threshold_advisor"))
     if value is None:
         return DEFAULT_THRESHOLD, True
     return value, False
@@ -98,7 +99,9 @@ def build_run_list_item(overview: RunOverview, now: float) -> dict:
             "dashboard": overview.origin_mono is not None,
             "requests": overview.has_requests_file,
         },
-        "in_progress": False,
+        "in_progress": is_in_progress(
+            overview.run_log_mtime, overview.has_record_end, now
+        ),
     }
 
 
@@ -140,13 +143,14 @@ def build_summary(
     old_format = is_old_format(records.header)
     # 古い形の実行は advisor の実行を返さないため、t_end にも使わない
     runs = [] if old_format else list(advisor_runs)
-    threshold, threshold_assumed = _advisor_threshold(records)
+    threshold, threshold_assumed = _advisor_threshold(records.args)
     list_item = build_run_list_item(records.overview, now)
     return {
         "run": list_item["run"],
         "game": list_item["game"],
         "model": list_item["model"],
         "started": list_item["started"],
+        "in_progress": list_item["in_progress"],
         "args": records.args,
         "thresholds": {"advisor": threshold},
         "thresholds_assumed": threshold_assumed,
@@ -162,31 +166,13 @@ def build_summary(
             "frames": len(records.frames) if records.frames is not None else 0,
             "pad": len(records.pad) if records.pad is not None else 0,
         },
-        "decide_s_median": _decide_s_median(records),
-        "advisor_runs": [
-            {
-                "name": run.name,
-                "role": run.role,
-                "request": run.request,
-                "t_start": run.t_start,
-                "t_end": run.t_end,
-                "returncode": run.returncode,
-                "denials": run.denials,
-                "result": run.result,
-            }
-            for run in runs
-        ],
+        "decide_s_median": decide_s_median(records.run_events),
+        "advisor_runs": [summary_advisor_run(run) for run in runs],
         "note_versions": (
             []
             if old_format
             else [
-                {
-                    "version": version.version,
-                    "t": version.t,
-                    "request": version.request,
-                    "initial": version.initial,
-                    "changed": version.changed,
-                }
+                summary_note_version(version)
                 for version in build_note_versions(records.requests, runs)
             ]
         ),
@@ -203,7 +189,7 @@ def build_summary(
 def _last_elapsed(
     records: RunRecords, advisor_runs: Sequence[AdvisorRun]
 ) -> float | None:
-    """summary の t_end (記録の経過秒のうち最大のもの) を返す。数の経過秒が 1 つも無ければ None。"""
+    """summary の t_end (記録の経過秒のうち最大のもの。max_elapsed) を返す。数の経過秒が 1 つも無ければ None。"""
     times: list[float | None] = [event.t for event in records.run_events]
     for request in records.requests:
         times.append(number_or_none(request.get("t_sent")))
@@ -212,22 +198,7 @@ def _last_elapsed(
         for line in lines or []:
             times.append(mono_elapsed(line.get("mono"), records.origin_mono))
     times.extend(run.t_end for run in advisor_runs)
-    numbers = [t for t in times if t is not None]
-    return max(numbers) if numbers else None
-
-
-def _decide_s_median(records: RunRecords) -> float | None:
-    """run.jsonl の decision の行の decide_s (数のもの) の中央値を返す。無ければ None。"""
-    values = [
-        value
-        for value in (
-            number_or_none(event.record.get("decide_s"))
-            for event in records.run_events
-            if event.record.get("event") == "decision"
-        )
-        if value is not None
-    ]
-    return statistics.median(values) if values else None
+    return max_elapsed(times)
 
 
 def _last_dropped(records: RunRecords) -> object:
@@ -288,7 +259,13 @@ def request_item_context(header: dict | None, args: dict | None) -> RequestItemC
     threshold は args の threshold_advisor が数 (bool を除く) ならその値、そうでなければ
     switch2_agent.action_decision.DEFAULT_THRESHOLD (build_summary の thresholds と同じ規則)。
     """
-    raise NotImplementedError
+    question_list = header_question_list(header)
+    threshold, _ = _advisor_threshold(args)
+    return RequestItemContext(
+        question_list=question_list,
+        questions=questions_for_decision(question_list),
+        threshold=threshold,
+    )
 
 
 def build_request_item(request: dict, context: RequestItemContext) -> dict:
@@ -297,7 +274,11 @@ def build_request_item(request: dict, context: RequestItemContext) -> dict:
     build_request_items の items の 1 件と同じキーと値 (adopted_count は
     question_values.request_adopted(context.questions, request, context.threshold) から求める)。
     """
-    raise NotImplementedError
+    return _request_item(
+        request,
+        context.question_list,
+        request_adopted(context.questions, request, context.threshold),
+    )
 
 
 def build_frame_item(frame: dict, origin_mono: float) -> dict:
@@ -305,7 +286,17 @@ def build_frame_item(frame: dict, origin_mono: float) -> dict:
 
     経過秒は elapsed_time.mono_elapsed(値, origin_mono)。キーと値は build_frame_items の items の 1 件と同じ。
     """
-    raise NotImplementedError
+    return {
+        "t": mono_elapsed(frame.get("mono"), origin_mono),
+        "sharpness": frame.get("sharpness"),
+        "diff": frame.get("diff"),
+        "phase": frame.get("phase"),
+        "peak_t": mono_elapsed(frame.get("peak_mono"), origin_mono),
+        "peak_sharpness": frame.get("peak_sharpness"),
+        "ref": frame.get("ref"),
+        "event": _frame_event(frame.get("event"), origin_mono),
+        "thumb": frame.get("thumb"),
+    }
 
 
 def build_pad_item(report: dict, origin_mono: float) -> dict:
@@ -313,7 +304,13 @@ def build_pad_item(report: dict, origin_mono: float) -> dict:
 
     経過秒は elapsed_time.mono_elapsed(mono, origin_mono)。キーと値は build_pad_items の items の 1 件と同じ。
     """
-    raise NotImplementedError
+    return {
+        "t": mono_elapsed(report.get("mono"), origin_mono),
+        "source": report.get("source"),
+        "state": report.get("state"),
+        "ok": report.get("ok"),
+        "error": report.get("error"),
+    }
 
 
 def build_event_item(event: RunEvent) -> dict | None:
@@ -322,7 +319,16 @@ def build_event_item(event: RunEvent) -> dict | None:
     event の record の event が "decision" の行と、t が None の行は None を返す (区間 API に入れない行)。
     それ以外は build_event_items の items の 1 件と同じ {"t": t, "event": その行の event, そのほかのキーと値}。
     """
-    raise NotImplementedError
+    record = event.record
+    if record.get("event") == "decision" or event.t is None:
+        return None
+    item = {"t": event.t, "event": record.get("event")}
+    item.update(
+        (key, value)
+        for key, value in record.items()
+        if key not in ("time", "event", "t")
+    )
+    return item
 
 
 def summary_advisor_run(run: AdvisorRun) -> dict:
@@ -330,7 +336,16 @@ def summary_advisor_run(run: AdvisorRun) -> dict:
 
     {"name", "role", "request", "t_start", "t_end", "returncode", "denials", "result"} (AdvisorRun の同名の値)。
     """
-    raise NotImplementedError
+    return {
+        "name": run.name,
+        "role": run.role,
+        "request": run.request,
+        "t_start": run.t_start,
+        "t_end": run.t_end,
+        "returncode": run.returncode,
+        "denials": run.denials,
+        "result": run.result,
+    }
 
 
 def summary_note_version(version: NoteVersion) -> dict:
@@ -338,7 +353,13 @@ def summary_note_version(version: NoteVersion) -> dict:
 
     {"version", "t", "request", "initial", "changed"} (NoteVersion の同名の値)。
     """
-    raise NotImplementedError
+    return {
+        "version": version.version,
+        "t": version.t,
+        "request": version.request,
+        "initial": version.initial,
+        "changed": version.changed,
+    }
 
 
 def decide_s_median(run_events: Sequence[RunEvent]) -> float | None:
@@ -346,12 +367,22 @@ def decide_s_median(run_events: Sequence[RunEvent]) -> float | None:
 
     statistics.median で求める。数の decide_s が 1 つも無ければ None (summary の decide_s_median と同じ規則)。
     """
-    raise NotImplementedError
+    values = [
+        value
+        for value in (
+            number_or_none(event.record.get("decide_s"))
+            for event in run_events
+            if event.record.get("event") == "decision"
+        )
+        if value is not None
+    ]
+    return statistics.median(values) if values else None
 
 
 def max_elapsed(values: Iterable[float | None]) -> float | None:
     """経過秒 values のうち None を除いた最大値を返す。None でない値が 1 つも無ければ None。"""
-    raise NotImplementedError
+    numbers = [value for value in values if value is not None]
+    return max(numbers) if numbers else None
 
 
 def build_request_items(
@@ -369,24 +400,27 @@ def build_request_items(
          "adopted_count": question_values.adopted_count(question_values.request_adopted(...))}
     questions の一覧は question_values.header_question_list(records.header)、adopted の判定に渡す問いは
     その questions_for_decision、しきい値は build_summary の thresholds の advisor の値。
+    各項目は build_request_item(要求の行, request_item_context(records.header, records.args))。
     どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["requests"] (requests.jsonl の、読んだ最後の
-    完全な行の次のバイトの位置。t_from・t_to によらない) を足す。
+    完全な行の次のバイトの位置。t_from・t_to によらない。requests.jsonl が無ければ 0) を足す。
     """
+    cursor = records.next_offsets["requests"]
     if not records.has_requests_file:
-        return _unavailable()
+        return _unavailable(cursor)
     if is_old_format(records.header):
-        return {"available": False, "reason": OLD_FORMAT_REASON, "items": []}
-    question_list = header_question_list(records.header)
-    questions = questions_for_decision(question_list)
-    threshold, _ = _advisor_threshold(records)
+        return {
+            "available": False,
+            "reason": OLD_FORMAT_REASON,
+            "items": [],
+            "cursor": cursor,
+        }
+    context = request_item_context(records.header, records.args)
     items = [
-        _request_item(
-            request, question_list, request_adopted(questions, request, threshold)
-        )
+        build_request_item(request, context)
         for request in records.requests
         if _in_range(number_or_none(request.get("t_sent")), t_from, t_to)
     ]
-    return {"available": True, "items": items}
+    return {"available": True, "items": items, "cursor": cursor}
 
 
 def build_request_detail(
@@ -413,7 +447,7 @@ def build_request_detail(
     if is_old_format(records.header):
         return {"available": False, "reason": OLD_FORMAT_REASON}
     question_list = header_question_list(records.header)
-    threshold, _ = _advisor_threshold(records)
+    threshold, _ = _advisor_threshold(records.args)
     adopted = request_adopted(questions_for_decision(question_list), request, threshold)
     decision = next(
         (
@@ -476,36 +510,29 @@ def build_frame_items(
 ) -> dict:
     """フレームの判定の区間 API (GET /api/runs/{run}/frames) の辞書を返す。
 
-    frames が None か origin_mono が None なら {"available": False, "items": []}。
-    それ以外は {"available": True, "items": [...]}。items は経過秒 t が区間に入る frames の行 (ファイルの順) の
+    frames が None か origin_mono が None なら {"available": False, "items": [], "cursor": 0}。
+    それ以外は {"available": True, "items": [...], "cursor": records.next_offsets["frames"]}。items は経過秒 t が
+    区間に入る frames の行 (ファイルの順) の build_frame_item の項目
         {"t": mono の経過秒, "sharpness", "diff", "phase", "peak_t": peak_mono の経過秒, "peak_sharpness",
          "ref", "event", "thumb"}
     経過秒は elapsed_time.mono_elapsed(値, origin_mono)。event が object なら、その candidate_mono を
     経過秒の candidate_t に置き換えた辞書 (ほかのキーはそのまま) にする。
-    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["frames"] (t_from・t_to によらない) を足す。
+    cursor は最後のキーで、t_from・t_to によらない。使えないときの cursor を 0 にするのは、start の行 (origin_mono)
+    を読む前に書かれた行を、ライブ (/live) が start の行を読んだときに送れるようにするため。
     """
     origin_mono = records.origin_mono
     if records.frames is None or origin_mono is None:
-        return _unavailable()
-    items = []
-    for frame in records.frames:
-        t = mono_elapsed(frame.get("mono"), origin_mono)
-        if not _in_range(t, t_from, t_to):
-            continue
-        items.append(
-            {
-                "t": t,
-                "sharpness": frame.get("sharpness"),
-                "diff": frame.get("diff"),
-                "phase": frame.get("phase"),
-                "peak_t": mono_elapsed(frame.get("peak_mono"), origin_mono),
-                "peak_sharpness": frame.get("peak_sharpness"),
-                "ref": frame.get("ref"),
-                "event": _frame_event(frame.get("event"), origin_mono),
-                "thumb": frame.get("thumb"),
-            }
-        )
-    return {"available": True, "items": items}
+        return _unavailable(0)
+    items = [
+        item
+        for item in (build_frame_item(frame, origin_mono) for frame in records.frames)
+        if _in_range(item["t"], t_from, t_to)
+    ]
+    return {
+        "available": True,
+        "items": items,
+        "cursor": records.next_offsets["frames"],
+    }
 
 
 def build_pad_items(
@@ -513,29 +540,20 @@ def build_pad_items(
 ) -> dict:
     """送ったレポートの区間 API (GET /api/runs/{run}/pad) の辞書を返す。
 
-    pad が None か origin_mono が None なら {"available": False, "items": []}。
-    それ以外は {"available": True, "items": [...]}。items は経過秒 t が区間に入る pad の行 (ファイルの順) の
-    {"t": mono の経過秒, "source", "state", "ok", "error"}。
-    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["pad"] (t_from・t_to によらない) を足す。
+    pad が None か origin_mono が None なら {"available": False, "items": [], "cursor": 0}。
+    それ以外は {"available": True, "items": [...], "cursor": records.next_offsets["pad"]}。items は経過秒 t が
+    区間に入る pad の行 (ファイルの順) の build_pad_item の項目 {"t": mono の経過秒, "source", "state", "ok", "error"}。
+    cursor は最後のキーで、t_from・t_to によらない (使えないときに 0 にする理由は build_frame_items と同じ)。
     """
     origin_mono = records.origin_mono
     if records.pad is None or origin_mono is None:
-        return _unavailable()
-    items = []
-    for report in records.pad:
-        t = mono_elapsed(report.get("mono"), origin_mono)
-        if not _in_range(t, t_from, t_to):
-            continue
-        items.append(
-            {
-                "t": t,
-                "source": report.get("source"),
-                "state": report.get("state"),
-                "ok": report.get("ok"),
-                "error": report.get("error"),
-            }
-        )
-    return {"available": True, "items": items}
+        return _unavailable(0)
+    items = [
+        item
+        for item in (build_pad_item(report, origin_mono) for report in records.pad)
+        if _in_range(item["t"], t_from, t_to)
+    ]
+    return {"available": True, "items": items, "cursor": records.next_offsets["pad"]}
 
 
 def build_event_items(
@@ -543,31 +561,23 @@ def build_event_items(
 ) -> dict:
     """run.jsonl の出来事の区間 API (GET /api/runs/{run}/events) の辞書を返す。
 
-    run.jsonl が無いか、start の行が無ければ {"available": False, "items": []}。
-    それ以外は {"available": True, "items": [...]}。items は run_events のうち、event が "decision" でなく、
-    t が数で区間に入る行 (ファイルの順) の {"t": t, "event": その行の event, そのほかのキーと値}。
-    壁時計の time のキーは入れない。行に t のキーがあっても、経過秒の t で置き換える。
-    どの形の辞書にも、最後のキーとして "cursor": records.next_offsets["run"] (run.jsonl の位置。t_from・t_to に
-    よらない) を足す。
+    run.jsonl が無いか、start の行が無ければ {"available": False, "items": [], "cursor": 0}。
+    それ以外は {"available": True, "items": [...], "cursor": records.next_offsets["run"]}。items は run_events の
+    うち、event が "decision" でなく、t が数で区間に入る行 (ファイルの順) の build_event_item の項目
+    {"t": t, "event": その行の event, そのほかのキーと値}。壁時計の time のキーは入れない。行に t のキーがあっても、
+    経過秒の t で置き換える。
+    cursor は run.jsonl の位置で、最後のキー。t_from・t_to によらない (使えないときに 0 にする理由は
+    build_frame_items と同じ)。
     """
     # run.jsonl が無い実行は、start の行も無い
     if records.start is None:
-        return _unavailable()
-    items = []
-    for event in records.run_events:
-        record = event.record
-        if record.get("event") == "decision" or event.t is None:
-            continue
-        if not _in_range(event.t, t_from, t_to):
-            continue
-        item = {"t": event.t, "event": record.get("event")}
-        item.update(
-            (key, value)
-            for key, value in record.items()
-            if key not in ("time", "event", "t")
-        )
-        items.append(item)
-    return {"available": True, "items": items}
+        return _unavailable(0)
+    items = [
+        item
+        for item in (build_event_item(event) for event in records.run_events)
+        if item is not None and _in_range(item["t"], t_from, t_to)
+    ]
+    return {"available": True, "items": items, "cursor": records.next_offsets["run"]}
 
 
 def build_note_detail(

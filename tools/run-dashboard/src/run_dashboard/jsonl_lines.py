@@ -81,11 +81,14 @@ def read_complete_lines(
           end が行の途中なら、その行は含めない (next_offset は、その範囲の最後の \\n の次のバイト)
         - end <= offset なら、読まずに LineChunk(lines=[], next_offset=offset) を返す
         - end がファイルの大きさより大きければ、None と同じ
-    ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す。
+    ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す (end <= offset のときは
+    ファイルを開かない)。
     """
+    if end is not None and end <= offset:
+        return LineChunk(lines=[], next_offset=offset)
     with path.open("rb") as file:
         file.seek(offset)
-        data = file.read()
+        data = file.read() if end is None else file.read(end - offset)
     last_newline = data.rfind(b"\n")
     if last_newline < 0:
         return LineChunk(lines=[], next_offset=offset)

@@ -630,6 +630,42 @@ def test_lines_before_start_line_are_sent_when_start_line_is_read(runs, tmp_path
         assert data_of(at_start, event_kind) == final.items(range_kind), event_kind
 
 
+def test_connecting_with_range_cursors_before_start_line_sends_earlier_lines(
+    runs, tmp_path
+):
+    # start の行を書く前に、区間 API の cursor で接続する。frames・pad・events は start の行 (origin_mono) が無く
+    # 使えないため cursor が 0 で、start の行を書いた読み取りで、start の行より前に書いた frames・pad・run の行が届く
+    source = runs.dashboard.run_dir
+    target = tmp_path / "live" / source.name
+    copy_static_files(source, target)
+    run_lines = file_lines(source / "run.jsonl")
+    assert json.loads(run_lines[0])["event"] == "record_error"
+    assert json.loads(run_lines[1])["event"] == "start"
+    append_lines(target, "requests.jsonl", file_lines(source / "requests.jsonl")[:1])
+    append_lines(target, "frames.jsonl", file_lines(source / "frames.jsonl")[:2])
+    append_lines(target, "pad.jsonl", file_lines(source / "pad.jsonl")[:1])
+    append_lines(target, "run.jsonl", run_lines[:1])
+    start = api_snapshot(target)
+    for range_kind in ("frames", "pad", "events"):
+        assert start.ranges[range_kind]["available"] is False, range_kind
+        assert start.ranges[range_kind]["cursor"] == 0, range_kind
+    follower = LiveFollower(target, start.cursors())
+    assert [
+        event.kind for event in follower.events if event.kind in LINE_EVENT_KINDS
+    ] == []
+    append_lines(target, "run.jsonl", run_lines[1:2])
+    at_start = follower.poll()
+    final = api_snapshot(target)
+    assert [event.kind for event in at_start if event.kind in LINE_EVENT_KINDS] == (
+        ["run", "run", "frame", "frame", "pad"]
+    )
+    assert_line_events_match(follower, final, start)
+    assert [data["event"] for data in follower.data_of("run")] == [
+        "record_error",
+        "start",
+    ]
+
+
 def test_frames_and_pad_are_not_sent_without_origin_mono(runs, tmp_path):
     # start の行に origin_mono が無ければ frame・pad を送らない (件数は数える)
     source = runs.dashboard.run_dir

@@ -13,6 +13,8 @@
 I/O を持たない。
 """
 
+import json
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -60,7 +62,13 @@ def json_compatible(value: object) -> object:
     str・None など) はそのまま返す (True を 1 にしない)。渡した value は変えない。
     区間 API の応答の直列化が有限でない数を null にするのと同じ値を、SSE の data でも返すために使う。
     """
-    raise NotImplementedError
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_compatible(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_compatible(item) for item in value]
+    return value
 
 
 def encode_live_event_data(data: object) -> str:
@@ -70,4 +78,9 @@ def encode_live_event_data(data: object) -> str:
     ensure_ascii=True にするのは、記録の文字列にある対になっていないサロゲートを `\\udXXX` のエスケープにして、
     UTF-8 への符号化 (fastapi.sse.format_sse_event) で失敗させないため。
     """
-    raise NotImplementedError
+    return json.dumps(
+        json_compatible(data),
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )

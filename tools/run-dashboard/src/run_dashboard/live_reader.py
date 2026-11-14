@@ -2,7 +2,8 @@
 
 1 つの接続 (GET /api/runs/{run}/live) ごとに 1 つの読み取りの状態 (LiveState) を持ち、open_live で最初の読み取り、
 poll_live で 2 回目以降の読み取りを行う。1 回の読み取りは「状態と今の時刻を受け取り、送るイベントの列と次の状態を
-返す」形で、待ちと時計は外から渡す (stream_live)。ファイルには何も書かない。
+返す」形で、待ちと時計は外から渡す (stream_live)。このモジュールはファイルを読み (I/O)、読んだ行から状態とイベントを
+作る規則は live_state にある。ファイルには何も書かない。
 
 1 回の読み取りの手順 (open_live と poll_live で共通):
     1. run.jsonl の大きさ S を os.stat で取る (無い・シンボリックリンク・OSError なら、無いものとする)
@@ -20,61 +21,40 @@ poll_live で 2 回目以降の読み取りを行う。1 回の読み取りは�
     位置より小さくなったファイルは、行なしとして扱う。
 
 接続時 (open_live) の位置:
-    4 つの JSON Lines は位置 0 から今の終わりまで読む。cursor のあるファイルは、cursor より前 (end=cursor で読んだ
-    行) を「状態だけの行」、cursor から後 (位置 cursor から読んだ行) を「送る行」にする。cursor が行の途中なら、その
-    行はどちらにも入れない。cursor がファイルの大きさより大きければ、その位置より後に始まる行だけが送る行になる。
-    cursor を省いた (None の) ファイルは、今の終わりまでのすべてを状態だけの行にする。advisor の stream.jsonl は、
-    接続時にあったファイルはすべてを状態だけの行にし、接続後にできたファイル (接続時にディレクトリーがあって
-    ファイルが無かったものを含む) は位置 0 から送る行にする。
-
-状態に入れるもの (状態だけの行と送る行のどちらも):
-    requests.jsonl  event が "header" の最初の行を header にする。event が "request" の行を
-                    run_records.lighten_request_lines(..., previous=前の要求の行) で軽くして足し、
-                    run_records.add_received_time で受信時刻を足す。t_sent・t_received (数のもの) を経過秒の最大値に入れる
-    run.jsonl       行を足す。start の行 (event が "start" の最初の行) を読むまでは経過秒を求めない。start の行を
-                    読んだら run_records.start_run_log_clock で時計を作り、それまでの行と新しい行の t を、start より
-                    前は elapsed_before_start、start は 0.0、start より後は advance_run_log_clock で求める。以後は
-                    ファイルの順に advance_run_log_clock。decision の行の decide_s (数のもの)、record_end の有無、
-                    経過秒の最大値を持つ
-    frames・pad     行の数 (JSON の object の行の数) と、数の mono (bool を除く) の最大値を持つ。start の行の
-                    origin_mono が数なら、mono の最大値 - origin_mono を経過秒の最大値に入れる
-    advisor         実行ごとに stream.jsonl の全行 (状態だけの行を含む) と、送った step の数
-
-イベント:
-    request・run・frame・pad・advisor_step は、start の行を読んだ後だけ作る。start の行を読む前の読み取りは送る行を
-    ためておき、start の行を読んだ読み取りでファイルの順に作る (start の行の無い実行では作らない)。
-    advisor_run・note_version・stats・end は、start の行によらず、読み取りのたびに下の規則で作る (stats の件数は
-    start の行を読む前も数える)。
-    request       送る要求の行ごとに run_views.build_request_item(行, run_views.request_item_context(header,
-                  start の args))。requests.jsonl の無い実行と、古い形の実行 (question_values.is_old_format) では
-                  作らない
-    run           送る run.jsonl の行ごとに run_views.build_event_item(RunEvent) (None の行は作らない)
-    frame・pad    送る行ごとに run_views.build_frame_item・build_pad_item。origin_mono が None なら作らない
-    advisor_step  古い形でなければ、advisor のディレクトリーの順に、advisor_runs.build_steps(その実行の stream.jsonl
-                  の全行, origin_mono, その実行の denied_tool_use_ids) のうちまだ送っていない分 (状態だけの行の step は
-                  送ったものとして数える) を {"name": 実行の名前, "t", "kind", "tool", "summary"} にする。kind は
-                  送った時点の値 (後で変わっても送り直さない)
-    advisor_run   advisor_runs = [] if 古い形 else advisor_runs.build_advisor_runs(一覧, 要求の行, RunEvent, 状態の
-                  result.json を返す関数) の各実行の run_views.summary_advisor_run。open_live はすべて、poll_live は
-                  前に送った値 (名前で引く) と違うものと新しいものだけ。並びは advisor_runs の順
-    note_version  [] if 古い形 else note_versions.build_note_versions(要求の行, advisor_runs) の各版の
-                  run_views.summary_note_version。open_live はすべて、poll_live は前に送った値 (番号で引く) と
-                  違うものと新しいものだけ。番号の昇順
-    stats         {"t_end": run_views.max_elapsed([経過秒の最大値] + [各 advisor_run の t_end]),
-                   "counts": {"requests": 要求の行の数, "frames": frames の行の数, "pad": pad の行の数},
-                   "decide_s_median": decide_s の中央値 (無ければ None)}。open_live はいつも、poll_live は前に
-                  送った値と違うときだけ
-    end           run_activity.is_in_progress(手順 6 の更新時刻, record_end の有無, now) が偽なら
-                  {"record_end": record_end の有無} を最後に足し、LivePoll.finished を真にする
-1 回の読み取りの events の順は request → run → frame → pad → advisor_step → advisor_run → note_version →
-stats → end。同じ種類の中はファイルの順 (advisor_step はディレクトリーの順の中でファイルの順)。
+    4 つの JSON Lines は位置 0 から今の終わり (run.jsonl は S) まで読む。cursor のあるファイルは、cursor より前
+    (end=cursor で読んだ行) を「状態だけの行」、cursor から後 (位置 cursor から読んだ行) を「送る行」にする。
+    cursor が行の途中なら、その行はどちらにも入れない。cursor がファイルの大きさより大きければ、その位置より後に
+    始まる行だけが送る行になる (その位置をまたぐ行は、書き終わっても送らない)。cursor を省いた (None の) ファイルは、
+    今の終わりまでのすべてを状態だけの行にする。advisor の stream.jsonl は、接続時にあったファイルはすべてを状態だけの
+    行にし、接続後にできたファイル (接続時にディレクトリーがあってファイルが無かったものを含む) は位置 0 から送る行に
+    する。2 回目以降の読み取りで読んだ行は、すべて送る行。
 """
 
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from anyio import to_thread
+from switch2_agent.advisors.claude_code_headless import RESULT_FILE_NAME
+from switch2_agent.advisors.stream_json_log import STREAM_FILE_NAME
+
+from run_dashboard import jsonl_lines
+from run_dashboard.jsonl_lines import LineChunk, parse_lines
 from run_dashboard.live_events import LiveEvent
+from run_dashboard.live_state import (
+    LINE_KINDS,
+    AdvisorRead,
+    LiveRead,
+    LiveRecords,
+    apply_read,
+)
+from run_dashboard.run_directory import AdvisorRunDir, list_advisor_run_dirs
+from run_dashboard.run_records import (
+    RECORD_FILE_NAMES,
+    read_result_json,
+    read_run_log_mtime,
+)
 
 # 実行のディレクトリーを読む間隔 (秒)
 LIVE_POLL_INTERVAL_S = 0.25
@@ -98,12 +78,36 @@ class LiveCursors:
 
 
 @dataclass(frozen=True)
+class FilePosition:
+    """JSON Lines のファイル 1 つの、次に読む位置。
+
+    offset   次に読み始めるバイトの位置
+    partial  offset が行の途中かもしれない (接続の cursor が完全な行の終わりでなかった)。次に行を読めたとき、
+             offset をまたぐ最初の行を読み捨てる
+    """
+
+    offset: int
+    partial: bool = False
+
+
+@dataclass(frozen=True)
 class LiveState:
     """1 つの接続の読み取りの状態。
 
     フィールドは live_reader の中の約束で、呼び出し側は中を見ない・変えない。読み取りのたびに新しい状態を作り、
     渡された状態は変えない。
+    run_dir         実行のディレクトリー
+    positions       LINE_KINDS の種類 → 次に読む位置
+    stream_offsets  advisor の実行の名前 → stream.jsonl の次に読む位置
+    records         読んだ記録をためた状態 (live_state.LiveRecords)
+    finished        end のイベントを送ったか
     """
+
+    run_dir: Path
+    positions: dict[str, FilePosition] = field(default_factory=dict)
+    stream_offsets: dict[str, int] = field(default_factory=dict)
+    records: LiveRecords = field(default_factory=LiveRecords)
+    finished: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,7 +132,45 @@ def open_live(run_dir: Path, cursors: LiveCursors, now: float) -> LivePoll:
     events は、cursor 以後の行のイベント、advisor_run と note_version のすべて、stats (と、実行中でなければ end)。
     cursors のどれかが負なら ValueError を出す。
     """
-    raise NotImplementedError
+    cursor_of = {
+        "run": cursors.run,
+        "requests": cursors.requests,
+        "frames": cursors.frames,
+        "pad": cursors.pad,
+    }
+    for kind, cursor in cursor_of.items():
+        if cursor is not None and cursor < 0:
+            raise ValueError(f"cursor must not be negative: {kind}={cursor}")
+    run_log_size = _run_log_size(run_dir)
+    state_lines: dict[str, list[dict]] = {}
+    send_lines: dict[str, list[dict]] = {}
+    positions: dict[str, FilePosition] = {}
+    for kind in LINE_KINDS:
+        path = run_dir / RECORD_FILE_NAMES[kind]
+        if kind == "run" and run_log_size is None:
+            state_lines[kind], send_lines[kind] = [], []
+            positions[kind] = _position_without_file(cursor_of[kind])
+            continue
+        end = run_log_size if kind == "run" else None
+        state_lines[kind], send_lines[kind], positions[kind] = _open_file(
+            path, cursor_of[kind], end
+        )
+    advisors, stream_offsets = _open_advisors(run_dir)
+    read = LiveRead(
+        state_lines=state_lines,
+        send_lines=send_lines,
+        advisors=advisors,
+        run_log_mtime=read_run_log_mtime(run_dir),
+    )
+    events, records, finished = apply_read(LiveRecords(), read, now)
+    state = LiveState(
+        run_dir=run_dir,
+        positions=positions,
+        stream_offsets=stream_offsets,
+        records=records,
+        finished=finished,
+    )
+    return LivePoll(events=events, state=state, finished=finished)
 
 
 def poll_live(state: LiveState, now: float) -> LivePoll:
@@ -137,7 +179,35 @@ def poll_live(state: LiveState, now: float) -> LivePoll:
     渡した state は変えない (ファイルが同じなら、同じ state で 2 回呼ぶと同じ結果になる)。finished の読み取りの
     state を渡すと、読まずに LivePoll([], state, True) を返す。
     """
-    raise NotImplementedError
+    if state.finished:
+        return LivePoll(events=[], state=state, finished=True)
+    run_dir = state.run_dir
+    run_log_size = _run_log_size(run_dir)
+    send_lines: dict[str, list[dict]] = {}
+    positions = dict(state.positions)
+    for kind in LINE_KINDS:
+        if kind == "run" and run_log_size is None:
+            continue
+        end = run_log_size if kind == "run" else None
+        send_lines[kind], positions[kind] = _read_from(
+            run_dir / RECORD_FILE_NAMES[kind], positions[kind], end
+        )
+    advisors, stream_offsets = _poll_advisors(run_dir, state)
+    read = LiveRead(
+        state_lines={},
+        send_lines=send_lines,
+        advisors=advisors,
+        run_log_mtime=read_run_log_mtime(run_dir),
+    )
+    events, records, finished = apply_read(state.records, read, now)
+    next_state = LiveState(
+        run_dir=run_dir,
+        positions=positions,
+        stream_offsets=stream_offsets,
+        records=records,
+        finished=finished,
+    )
+    return LivePoll(events=events, state=next_state, finished=finished)
 
 
 async def stream_live(
@@ -156,6 +226,136 @@ async def stream_live(
     (テストが呼んだ回数を数える関数に差し替える)。取り消し (クライアントが接続を切った) は sleep か
     スレッドの待ちで届き、それ以上は読まない。
     """
-    raise NotImplementedError
-    # 本体が yield を含む非同期のジェネレーターの関数にするための、到達しない yield
-    yield
+    poll = await to_thread.run_sync(open_live, run_dir, cursors, clock())
+    for event in poll.events:
+        yield event
+    while not poll.finished:
+        await sleep(interval_s)
+        poll = await to_thread.run_sync(poll_live, poll.state, clock())
+        for event in poll.events:
+            yield event
+
+
+def _run_log_size(run_dir: Path) -> int | None:
+    """run_dir の run.jsonl の大きさを返す。無い・シンボリックリンク・OSError なら None。"""
+    path = run_dir / RECORD_FILE_NAMES["run"]
+    if path.is_symlink():
+        return None
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def _read_chunk(path: Path, offset: int, end: int | None = None) -> LineChunk | None:
+    """path の offset から (end があれば end の手前まで) の完全な行を読む。無い・シンボリックリンク・OSError なら None。"""
+    if path.is_symlink():
+        return None
+    try:
+        return jsonl_lines.read_complete_lines(path, offset, end)
+    except OSError:
+        return None
+
+
+def _read_from(
+    path: Path, position: FilePosition, end: int | None
+) -> tuple[list[dict], FilePosition]:
+    """path を position から (end があれば end の手前まで) 読み、(JSON の object の行, 次の位置) を返す。
+
+    position.partial なら、offset の 1 バイト前から読んで最初の行 (offset をまたぐ行か、offset の直前の改行で
+    終わる空の行) を読み捨てる。行を読めなければ、行なしで同じ位置を返す。
+    """
+    partial = position.partial and position.offset > 0
+    start = position.offset - 1 if partial else position.offset
+    chunk = _read_chunk(path, start, end)
+    if chunk is None or not chunk.lines:
+        return [], position
+    lines = chunk.lines[1:] if partial else chunk.lines
+    parsed = parse_lines(LineChunk(lines=lines, next_offset=chunk.next_offset))
+    return parsed.records, FilePosition(offset=chunk.next_offset)
+
+
+def _open_file(
+    path: Path, cursor: int | None, end: int | None
+) -> tuple[list[dict], list[dict], FilePosition]:
+    """接続時に path を読み、(状態だけの行, 送る行, 次の位置) を返す (モジュールの docstring の接続時の位置)。"""
+    if cursor is None:
+        chunk = _read_chunk(path, 0, end)
+        if chunk is None:
+            return [], [], FilePosition(offset=0)
+        return parse_lines(chunk).records, [], FilePosition(offset=chunk.next_offset)
+    state_end = cursor if end is None else min(cursor, end)
+    chunk = _read_chunk(path, 0, state_end)
+    state_lines = parse_lines(chunk).records if chunk is not None else []
+    complete_end = chunk.next_offset if chunk is not None else 0
+    position = FilePosition(offset=cursor, partial=complete_end != cursor)
+    send_lines, position = _read_from(path, position, end)
+    return state_lines, send_lines, position
+
+
+def _position_without_file(cursor: int | None) -> FilePosition:
+    """接続時にファイルが無かったときの、次に読む位置 (cursor が無いか 0 なら 0、それ以外は行の途中かもしれない)。"""
+    if cursor is None or cursor == 0:
+        return FilePosition(offset=0)
+    return FilePosition(offset=cursor, partial=True)
+
+
+def _list_advisor_dirs(run_dir: Path) -> list[AdvisorRunDir] | None:
+    """run_dir の advisor の実行のディレクトリーの一覧を返す。一覧を取れなければ (OSError) None。"""
+    try:
+        return list_advisor_run_dirs(run_dir)
+    except OSError:
+        return None
+
+
+def _open_advisors(run_dir: Path) -> tuple[list[AdvisorRead], dict[str, int]]:
+    """接続時に advisor の実行を読む。接続時にあった stream.jsonl の行はすべて状態だけの行にする。"""
+    reads: list[AdvisorRead] = []
+    offsets: dict[str, int] = {}
+    for advisor_dir in _list_advisor_dirs(run_dir) or []:
+        chunk = _read_chunk(advisor_dir.path / STREAM_FILE_NAME, 0)
+        offsets[advisor_dir.name] = chunk.next_offset if chunk is not None else 0
+        reads.append(
+            AdvisorRead(
+                advisor_dir=advisor_dir,
+                state_lines=parse_lines(chunk).records if chunk is not None else [],
+                send_lines=[],
+                result_json=read_result_json(advisor_dir.path / RESULT_FILE_NAME),
+            )
+        )
+    return reads, offsets
+
+
+def _poll_advisors(
+    run_dir: Path, state: LiveState
+) -> tuple[list[AdvisorRead] | None, dict[str, int]]:
+    """2 回目以降の読み取りで advisor の実行を読む。一覧を取れなければ (None, 前の位置) を返す。
+
+    stream.jsonl は前の位置 (接続後にできた実行は 0) から読み、result.json はまだ読めていない実行だけ読む。
+    """
+    advisor_dirs = _list_advisor_dirs(run_dir)
+    if advisor_dirs is None:
+        return None, state.stream_offsets
+    offsets = dict(state.stream_offsets)
+    reads: list[AdvisorRead] = []
+    for advisor_dir in advisor_dirs:
+        offset = offsets.get(advisor_dir.name, 0)
+        lines, position = _read_from(
+            advisor_dir.path / STREAM_FILE_NAME, FilePosition(offset=offset), None
+        )
+        offsets[advisor_dir.name] = position.offset
+        known = state.records.advisors.get(advisor_dir.name)
+        needs_result = known is None or known.result_json is None
+        reads.append(
+            AdvisorRead(
+                advisor_dir=advisor_dir,
+                state_lines=[],
+                send_lines=lines,
+                result_json=(
+                    read_result_json(advisor_dir.path / RESULT_FILE_NAME)
+                    if needs_result
+                    else None
+                ),
+            )
+        )
+    return reads, offsets

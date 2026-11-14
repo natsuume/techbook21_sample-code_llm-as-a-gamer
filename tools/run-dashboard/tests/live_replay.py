@@ -25,6 +25,7 @@ from synthetic_runs import format_clock
 from run_dashboard.advisor_runs import build_advisor_runs
 from run_dashboard.elapsed_time import mono_elapsed, parse_wall_time
 from run_dashboard.jsonl_lines import LineChunk, number_or_none, parse_lines
+from run_dashboard.run_activity import RECORD_END_EVENT
 from run_dashboard.run_directory import ADVISOR_FILE_TOP_DIR_PATTERN
 from run_dashboard.run_records import RECORD_FILE_NAMES, load_run, read_result_json
 
@@ -65,6 +66,9 @@ def replay_steps(source_run_dir: Path) -> list[ReplayStep]:
         JSON として読めない行と、鍵の無い行は、同じファイルの直前の鍵 (ファイルの最初なら -inf)
     同じ鍵の順は result.json → stream → requests → run → frames → pad (merge に渡す順。要求の行を同じ時刻の
     decision の行より先に、result.json を同じ時刻の advisor の行より先に書く)。
+    run.jsonl の record_end の行 (最初の 1 行) は、経過秒の鍵によらず、ほかのすべての歩の後に書く (第4章は記録を
+    閉じるとき、ほかの記録をすべて書き切った後に record_end を書くため)。run.jsonl でその後にある行 (壊れた行など)
+    は、ファイルの順を保つため、record_end の行に続けて書く。
     advisor のディレクトリー (名前が run_directory.ADVISOR_FILE_TOP_DIR_PATTERN に fullmatch するディレクトリー。
     名前の順) の入力 (stream.jsonl と result.json 以外のファイル。パスの順) は、その stream.jsonl の最初の行の
     直前に書く。result.json は、その実行の t_end (advisor_runs.build_advisor_runs の値。None か、役割を持たない
@@ -123,15 +127,34 @@ def replay_steps(source_run_dir: Path) -> list[ReplayStep]:
         "frames": mono_key,
         "pad": mono_key,
     }
+    last_steps: list[KeyedStep] = []
     for kind in ("requests", "run", "frames", "pad"):
         path = source_run_dir / RECORD_FILE_NAMES[kind]
-        if path.is_file():
-            file_groups.append(_keyed_lines(source_run_dir, path, key_of_kind[kind]))
+        if not path.is_file():
+            continue
+        keyed = _keyed_lines(source_run_dir, path, key_of_kind[kind])
+        if kind == "run":
+            keyed, last_steps = _split_at_record_end(keyed)
+        file_groups.append(keyed)
 
     merged = heapq.merge(
         *result_groups, *stream_groups, *file_groups, key=lambda pair: pair[0]
     )
-    return [step for _, step in merged]
+    return [step for _, step in [*merged, *last_steps]]
+
+
+def _split_at_record_end(
+    keyed: list[KeyedStep],
+) -> tuple[list[KeyedStep], list[KeyedStep]]:
+    """run.jsonl の歩 keyed を、最初の record_end の行の手前までと、record_end の行から後に分けて返す。
+
+    record_end の行が無ければ (keyed, [])。
+    """
+    for index, (_, step) in enumerate(keyed):
+        record = _parse_record(step.data.removesuffix(b"\n"))
+        if record is not None and record.get("event") == RECORD_END_EVENT:
+            return keyed[:index], keyed[index:]
+    return keyed, []
 
 
 def _advisor_dirs(run_dir: Path) -> list[Path]:
