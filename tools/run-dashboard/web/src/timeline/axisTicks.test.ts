@@ -13,6 +13,12 @@ describe("computeAxisTicks", () => {
     ]);
   });
 
+  it("from + 幅 の丸めで to - from が幅をわずかに超えても、同じ刻みを選ぶ (幅 10 秒なら 1 秒)", () => {
+    const from = 7.176;
+    const to = from + 10; // to - from は 10.000000000000002
+    expect(computeAxisTicks({ from, to })).toEqual([8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+  });
+
   it("幅 ÷ 刻みが 10 を越える刻みは選ばない (幅 5.5 秒なら 1 秒)", () => {
     expect(computeAxisTicks({ from: 0, to: 5.5 })).toEqual([0, 1, 2, 3, 4, 5]);
   });
