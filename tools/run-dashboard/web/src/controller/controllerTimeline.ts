@@ -1,6 +1,6 @@
 // コントローラー入力の時間の変化を、pad の記録 (送ったレポート) か要求の決めた操作から組み立てる純粋な関数。
 // 再生位置の時刻の入力 (snapshot) と、タイムラインの入力のレーンに描く区間 (spans) を返す。
-import type { PadItem, RequestItem } from "../api/apiTypes.ts";
+import type { EventItem, PadItem, RequestItem } from "../api/apiTypes.ts";
 import type { TimeRange } from "../timeline/viewWindow.ts";
 import type { ButtonName, StickName, StickValue } from "./operationText.ts";
 
@@ -33,17 +33,34 @@ export const controllerAtFromPad: (pad: readonly PadItem[], t: number) => Contro
     throw new Error("not implemented");
   };
 
+/** 第4章が中立のレポートを送った直後に run.jsonl に書く出来事 (判断の失敗、キャプチャーの停止、接続の復旧待ち) */
+export const NEUTRAL_EVENTS: readonly string[] = [
+  "decision_error",
+  "capture_stopped",
+  "bridge_wait",
+];
+
+/**
+ * events から、第4章が中立に戻した時刻 (event が NEUTRAL_EVENTS の行の t) を昇順で返す。
+ * 要求の記録は中立に戻した時刻を持たないため、要求から入力を組み立てるときにこの時刻を使う
+ */
+export const neutralTimesFromEvents: (events: readonly EventItem[]) => number[] = () => {
+  throw new Error("not implemented");
+};
+
 /**
  * 要求の決めた操作から、時刻 t のコントローラー入力を返す (source は "requests")。
- * - 使う要求は result === "ok"、t_received !== null、parseOperation(action) !== null のもの
- * - result が "ok" でない要求は、その時刻 (t_received ?? t_sent) で中立に戻す (第4章は判断の失敗・出力の停止・
- *   送信の失敗のときに中立のレポートを送る)。ok で使わない要求は飛ばす (前の押下が続く)
- * - 要求を配列の順に見て、使う要求 i の押下とスティックは、受信時刻 tr_i から、その後で最初に来る使う要求の
- *   受信時刻か ok でない要求の時刻の前まで効く。短押しは [tr_i, tr_i + TAP_SECONDS) に効く
+ * - 使う要求は result === "ok"、t_received !== null、parseOperation(action) !== null のもの。ほかの要求は飛ばす
+ * - neutralTimes は中立に戻した時刻 (neutralTimesFromEvents の結果。昇順)
+ * - 使う要求 i の押下とスティックは、受信時刻 tr_i から、その後で最初に来る「使う要求の受信時刻」か
+ *   「neutralTimes の時刻」の前まで効く。中立に戻す時刻と使う要求の受信時刻が同じなら、要求の操作が効く。
+ *   短押しは [tr_i, tr_i + TAP_SECONDS) に効く
  * - 同じボタンが押下と短押しの両方にあれば短押しとして扱う
+ * - events の時刻は run.jsonl の壁時計から求めるため、要求の時刻と数十ミリ秒ずれることがある
  */
 export const controllerAtFromRequests: (
   requests: readonly RequestItem[],
+  neutralTimes: readonly number[],
   t: number,
 ) => ControllerSnapshot = () => {
   throw new Error("not implemented");
@@ -66,12 +83,13 @@ export const inputSpansFromPad: (
 
 /**
  * 要求の決めた操作から、range と重なる入力の区間を range に切り詰めて返す (source は "requests")。
- * 要求の選び方・中立に戻す要求・効く区間・短押しの扱いは controllerAtFromRequests と同じ。最後の使う要求の押下は、
- * その後に ok でない要求が無ければ tEnd まで効く。
+ * 要求の選び方・中立に戻す時刻・効く区間・短押しの扱いは controllerAtFromRequests と同じ。最後の使う要求の押下は、
+ * その後に中立に戻す時刻が無ければ tEnd まで効く。
  * つなぎ方と並びは inputSpansFromPad と同じ
  */
 export const inputSpansFromRequests: (
   requests: readonly RequestItem[],
+  neutralTimes: readonly number[],
   range: TimeRange,
   tEnd: number,
 ) => InputSpans = () => {

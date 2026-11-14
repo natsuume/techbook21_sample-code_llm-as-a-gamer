@@ -1,12 +1,13 @@
 // controllerTimeline のテスト。pad の記録と要求の操作からの、時刻の入力と入力の区間の組み立て方を確かめる
 import { describe, expect, it } from "vitest";
-import type { PadItem, PadSource, RequestItem } from "../api/apiTypes.ts";
+import type { EventItem, PadItem, PadSource, RequestItem } from "../api/apiTypes.ts";
 import {
   type ControllerSnapshot,
   controllerAtFromPad,
   controllerAtFromRequests,
   inputSpansFromPad,
   inputSpansFromRequests,
+  neutralTimesFromEvents,
 } from "./controllerTimeline.ts";
 import { BUTTON_NAMES } from "./operationText.ts";
 
@@ -234,7 +235,7 @@ describe("controllerAtFromRequests", () => {
   ];
 
   it("要求の押下とスティックは、受信時刻から効く", () => {
-    expect(sortButtons(controllerAtFromRequests(requests, 1.5))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(requests, [], 1.5))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: { LS: { x: 1, y: 0 } },
       source: "requests",
@@ -242,12 +243,12 @@ describe("controllerAtFromRequests", () => {
   });
 
   it("要求の押下とスティックは、次の要求の受信時刻の前まで効く", () => {
-    expect(sortButtons(controllerAtFromRequests(requests, 2.99))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(requests, [], 2.99))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: { LS: { x: 1, y: 0 } },
       source: "requests",
     });
-    expect(controllerAtFromRequests(requests, 3)).toEqual({
+    expect(controllerAtFromRequests(requests, [], 3)).toEqual({
       buttons: [],
       sticks: {},
       source: "requests",
@@ -255,7 +256,7 @@ describe("controllerAtFromRequests", () => {
   });
 
   it("短押しは受信時刻から TAP_SECONDS の間だけ効く", () => {
-    expect(sortButtons(controllerAtFromRequests(requests, 1.05))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(requests, [], 1.05))).toEqual({
       buttons: [
         { name: "A", kind: "hold" },
         { name: "B", kind: "tap" },
@@ -263,7 +264,7 @@ describe("controllerAtFromRequests", () => {
       sticks: { LS: { x: 1, y: 0 } },
       source: "requests",
     });
-    expect(sortButtons(controllerAtFromRequests(requests, 1.2))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(requests, [], 1.2))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: { LS: { x: 1, y: 0 } },
       source: "requests",
@@ -271,37 +272,37 @@ describe("controllerAtFromRequests", () => {
   });
 
   it("最初の要求の受信時刻より前は何も押していない", () => {
-    expect(controllerAtFromRequests(requests, 0.9)).toEqual({
+    expect(controllerAtFromRequests(requests, [], 0.9)).toEqual({
       buttons: [],
       sticks: {},
       source: "requests",
     });
   });
 
-  it("result が ok でない要求の時刻 (t_received が null なら t_sent) で中立に戻す", () => {
-    const withFailures = [
+  it("中立に戻す時刻から、押下とスティックを中立にする (始まりを含む)", () => {
+    const withFailure = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A+LS:1,0 / 短押し none" }),
       request({ n: 2, t_sent: 1.5, t_received: null, result: "error", action: null }),
       request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 X / 短押し none" }),
     ];
-    expect(sortButtons(controllerAtFromRequests(withFailures, 1.49))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(withFailure, [2.1], 2.09))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: { LS: { x: 1, y: 0 } },
       source: "requests",
     });
-    expect(controllerAtFromRequests(withFailures, 1.5)).toEqual({
+    expect(controllerAtFromRequests(withFailure, [2.1], 2.1)).toEqual({
       buttons: [],
       sticks: {},
       source: "requests",
     });
-    expect(controllerAtFromRequests(withFailures, 3)).toEqual({
+    expect(controllerAtFromRequests(withFailure, [2.1], 3)).toEqual({
       buttons: [{ name: "X", kind: "hold" }],
       sticks: {},
       source: "requests",
     });
   });
 
-  it("受信時刻のある ok でない要求 (discarded) は、受信時刻で中立に戻し、その操作は使わない", () => {
+  it("ok でない要求は使わず、その時刻では中立に戻さない", () => {
     const withDiscarded = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
       request({
@@ -312,13 +313,20 @@ describe("controllerAtFromRequests", () => {
         action: "押下 B / 短押し none",
       }),
     ];
-    expect(sortButtons(controllerAtFromRequests(withDiscarded, 1.9))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(withDiscarded, [], 2.5))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: {},
       source: "requests",
     });
-    expect(controllerAtFromRequests(withDiscarded, 2.5)).toEqual({
-      buttons: [],
+  });
+
+  it("中立に戻す時刻と使う要求の受信時刻が同じなら、要求の操作が効く", () => {
+    const sameTime = [
+      request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
+      request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 X / 短押し none" }),
+    ];
+    expect(controllerAtFromRequests(sameTime, [2], 2)).toEqual({
+      buttons: [{ name: "X", kind: "hold" }],
       sticks: {},
       source: "requests",
     });
@@ -330,7 +338,7 @@ describe("controllerAtFromRequests", () => {
       request({ n: 2, t_sent: 1.5, t_received: null, action: "押下 B / 短押し none" }),
       request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 X / 短押し none" }),
     ];
-    expect(sortButtons(controllerAtFromRequests(withoutReceived, 2))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(withoutReceived, [], 2))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: {},
       source: "requests",
@@ -343,7 +351,7 @@ describe("controllerAtFromRequests", () => {
       request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 JUMP / 短押し none" }),
       request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 X / 短押し none" }),
     ];
-    expect(sortButtons(controllerAtFromRequests(withUnknown, 2.5))).toEqual({
+    expect(sortButtons(controllerAtFromRequests(withUnknown, [], 2.5))).toEqual({
       buttons: [{ name: "A", kind: "hold" }],
       sticks: {},
       source: "requests",
@@ -355,7 +363,7 @@ describe("controllerAtFromRequests", () => {
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し A" }),
       request({ n: 2, t_sent: 2.5, t_received: 3, action: "押下 none / 短押し none" }),
     ];
-    expect(controllerAtFromRequests(both, 1.05)).toEqual({
+    expect(controllerAtFromRequests(both, [], 1.05)).toEqual({
       buttons: [{ name: "A", kind: "tap" }],
       sticks: {},
       source: "requests",
@@ -508,7 +516,7 @@ describe("inputSpansFromRequests", () => {
       request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 A / 短押し none" }),
       request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 none / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 5)).toEqual({
+    expect(inputSpansFromRequests(requests, [], WIDE_RANGE, 5)).toEqual({
       buttons: [
         { button: "A", kind: "hold", start: 1, end: 3 },
         { button: "B", kind: "tap", start: 1, end: expect.closeTo(1.12) },
@@ -518,29 +526,28 @@ describe("inputSpansFromRequests", () => {
     });
   });
 
-  it("ok で使わない要求は飛ばして押下を続け、ok でない要求の時刻で押下を閉じる", () => {
+  it("使わない要求を飛ばして押下を続け、中立に戻す時刻で押下とスティックを閉じる", () => {
     const requests = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 X+LS:1,0 / 短押し none" }),
       request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 JUMP / 短押し none" }),
       request({ n: 3, t_sent: 2.2, t_received: null, result: "error", action: null }),
       request({ n: 4, t_sent: 2.5, t_received: 3, action: "押下 Y / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 5)).toEqual({
+    expect(inputSpansFromRequests(requests, [2.4], WIDE_RANGE, 5)).toEqual({
       buttons: [
-        { button: "X", kind: "hold", start: 1, end: 2.2 },
+        { button: "X", kind: "hold", start: 1, end: 2.4 },
         { button: "Y", kind: "hold", start: 3, end: 5 },
       ],
-      sticks: [{ stick: "LS", start: 1, end: 2.2, magnitude: expect.closeTo(1) }],
+      sticks: [{ stick: "LS", start: 1, end: 2.4, magnitude: expect.closeTo(1) }],
       source: "requests",
     });
   });
 
-  it("最後の使う要求の後に ok でない要求があれば、押下をその時刻で閉じる", () => {
+  it("最後の使う要求の押下は、その後の中立に戻す時刻で閉じる", () => {
     const requests = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 Y / 短押し none" }),
-      request({ n: 2, t_sent: 1.8, t_received: 2, result: "discarded", action: null }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 4)).toEqual({
+    expect(inputSpansFromRequests(requests, [0.5, 2], WIDE_RANGE, 4)).toEqual({
       buttons: [{ button: "Y", kind: "hold", start: 1, end: 2 }],
       sticks: [],
       source: "requests",
@@ -551,7 +558,7 @@ describe("inputSpansFromRequests", () => {
     const requests = [
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 Y / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 4)).toEqual({
+    expect(inputSpansFromRequests(requests, [], WIDE_RANGE, 4)).toEqual({
       buttons: [{ button: "Y", kind: "hold", start: 1, end: 4 }],
       sticks: [],
       source: "requests",
@@ -563,7 +570,7 @@ describe("inputSpansFromRequests", () => {
       request({ n: 1, t_sent: 0.5, t_received: 1, action: "押下 A / 短押し none" }),
       request({ n: 2, t_sent: 5.5, t_received: 6, action: "押下 none / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, { from: 2, to: 4 }, 10)).toEqual({
+    expect(inputSpansFromRequests(requests, [], { from: 2, to: 4 }, 10)).toEqual({
       buttons: [{ button: "A", kind: "hold", start: 2, end: 4 }],
       sticks: [],
       source: "requests",
@@ -575,7 +582,7 @@ describe("inputSpansFromRequests", () => {
       request({ n: 1, t_sent: -0.5, t_received: 0, action: "押下 none / 短押し B" }),
       request({ n: 2, t_sent: 0.1, t_received: 0.12, action: "押下 B / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 1)).toEqual({
+    expect(inputSpansFromRequests(requests, [], WIDE_RANGE, 1)).toEqual({
       buttons: [
         { button: "B", kind: "tap", start: 0, end: expect.closeTo(0.12) },
         { button: "B", kind: "hold", start: 0.12, end: 1 },
@@ -591,7 +598,7 @@ describe("inputSpansFromRequests", () => {
       request({ n: 2, t_sent: 1.5, t_received: 2, action: "押下 LS:0,-1 / 短押し none" }),
       request({ n: 3, t_sent: 2.5, t_received: 3, action: "押下 LS:0.5,0 / 短押し none" }),
     ];
-    expect(inputSpansFromRequests(requests, WIDE_RANGE, 4)).toEqual({
+    expect(inputSpansFromRequests(requests, [], WIDE_RANGE, 4)).toEqual({
       buttons: [],
       sticks: [
         { stick: "LS", start: 1, end: 3, magnitude: expect.closeTo(1) },
@@ -599,5 +606,37 @@ describe("inputSpansFromRequests", () => {
       ],
       source: "requests",
     });
+  });
+});
+
+describe("neutralTimesFromEvents", () => {
+  const event = (t: number, name: string): EventItem => ({ t, event: name });
+
+  it("判断の失敗・キャプチャーの停止・接続の復旧待ちの時刻を返す", () => {
+    const events = [
+      event(1, "decision_error"),
+      event(2, "capture_stopped"),
+      event(3, "bridge_wait"),
+    ];
+    expect(neutralTimesFromEvents(events)).toEqual([1, 2, 3]);
+  });
+
+  it("ほかの出来事は入れない", () => {
+    const events = [
+      event(0, "start"),
+      event(1, "bridge_wait_end"),
+      event(2, "send_error"),
+      event(3, "advisor"),
+    ];
+    expect(neutralTimesFromEvents(events)).toEqual([]);
+  });
+
+  it("時刻の昇順に並べる", () => {
+    const events = [
+      event(5, "bridge_wait"),
+      event(-0.5, "decision_error"),
+      event(2, "capture_stopped"),
+    ];
+    expect(neutralTimesFromEvents(events)).toEqual([-0.5, 2, 5]);
   });
 });
