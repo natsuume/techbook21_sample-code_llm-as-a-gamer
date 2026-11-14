@@ -8,6 +8,7 @@ import {
   inputSpansFromPad,
   inputSpansFromRequests,
   neutralTimesFromEvents,
+  padSnapshotTime,
 } from "./controllerTimeline.ts";
 import { BUTTON_NAMES } from "./operationText.ts";
 
@@ -680,6 +681,52 @@ describe("inputSpansFromRequests", () => {
       ],
       source: "requests",
     });
+  });
+});
+
+describe("padSnapshotTime", () => {
+  it("position 以後で次の要求より前の、最初の apply の行の時刻を返す", () => {
+    const rows = [
+      padRow(1.02, "apply", "A"),
+      padRow(1.14, "tap_release", "A"),
+      padRow(2.03, "apply", "B"),
+    ];
+    expect(padSnapshotTime(rows, 1, 2)).toBe(1.02);
+  });
+
+  it("apply の行が次の要求の時刻以後にしか無ければ position を返す", () => {
+    const rows = [padRow(0.5, "apply", "A"), padRow(2, "apply", "B")];
+    expect(padSnapshotTime(rows, 1, 2)).toBe(1);
+  });
+
+  it("apply 以外の行は使わない", () => {
+    const rows = [
+      padRow(1.01, "tap_start", "A"),
+      padRow(1.02, "tap_release", "none"),
+      padRow(1.03, "neutral", "none"),
+      padRow(1.04, "apply", "B"),
+    ];
+    expect(padSnapshotTime(rows, 1, 2)).toBe(1.04);
+  });
+
+  it("使わない行 (ok が false、t が null、状態を解釈できない) は飛ばす", () => {
+    const rows = [
+      padRow(1.01, "apply", "A", false),
+      padRow(null, "apply", "A"),
+      padRow(1.02, "apply", "A+JUMP"),
+      padRow(1.03, "apply", "X"),
+    ];
+    expect(padSnapshotTime(rows, 1, 2)).toBe(1.03);
+  });
+
+  it("nextRequestTime が null なら上限を設けない", () => {
+    const rows = [padRow(0.9, "apply", "A"), padRow(5, "apply", "B")];
+    expect(padSnapshotTime(rows, 1, null)).toBe(5);
+  });
+
+  it("apply の行の時刻が position と同じなら、その時刻を返す", () => {
+    const rows = [padRow(1, "apply", "A")];
+    expect(padSnapshotTime(rows, 1, 2)).toBe(1);
   });
 });
 

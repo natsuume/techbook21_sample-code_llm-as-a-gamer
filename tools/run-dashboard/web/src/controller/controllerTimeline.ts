@@ -36,6 +36,21 @@ export const controllerAtFromPad: (pad: readonly PadItem[], t: number) => Contro
   };
 
 /**
+ * 選んだ要求の操作を pad の記録で示す時刻を返す (上の段のコントローラー入力に使う)。
+ * 使う行 (controllerAtFromPad と同じ選び方) のうち、source が apply で position <= t < nextRequestTime の最初の
+ * 行の t を返す (nextRequestTime が null なら上限を設けない)。該当する行が無ければ position を返す。
+ * 第4章は要求の応答を受けた後に操作を送り、pad の行の時刻は送信が戻った後の時刻のため、再生位置 (要求の受信時刻)
+ * では pad の記録にまだ前の操作が出ている。position は選んだ要求の再生位置、nextRequestTime は次の要求の再生位置
+ */
+export const padSnapshotTime: (
+  pad: readonly PadItem[],
+  position: number,
+  nextRequestTime: number | null,
+) => number = () => {
+  throw new Error("not implemented");
+};
+
+/**
  * 第4章が中立のレポートを送る前後に run.jsonl に書く出来事。判断の失敗・キャプチャーの停止・接続の復旧待ちは
  * 中立に戻した直後に書く。割り込み (interrupted) は書いた直後に中立に戻し、接続の失敗 (pipeline_error) は
  * 書いた後に判断のループを抜け、終了処理で中立に戻す
