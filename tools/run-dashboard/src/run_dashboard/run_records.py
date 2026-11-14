@@ -9,9 +9,11 @@ ch04_techniques/README.md のログの節):
     advisor-<役割>-<連番>/result.json   advisor の実行の結果 (switch2_agent.advisors.claude_code_headless)
 JSON Lines は jsonl_lines.read_json_lines で読む (改行で終わっていない最後の行は読まず、JSON として読めない行は
 読み飛ばして数える)。無いファイルと、読めない (OSError) ファイルは、無いものとして扱う。ファイルには何も書かない。
+読む関数は record_cache.JsonLinesCache を受け取れ、受け取ったときは、署名の変わっていないファイルを読み直さない。
 """
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from run_dashboard.jsonl_lines import (
     is_json_scalar,
     read_json_lines,
 )
+from run_dashboard.record_cache import JsonLinesCache, RecordsTransform
 from run_dashboard.run_directory import (
     AdvisorRunDir,
     find_run_dir,
@@ -45,6 +48,12 @@ RECORD_FILE_NAMES = {
     "frames": FRAMES_RECORD_FILE_NAME,
     "pad": PAD_RECORD_FILE_NAME,
 }
+# load_run の parts に指定できる、読むかどうかを選べる記録の種類 (run.jsonl はいつも読む)。既定はすべて
+LOAD_PARTS = ("requests", "frames", "pad", "advisor_steps")
+# lighten_request_lines が要求の行から除くキー (API で使わない、応答の本文と拒否の数)
+UNUSED_REQUEST_KEYS = ("raw_response", "refusals")
+# lighten_request_lines が、直前の要求の行と同じ値なら同じ文字列のオブジェクトにするキー
+SHARED_REQUEST_TEXT_KEYS = ("state_text", "history_text", "previous_operation_text")
 
 
 @dataclass(frozen=True)
@@ -86,13 +95,25 @@ class RunRecords:
     args              start の args (起動引数)。object (辞書) でなければ None
     run_events        run.jsonl の全行 (ファイルの順)。run.jsonl が無ければ空のリスト
     header            requests.jsonl の、event が "header" の最初の行。無ければ None
-    requests          requests.jsonl の、event が "request" の行 (ファイルの順)。無ければ空のリスト
+    requests          requests.jsonl の、event が "request" の行 (ファイルの順。lighten_request_lines で軽くした行)。
+                      無ければ空のリスト
     frames            frames.jsonl の行 (ファイルの順)。ファイルが無ければ None
     pad               pad.jsonl の行 (ファイルの順)。ファイルが無ければ None
     advisor_dirs      役割ごとの advisor の実行のディレクトリー (run_directory.list_advisor_run_dirs)
     skipped_lines     RECORD_KINDS の種類 → 読み飛ばした行の数。5 つの種類すべてのキーを持つ (0 を含む)
     has_requests_file requests.jsonl を読めたか
     has_stream_file   advisor_dirs のどれかに stream.jsonl があって読めたか
+
+    load_run の parts で読む種類を絞ったときに、正しい値になるフィールド:
+        name・run_dir・start・origin_mono・args・advisor_dirs   いつも正しい (run.jsonl と advisor のディレクトリーの
+                                                                一覧はいつも読む)
+        run_events の行      いつも正しい。t は、parts に requests があるときだけ正しい (起点に decision の行を使うため。
+                             requests が無いと、起点は start の行だけになる)
+        header・requests・has_requests_file   parts に requests があるときだけ正しい (無ければ None・[]・False)
+        frames               parts に frames があるときだけ正しい (無ければ None)
+        pad                  parts に pad があるときだけ正しい (無ければ None)
+        has_stream_file      parts に advisor_steps があるときだけ正しい (無ければ False)
+        skipped_lines        すべての種類を読んだときだけ正しい (読まなかった種類は 0)
     """
 
     name: str
@@ -121,17 +142,20 @@ class RunRecords:
         )
 
 
-def load_run_overview(runs_dir: Path, name: str) -> RunOverview | None:
+def load_run_overview(
+    runs_dir: Path, name: str, cache: JsonLinesCache | None = None
+) -> RunOverview | None:
     """runs_dir の実行 name の、一覧の 1 件に使う部分だけを読んで返す。
 
     run_directory.find_run_dir(runs_dir, name) で照合し、一致しなければ None を返す。読むのは run.jsonl だけで、
     requests.jsonl は開けるかだけを確かめる (一覧では実行ごとに大きなファイルを読まないため)。start と origin_mono の
     決め方は load_run と同じ。has_requests_file は requests.jsonl を開けるか (無いか、OSError なら False)。
+    cache があれば、run.jsonl を cache で読む。
     """
     run_dir = find_run_dir(runs_dir, name)
     if run_dir is None:
         return None
-    run_lines = _records_of(_read_lines_if_readable(run_dir / RUN_LOG_FILE_NAME)) or []
+    run_lines = _records_of(_read_lines(run_dir / RUN_LOG_FILE_NAME, cache)) or []
     _, start = _find_start(run_lines)
     return RunOverview(
         name=name,
@@ -141,7 +165,12 @@ def load_run_overview(runs_dir: Path, name: str) -> RunOverview | None:
     )
 
 
-def load_run(runs_dir: Path, name: str) -> RunRecords | None:
+def load_run(
+    runs_dir: Path,
+    name: str,
+    parts: Collection[str] = LOAD_PARTS,
+    cache: JsonLinesCache | None = None,
+) -> RunRecords | None:
     """runs_dir の実行 name の記録を読んで返す。
 
     run_directory.find_run_dir(runs_dir, name) で照合し、一致しなければ None を返す。
@@ -150,6 +179,13 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
     読み飛ばした行の数を skipped_lines に入れる。無いファイルと読めないファイル (OSError) は無いものとして扱い、
     その種類の skipped_lines は 0 にする。stream.jsonl は skipped_lines と has_stream_file のためだけに読み、
     中身は持たない (中身は read_advisor_stream で読む)。
+    requests.jsonl の行は lighten_request_lines で軽くする (cache があってもなくても同じ値になる)。
+
+    parts は読む種類 (LOAD_PARTS の要素。既定はすべて)。run.jsonl と advisor のディレクトリーの一覧はいつも読む。
+    parts に無い種類のファイルは読まず、そのフィールドを RunRecords の docstring のとおり空のリストか None
+    (has_requests_file と has_stream_file は False、skipped_lines は 0) にする。LOAD_PARTS に無い種類は ValueError。
+    cache があれば、JSON Lines を cache (record_cache.JsonLinesCache) で読み、署名の変わっていないファイルは
+    読み直さない。None なら、キャッシュを使わずに読む。
 
     run.jsonl の行の経過秒 t (time は elapsed_time.parse_wall_time で読む):
         起点の行は、start の行 (t は 0.0) と、start の行より後の行のうち、event が "decision" で、number と同じ
@@ -166,13 +202,20 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
         requests.jsonl の無い実行では、起点の行が start の行だけになり、壁時計の差のままなので、ずれうる。
         number がキーにできない値 (list・dict) の行は、起点の行にしない。
     """
+    unknown = set(parts) - set(LOAD_PARTS)
+    if unknown:
+        raise ValueError(f"unknown parts: {sorted(unknown)}")
     run_dir = find_run_dir(runs_dir, name)
     if run_dir is None:
         return None
     skipped_lines = dict.fromkeys(RECORD_KINDS, 0)
     parsed: dict[str, ParsedLines | None] = {}
     for kind, file_name in RECORD_FILE_NAMES.items():
-        lines = _read_lines_if_readable(run_dir / file_name)
+        if kind != "run" and kind not in parts:
+            parsed[kind] = None
+            continue
+        transform = lighten_request_lines if kind == "requests" else None
+        lines = _read_lines(run_dir / file_name, cache, transform)
         parsed[kind] = lines
         if lines is not None:
             skipped_lines[kind] = lines.skipped
@@ -189,11 +232,12 @@ def load_run(runs_dir: Path, name: str) -> RunRecords | None:
 
     advisor_dirs = list_advisor_run_dirs(run_dir)
     has_stream_file = False
-    for advisor_dir in advisor_dirs:
-        stream = _read_lines_if_readable(advisor_dir.path / STREAM_FILE_NAME)
-        if stream is not None:
-            has_stream_file = True
-            skipped_lines["advisor_steps"] += stream.skipped
+    if "advisor_steps" in parts:
+        for advisor_dir in advisor_dirs:
+            stream = _read_lines(advisor_dir.path / STREAM_FILE_NAME, cache)
+            if stream is not None:
+                has_stream_file = True
+                skipped_lines["advisor_steps"] += stream.skipped
 
     return RunRecords(
         name=name,
@@ -236,12 +280,59 @@ def _can_open(path: Path) -> bool:
         return False
 
 
-def _read_lines_if_readable(path: Path) -> ParsedLines | None:
-    """path の JSON Lines を jsonl_lines.read_json_lines で読んで返す。無いか、読めない (OSError) なら None を返す。"""
+def _read_lines(
+    path: Path,
+    cache: JsonLinesCache | None,
+    transform: RecordsTransform | None = None,
+) -> ParsedLines | None:
+    """path の JSON Lines を読んで返す。無いか、読めない (OSError) なら None を返す。
+
+    cache があれば cache.read(path, transform) で読む。無ければ jsonl_lines.read_json_lines で読み、transform が
+    あれば records に当てる (キャッシュを使うときと同じ値にする)。
+    """
+    if cache is not None:
+        return cache.read(path, transform)
     try:
-        return read_json_lines(path)
+        lines = read_json_lines(path)
     except OSError:
         return None
+    if transform is None:
+        return lines
+    return ParsedLines(
+        records=transform(lines.records),
+        skipped=lines.skipped,
+        next_offset=lines.next_offset,
+    )
+
+
+def lighten_request_lines(records: list[dict]) -> list[dict]:
+    """requests.jsonl の行 records を、API で持つための軽い形にした新しいリストを返す (行の数と順は同じ)。
+
+    event が "request" の行は、UNUSED_REQUEST_KEYS (raw_response・refusals) のキーを除いた新しい辞書にする。
+    さらに SHARED_REQUEST_TEXT_KEYS (state_text・history_text・previous_operation_text) の値が、直前の要求の行の
+    同じキーの値と同じ文字列なら、直前の行の文字列のオブジェクトを使う (値は変えない。要求ごとに同じ数千字の
+    ゲームの情報が並ぶため、メモリーを減らし、版を比べるときの比較も速くする)。
+    ほかの行 (header など) はそのまま入れる。records は変えない。
+    """
+    lightened: list[dict] = []
+    previous: dict | None = None
+    for record in records:
+        if record.get("event") != "request":
+            lightened.append(record)
+            continue
+        line = {
+            key: value
+            for key, value in record.items()
+            if key not in UNUSED_REQUEST_KEYS
+        }
+        if previous is not None:
+            for key in SHARED_REQUEST_TEXT_KEYS:
+                value = line.get(key)
+                if isinstance(value, str) and value == previous.get(key):
+                    line[key] = previous[key]
+        lightened.append(line)
+        previous = line
+    return lightened
 
 
 def _records_of(lines: ParsedLines | None) -> list[dict] | None:
@@ -315,13 +406,16 @@ def _build_run_events(
     return events
 
 
-def read_advisor_stream(advisor_dir: AdvisorRunDir) -> list[dict] | None:
+def read_advisor_stream(
+    advisor_dir: AdvisorRunDir, cache: JsonLinesCache | None = None
+) -> list[dict] | None:
     """advisor_dir の stream.jsonl (switch2_agent.advisors.stream_json_log.STREAM_FILE_NAME) を読み、行の辞書のリストを返す。
 
     各要素は stream.jsonl の 1 行 ({"mono", "data"} か {"mono", "raw"}) のまま。jsonl_lines.read_json_lines で読み、
     読み飛ばした行は入れない。ファイルが無いか、読めない (OSError) なら None を返す。
+    cache があれば、cache で読む。
     """
-    return _records_of(_read_lines_if_readable(advisor_dir.path / STREAM_FILE_NAME))
+    return _records_of(_read_lines(advisor_dir.path / STREAM_FILE_NAME, cache))
 
 
 def read_result_json(path: Path) -> dict | None:

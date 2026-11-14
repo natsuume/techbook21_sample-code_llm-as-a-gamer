@@ -19,6 +19,7 @@ runs/ には何も書かない。
 """
 
 import json
+from collections.abc import Collection
 from pathlib import Path
 from typing import Annotated
 
@@ -28,6 +29,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from run_dashboard.advisor_runs import AdvisorRun, build_advisor_runs
+from run_dashboard.record_cache import JsonLinesCache
 from run_dashboard.run_directory import (
     find_run_dir,
     list_advisor_files,
@@ -35,6 +37,7 @@ from run_dashboard.run_directory import (
     resolve_run_file,
 )
 from run_dashboard.run_records import (
+    LOAD_PARTS,
     RunRecords,
     load_run,
     load_run_overview,
@@ -76,6 +79,13 @@ BUILD_INSTRUCTIONS_TEXT = (
     "API は /api/runs から使えます。\n"
 )
 
+# API ごとに load_run で読む記録の種類 (run_records.LOAD_PARTS の要素)。応答に使うフィールドが正しくなる種類だけを
+# 読む (run_records.RunRecords の docstring)。summary はすべてを読む
+# 要求・events・notes・advisor の実行: 要求の行と、run.jsonl の行の経過秒の起点にする decision の行のため
+REQUEST_PARTS = ("requests",)
+FRAME_PARTS = ("frames",)
+PAD_PARTS = ("pad",)
+
 # 区間の下限 (クエリーの from。Python の予約語のため、引数の名前は t_from にして alias で受け取る)
 TimeFrom = Annotated[float | None, Query(alias="from", allow_inf_nan=False)]
 # 区間の上限 (クエリーの to)
@@ -113,9 +123,11 @@ def check_time_range(t_from: float | None, t_to: float | None) -> None:
         raise HTTPException(status_code=422, detail="from must not be greater than to")
 
 
-def load_run_or_404(runs_dir: Path, run: str) -> RunRecords:
-    """run_records.load_run(runs_dir, run) の記録を返す。知らない実行 (None) なら HTTPException(404) を出す。"""
-    records = load_run(runs_dir, run)
+def load_run_or_404(
+    runs_dir: Path, run: str, parts: Collection[str], cache: JsonLinesCache
+) -> RunRecords:
+    """run_records.load_run(runs_dir, run, parts, cache) の記録を返す。知らない実行 (None) なら HTTPException(404) を出す。"""
+    records = load_run(runs_dir, run, parts, cache)
     if records is None:
         raise HTTPException(status_code=404, detail=f"unknown run: {run}")
     return records
@@ -141,33 +153,37 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     返す (Content-Length は返す本文の長さ)。FileResponse は Content-Length を stat の大きさで決めた後に
     ファイルの終わりまで読むため、送る間に伸びるファイル (書いている途中の stream.jsonl など) では、
     宣言した長さと本文の長さがずれる。読めなければ (OSError) 404。
+    記録の JSON Lines は、アプリごとに 1 つの record_cache.JsonLinesCache で読み、署名 (大きさ・更新時刻・inode) の
+    変わっていないファイルは読み直さない。API ごとに、応答に使う種類のファイルだけを読む (REQUEST_PARTS など)。
     """
     app = FastAPI(title="run-dashboard", default_response_class=RecordJSONResponse)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+    cache = JsonLinesCache()
 
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
         items = []
         # 一覧では実行ごとに run.jsonl だけを読む (requests.jsonl・frames.jsonl などの大きなファイルは読まない)
         for name in list_run_names(runs_dir):
-            overview = load_run_overview(runs_dir, name)
+            overview = load_run_overview(runs_dir, name, cache)
             if overview is not None:
                 items.append(build_run_list_item(overview))
         return items
 
     @app.get("/api/runs/{run}")
     def get_summary(run: str) -> dict:
-        records = load_run_or_404(runs_dir, run)
+        records = load_run_or_404(runs_dir, run, LOAD_PARTS, cache)
         return build_summary(records, load_advisor_runs(records))
 
     @app.get("/api/runs/{run}/requests")
     def get_requests(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
         check_time_range(t_from, to)
-        return build_request_items(load_run_or_404(runs_dir, run), t_from, to)
+        records = load_run_or_404(runs_dir, run, REQUEST_PARTS, cache)
+        return build_request_items(records, t_from, to)
 
     @app.get("/api/runs/{run}/requests/{n}")
     def get_request_detail(run: str, n: int) -> dict:
-        records = load_run_or_404(runs_dir, run)
+        records = load_run_or_404(runs_dir, run, REQUEST_PARTS, cache)
         detail = build_request_detail(records, n, load_advisor_runs(records))
         if detail is None:
             raise HTTPException(status_code=404, detail=f"unknown request: {n}")
@@ -176,21 +192,24 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     @app.get("/api/runs/{run}/frames")
     def get_frames(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
         check_time_range(t_from, to)
-        return build_frame_items(load_run_or_404(runs_dir, run), t_from, to)
+        records = load_run_or_404(runs_dir, run, FRAME_PARTS, cache)
+        return build_frame_items(records, t_from, to)
 
     @app.get("/api/runs/{run}/pad")
     def get_pad(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
         check_time_range(t_from, to)
-        return build_pad_items(load_run_or_404(runs_dir, run), t_from, to)
+        records = load_run_or_404(runs_dir, run, PAD_PARTS, cache)
+        return build_pad_items(records, t_from, to)
 
     @app.get("/api/runs/{run}/events")
     def get_events(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
         check_time_range(t_from, to)
-        return build_event_items(load_run_or_404(runs_dir, run), t_from, to)
+        records = load_run_or_404(runs_dir, run, REQUEST_PARTS, cache)
+        return build_event_items(records, t_from, to)
 
     @app.get("/api/runs/{run}/notes/{version}")
     def get_note(run: str, version: int) -> dict:
-        records = load_run_or_404(runs_dir, run)
+        records = load_run_or_404(runs_dir, run, REQUEST_PARTS, cache)
         detail = build_note_detail(records, version, load_advisor_runs(records))
         if detail is None:
             raise HTTPException(status_code=404, detail=f"unknown version: {version}")
@@ -198,7 +217,7 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
 
     @app.get("/api/runs/{run}/advisor/{name}")
     def get_advisor(run: str, name: str) -> dict:
-        records = load_run_or_404(runs_dir, run)
+        records = load_run_or_404(runs_dir, run, REQUEST_PARTS, cache)
         advisor_dir = next(
             (item for item in records.advisor_dirs if item.name == name), None
         )
@@ -208,7 +227,7 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
             records,
             name,
             load_advisor_runs(records),
-            read_advisor_stream(advisor_dir),
+            read_advisor_stream(advisor_dir, cache),
             list_advisor_files(advisor_dir),
         )
         if detail is None:

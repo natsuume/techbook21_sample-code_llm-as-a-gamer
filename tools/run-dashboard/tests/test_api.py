@@ -769,6 +769,52 @@ def test_events_without_start_line_are_unavailable(runs):
     assert body == {"available": False, "items": []}
 
 
+# --- 読んだ結果のキャッシュ ---
+
+
+def test_same_request_twice_returns_same_response(client, runs):
+    # 2 回目は、署名の変わっていないファイルをキャッシュから読んで返す
+    name = runs.dashboard.name
+    urls = [
+        "/api/runs",
+        f"/api/runs/{name}",
+        f"/api/runs/{name}/requests?from=1&to=7",
+        f"/api/runs/{name}/requests/1",
+        f"/api/runs/{name}/frames",
+        f"/api/runs/{name}/pad",
+        f"/api/runs/{name}/events",
+        f"/api/runs/{name}/notes/1",
+        f"/api/runs/{name}/advisor/{STRATEGY_RUN_NAME}",
+    ]
+    for url in urls:
+        first = client.get(url)
+        second = client.get(url)
+        assert first.status_code == 200, url
+        assert second.status_code == 200, url
+        assert second.json() == first.json(), url
+
+
+def test_cached_responses_equal_responses_of_new_app(client, runs):
+    # キャッシュの記録をほかの API が書き換えていれば、空のキャッシュのアプリの応答と違ってくる
+    name = runs.dashboard.name
+    urls = [
+        "/api/runs",
+        f"/api/runs/{name}",
+        f"/api/runs/{name}/requests?from=1&to=7",
+        f"/api/runs/{name}/requests/1",
+        f"/api/runs/{name}/requests/2",
+        f"/api/runs/{name}/frames",
+        f"/api/runs/{name}/pad",
+        f"/api/runs/{name}/events",
+        f"/api/runs/{name}/notes/0",
+        f"/api/runs/{name}/notes/1",
+        f"/api/runs/{name}/advisor/{STRATEGY_RUN_NAME}",
+    ]
+    expected = {url: get_json(make_client(runs.runs_dir, None), url) for url in urls}
+    for url in [*urls, *reversed(urls)]:
+        assert get_json(client, url) == expected[url], url
+
+
 # --- 記録の無い種類 ---
 
 

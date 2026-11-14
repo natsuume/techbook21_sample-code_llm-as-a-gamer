@@ -96,12 +96,13 @@ def build_advisor_runs(
         number = request.get("number")
         if _is_int(number):
             requests_by_number.setdefault(number, request)
+    advisor_lines = _advisor_lines_by_name(run_events)
     return [
         _build_advisor_run(
             advisor_dir,
             accepted_numbers.get(advisor_dir.role, []),
             requests_by_number,
-            run_events,
+            advisor_lines.get(advisor_dir.name),
             read_result_json,
         )
         for advisor_dir in advisor_dirs
@@ -134,18 +135,19 @@ def _accepted_request_numbers(
     return numbers
 
 
-def _advisor_line(name: str, run_events: Sequence[RunEvent]) -> RunEvent | None:
-    """run_events のうち、event が "advisor" で run_dir のディレクトリー名が name の最初の行を返す。無ければ None。"""
+def _advisor_lines_by_name(run_events: Sequence[RunEvent]) -> dict[str, RunEvent]:
+    """run_events のうち event が "advisor" の行を、run_dir のディレクトリー名 → その名前の最初の行の辞書にして返す。
+
+    run_dir が文字列でない行は入れない。advisor の実行ごとに run_events を探し直さないよう、1 回で引けるようにする
+    (長い実行では、run.jsonl の行と advisor の実行のどちらも多いため)。
+    """
+    lines: dict[str, RunEvent] = {}
     for event in run_events:
         record = event.record
         run_dir = record.get("run_dir")
-        if (
-            record.get("event") == "advisor"
-            and isinstance(run_dir, str)
-            and Path(run_dir).name == name
-        ):
-            return event
-    return None
+        if record.get("event") == "advisor" and isinstance(run_dir, str):
+            lines.setdefault(Path(run_dir).name, event)
+    return lines
 
 
 def _tool_use_ids(permission_denials: object) -> frozenset[str]:
@@ -163,12 +165,13 @@ def _build_advisor_run(
     advisor_dir: AdvisorRunDir,
     accepted_numbers: Sequence[object],
     requests_by_number: Mapping[int, dict],
-    run_events: Sequence[RunEvent],
+    advisor_line: RunEvent | None,
     read_result_json: Callable[[Path], dict | None],
 ) -> AdvisorRun:
     """1 つの advisor の実行の AdvisorRun を作る (build_advisor_runs の docstring の各実行の値)。
 
     accepted_numbers は、その役割を受け付けた decision の行の number のリスト (ファイルの順)。
+    advisor_line は、run_dir のディレクトリー名がその実行の名前の、run.jsonl の最初の advisor の行 (無ければ None)。
     """
     number = (
         accepted_numbers[advisor_dir.index - 1]
@@ -177,7 +180,6 @@ def _build_advisor_run(
     )
     request = number if _is_int(number) else None
     result_json = read_result_json(advisor_dir.path / RESULT_FILE_NAME)
-    advisor_line = _advisor_line(advisor_dir.name, run_events)
 
     # 所要時間と結果は result.json から。無ければ run.jsonl の advisor の行から
     source: Mapping | None = result_json

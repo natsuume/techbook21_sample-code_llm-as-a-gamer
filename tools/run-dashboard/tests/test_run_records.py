@@ -14,9 +14,12 @@ from synthetic_runs import (
     make_frame,
 )
 
+from run_dashboard.record_cache import JsonLinesCache
 from run_dashboard.run_directory import AdvisorRunDir
 from run_dashboard.run_records import (
+    LOAD_PARTS,
     RECORD_KINDS,
+    lighten_request_lines,
     load_run,
     load_run_overview,
     read_advisor_stream,
@@ -436,6 +439,141 @@ def test_empty_run_dir_has_no_records(tmp_path):
     assert records.skipped_lines == NO_SKIPPED_LINES
     assert records.has_requests_file is False
     assert records.has_stream_file is False
+
+
+# --- lighten_request_lines ---
+
+
+def test_lighten_request_lines_drops_unused_keys_and_shares_same_texts():
+    state_text = "## ゲームの操作方法\n" + "あ" * 100
+    header = {"event": "header", "questions": []}
+    records = [
+        header,
+        {
+            "event": "request",
+            "number": 1,
+            "state_text": state_text,
+            "history_text": "履歴 1",
+            "previous_operation_text": None,
+            "raw_response": {"model": "jev"},
+            "refusals": 0,
+        },
+        {
+            "event": "request",
+            "number": 2,
+            # 直前の行と同じ値の、別の文字列のオブジェクト
+            "state_text": state_text[:10] + state_text[10:],
+            "history_text": "履歴 2",
+            "previous_operation_text": None,
+            "raw_response": None,
+            "refusals": 1,
+        },
+    ]
+    assert records[2]["state_text"] is not records[1]["state_text"]
+    lightened = lighten_request_lines(records)
+    assert lightened == [
+        header,
+        {
+            "event": "request",
+            "number": 1,
+            "state_text": state_text,
+            "history_text": "履歴 1",
+            "previous_operation_text": None,
+        },
+        {
+            "event": "request",
+            "number": 2,
+            "state_text": state_text,
+            "history_text": "履歴 2",
+            "previous_operation_text": None,
+        },
+    ]
+    assert lightened[0] is header
+    assert lightened[2]["state_text"] is lightened[1]["state_text"]
+    # 元の行は変えない
+    assert records[1]["raw_response"] == {"model": "jev"}
+    assert records[2]["refusals"] == 1
+
+
+# --- load_run の parts と cache ---
+
+
+def test_load_parts():
+    assert LOAD_PARTS == ("requests", "frames", "pad", "advisor_steps")
+
+
+def test_load_run_with_only_frames_leaves_other_parts_empty(runs):
+    run = runs.dashboard
+    full = load_run(runs.runs_dir, run.name)
+    records = load_run(runs.runs_dir, run.name, ("frames",))
+    assert full is not None
+    assert records is not None
+    # run.jsonl と advisor のディレクトリーの一覧は、いつも読む
+    assert records.start == full.start
+    assert records.origin_mono == full.origin_mono
+    assert records.args == full.args
+    assert [event.record for event in records.run_events] == [
+        event.record for event in full.run_events
+    ]
+    assert records.advisor_dirs == full.advisor_dirs
+    assert records.frames == full.frames
+    # 読まなかった種類は空か None
+    assert records.header is None
+    assert records.requests == []
+    assert records.has_requests_file is False
+    assert records.pad is None
+    assert records.has_stream_file is False
+    assert records.skipped_lines == NO_SKIPPED_LINES
+
+
+def test_load_run_with_no_parts_reads_only_run_log(runs):
+    records = load_run(runs.runs_dir, runs.broken.name, ())
+    assert records is not None
+    assert len(records.run_events) == 12
+    assert (records.header, records.requests, records.frames, records.pad) == (
+        None,
+        [],
+        None,
+        None,
+    )
+    # run.jsonl の読み飛ばした行だけを数える
+    assert records.skipped_lines == {**NO_SKIPPED_LINES, "run": 1}
+
+
+def test_load_run_rejects_unknown_parts(runs):
+    with pytest.raises(ValueError):
+        load_run(runs.runs_dir, runs.dashboard.name, ("requests", "thumbs"))
+
+
+def test_requests_of_load_run_are_lightened(runs):
+    records = load_run(runs.runs_dir, runs.dashboard.name, ("requests",))
+    assert records is not None
+    assert all("raw_response" not in request for request in records.requests)
+    assert all("refusals" not in request for request in records.requests)
+
+
+@pytest.mark.parametrize("attribute", SYNTHETIC_RUN_ATTRIBUTES)
+def test_load_run_with_cache_returns_same_records(runs, attribute):
+    run = getattr(runs, attribute)
+    cache = JsonLinesCache()
+    expected = load_run(runs.runs_dir, run.name)
+    assert load_run(runs.runs_dir, run.name, cache=cache) == expected
+    # 2 回目はキャッシュから読む
+    assert load_run(runs.runs_dir, run.name, cache=cache) == expected
+    assert load_run_overview(runs.runs_dir, run.name, cache) == load_run_overview(
+        runs.runs_dir, run.name
+    )
+
+
+def test_read_advisor_stream_with_cache_returns_same_lines(runs):
+    run_dir = runs.dashboard.run_dir
+    advisor_dir = AdvisorRunDir(
+        STRATEGY_RUN_NAME, "strategy", 1, run_dir / STRATEGY_RUN_NAME
+    )
+    cache = JsonLinesCache()
+    expected = read_advisor_stream(advisor_dir)
+    assert read_advisor_stream(advisor_dir, cache) == expected
+    assert read_advisor_stream(advisor_dir, cache) == expected
 
 
 # --- read_advisor_stream ---

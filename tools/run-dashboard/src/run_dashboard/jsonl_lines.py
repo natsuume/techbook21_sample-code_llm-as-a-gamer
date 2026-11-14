@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeGuard
 
+# JSON の空白 (json.loads が値の前後で読み飛ばす文字)
+JSON_WHITESPACE = " \t\n\r"
+# 行を読む JSON の decoder。数万行の記録を読むときに json.loads が 1 行ごとに行う処理 (引数の確認や decoder の選択、
+# 正規表現での空白の読み飛ばし) を省くため、1 つを作って raw_decode を直接呼ぶ
+_JSON_DECODER = json.JSONDecoder()
+
 
 @dataclass(frozen=True)
 class LineChunk:
@@ -85,7 +91,7 @@ def parse_lines(chunk: LineChunk) -> ParsedLines:
     各行は次の順に扱う:
         - 空白 (str.strip で除く文字) だけの行と空の行は、数えずに飛ばす
         - UTF-8 として読めない行 (UnicodeDecodeError) は読み飛ばし、skipped に数える
-        - json.loads で読めない行 (ValueError) は読み飛ばし、skipped に数える
+        - JSON として読めない行 (json.loads と同じ規則。_load_json の ValueError) は読み飛ばし、skipped に数える
         - 読んだ値が object (dict) でない行 (配列や数など) は読み飛ばし、skipped に数える
     next_offset は chunk.next_offset をそのまま入れる。
     """
@@ -102,7 +108,7 @@ def parse_lines(chunk: LineChunk) -> ParsedLines:
         if not text.strip():
             continue
         try:
-            value = json.loads(text)
+            value = _load_json(text)
         except ValueError:
             skipped += 1
             continue
@@ -111,6 +117,19 @@ def parse_lines(chunk: LineChunk) -> ParsedLines:
             continue
         records.append(value)
     return ParsedLines(records=records, skipped=skipped, next_offset=chunk.next_offset)
+
+
+def _load_json(text: str) -> object:
+    """text を json.loads と同じ規則で JSON として読んだ値を返す。読めなければ ValueError を出す。
+
+    値の前後の JSON の空白 (JSON_WHITESPACE) を除き、json.JSONDecoder.raw_decode で読む。値として読めなければ
+    raw_decode の json.JSONDecodeError (ValueError の一種) をそのまま出し、値の後に空白以外が残れば ValueError を出す。
+    """
+    stripped = text.strip(JSON_WHITESPACE)
+    value, end = _JSON_DECODER.raw_decode(stripped)
+    if end != len(stripped):
+        raise ValueError("extra data after a JSON value")
+    return value
 
 
 def read_json_lines(path: Path, offset: int = 0) -> ParsedLines:
