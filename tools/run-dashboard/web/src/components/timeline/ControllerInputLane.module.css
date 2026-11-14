@@ -1,0 +1,32 @@
+/* コントローラー入力のレーン。見出しの行の下に、5 行の入力のトラックを並べる */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.trackArea {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+}
+
+/* 押下は accent、短押しは tap、スティックは accent (倒した大きさを不透明度で示す) */
+.hold {
+  background: var(--accent);
+}
+
+.tap {
+  background: var(--tap);
+}
+
+.stick {
+  background: var(--accent);
+}

@@ -1,0 +1,22 @@
+/*
+ * 値の 1 行。タイムラインの区画の下端に留め (区画の中を縦にスクロールしても見える)、1 行の高さを予約する。
+ * 区画の下の余白 (--space-layout) まで地で覆い、その下をスクロールするレーンを隠す (余白の分は負の margin で
+ * 打ち消し、区画の高さを変えない)。長い文は末尾を省略する (全文は title と aria-live で読める)
+ */
+.readout {
+  position: sticky;
+  bottom: calc(-1 * var(--space-layout));
+  z-index: 3;
+  flex: none;
+  margin: 0 0 calc(-1 * var(--space-layout));
+  min-height: calc(1.5em + 2 * var(--space-1) + var(--space-layout));
+  padding-block: var(--space-1) calc(var(--space-1) + var(--space-layout));
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

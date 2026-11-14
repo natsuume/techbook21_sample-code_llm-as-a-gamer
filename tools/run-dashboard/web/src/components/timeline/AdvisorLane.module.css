@@ -1,0 +1,71 @@
+/* advisor とファイルのレーン。見出しの行の下に、役割ごとの 4 行を並べる */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* advisor の実行の区間。名前は区間の幅で切る (全文は title と aria-label で読める) */
+.span {
+  position: absolute;
+  top: 0.1875rem;
+  bottom: 0.1875rem;
+  min-width: 0.375rem;
+  padding: 0 var(--space-2);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--hot);
+  border-radius: var(--radius-small);
+  background: var(--hot-soft);
+  color: var(--warn-text);
+  font-size: var(--text-sm);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.span:hover {
+  border-color: var(--accent);
+}
+
+/* 実行中 (終わりの記録が無い) は破線の枠 */
+.running {
+  border-style: dashed;
+}
+
+/* 詳細ペインで開いている実行は、accent の 2px の枠を外側に足す */
+.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* 書き換えの印。回した正方形 (菱形) を、書き換えの時刻を中心に置く */
+.mark {
+  position: absolute;
+  top: 0.375rem;
+  width: 0.6875rem;
+  height: 0.6875rem;
+  margin-left: -0.34375rem;
+  padding: 0;
+  transform: rotate(45deg);
+  border: 0;
+  background: var(--hot);
+  cursor: pointer;
+  z-index: 1;
+}
+
+.mark:hover {
+  box-shadow: 0 0 0 1px var(--fg);
+}
+
+/* トラックははみ出した要素を切るため、フォーカスの枠を内側に描く */
+.span:focus-visible,
+.mark:focus-visible {
+  outline-offset: -2px;
+}
+
+/* 受け持ちの advisor 以外による書き換えは、地 surface に danger の枠 */
+.external {
+  border: 2px solid var(--danger);
+  background: var(--surface);
+}
