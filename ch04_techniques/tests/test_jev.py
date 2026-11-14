@@ -326,6 +326,36 @@ def test_payload_without_history_text_has_no_operation_history():
     assert list(payload["state"]) == ["instructions", "game_notes", "frames"]
 
 
+def test_payload_appends_timeline_text_to_operation_history():
+    request = replace(timeline_request(), timeline_text="## 画面の変化\n- 変わった")
+    payload = build_jev_payload(
+        request, make_reference=fixed_references("ref-1", "ref-2")
+    )
+    assert list(payload["state"]) == [
+        "instructions",
+        "game_notes",
+        "operation_history",
+        "frames",
+    ]
+    assert payload["state"]["operation_history"] == (
+        f"{HISTORY_TEXT}\n\n## 画面の変化\n- 変わった"
+    )
+
+
+def test_payload_with_only_timeline_text_uses_it_as_operation_history():
+    request = replace(sample_request(), timeline_text="## 画面の変化\n- 変わった")
+    payload = build_jev_payload(request)
+    assert payload["state"]["operation_history"] == "## 画面の変化\n- 変わった"
+
+
+def test_payload_with_empty_timeline_text_is_same_as_without_it():
+    references = ("ref-1", "ref-2")
+    request = timeline_request()
+    assert build_jev_payload(
+        replace(request, timeline_text=""), make_reference=fixed_references(*references)
+    ) == build_jev_payload(request, make_reference=fixed_references(*references))
+
+
 def test_payload_uses_labels_as_is_without_previous_operation_text():
     # 前回の操作の前後はラベルに書いてあるため、区切りの文は Jev の要求に入れない
     request = timeline_request()

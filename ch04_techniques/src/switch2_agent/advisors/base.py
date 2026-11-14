@@ -19,8 +19,10 @@ class AdvisorContext:
     current_strategy      今の戦略 (ゲームの情報の strategy の中身)
     operation_log_text    その役割の advisor が前回受け付けてからの応答と送った操作
                           (OperationLog.format_since。行の advisor の確率は、その役割の問いの確率)
-    trigger_probability   呼んだきっかけの、その役割の問いの確率
+    trigger_probability   呼んだきっかけの要求の、その役割の問いの確率
     trigger_time_text     呼んだきっかけの要求の時刻 (time.strftime で書いた壁時計の時刻)
+    trigger_reason        強制の呼び出し (advisor_triggers) で呼んだときの理由の文 (ForcedCall.reason)。
+                          advisor の問いが真になって呼んだときは None
     """
 
     game: str
@@ -29,6 +31,7 @@ class AdvisorContext:
     operation_log_text: str
     trigger_probability: float
     trigger_time_text: str
+    trigger_reason: str | None = None
 
 
 class Advisor(Protocol):

@@ -66,6 +66,7 @@ class RequestLogEntry:
     result             "ok" (操作を送った)、"error" (model.decide の失敗か、操作の送信の失敗)、
                        "discarded" (キャプチャーが止まったため、応答を捨てた)
     error              result が "ok" でないときの説明。"ok" なら None
+    advisor_forced     強制の呼び出し (advisor_triggers) で advisor に求めた役割の name の集合 (無ければ空の集合)
     """
 
     number: int
@@ -79,6 +80,7 @@ class RequestLogEntry:
     advisor_accepted: frozenset[str]
     result: Literal["ok", "error", "discarded"]
     error: str | None
+    advisor_forced: frozenset[str] = frozenset()
 
 
 class RequestLog:
@@ -174,7 +176,8 @@ class RequestLog:
                                       record_thumbs が True なら、各要素に "thumb":
                                       dashboard_records.thumb_file_name(frame_time) (frame_time は clock
                                       (time.monotonic) の値のまま。frames.jsonl の thumb と同じ名前) を足す
-            state_text / history_text / previous_operation_text   entry.request の同名の値
+            state_text / history_text / previous_operation_text / timeline_text   entry.request の同名の値
+                                      (timeline_text は系列情報の文。使っていなければ空文字)
             probabilities / choices / refusals / raw_response     entry.decision の同名の値 (decision が None なら null)。
                                                                   probabilities は確率の問いの確率、choices は選択肢の
                                                                   問いの選択肢ごとの確率
@@ -183,6 +186,7 @@ class RequestLog:
                                       action が None なら null)
             advisor_requested         entry.action.advisor_requested の役割の name のリスト (action が None なら null)
             advisor_accepted          entry.advisor_accepted の役割の name のリスト (受け付けた役割が無ければ空のリスト)
+            advisor_forced            entry.advisor_forced の役割の name のリスト (強制で求めた役割が無ければ空のリスト)
             役割の name のリストは advisor_roles.ADVISOR_ROLES の順に並べる
         書き込みの OSError はそのまま出す。
         """
@@ -260,6 +264,7 @@ def build_request_record(
         "state_text": request.state_text,
         "history_text": request.history_text,
         "previous_operation_text": request.previous_operation_text,
+        "timeline_text": request.timeline_text,
         "probabilities": decision.probabilities if decision is not None else None,
         "choices": decision.choices if decision is not None else None,
         "refusals": decision.refusals if decision is not None else None,
@@ -283,5 +288,8 @@ def build_request_record(
         ),
         "advisor_accepted": [
             role.name for role in ADVISOR_ROLES if role.name in entry.advisor_accepted
+        ],
+        "advisor_forced": [
+            role.name for role in ADVISOR_ROLES if role.name in entry.advisor_forced
         ],
     }

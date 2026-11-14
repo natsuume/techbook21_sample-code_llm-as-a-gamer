@@ -95,6 +95,16 @@ class OperationLog:
         with self.lock:
             return [record for record in self.records if record_time(record) > time]
 
+    def is_full(self) -> bool:
+        """記録が capacity 件に達している (次に足すと最も古い記録を捨てる) なら True を返す。"""
+        with self.lock:
+            return len(self.records) >= self.capacity
+
+    def oldest_time(self) -> float | None:
+        """最も古い記録の record_time を返す。記録が無ければ None を返す。"""
+        with self.lock:
+            return record_time(self.records[0]) if self.records else None
+
     def recent(self, count: int) -> list[OperationLogRecord]:
         """新しいものから count 件の記録を、古い順に返す。
 

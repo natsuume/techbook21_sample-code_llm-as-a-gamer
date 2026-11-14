@@ -251,6 +251,7 @@ def test_write_ok_entry_writes_request_line(tmp_path):
     assert line["state_text"] == "## 戦略\n右へ進む"
     assert line["history_text"] == HISTORY_TEXT
     assert line["previous_operation_text"] == PREVIOUS_OPERATION_TEXT
+    assert line["timeline_text"] == ""
     assert line["probabilities"] == {"advisor_strategy": 0.7}
     assert line["refusals"] == 1
     assert line["raw_response"] == RAW_RESPONSE
@@ -524,3 +525,19 @@ def test_build_request_record_with_flags():
     assert {key: value for key, value in record.items() if key != "images"} == {
         key: value for key, value in default.items() if key != "images"
     }
+
+
+def test_write_keeps_timeline_text_of_request(tmp_path):
+    log = RequestLog(tmp_path)
+    request = replace(sample_request(), timeline_text="## 画面の変化\n- 変わった")
+    log.write(ok_entry(request=request))
+    assert request_lines(tmp_path)[0]["timeline_text"] == "## 画面の変化\n- 変わった"
+
+
+def test_write_lists_forced_roles_in_role_order(tmp_path):
+    log = RequestLog(tmp_path)
+    log.write(ok_entry())
+    log.write(ok_entry(advisor_forced=frozenset({"advice", "strategy"})))
+    lines = request_lines(tmp_path)
+    assert lines[0]["advisor_forced"] == []
+    assert lines[1]["advisor_forced"] == ["strategy", "advice"]

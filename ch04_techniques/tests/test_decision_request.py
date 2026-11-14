@@ -13,6 +13,7 @@ from switch2_agent.decision_request import (
     build_instructions,
     format_operation_history,
     format_previous_operation,
+    history_with_timeline,
     label_latest_frame,
 )
 from switch2_agent.frame_history import TimedFrame
@@ -365,6 +366,45 @@ def test_build_decision_request_keeps_questions():
         latest_frame(), NOW, NOTES, tuple(QUESTIONS), fake_encode, ORIGIN, ()
     )
     assert request.questions == QUESTIONS
+
+
+def test_build_decision_request_keeps_timeline_text():
+    request = build_decision_request(
+        latest_frame(),
+        NOW,
+        NOTES,
+        QUESTIONS,
+        fake_encode,
+        ORIGIN,
+        [],
+        timeline_text="## 画面の変化\n- 変わった",
+    )
+    assert request.timeline_text == "## 画面の変化\n- 変わった"
+    # 履歴の文そのものは変えない
+    assert request.history_text == f"{HISTORY_HEADING}\n(まだ操作を送っていない)"
+
+
+def test_build_decision_request_without_timeline_text_has_empty_timeline():
+    request = build_decision_request(
+        latest_frame(), NOW, NOTES, QUESTIONS, fake_encode, ORIGIN, []
+    )
+    assert request.timeline_text == ""
+
+
+def test_history_with_timeline_joins_with_blank_line():
+    base = DecisionRequest("i", "s", [], [], history_text="h")
+    assert history_with_timeline(base) == "h"
+    assert (
+        history_with_timeline(DecisionRequest("i", "s", [], [], timeline_text="t"))
+        == "t"
+    )
+    assert (
+        history_with_timeline(
+            DecisionRequest("i", "s", [], [], history_text="h", timeline_text="t")
+        )
+        == "h\n\nt"
+    )
+    assert history_with_timeline(DecisionRequest("i", "s", [], [])) == ""
 
 
 # --- JpegCache ---

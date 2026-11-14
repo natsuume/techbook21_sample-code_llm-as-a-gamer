@@ -2,7 +2,9 @@
 
 要求は、役割の説明と安全のための規則 (instructions)、ゲームの情報の 4 ファイルの内容 (state_text)、
 ラベル付きの画像 1 枚 (フレームの履歴の最新のフレーム)、問いの一覧、直近の応答と送った操作の履歴 (history_text)、
+系列情報 (timeline_text。timeline.builder.TimelineBuilder の文)、
 前回の操作の時点を表す区切りの文 (previous_operation_text) からなる。
+系列情報は、履歴の文の後ろに空行をはさんで足し、API の要求では履歴と同じ欄に入れる (history_with_timeline)。
 前回の操作は OperationLog の最新の記録で、前回の判断で決めた操作か、その後にコントローラーを中立に戻したこと。
 履歴には、中立に戻したことも 1 行として書く。
 画像のラベルには、実行を始めてからの経過秒 (t) と何秒前の画像かを書き、前回の操作があれば、
@@ -84,6 +86,7 @@ class DecisionRequest:
                               空文字なら履歴を入れない
     previous_operation_text   前回の操作 (送った操作か、中立に戻したこと) の時点を表す区切りの文
                               (format_previous_operation)。前回の操作が無ければ None
+    timeline_text             系列情報 (timeline.builder.TimelineBuilder.build の文)。空文字なら入れない
     """
 
     instructions: str
@@ -92,6 +95,18 @@ class DecisionRequest:
     questions: list[Question]
     history_text: str = ""
     previous_operation_text: str | None = None
+    timeline_text: str = ""
+
+
+def history_with_timeline(request: DecisionRequest) -> str:
+    """要求の履歴の欄に入れる文を返す。
+
+    history_text と timeline_text が両方あれば、空行 1 つ (\\n\\n) でつなぐ。片方が空文字なら、もう片方だけを返す
+    (両方が空なら空文字)。timeline_text が空文字なら history_text そのものになるため、系列情報を使わない要求は、
+    系列情報を足す前と同じになる。
+    """
+    parts = [text for text in (request.history_text, request.timeline_text) if text]
+    return "\n\n".join(parts)
 
 
 def build_instructions() -> str:
@@ -204,8 +219,12 @@ def build_decision_request(
     encode: Callable[[TimedFrame], bytes],
     origin: float,
     recent_operations: Sequence[OperationLogRecord],
+    timeline_text: str = "",
 ) -> DecisionRequest:
     """要求を組み立てる。
+
+    timeline_text は系列情報の文 (Pipeline は TimelineBuilder.build の結果を渡す。使わなければ空文字) で、
+    そのまま DecisionRequest.timeline_text に入れる。
 
     frame は要求に載せるフレーム (Pipeline はフレームの履歴の最新のフレームを渡す)。
     origin は経過秒の起点 (Pipeline.started_at)。recent_operations は直近の応答と送った操作の記録と、
@@ -242,6 +261,7 @@ def build_decision_request(
         previous_operation_text=format_previous_operation(
             previous_operation, now, origin
         ),
+        timeline_text=timeline_text,
     )
 
 

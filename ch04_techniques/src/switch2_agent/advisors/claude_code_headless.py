@@ -114,6 +114,26 @@ def image_file_name(index: int) -> str:
     return f"frame-{index:02d}.jpg"
 
 
+def trigger_line(context: AdvisorContext) -> str:
+    """context.md の、advisor を呼んだきっかけの行を返す (純粋な関数)。確率は小数第 2 位まで書く。
+
+    advisor の問いで呼んだとき (trigger_reason が None):
+        `- きっかけ: <trigger_time_text> の要求で、advisor の問いの確率が <trigger_probability> だった`
+    強制の呼び出しで呼んだとき:
+        `- きっかけ: <trigger_time_text> の要求の後に、<trigger_reason> (この役割の advisor の問いの確率は <trigger_probability> だった)`
+    """
+    probability = f"{context.trigger_probability:.2f}"
+    if context.trigger_reason is None:
+        return (
+            f"- きっかけ: {context.trigger_time_text} の要求で、advisor の問いの確率が "
+            f"{probability} だった"
+        )
+    return (
+        f"- きっかけ: {context.trigger_time_text} の要求の後に、{context.trigger_reason} "
+        f"(この役割の advisor の問いの確率は {probability} だった)"
+    )
+
+
 def write_advisor_inputs(
     run_dir: Path, context: AdvisorContext, role: AdvisorRole
 ) -> Path:
@@ -121,8 +141,7 @@ def write_advisor_inputs(
 
     - context.images を順に image_file_name(1)、image_file_name(2)、… のファイル名で JPEG のまま書く
     - CONTEXT_FILE_NAME (context.md) に次を Markdown で書く (UTF-8):
-        先頭の一覧に、ゲーム名、`- 役割: <role.title>` の行、きっかけの advisor の問い (その役割の問い) の確率
-        (小数第 2 位まで) と要求の時刻 (trigger_time_text)、
+        先頭の一覧に、ゲーム名、`- 役割: <role.title>` の行、きっかけの行 (trigger_line)、
         画像のファイル名とラベルの一覧 (画像の順)、今の戦略 (current_strategy。空なら「(まだ書かれていない)」)、
         この役割の advisor を前回呼んでからの応答と送った操作 (operation_log_text。空なら「(記録なし)」)
     """
@@ -140,10 +159,7 @@ def write_advisor_inputs(
             "",
             f"- ゲーム: {context.game}",
             f"- 役割: {role.title}",
-            (
-                f"- きっかけ: {context.trigger_time_text} の要求で、advisor の問いの確率が "
-                f"{context.trigger_probability:.2f} だった"
-            ),
+            trigger_line(context),
             "",
             "## 画像 (古い順)",
             "",
