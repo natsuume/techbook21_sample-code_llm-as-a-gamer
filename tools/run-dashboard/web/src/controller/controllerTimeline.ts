@@ -33,11 +33,17 @@ export const controllerAtFromPad: (pad: readonly PadItem[], t: number) => Contro
     throw new Error("not implemented");
   };
 
-/** 第4章が中立のレポートを送った直後に run.jsonl に書く出来事 (判断の失敗、キャプチャーの停止、接続の復旧待ち) */
+/**
+ * 第4章が中立のレポートを送る前後に run.jsonl に書く出来事。判断の失敗・キャプチャーの停止・接続の復旧待ちは
+ * 中立に戻した直後に書く。割り込み (interrupted) は書いた直後に中立に戻し、接続の失敗 (pipeline_error) は
+ * 書いた後に判断のループを抜け、終了処理で中立に戻す
+ */
 export const NEUTRAL_EVENTS: readonly string[] = [
   "decision_error",
   "capture_stopped",
   "bridge_wait",
+  "interrupted",
+  "pipeline_error",
 ];
 
 /**

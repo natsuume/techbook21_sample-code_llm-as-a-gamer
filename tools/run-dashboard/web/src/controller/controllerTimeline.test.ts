@@ -612,13 +612,15 @@ describe("inputSpansFromRequests", () => {
 describe("neutralTimesFromEvents", () => {
   const event = (t: number, name: string): EventItem => ({ t, event: name });
 
-  it("判断の失敗・キャプチャーの停止・接続の復旧待ちの時刻を返す", () => {
+  it("判断の失敗・キャプチャーの停止・接続の復旧待ち・割り込み・接続の失敗の時刻を返す", () => {
     const events = [
       event(1, "decision_error"),
       event(2, "capture_stopped"),
       event(3, "bridge_wait"),
+      event(4, "pipeline_error"),
+      event(5, "interrupted"),
     ];
-    expect(neutralTimesFromEvents(events)).toEqual([1, 2, 3]);
+    expect(neutralTimesFromEvents(events)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("ほかの出来事は入れない", () => {
