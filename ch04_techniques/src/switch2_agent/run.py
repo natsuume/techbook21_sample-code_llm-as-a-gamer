@@ -24,7 +24,7 @@ Ctrl+C で止まる。
     --max-consecutive-errors N   Decision Model の失敗がこの回数続いたら止まる (整数 1 以上、既定 5)
     --timeline SECTIONS          要求に足す系列情報の節 (timeline.builder.SECTION_NAMES の名前をカンマで区切ったもの。
                                  all ならすべて、none なら足さない。既定 all)
-    --timeline-window S          系列情報の操作のまとめに入れる直近の秒数 (0 より大きい有限の値、既定 120)
+    --timeline-window S          系列情報の操作のまとめに入れる直近の秒数 (0 より大きく 3600 以下、既定 120)
     --screen-change-threshold D  系列情報の画面の変化で、画面が変わったとみなす差分の下限 (0〜255、既定 2.0)
     --advisor-idle-seconds S     advisor がこの秒数呼ばれていなければ、強制で呼ぶ (0 以上の有限の値、既定 60。0 なら
                                  強制では呼ばない)。数え始めるのは、advisor が要求を受け付けた時刻
@@ -135,6 +135,8 @@ TIMELINE_ALL, TIMELINE_NONE = "all", "none"
 # 1 秒あたりの要求の数の見積もりの上限。操作の記録 (OperationLog) の上限を、--timeline-window の秒数の記録が
 # 入る数にするために使う (実機では Jev で 1 秒に約 2.5 回、Decisions API で約 1.8 回だった)
 MAX_REQUESTS_PER_SECOND = 5
+# --timeline-window の上限 (秒)。操作の記録の上限 (秒数 × MAX_REQUESTS_PER_SECOND) を、作れる大きさに収めるため
+TIMELINE_WINDOW_MAX_S = 3600.0
 
 
 def parse_timeline_sections(text: str) -> tuple[str, ...]:
@@ -332,7 +334,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--timeline-window",
         type=float,
         default=DEFAULT_ACTION_WINDOW_S,
-        help="系列情報の操作のまとめに入れる直近の秒数 (0 より大きい有限の値)",
+        help=(
+            "系列情報の操作のまとめに入れる直近の秒数 "
+            f"(0 より大きく {TIMELINE_WINDOW_MAX_S:g} 以下)"
+        ),
     )
     parser.add_argument(
         "--screen-change-threshold",
@@ -396,8 +401,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def range_errors(args: argparse.Namespace) -> list[str]:
     """parse_args の結果の範囲の誤りを、起動引数の名前を含むメッセージのリストにする (誤りが無ければ空)。
 
-    nan は、どの範囲にも入らないものとして扱う。--history-seconds、--advisor-timeout、--timeline-window、
-    --advisor-idle-seconds は有限の値に限り、inf も誤りにする。
+    nan は、どの範囲にも入らないものとして扱う。--history-seconds、--advisor-timeout、--advisor-idle-seconds は
+    有限の値に限り、inf も誤りにする。--timeline-window は TIMELINE_WINDOW_MAX_S 以下に限る (操作の記録の上限を
+    作れる大きさに収めるため)。
     """
     errors = []
     if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
@@ -454,9 +460,9 @@ def range_errors(args: argparse.Namespace) -> list[str]:
         errors.append(
             f"--max-consecutive-errors must be 1 or more: {args.max_consecutive_errors}"
         )
-    if not (math.isfinite(args.timeline_window) and args.timeline_window > 0):
+    if not 0 < args.timeline_window <= TIMELINE_WINDOW_MAX_S:
         errors.append(
-            "--timeline-window must be a finite number more than 0: "
+            f"--timeline-window must be more than 0 and at most {TIMELINE_WINDOW_MAX_S:g}: "
             f"{args.timeline_window}"
         )
     if (

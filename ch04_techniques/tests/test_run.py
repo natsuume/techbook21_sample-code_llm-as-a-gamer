@@ -964,6 +964,8 @@ def test_parse_args_rejects_bad_timeline_sections(value, capsys):
     ("option", "value"),
     [
         ("--timeline-window", "0"),
+        ("--timeline-window", "3600.1"),
+        ("--timeline-window", "1e308"),
         ("--timeline-window", "inf"),
         ("--timeline-window", "nan"),
         ("--screen-change-threshold", "-0.1"),
@@ -979,6 +981,12 @@ def test_parse_args_rejects_out_of_range_timeline_values(option, value, capsys):
 def test_operation_log_capacity_covers_timeline_window():
     assert run.operation_log_capacity(10.0) == DEFAULT_OPERATION_LOG_CAPACITY
     assert run.operation_log_capacity(300.0) == 1500
+
+
+def test_parse_args_accepts_maximum_timeline_window():
+    args = run.parse_args([*REQUIRED, "--timeline-window", "3600"])
+    assert args.timeline_window == 3600.0
+    assert run.operation_log_capacity(args.timeline_window) == 18000
 
 
 def test_main_wires_timeline_with_all_sections_by_default(recorder):

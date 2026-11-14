@@ -140,7 +140,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--advisor-timeout S` | advisor の 1 回の実行の上限 (秒。4 つの役割で共通) | 300 | 0 より大きい有限の値 |
 | `--max-consecutive-errors N` | Decision Model の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |
 | `--timeline SECTIONS` | 要求に入れる系列情報の節。`actions`・`screen`・`notes`・`advisor_calls`・`subgoals` をカンマで区切って指定します。`all` ならすべての節、`none` なら系列情報を入れません | `all` | 節の名前、`all`、`none` |
-| `--timeline-window S` | 系列情報の操作のまとめに入れる直近の秒数 | 120 | 0 より大きい有限の値 |
+| `--timeline-window S` | 系列情報の操作のまとめに入れる直近の秒数 | 120 | 0 より大きく 3600 以下 |
 | `--screen-change-threshold D` | 系列情報の画面の変化で、画面が変わったとみなす差分 (縮小したグレー画像の画素の差の平均) の下限 | 2.0 | 0〜255 |
 | `--advisor-idle-seconds S` | advisor がこの秒数要求を受け付けていなければ、強制で呼びます。0 なら強制では呼びません | 60 | 0 以上の有限の値 |
 | `--advisor-idle-scope {any,each}` | 強制の呼び出しで数える範囲。`any` はどの役割も呼ばれていない時間、`each` は役割ごとの時間を数えます | `any` | `any`、`each` |
