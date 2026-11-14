@@ -24,7 +24,9 @@ import type { LiveEndReason, LiveSession } from "../state/viewState.ts";
 import { parseLiveEvent } from "./liveEvents.ts";
 import {
   hasAppendedRecords,
+  hasStaleRecords,
   liveCursorsOf,
+  markRunRecordsStale,
   refetchRunRecords,
   writeLiveEvents,
 } from "./liveQueryCache.ts";
@@ -41,7 +43,8 @@ type LiveSessionCallbacks = {
 
 /**
  * 実行 run の /live につなぐセッションを始め、閉じる関数を返す。
- * - つなぐ位置は区間 API のキャッシュの cursor。キャッシュにイベントで足した記録があれば、先に読み直してからつなぐ
+ * - つなぐ位置は区間 API のキャッシュの cursor。キャッシュにイベントで足した記録があるか、キャッシュに古いものとしての
+ *   印 (markRunRecordsStale) が付いていれば、先に読み直してからつなぐ (読み直しとつないだ後の足し込みを重ねない)
  * - イベントの種類ごとに受け取り、parseLiveEvent で読めたものをためる。ためた分は nextFlushDelayMs の時刻に
  *   1 回で writeLiveEvents で足す
  * - つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に読んだ詳細に、つなぐまでの
@@ -168,7 +171,7 @@ const openLiveSession = (
   };
 
   callbacks.onConnection({ state: "connecting" });
-  if (hasAppendedRecords(queryClient, run)) {
+  if (hasAppendedRecords(queryClient, run) || hasStaleRecords(queryClient, run)) {
     void reloadAndConnect();
   } else {
     connect();
@@ -210,7 +213,8 @@ const liveConnectionOf = (
  * LiveConnectionContext で配る)。liveSession が active で、summary と 4 つの区間 API が読めたらつなぐ。
  * 実行を選び直す・liveSession が active でなくなる・アンマウントで閉じる。一時停止中も、終わった実行の表示中も、
  * 届いた記録はキャッシュに足し続ける。end を受け取ったら liveEnded を送る。
- * liveSession が none の実行のキャッシュにイベントで足した記録があれば (前にライブで見た実行)、読み直す
+ * 閉じたら、その実行の summary と区間 API のキャッシュに古いものとしての印を付ける (閉じた後も記録は書き足されうるため。
+ * 次にその実行を選ぶと、TanStack Query が読み直す)
  */
 export const useLiveConnection = (): LiveConnection => {
   const { state, dispatch } = useViewState();
@@ -236,18 +240,10 @@ export const useLiveConnection = (): LiveConnection => {
     });
     return () => {
       close();
+      markRunRecordsStale(queryClient, run);
       setSession(CONNECTING);
     };
   }, [run, active, loaded, queryClient, dispatch]);
-
-  // 前にライブで見た実行を、実行中でない実行として選び直したとき、キャッシュはイベントを足した時点のまま古いため、
-  // 区間 API と summary を読み直して、その後に書かれた記録を出す
-  const inactive = state.liveSession === "none";
-  useEffect(() => {
-    if (run !== null && inactive && loaded && hasAppendedRecords(queryClient, run)) {
-      void refetchRunRecords(queryClient, run);
-    }
-  }, [run, inactive, loaded, queryClient]);
 
   return useMemo(
     () => liveConnectionOf(state.liveSession, state.endReason, session),

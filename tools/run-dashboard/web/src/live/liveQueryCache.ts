@@ -149,6 +149,31 @@ export const liveCursorsOf = (queryClient: QueryClient, run: string): LiveCursor
   pad: getRange(queryClient, run, "pad")?.cursor ?? null,
 });
 
+/** 実行 run の summary と 4 つの区間 API の queryKey */
+const runRecordQueryKeys = (run: string) => [
+  summaryQueryKey(run),
+  ...RANGE_KINDS.map((kind) => rangeQueryKey(run, kind)),
+];
+
+/**
+ * 実行 run の summary と 4 つの区間 API のキャッシュを、古いものとして印を付ける (今は読み直さない)。ライブで追うのを
+ * やめた後もサーバーでは記録が書き足されるため、次にその実行の query を使い始めたときに読み直させる
+ */
+export const markRunRecordsStale = (queryClient: QueryClient, run: string): void => {
+  for (const queryKey of runRecordQueryKeys(run)) {
+    void queryClient.invalidateQueries({ queryKey, exact: true, refetchType: "none" });
+  }
+};
+
+/**
+ * 実行 run の summary と 4 つの区間 API のキャッシュのどれかに、古いものとしての印が付いているか (あれば、つなぐ前に
+ * 読み直す。読み直すと印は消える)
+ */
+export const hasStaleRecords = (queryClient: QueryClient, run: string): boolean =>
+  runRecordQueryKeys(run).some(
+    (queryKey) => queryClient.getQueryState(queryKey)?.isInvalidated === true,
+  );
+
 /**
  * 実行 run の summary と 4 つの区間 API を読み直す (読み込み中の古い要求は取り消す)。すべて読めたら true、
  * どれかが読めなければ false (読めなかった query は、前に読めた値を data に残す)
@@ -157,7 +182,7 @@ export const refetchRunRecords = async (
   queryClient: QueryClient,
   run: string,
 ): Promise<boolean> => {
-  const queryKeys = [summaryQueryKey(run), ...RANGE_KINDS.map((kind) => rangeQueryKey(run, kind))];
+  const queryKeys = runRecordQueryKeys(run);
   try {
     await Promise.all(
       queryKeys.map((queryKey) =>

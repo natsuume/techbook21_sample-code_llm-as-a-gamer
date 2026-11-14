@@ -17,7 +17,13 @@ import {
   requestQueryKey,
   summaryQueryKey,
 } from "../api/queries.ts";
-import { hasAppendedRecords, liveCursorsOf, writeLiveEvents } from "./liveQueryCache.ts";
+import {
+  hasAppendedRecords,
+  hasStaleRecords,
+  liveCursorsOf,
+  markRunRecordsStale,
+  writeLiveEvents,
+} from "./liveQueryCache.ts";
 
 const RUN = "20260101-120000";
 
@@ -121,6 +127,36 @@ describe("writeLiveEvents と hasAppendedRecords", () => {
     const frames = queryClient.getQueryData(rangeQueryKey(RUN, "frames"));
     writeLiveEvents(queryClient, RUN, [{ kind: "request", data: request(2) }]);
     expect(queryClient.getQueryData(rangeQueryKey(RUN, "frames"))).toBe(frames);
+  });
+});
+
+describe("markRunRecordsStale と hasStaleRecords", () => {
+  it("サーバーから読んだだけのキャッシュには、古いものとしての印が無い", () => {
+    expect(hasStaleRecords(seededClient(), RUN)).toBe(false);
+  });
+
+  it("印を付けると、summary と 4 つの区間 API が古いものになり、値はそのまま残る", () => {
+    const queryClient = seededClient();
+    markRunRecordsStale(queryClient, RUN);
+    expect(hasStaleRecords(queryClient, RUN)).toBe(true);
+    for (const queryKey of [
+      summaryQueryKey(RUN),
+      rangeQueryKey(RUN, "requests"),
+      rangeQueryKey(RUN, "frames"),
+      rangeQueryKey(RUN, "pad"),
+      rangeQueryKey(RUN, "events"),
+    ]) {
+      expect(queryClient.getQueryState(queryKey)?.isInvalidated).toBe(true);
+    }
+    expect(
+      queryClient.getQueryData<RangeResponse<RequestItem>>(rangeQueryKey(RUN, "requests"))?.items,
+    ).toEqual([request(1)]);
+  });
+
+  it("ほかの実行のキャッシュには印を付けない", () => {
+    const queryClient = seededClient();
+    markRunRecordsStale(queryClient, "20261231-000000");
+    expect(hasStaleRecords(queryClient, RUN)).toBe(false);
   });
 });
 
