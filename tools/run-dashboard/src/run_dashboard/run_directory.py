@@ -66,13 +66,14 @@ def list_advisor_run_dirs(run_dir: Path) -> list[AdvisorRunDir]:
     """run_dir の直下で、名前が ADVISOR_RUN_DIR_PATTERN に fullmatch するディレクトリーの一覧を返す。
 
     並びは advisor_roles.ADVISOR_ROLES の役割の順で、同じ役割の中は連番の昇順。
-    役割を持たない形の名前 (advisor-001 など) と、ファイルは入れない。
+    役割を持たない形の名前 (advisor-001 など) と、ファイルと、シンボリックリンクは入れない (第4章はシンボリック
+    リンクを作らない。リンクをたどって実行のディレクトリーの外のファイルを返さないため)。
     """
     role_order = {role.name: position for position, role in enumerate(ADVISOR_ROLES)}
     found: list[AdvisorRunDir] = []
     for entry in run_dir.iterdir():
         match = ADVISOR_RUN_DIR_PATTERN.fullmatch(entry.name)
-        if match is None or not entry.is_dir():
+        if match is None or entry.is_symlink() or not entry.is_dir():
             continue
         role, index = match.groups()
         found.append(AdvisorRunDir(entry.name, role, int(index), entry))

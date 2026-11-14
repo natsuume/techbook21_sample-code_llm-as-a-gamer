@@ -33,14 +33,13 @@ from run_dashboard.record_cache import JsonLinesCache
 from run_dashboard.run_directory import (
     find_run_dir,
     list_advisor_files,
-    list_run_names,
     resolve_run_file,
 )
 from run_dashboard.run_records import (
     LOAD_PARTS,
     RunRecords,
+    list_run_overviews,
     load_run,
-    load_run_overview,
     read_advisor_stream,
     read_result_json,
 )
@@ -162,13 +161,11 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
 
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
-        items = []
         # 一覧では実行ごとに run.jsonl だけを読む (requests.jsonl・frames.jsonl などの大きなファイルは読まない)
-        for name in list_run_names(runs_dir):
-            overview = load_run_overview(runs_dir, name, cache)
-            if overview is not None:
-                items.append(build_run_list_item(overview))
-        return items
+        return [
+            build_run_list_item(overview)
+            for overview in list_run_overviews(runs_dir, cache)
+        ]
 
     @app.get("/api/runs/{run}")
     def get_summary(run: str) -> dict:

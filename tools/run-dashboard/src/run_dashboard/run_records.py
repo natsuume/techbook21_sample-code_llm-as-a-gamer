@@ -37,6 +37,7 @@ from run_dashboard.run_directory import (
     AdvisorRunDir,
     find_run_dir,
     list_advisor_run_dirs,
+    list_run_names,
 )
 
 # 記録の種類の名前。summary の skipped_lines のキーにも使う。advisor_steps は全部の stream.jsonl の合計
@@ -155,6 +156,24 @@ def load_run_overview(
     run_dir = find_run_dir(runs_dir, name)
     if run_dir is None:
         return None
+    return _overview_of(name, run_dir, cache)
+
+
+def list_run_overviews(
+    runs_dir: Path, cache: JsonLinesCache | None = None
+) -> list[RunOverview]:
+    """runs_dir の実行の一覧 (run_directory.list_run_names の順) の、一覧の 1 件に使う部分を返す。
+
+    各実行は load_run_overview と同じ値になる。list_run_names で照合済みの名前を使い、実行ごとに一覧を取り直さない
+    (実行の数の 2 乗に比例してディレクトリーを調べないため)。
+    """
+    return [
+        _overview_of(name, runs_dir / name, cache) for name in list_run_names(runs_dir)
+    ]
+
+
+def _overview_of(name: str, run_dir: Path, cache: JsonLinesCache | None) -> RunOverview:
+    """照合済みの実行のディレクトリー run_dir から、load_run_overview の値を作る。"""
     run_lines = _records_of(_read_lines(run_dir / RUN_LOG_FILE_NAME, cache)) or []
     _, start = _find_start(run_lines)
     return RunOverview(
@@ -272,7 +291,12 @@ def _origin_mono_of(start: dict | None) -> float | None:
 
 
 def _can_open(path: Path) -> bool:
-    """path のファイルを読み取りで開けるなら True を返す (中身は読まない)。無いか、開けない (OSError) なら False。"""
+    """path のファイルを読み取りで開けるなら True を返す (中身は読まない)。
+
+    無いか、シンボリックリンクか、開けない (OSError) なら False。
+    """
+    if path.is_symlink():
+        return False
     try:
         with path.open("rb"):
             return True
@@ -287,9 +311,13 @@ def _read_lines(
 ) -> ParsedLines | None:
     """path の JSON Lines を読んで返す。無いか、読めない (OSError) なら None を返す。
 
+    path がシンボリックリンクなら読まずに None を返す (第4章は記録のファイルをシンボリックリンクにしない。
+    リンクをたどって実行のディレクトリーの外のファイルを返さないため)。
     cache があれば cache.read(path, transform) で読む。無ければ jsonl_lines.read_json_lines で読み、transform が
     あれば records に当てる (キャッシュを使うときと同じ値にする)。
     """
+    if path.is_symlink():
+        return None
     if cache is not None:
         return cache.read(path, transform)
     try:
@@ -421,9 +449,12 @@ def read_advisor_stream(
 def read_result_json(path: Path) -> dict | None:
     """advisor の result.json のファイル path を UTF-8 の JSON として読み、その object (辞書) を返す。
 
-    ファイルが無い、読めない (OSError)、UTF-8 でない (UnicodeDecodeError)、JSON として読めない (ValueError)、
-    読んだ値が object でないときは None を返す。advisor_runs.build_advisor_runs の read_result_json に渡す関数。
+    ファイルが無い、シンボリックリンク、読めない (OSError)、UTF-8 でない (UnicodeDecodeError)、JSON として読めない
+    (ValueError)、読んだ値が object でないときは None を返す。advisor_runs.build_advisor_runs の read_result_json に
+    渡す関数。シンボリックリンクを読まないのは、リンクをたどって実行のディレクトリーの外のファイルを返さないため。
     """
+    if path.is_symlink():
+        return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     # UnicodeDecodeError は ValueError の派生の型なので、ValueError で一緒に捕まえる

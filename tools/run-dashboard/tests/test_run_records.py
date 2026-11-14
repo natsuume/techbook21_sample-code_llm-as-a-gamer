@@ -15,11 +15,12 @@ from synthetic_runs import (
 )
 
 from run_dashboard.record_cache import JsonLinesCache
-from run_dashboard.run_directory import AdvisorRunDir
+from run_dashboard.run_directory import AdvisorRunDir, list_run_names
 from run_dashboard.run_records import (
     LOAD_PARTS,
     RECORD_KINDS,
     lighten_request_lines,
+    list_run_overviews,
     load_run,
     load_run_overview,
     read_advisor_stream,
@@ -35,6 +36,56 @@ SYNTHETIC_RUN_ATTRIBUTES = (
     "no_answer_type",
     "single_advisor_question",
 )
+
+
+def test_list_run_overviews_matches_load_run_overview(runs):
+    expected = [
+        load_run_overview(runs.runs_dir, name) for name in list_run_names(runs.runs_dir)
+    ]
+    assert list_run_overviews(runs.runs_dir) == expected
+    assert list_run_overviews(runs.runs_dir, JsonLinesCache()) == expected
+
+
+def test_symlinked_record_files_and_advisor_dirs_are_treated_as_missing(tmp_path):
+    # 実行のディレクトリーの外にある記録へのシンボリックリンクは、たどらずに無いものとして扱う
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_run_log = outside / "run.jsonl"
+    outside_run_log.write_text(
+        '{"time": "10:00:00.000", "event": "start", "game": "secret"}\n',
+        encoding="utf-8",
+    )
+    outside_result = outside / "result.json"
+    outside_result.write_text('{"returncode": 0, "secret": true}', encoding="utf-8")
+    outside_stream = outside / "stream.jsonl"
+    outside_stream.write_text('{"mono": 1.0, "raw": "secret"}\n', encoding="utf-8")
+    outside_advisor = outside / "advisor-tips-001"
+    outside_advisor.mkdir()
+    (outside_advisor / "result.json").write_text('{"returncode": 0}', encoding="utf-8")
+
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "20261101-000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.jsonl").symlink_to(outside_run_log)
+    (run_dir / "requests.jsonl").symlink_to(outside_stream)
+    advisor_dir = run_dir / "advisor-strategy-001"
+    advisor_dir.mkdir()
+    (advisor_dir / "result.json").symlink_to(outside_result)
+    (advisor_dir / "stream.jsonl").symlink_to(outside_stream)
+    (run_dir / "advisor-tips-001").symlink_to(outside_advisor, target_is_directory=True)
+
+    records = load_run(runs_dir, "20261101-000000")
+    assert records is not None
+    assert records.start is None
+    assert records.has_requests_file is False
+    assert records.has_stream_file is False
+    assert [item.name for item in records.advisor_dirs] == ["advisor-strategy-001"]
+    assert read_result_json(advisor_dir / "result.json") is None
+    assert read_advisor_stream(records.advisor_dirs[0]) is None
+    overview = load_run_overview(runs_dir, "20261101-000000", JsonLinesCache())
+    assert overview is not None
+    assert overview.start is None
+    assert overview.has_requests_file is False
 
 
 def test_record_kinds():
