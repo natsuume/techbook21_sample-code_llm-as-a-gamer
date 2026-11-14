@@ -303,6 +303,31 @@ def test_payload_puts_history_text_after_state_text():
     ]
 
 
+def test_payload_appends_timeline_text_to_history_text():
+    request = replace(
+        timeline_request([False]), timeline_text="## 画面の変化\n- 変わった"
+    )
+    payload = build_decisions_payload(request)
+    assert payload["input"][0]["content"][2] == {
+        "type": "input_text",
+        "text": f"{HISTORY_TEXT}\n\n## 画面の変化\n- 変わった",
+    }
+
+
+def test_payload_with_only_timeline_text_puts_it_after_state_text():
+    request = replace(
+        timeline_request([False], previous_operation_text=None, history_text=""),
+        timeline_text="## 画面の変化\n- 変わった",
+    )
+    assert content_texts(build_decisions_payload(request)) == [
+        request.instructions,
+        request.state_text,
+        "## 画面の変化\n- 変わった",
+        "画像 1",
+        IMAGE_MARK,
+    ]
+
+
 def test_payload_without_history_text_puts_first_label_after_state_text():
     request = timeline_request([False], previous_operation_text=None, history_text="")
     assert content_texts(build_decisions_payload(request)) == [

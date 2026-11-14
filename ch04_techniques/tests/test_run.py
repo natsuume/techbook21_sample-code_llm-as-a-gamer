@@ -22,8 +22,14 @@ from switch2_agent.decision_request import (
 )
 from switch2_agent.frame_history import TimedFrame
 from switch2_agent.game_notes import NOTE_KINDS
+from switch2_agent.operation_log import DEFAULT_OPERATION_LOG_CAPACITY
 from switch2_agent.questions import build_questions
 from switch2_agent.request_log import RequestLog, RequestLogEntry
+from switch2_agent.timeline.builder import (
+    SECTION_NAMES,
+    TimelineBuilder,
+    TimelineSettings,
+)
 
 REQUIRED = ["--game", "zelda", "--model", "jev"]
 TEST_API_KEY = "test-key-not-a-secret"
@@ -663,7 +669,9 @@ def test_main_with_record_dashboard_writes_args_and_origin_to_start(recorder):
     run.main(argv)
     start = run_log_lines(recorder)[0]
     assert start["event"] == "start"
-    assert start["args"] == vars(run.parse_args(argv))
+    # run.jsonl は JSON なので、タプル (--timeline の節) はリストになる
+    assert start["args"] == json.loads(json.dumps(vars(run.parse_args(argv))))
+    assert start["args"]["timeline"] == list(SECTION_NAMES)
     assert start["origin_mono"] == PIPELINE_STARTED_AT
 
 
@@ -849,9 +857,100 @@ def test_parse_args_uses_defaults():
         "similarity_threshold": 0.15,
         "advisor_timeout": 300.0,
         "max_consecutive_errors": 5,
+        "timeline": SECTION_NAMES,
+        "timeline_window": 120.0,
+        "screen_change_threshold": 2.0,
         "save_requests": False,
         "record_dashboard": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("all", SECTION_NAMES),
+        ("none", ()),
+        ("screen", ("screen",)),
+        # SECTION_NAMES の順に並べ直す。前後の空白は除く
+        ("subgoals, actions", ("actions", "subgoals")),
+    ],
+)
+def test_parse_args_reads_timeline_sections(value, expected):
+    assert run.parse_args([*REQUIRED, "--timeline", value]).timeline == expected
+
+
+@pytest.mark.parametrize("value", ["unknown", "actions,actions", "actions,", ""])
+def test_parse_args_rejects_bad_timeline_sections(value, capsys):
+    with pytest.raises(SystemExit) as raised:
+        run.parse_args([*REQUIRED, "--timeline", value])
+    assert raised.value.code == 2
+    assert "--timeline" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--timeline-window", "0"),
+        ("--timeline-window", "inf"),
+        ("--timeline-window", "nan"),
+        ("--screen-change-threshold", "-0.1"),
+        ("--screen-change-threshold", "255.5"),
+    ],
+)
+def test_parse_args_rejects_out_of_range_timeline_values(option, value, capsys):
+    with pytest.raises(SystemExit):
+        run.parse_args([*REQUIRED, option, value])
+    assert option in capsys.readouterr().err
+
+
+def test_operation_log_capacity_covers_timeline_window():
+    assert run.operation_log_capacity(10.0) == DEFAULT_OPERATION_LOG_CAPACITY
+    assert run.operation_log_capacity(300.0) == 1500
+
+
+def test_main_wires_timeline_with_all_sections_by_default(recorder):
+    run.main(REQUIRED)
+    parts = recorder.pipeline.parts
+    timeline = parts.timeline
+    assert isinstance(timeline, TimelineBuilder)
+    assert timeline.settings == TimelineSettings(SECTION_NAMES, action_window_s=120.0)
+    assert timeline.operation_log is parts.operation_log
+    # 120 秒 × 1 秒あたり 5 回 = 600 件 (既定の 500 件より多い)
+    assert parts.operation_log.capacity == 600
+    # キャプチャーのフレームが、画面の変化の追跡に届く
+    recorder.capture.on_frame(frame(1.0, 100, gray=10))
+    assert timeline.screen.static_since() == 1.0
+
+
+def test_main_wires_timeline_settings_from_options(recorder):
+    run.main(
+        [
+            *REQUIRED,
+            "--timeline",
+            "actions,notes",
+            "--timeline-window",
+            "300",
+            "--screen-change-threshold",
+            "5",
+        ]
+    )
+    parts = recorder.pipeline.parts
+    assert parts.timeline.settings == TimelineSettings(
+        ("actions", "notes"), action_window_s=300.0
+    )
+    # screen の節が無ければ、画面の変化の追跡を作らない
+    assert parts.timeline.screen is None
+    assert parts.operation_log.capacity == 1500
+
+
+def test_main_with_timeline_screen_uses_given_threshold(recorder):
+    run.main([*REQUIRED, "--timeline", "screen", "--screen-change-threshold", "5"])
+    assert recorder.pipeline.parts.timeline.screen.threshold == 5.0
+
+
+def test_main_without_timeline_passes_none(recorder):
+    run.main([*REQUIRED, "--timeline", "none"])
+    assert recorder.pipeline.parts.timeline is None
 
 
 def test_parse_args_accepts_save_requests():

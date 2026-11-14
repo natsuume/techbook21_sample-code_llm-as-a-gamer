@@ -11,7 +11,8 @@ Decision Model の応答は同期で待つ。その間にキャプチャーが�
     2. キャプチャーが終わっていないか (見張りが止まったと判定していないか)、ブリッジが復旧中になっていないか、
        新しいフレームが届いているかを確かめる
     3. 要求に載せるフレームとして、フレームの履歴の最新の 1 枚を選ぶ
-    4. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる
+    4. ゲームの情報の 4 ファイルの最新の内容を読み、直近の応答と送った操作の履歴とともに要求を組み立てる。
+       系列情報 (parts.timeline) があれば、読んだゲームの情報を渡してから系列情報の文を作り、要求に足す
     5. Decision Model に送る。応答を待つ間にキャプチャーが止まっていたら、応答を捨てて止まる。
        そうでなければ、問いごとの答え (選択肢ごとの確率と、真である確率) から操作を決めて PadOutput に渡す (すぐ戻る)
     6. advisor を呼ぶ答えの役割 (advisor_roles.ADVISOR_ROLES) のうち、その役割の advisor が実行中でないものがあれば、
@@ -103,6 +104,22 @@ class PadOutputLike(Protocol):
         ...
 
 
+class TimelineLike(Protocol):
+    """Pipeline が系列情報の文を作る部品。run では timeline.builder.TimelineBuilder を使う。"""
+
+    def observe_notes(self, notes: Mapping[str, str], now: float) -> None:
+        """要求の時刻 now に読んだゲームの情報 notes (種別 → 中身) を受け取る。"""
+        ...
+
+    def record_advisor_call(self, role_name: str, now: float) -> None:
+        """役割 role_name の advisor が、時刻 now に要求を受け付けたことを受け取る。"""
+        ...
+
+    def build(self, now: float, origin: float) -> str:
+        """要求の時刻 now の系列情報の文を返す。origin は経過秒の起点 (Pipeline.started_at)。"""
+        ...
+
+
 class RequestLogLike(Protocol):
     """Pipeline が要求ごとの入出力を書く先。run では request_log.RequestLog を使う。"""
 
@@ -139,6 +156,8 @@ class PipelineParts:
                      返す関数。まだなら None (run では watcher.lost)
     request_log      要求ごとの入出力を書く先 (run では --save-requests が付いていれば request_log.RequestLog)。
                      None なら書かない
+    timeline         系列情報の文を作る部品 (run では --timeline の節が 1 つ以上あれば timeline.builder.TimelineBuilder)。
+                     None なら系列情報を足さない (要求の timeline_text は空文字)
     """
 
     history: FrameHistory
@@ -161,6 +180,7 @@ class PipelineParts:
     bridge_recovering: Callable[[], bool]
     capture_lost: Callable[[], str | None]
     request_log: RequestLogLike | None = None
+    timeline: TimelineLike | None = None
 
 
 class Pipeline:
@@ -244,8 +264,10 @@ class Pipeline:
            このときは要求を送らず、次の「新しいフレームが無いときの扱い」をして戻る。
            新しいフレームなら now = clock() とし、no_new_frame_since = None にする (この後の要求が失敗しても None のまま。
            それまでフレームを待った時間を、失敗の後の上限の判定に持ち越さないため)
-        4. notes = read_notes()、build_decision_request(frame, now, notes, questions, encode,
-           origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT))。
+        4. notes = read_notes()。timeline があれば、timeline.observe_notes(notes, now) の後に
+           timeline_text = timeline.build(now, started_at) とする (無ければ空文字)。
+           build_decision_request(frame, now, notes, questions, encode,
+           origin=started_at, recent_operations=operation_log.recent(DEFAULT_HISTORY_COUNT), timeline_text=timeline_text)。
            画像のラベルの前回の操作の前後は、operation_log の最新の記録の時刻 (operation_log.record_time) で決まる。
            組み立て終えたら encoded_at = clock() (model.decide を呼ぶ直前の時刻)
         5. request_sent = True、request_count を 1 増やす (増やした後の値 number がこの要求の通し番号)。
@@ -289,6 +311,7 @@ class Pipeline:
              operation_log.format_since(last_advisor_at[name], received_at, name)、action.advisor_probabilities[name]、
              time.strftime("%H:%M:%S") の壁時計の時刻からなる
            - 受け付けられた (True) 役割の last_advisor_at[name] を received_at にし (その役割の次の操作の記録の起点)、
+             timeline があれば timeline.record_advisor_call(name, received_at) を呼んで、
              受け付けた役割の name の frozenset を返す
         9. 要求のログに result="ok"、error=None、decision は応答、action は送った操作、
            advisor_accepted=受け付けた役割の name の frozenset (呼ばなければ空の集合) の記録を書く
@@ -346,6 +369,10 @@ class Pipeline:
         selected_at = parts.clock()
 
         notes = parts.read_notes()
+        timeline_text = ""
+        if parts.timeline is not None:
+            parts.timeline.observe_notes(notes, now)
+            timeline_text = parts.timeline.build(now, self.started_at)
         request = build_decision_request(
             frame,
             now,
@@ -354,6 +381,7 @@ class Pipeline:
             parts.encode,
             origin=self.started_at,
             recent_operations=parts.operation_log.recent(DEFAULT_HISTORY_COUNT),
+            timeline_text=timeline_text,
         )
         encoded_at = parts.clock()
 
@@ -653,6 +681,8 @@ class Pipeline:
             )
             if parts.advisors[name].request_update(context):
                 self.last_advisor_at[name] = received_at
+                if parts.timeline is not None:
+                    parts.timeline.record_advisor_call(name, received_at)
                 accepted.add(name)
         return frozenset(accepted)
 

@@ -174,7 +174,8 @@ class RequestLog:
                                       record_thumbs が True なら、各要素に "thumb":
                                       dashboard_records.thumb_file_name(frame_time) (frame_time は clock
                                       (time.monotonic) の値のまま。frames.jsonl の thumb と同じ名前) を足す
-            state_text / history_text / previous_operation_text   entry.request の同名の値
+            state_text / history_text / previous_operation_text / timeline_text   entry.request の同名の値
+                                      (timeline_text は系列情報の文。使っていなければ空文字)
             probabilities / choices / refusals / raw_response     entry.decision の同名の値 (decision が None なら null)。
                                                                   probabilities は確率の問いの確率、choices は選択肢の
                                                                   問いの選択肢ごとの確率
@@ -260,6 +261,7 @@ def build_request_record(
         "state_text": request.state_text,
         "history_text": request.history_text,
         "previous_operation_text": request.previous_operation_text,
+        "timeline_text": request.timeline_text,
         "probabilities": decision.probabilities if decision is not None else None,
         "choices": decision.choices if decision is not None else None,
         "refusals": decision.refusals if decision is not None else None,

@@ -211,3 +211,15 @@ def test_format_since_writes_neutral_record_without_advisor_probability():
         "-3.21 秒: 押下 A+LS:0.8,0 / 短押し B / advisor 0.12\n"
         "-1.05 秒: 中立に戻した (Decision Model の失敗)"
     )
+
+
+def test_is_full_and_oldest_time():
+    log = OperationLog(capacity=2)
+    assert not log.is_full()
+    assert log.oldest_time() is None
+    log.add(record(1.0))
+    log.add(neutral(2.0))
+    assert log.is_full()
+    assert log.oldest_time() == 1.0
+    log.add(record(3.0))
+    assert log.oldest_time() == 2.0

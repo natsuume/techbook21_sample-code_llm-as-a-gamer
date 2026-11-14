@@ -10,7 +10,7 @@ https://docs.typesafe.ai/api/system-one.md (2026-11-13 に確認) に合わせ�
       "state": {
         "instructions": <instructions>,
         "game_notes": <state_text>,
-        "operation_history": <history_text>,
+        "operation_history": <history_with_timeline(request)>,
         "frames": [{"label": <画像 1 のラベル>, "image": <画像 1 の参照文字列>}, ...]
       },
       "assets": {<画像 1 の参照文字列>: {"type": "image", "format": "jpg", "data_base64": <base64>}, ...},
@@ -23,8 +23,9 @@ https://docs.typesafe.ai/api/system-one.md (2026-11-13 に確認) に合わせ�
     }
 questions は request.questions の順で、criteria は Question.choices の順の map。公式ドキュメントには、Jev は
 先頭の選択肢に寄りやすいと書かれているため、選択肢の問いの先頭は「なし」(questions.NONE_CHOICE) にしてある。
-state のキーは instructions、game_notes、operation_history、frames の順。operation_history (直近の応答と送った
-操作の履歴) は、history_text が空文字なら入れない。frames のラベルは DecisionRequest の画像のラベルをそのまま使う。
+state のキーは instructions、game_notes、operation_history、frames の順。operation_history は、直近の応答と送った
+操作の履歴 (history_text) の後ろに、空行をはさんで系列情報 (timeline_text) を足した文
+(decision_request.history_with_timeline) で、空文字なら入れない。frames のラベルは DecisionRequest の画像のラベルをそのまま使う。
 前回の操作の前か後かはラベルに書いてあるため、前回の操作を送った時点の区切りの文 (previous_operation_text) は入れない。
 画像はトップレベルの assets に 1 回だけ登録し、state の frames の各要素の image に参照文字列を 1 回だけ置く。
 参照文字列は書くたびに同じ画像が足されるため、問いの文には書かない。どこからも参照しない asset は 400 になるため、
@@ -54,7 +55,7 @@ from switch2_agent.decision_models.base import (
     read_choice_probabilities,
     read_probability,
 )
-from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.decision_request import DecisionRequest, history_with_timeline
 from switch2_agent.questions import Question
 
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
@@ -94,8 +95,10 @@ def build_jev_payload(
     """request を Jev の要求の JSON (モジュールの docstring の形) にする。
 
     state は {"instructions": request.instructions, "game_notes": request.state_text,
-    "operation_history": request.history_text, "frames": [...]} の順のキーを持つ。request.history_text が
-    空文字なら operation_history を入れない。request.previous_operation_text は入れない。
+    "operation_history": <履歴の欄の文>, "frames": [...]} の順のキーを持つ。履歴の欄の文は
+    decision_request.history_with_timeline(request) (history_text の後ろに、空行をはさんで系列情報 timeline_text を
+    足した文。timeline_text が空なら history_text のまま) で、空文字なら operation_history を入れない。
+    request.previous_operation_text は入れない。
     request.images の各画像に make_reference() で参照文字列を 1 つずつ作り (make_reference は呼ぶたびに
     異なる文字列を返す)、assets に {"type": "image", "format": JPEG_ASSET_FORMAT, "data_base64": <base64>}
     を 1 回だけ登録し、state の frames に request.images の順で {"label": ラベル (画像の label のまま),
@@ -121,8 +124,9 @@ def build_jev_payload(
         "instructions": request.instructions,
         "game_notes": request.state_text,
     }
-    if request.history_text:
-        state["operation_history"] = request.history_text
+    history = history_with_timeline(request)
+    if history:
+        state["operation_history"] = history
     state["frames"] = frames
     payload: dict[str, object] = {
         "model": model,

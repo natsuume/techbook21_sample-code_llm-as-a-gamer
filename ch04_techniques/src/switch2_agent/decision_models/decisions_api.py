@@ -10,7 +10,7 @@ https://developers.openai.com/api/reference/resources/decisions/methods/create�
       "input": [{"role": "user", "content": [
         {"type": "input_text", "text": <instructions>},
         {"type": "input_text", "text": <state_text>},
-        {"type": "input_text", "text": <history_text>},
+        {"type": "input_text", "text": <history_with_timeline(request)>},
         {"type": "input_text", "text": <画像 1 のラベル>},
         {"type": "input_image", "image_url": "data:image/jpeg;base64,<画像 1 の base64>"},
         ...
@@ -27,7 +27,8 @@ https://developers.openai.com/api/reference/resources/decisions/methods/create�
       ]
     }
 questions は request.questions の順で、choices は Question.choices の順。
-history_text (直近の応答と送った操作の履歴) のテキストは、空文字なら置かない。previous_operation_text
+直近の応答と送った操作の履歴 (history_text) の後ろに、空行をはさんで系列情報 (timeline_text) を足した文
+(decision_request.history_with_timeline) は、空文字なら置かない。previous_operation_text
 (前回の操作を送った時点の区切りの文) は、前回の操作の後 (after_previous_operation が True) の最初の画像の
 ラベルの直前に 1 回だけ置き、previous_operation_text が None か、前回の操作の後の画像が無ければ置かない。
 応答の形: {"answers": [<answer>, ...], "model": ..., "usage": ...}。answer は次のどれか:
@@ -55,7 +56,7 @@ from switch2_agent.decision_models.base import (
     read_choice_probabilities,
     read_probability,
 )
-from switch2_agent.decision_request import DecisionRequest
+from switch2_agent.decision_request import DecisionRequest, history_with_timeline
 from switch2_agent.questions import NONE_CHOICE, Question
 
 DECISIONS_URL = "https://api.openai.com/v1/decisions"
@@ -83,7 +84,8 @@ def build_decisions_payload(
     """request を Decisions API の要求の JSON (モジュールの docstring の形) にする。
 
     input は user のメッセージ 1 つ。content には、instructions のテキスト、state_text のテキスト、
-    history_text のテキスト (空文字なら置かない) の順に置き、続けて request.images の順に、ラベルのテキスト
+    履歴の欄のテキスト (decision_request.history_with_timeline(request)。history_text の後ろに、空行をはさんで
+    系列情報 timeline_text を足した文。空文字なら置かない) の順に置き、続けて request.images の順に、ラベルのテキスト
     (input_text) と画像 (input_image、jpeg_data_url) を 1 組ずつ置く。after_previous_operation が True の
     最初の画像の組の直前 (ラベルのテキストの前) には、request.previous_operation_text が None でなければ、
     その文の input_text を 1 回だけ置く。各画像の本体は要求の中に 1 回だけ入る。
@@ -96,8 +98,9 @@ def build_decisions_payload(
         {"type": "input_text", "text": request.instructions},
         {"type": "input_text", "text": request.state_text},
     ]
-    if request.history_text:
-        content.append({"type": "input_text", "text": request.history_text})
+    history = history_with_timeline(request)
+    if history:
+        content.append({"type": "input_text", "text": history})
     separator_placed = False
     for image in request.images:
         if (

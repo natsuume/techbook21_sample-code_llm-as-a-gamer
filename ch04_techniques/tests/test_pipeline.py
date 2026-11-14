@@ -2037,3 +2037,61 @@ def test_advisor_operation_log_includes_neutral_after_decision_error():
         "-0.50 秒: 中立に戻した (Decision Model の失敗)\n"
         "0.00 秒: 押下 none / 短押し none / advisor 0.90"
     )
+
+
+# --- 系列情報 ---
+
+
+class FakeTimeline:
+    """偽の TimelineBuilder。受け取った呼び出しを calls に記録し、build では text を返す。"""
+
+    def __init__(self, text: str = "## 画面の変化\n- 変わった"):
+        self.text = text
+        self.calls: list[tuple] = []
+
+    def observe_notes(self, notes, now: float) -> None:
+        self.calls.append(("observe_notes", dict(notes), now))
+
+    def record_advisor_call(self, role_name: str, now: float) -> None:
+        self.calls.append(("record_advisor_call", role_name, now))
+
+    def build(self, now: float, origin: float) -> str:
+        self.calls.append(("build", now, origin))
+        return self.text
+
+
+def test_request_without_timeline_has_empty_timeline_text():
+    pipeline, env = make_pipeline()
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert env.model.requests[0].timeline_text == ""
+
+
+def test_timeline_observes_notes_before_building_text_for_request():
+    pipeline, env = make_pipeline()
+    timeline = FakeTimeline()
+    pipeline.parts.timeline = timeline
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    assert timeline.calls[:2] == [
+        ("observe_notes", NOTES, 10.0),
+        ("build", 10.0, 9.0),
+    ]
+    assert env.model.requests[0].timeline_text == "## 画面の変化\n- 変わった"
+
+
+def test_timeline_records_only_accepted_advisor_calls():
+    pipeline, env = make_pipeline()
+    timeline = FakeTimeline()
+    pipeline.parts.timeline = timeline
+    env.advisors["tips"].answers = [False]
+    env.model.outcomes = [decision(advisor_strategy=0.9, advisor_tips=0.9)]
+    env.add_frames(9.9)
+    env.clock.now = 10.0
+    pipeline.run_once()
+    received_at = 10.0 + env.model.decide_s
+    assert [c for c in timeline.calls if c[0] == "record_advisor_call"] == [
+        ("record_advisor_call", "strategy", pytest.approx(received_at))
+    ]
