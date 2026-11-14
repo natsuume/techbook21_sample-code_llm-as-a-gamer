@@ -41,6 +41,10 @@ ch04_techniques/         第4章: 型付きの判断を返すモデルと adviso
   .claude/skills/        advisor がゲームの情報を書き込む手順 (Skill)
   src/switch2_agent/     エージェントのパッケージ
   tests/                 パッケージのテスト
+tools/run-dashboard/     第4章の試行の記録を読み、画面に渡す読み取り専用の API サーバーの uv プロジェクト
+  pyproject.toml
+  src/run_dashboard/     サーバーのパッケージ
+  tests/                 パッケージのテスト
 ```
 
 ### 章ディレクトリー
@@ -50,6 +54,12 @@ ch04_techniques/         第4章: 型付きの判断を返すモデルと adviso
 | [`ch02_setup`](./ch02_setup/) | 第2章 | 機材の準備、デーモンとクライアントの使い方と実装 |
 | [`ch03_playtest`](./ch03_playtest/) | 第3章 | 試行でエージェントに読ませた指示ファイル (`CLAUDE.md`)。操作には `ch02_setup` のデーモンとクライアントを使います |
 | [`ch04_techniques`](./ch04_techniques/) | 第4章 | 型付きの判断を返すモデル (Decision Model) と、Claude Code の advisor でゲームを遊ぶエージェント (`switch2-agent`) の使い方と実装。映像と入力には `ch02_setup` のパッケージを使います |
+
+### ツール
+
+| ディレクトリー | 内容 |
+|---|---|
+| [`tools/run-dashboard`](./tools/run-dashboard/) | 第4章の試行の記録を読み、画面に渡す読み取り専用の API サーバー |
 
 ### パッケージ `ch02_setup/src/switch2_remote`
 
