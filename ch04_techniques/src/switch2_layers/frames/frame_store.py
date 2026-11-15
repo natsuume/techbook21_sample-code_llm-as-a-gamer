@@ -12,6 +12,9 @@
 書き込み (縮小・JPEG 化・ファイルの書き込み) は専用の書き出しスレッドで行い、受け付けは上限付きのキューで行う。
 キューが満杯のときは保存を捨て、捨てた件数を dropped に数える (終了時に run.jsonl の frames_dropped に記録する)。
 受け付ける側 (キャプチャーのスレッドと surface のスレッド) は I/O をせず、書き出しスレッドを待たない。
+close の待ちが時間切れになったら、書き出しスレッドが書いている途中の 1 件も捨てたものとして数え、その 1 件を後から
+書き終えても frames.jsonl に行を足さない。行を足すことと、あきらめて捨てたと数えることは同じロックの中で決めるため、
+1 件は written と dropped のどちらか一方にだけ数える。
 """
 
 import logging
@@ -268,7 +271,15 @@ class FrameStore:
     def close(self, timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S) -> None:
         """以後の受け付けをやめ、書き出しスレッドがキューの分を書き終えるまで最大 timeout_s 秒待つ。
 
-        書き終えられなかった分は dropped に足す。書き出しスレッドが無ければ、キューに残った分を dropped に足す。
+        待ちが時間切れになったら (書き出しスレッドがまだ動いていたら)、書き終えるのをあきらめる:
+            - キューに残った分と、書き出しスレッドが書いている途中の 1 件を dropped に足す
+              (キューに残った surface の画像は予約から外す)
+            - 以後、書き出しスレッドは frames.jsonl に行を足さない。書いている途中の 1 件は、画像を書き終えても
+              行を足さず、written にも数えない (書いた画像のファイルは消さない)
+        あきらめて dropped に足すことと、書き出しスレッドが行を足すこと (_write_item) は同じロックの中で決める。
+        そのため書いている途中の 1 件は、待ちの間に行を足し終えていれば written だけに、そうでなければ dropped だけに数える。
+        受け付ける側 (offer_interval・save_surface) は、このロックで行の追記を待たない。
+        書き出しスレッドが無ければ、キューに残った分を dropped に足す。
         2 回目以降の呼び出しは何もしない。
         """
         with self._condition:
@@ -305,8 +316,11 @@ class FrameStore:
     def _write_item(self, item: _SaveItem) -> bool:
         """1 件を書く (画像を置き換えの書き込みで書いてから、frames.jsonl に 1 行足す)。書けたら True。
 
+        画像を書き終えた後、close があきらめたかを確かめることと、行を足して written を数えることは、close があきらめて
+        dropped に足すのと同じロックの中で行う。close があきらめた後なら、行を足さず、数えずに False を返す
+        (もう dropped に数えてある)。
         書き込みに失敗したら (OSError・ValueError) dropped に数え、surface の画像なら予約から外して False を返す。
-        close の時間切れで手放した後に戻った 1 件は、数えずに False を返す (もう dropped に数えてある)。
+        close があきらめた後の失敗は数えない。
         """
         try:
             record = self._write_image(item)

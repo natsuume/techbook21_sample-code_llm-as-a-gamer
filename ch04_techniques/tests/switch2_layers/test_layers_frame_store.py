@@ -1,11 +1,14 @@
 import json
 import random
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
+import switch2_layers.frames.frame_store as frame_store_module
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.frame_store import (
     FrameRecord,
@@ -356,6 +359,86 @@ def test_close_counts_unwritten_items_and_stops_accepting(tmp_path):
     assert store.dropped == 4
     store.close(timeout_s=0.1)
     assert store.dropped == 4
+
+
+# --- close の待ちと、書いている途中の 1 件 ---
+
+WAIT_LIMIT_S = 5.0  # テストが待つ上限 (秒)
+GIVE_UP_TIMEOUT_S = 0.05  # close の待ちを時間切れにする秒数
+
+
+class BlockingImageWrite:
+    """画像の書き込み (frame_store の write_bytes_atomic) を、release が立つまで止める。
+
+    書き出しスレッドが画像を書いている途中の状態を作る。止めるのは画像の書き込みだけで、frames.jsonl の行の追記は止めない。
+    """
+
+    def __init__(self, original: Callable[[Path, bytes], None]):
+        self.original = original
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.writer_threads: list[threading.Thread] = []
+
+    def __call__(self, path: Path, data: bytes) -> None:
+        self.writer_threads.append(threading.current_thread())
+        self.entered.set()
+        self.release.wait(WAIT_LIMIT_S)
+        self.original(path, data)
+
+
+def offer_one(store: FrameStore, kind: str) -> None:
+    """kind ("interval" か "surface") の保存を 1 件受け付けさせる。"""
+    if kind == "interval":
+        assert store.offer_interval(captured(1.0)) is True
+    else:
+        assert store.save_surface(1.0, jpeg_image()) == "frames/surface/000001000.jpg"
+
+
+@pytest.mark.parametrize("kind", ["interval", "surface"])
+def test_item_finished_after_close_gave_up_adds_no_row(tmp_path, monkeypatch, kind):
+    root = make_run(tmp_path)
+    blocking = BlockingImageWrite(frame_store_module.write_bytes_atomic)
+    monkeypatch.setattr(frame_store_module, "write_bytes_atomic", blocking)
+    store = FrameStore(RunPaths(root), interval_fps=5.0, interval_width=64)
+    try:
+        offer_one(store, kind)
+        assert blocking.entered.wait(WAIT_LIMIT_S)
+        # 書き出しスレッドが画像を書いている途中に、close の待ちが時間切れになる
+        store.close(timeout_s=GIVE_UP_TIMEOUT_S)
+        assert store.dropped == 1
+    finally:
+        blocking.release.set()
+    # その後に書き出しスレッドが書き終える
+    writer = blocking.writer_threads[0]
+    writer.join(WAIT_LIMIT_S)
+    assert not writer.is_alive()
+    # あきらめて捨てたと数えた 1 件の行は足さない (行の数と捨てた件数が食い違わない)
+    assert frames_rows(root) == []
+    assert store.written == 0
+    assert store.dropped == 1
+
+
+@pytest.mark.parametrize("kind", ["interval", "surface"])
+def test_item_finished_while_close_waits_is_written_not_dropped(
+    tmp_path, monkeypatch, kind
+):
+    root = make_run(tmp_path)
+    blocking = BlockingImageWrite(frame_store_module.write_bytes_atomic)
+    monkeypatch.setattr(frame_store_module, "write_bytes_atomic", blocking)
+    store = FrameStore(RunPaths(root), interval_fps=5.0, interval_width=64)
+    release_timer = threading.Timer(GIVE_UP_TIMEOUT_S, blocking.release.set)
+    try:
+        offer_one(store, kind)
+        assert blocking.entered.wait(WAIT_LIMIT_S)
+        # close が待っている間に書き終える
+        release_timer.start()
+        store.close(timeout_s=WAIT_LIMIT_S)
+    finally:
+        release_timer.cancel()
+        blocking.release.set()
+    assert len(frames_rows(root)) == 1
+    assert store.written == 1
+    assert store.dropped == 0
 
 
 # --- frames.jsonl の読み込み ---

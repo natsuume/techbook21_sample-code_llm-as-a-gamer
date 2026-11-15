@@ -10,6 +10,8 @@ cli の run は実機の部品とフェイクの層を渡し、テストはフ�
     - ブリッジの復旧が失敗した (bridge_state() が "failed")             REASON_BRIDGE_FAILED
     - surface か middle が続けて失敗した                                surface_loop・middle_loop の理由
 ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。
+start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら、それまでに作った部品と起動したスレッドだけを
+止めて閉じ、run.jsonl の stop に理由を書いてから、その例外を外に出す (LayersApp.start)。
 
 スレッド:
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
@@ -113,9 +115,11 @@ class _StartedParts:
 class LayersApp:
     """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
-    settings   run の起動引数
-    parts      注入する部品
-    sleep      wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
+    settings       run の起動引数
+    parts          注入する部品
+    sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
+    start_thread   start が surface と middle のループのスレッドを起動する関数 (既定 threading.Thread.start)。
+                   テストでは、起動の途中で例外を出す関数を渡せる
     """
 
     def __init__(
@@ -123,11 +127,13 @@ class LayersApp:
         settings: RunSettings,
         parts: LayersParts,
         sleep: Callable[[float], None] = time.sleep,
+        start_thread: Callable[[threading.Thread], None] = threading.Thread.start,
     ) -> None:
         """属性を持つ。ディレクトリーとスレッドは start で作る。"""
         self.settings = settings
         self.parts = parts
         self.sleep = sleep
+        self.start_thread = start_thread
         self._lock = threading.Lock()
         # ループの停止の合図 (surface と middle のループが見る)
         self._stop_event = threading.Event()
@@ -151,8 +157,20 @@ class LayersApp:
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            timeout_s は deep_timeout_s) を作って start する (タイムアウトと自動の呼び出しの判定のスレッド)
         7. SurfaceLoop (max_errors = max_surface_errors) と MiddleLoop (interval_s・window_s・max_errors) を作り、
-           それぞれのスレッドを起動する。on_stop には request_stop を渡す
+           それぞれのスレッドを start_thread で起動する。on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
+
+        途中で例外 (KeyboardInterrupt などの BaseException を含む) が出たら、次の後片付けをしてから、その例外を
+        そのまま外に出す:
+            - request_stop(`start failed: <error_text.describe_exception(例外)>`) と同じく、止まった理由を決め
+              (先に理由が決まっていればそのまま)、ループの停止の合図を立て、PadOutput を作っていれば stop_output で
+              操作を中立にする
+            - close の後片付けと同じ順に、それまでに作った部品と起動したスレッドだけを止めて閉じる: 起動したループの
+              スレッドの終わりを待ち、作った DeepScheduler・CaptureSource・FrameStore を閉じ、run.jsonl に
+              frames_dropped (FrameStore を作ったときだけ) と stop {"reason": 止まった理由} を書いて RunLog を閉じ、
+              PadOutput を閉じる
+        上の 3 で run.jsonl に start を書き終える前の例外では、run.jsonl には何も書かない。
+        後片付けを終えた後の close は何もしない (二重に閉じない)。
         """
         with self._lock:
             if self._start_called:
@@ -262,7 +280,7 @@ class LayersApp:
                 loop_threads=loop_threads,
             )
         for thread in loop_threads:
-            thread.start()
+            self.start_thread(thread)
         return paths
 
     @property
@@ -333,6 +351,7 @@ class LayersApp:
         5. PadOutput.close()
         実機の部品 (キャプチャー・ブリッジ) は閉じない (作った側が閉じる)。2 回目以降の呼び出しは何もしない。
         start の前に呼んだら、理由を REASON_CLOSED にするだけで、後片付けするものは無い。
+        start が途中の例外で後片付けを済ませた後に呼んだら、何もしない (二重に閉じない)。
         先に request_stop が理由だけを決めて、停止の処理 (合図と PadOutput.stop_output) の途中で割り込まれていた場合
         (Ctrl+C など) は、1 の前に停止の処理をやり直す。
         """
