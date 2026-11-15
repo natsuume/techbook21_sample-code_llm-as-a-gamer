@@ -5,14 +5,15 @@ import { useEffect, useRef } from "react";
 import { runsQueryKey, useRuns } from "../api/queries.ts";
 import { useViewState } from "../state/ViewStateContext.tsx";
 import { refetchRunRecords } from "./liveQueryCache.ts";
-import { shouldReopenLive } from "./liveStatus.ts";
+import { reopenOutcome, shouldReopenLive } from "./liveStatus.ts";
 
 /**
  * 選んでいる実行の liveSession が none か ended になったら、その時刻を覚えて実行の一覧を読み直す (読み込み中の古い
  * 要求は取り消すため、この後に読み終えた一覧は、終わった後のサーバーの値になる)。一覧を読み終えるたびに
- * shouldReopenLive で決め、開き直すなら summary と区間 API を読み直してから reopenLive を送る。開き直したら覚えた
- * 時刻を捨てる (開き直してすぐに end が届いたら、もう一度時刻を覚え、次に読み終えた一覧で決める)。
- * RunViewProvider の中で 1 回だけ呼ぶ
+ * shouldReopenLive で決め、開き直すなら summary と区間 API を読み直し、読み直しが終わった後にすることを
+ * reopenOutcome で決める。すべて読み直せたら reopenLive を送り、覚えた時刻を捨てる (開き直してすぐに end が届いたら、
+ * もう一度時刻を覚え、次に読み終えた一覧で決める)。どれかが読めなければ reopenLive を送らず、覚えた時刻を戻して、
+ * 次に読み終えた一覧でもう一度決める。RunViewProvider の中で 1 回だけ呼ぶ
  */
 export const useLiveReopen = (): void => {
   const { state, dispatch } = useViewState();
@@ -44,15 +45,28 @@ export const useLiveReopen = (): void => {
       return;
     }
     const listed = { inProgress: listedInProgress, readAt };
-    if (!shouldReopenLive(listed, liveSession, inactiveSince.current)) {
+    const since = inactiveSince.current;
+    if (!shouldReopenLive(listed, liveSession, since)) {
       return;
     }
+    // 読み直しを待つ間は、次に読み終えた一覧で重ねて開き直さない
     inactiveSince.current = null;
-    void refetchRunRecords(queryClient, run).then(() => {
-      const current = latest.current;
-      if (current.run === run && current.liveSession !== "active") {
-        dispatch({ type: "reopenLive" });
-      }
-    });
+    void refetchRunRecords(queryClient, run)
+      .catch(() => false)
+      .then((reloaded) => {
+        switch (reopenOutcome(reloaded, run, latest.current)) {
+          case "reopen":
+            dispatch({ type: "reopenLive" });
+            return;
+          case "waitForNextList":
+            // 終わった時刻を戻し、次に読み終えた一覧でもう一度決める
+            if (inactiveSince.current === null) {
+              inactiveSince.current = since;
+            }
+            return;
+          case "ignore":
+            return;
+        }
+      });
   }, [run, listedInProgress, readAt, liveSession, queryClient, dispatch]);
 };

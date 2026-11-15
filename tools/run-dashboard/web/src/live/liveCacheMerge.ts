@@ -306,15 +306,18 @@ export const applyLiveEvents = (
 const isSameStep = (left: AdvisorStep, right: AdvisorStep): boolean =>
   left.t === right.t && left.tool === right.tool && left.summary === right.summary;
 
-/** fetched の末尾 k 件と streamed の先頭 k 件が、要素ごとに同じ step か */
-const overlapsBy = (
+/**
+ * fetched の位置 start から後と streamed の先頭を、短い方の長さだけ要素ごとに比べて、すべて同じ step か
+ * (start が fetched の長さなら、比べるものが無いため true)
+ */
+const matchesFrom = (
   fetched: readonly AdvisorStep[],
   streamed: readonly AdvisorStep[],
-  k: number,
+  start: number,
 ): boolean => {
-  const offset = fetched.length - k;
-  for (let index = 0; index < k; index += 1) {
-    const fetchedStep = fetched[offset + index];
+  const length = Math.min(fetched.length - start, streamed.length);
+  for (let index = 0; index < length; index += 1) {
+    const fetchedStep = fetched[start + index];
     const streamedStep = streamed[index];
     if (
       fetchedStep === undefined ||
@@ -330,10 +333,13 @@ const overlapsBy = (
 /**
  * advisor の実行の詳細の API の steps (fetched) と、ライブで届いた step を届いた順に並べたもの (streamed) を、
  * 重なりを除いてつないだ列を返す。
- * - 重なりは、fetched の末尾 k 件と streamed の先頭 k 件が、要素ごとに t・tool・summary で一致する最大の k
- *   (0 ≤ k ≤ min(両方の長さ))。詳細はつないだ後に読み直すため、詳細の末尾と、届いた step の先頭が重なる
- * - 返す列は、fetched の後に streamed の k 件目より後を続けたもの。重なった step は fetched のものを使う
- *   (kind は一致の判定に使わない。advisor が終わると、詳細の kind が permission_denied に変わりうるため)
+ * - 重なりの始まりは、fetched の位置 p (0 ≤ p ≤ fetched の長さ) のうち、fetched[p:] と streamed の先頭を短い方の
+ *   長さ (min(fetched の長さ − p, streamed の長さ)) だけ要素ごとに t・tool・summary で比べて、すべて一致する最小の p
+ *   (p が fetched の長さなら、いつも一致とみなす)。詳細はつないだ後に読み直すため、届いた step の先頭は詳細の途中か
+ *   末尾にある。詳細を読み直すのが足し込みより後なら、詳細は届いた step より先に進んでいることがある
+ * - 返す列は、fetched の後に streamed の (fetched の長さ − p) 件目より後を続けたもの (streamed が fetched[p:] に
+ *   収まるなら fetched のまま)。重なった step は fetched のものを使う (kind は一致の判定に使わない。advisor が
+ *   終わると、詳細の kind が permission_denied に変わりうるため)
  * - 同じ値の step が続いても、その数を保つ (同じ値の step をまとめない)
  * - 渡した配列は変えない
  */
@@ -341,10 +347,9 @@ export const mergeAdvisorSteps = (
   fetched: readonly AdvisorStep[],
   streamed: readonly AdvisorStep[],
 ): AdvisorStep[] => {
-  for (let k = Math.min(fetched.length, streamed.length); k > 0; k -= 1) {
-    if (overlapsBy(fetched, streamed, k)) {
-      return [...fetched, ...streamed.slice(k)];
-    }
+  let start = 0;
+  while (start < fetched.length && !matchesFrom(fetched, streamed, start)) {
+    start += 1;
   }
-  return [...fetched, ...streamed];
+  return [...fetched, ...streamed.slice(fetched.length - start)];
 };

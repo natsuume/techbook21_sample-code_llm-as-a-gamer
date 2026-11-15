@@ -4,6 +4,7 @@ import {
   LIVE_STATUS_TEXTS,
   liveStatusText,
   liveToggleReason,
+  reopenOutcome,
   resumeButtonReason,
   shouldReopenLive,
 } from "./liveStatus.ts";
@@ -105,5 +106,40 @@ describe("shouldReopenLive", () => {
   it("一覧の値か、終わった時刻が無ければ false", () => {
     expect(shouldReopenLive(null, "ended", 1000)).toBe(false);
     expect(shouldReopenLive({ inProgress: true, readAt: 2000 }, "ended", null)).toBe(false);
+  });
+});
+
+describe("reopenOutcome", () => {
+  const RUN = "20260101-120000";
+
+  it.each(["none", "ended"] as const)(
+    "%s のまま同じ実行を選んでいて、すべて読み直せたら reopen",
+    (liveSession) => {
+      expect(reopenOutcome(true, RUN, { run: RUN, liveSession })).toBe("reopen");
+    },
+  );
+
+  it.each(["none", "ended"] as const)(
+    "%s のまま同じ実行を選んでいて、どれかが読めなければ waitForNextList (開き直さない)",
+    (liveSession) => {
+      expect(reopenOutcome(false, RUN, { run: RUN, liveSession })).toBe("waitForNextList");
+    },
+  );
+
+  it("読み直しを待つ間に、選んでいる実行が替わったか、つないでいれば ignore", () => {
+    expect(reopenOutcome(true, RUN, { run: "20260102-090000", liveSession: "ended" })).toBe(
+      "ignore",
+    );
+    expect(reopenOutcome(false, RUN, { run: null, liveSession: "none" })).toBe("ignore");
+    expect(reopenOutcome(true, RUN, { run: RUN, liveSession: "active" })).toBe("ignore");
+    expect(reopenOutcome(false, RUN, { run: RUN, liveSession: "active" })).toBe("ignore");
+  });
+
+  it("読み直せなかった後に読み終えた一覧は、shouldReopenLive の規則のまま、もう一度開き直す", () => {
+    // 終わった時刻 1000 の後に読み終えた一覧で開き直そうとし、読み直しに失敗した
+    expect(shouldReopenLive({ inProgress: true, readAt: 2000 }, "ended", 1000)).toBe(true);
+    expect(reopenOutcome(false, RUN, { run: RUN, liveSession: "ended" })).toBe("waitForNextList");
+    // 終わった時刻を 1000 に戻すと、次に読み終えた一覧 (読み終えた時刻 7000) でもう一度開き直す
+    expect(shouldReopenLive({ inProgress: true, readAt: 7000 }, "ended", 1000)).toBe(true);
   });
 });

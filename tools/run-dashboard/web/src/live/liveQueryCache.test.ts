@@ -29,6 +29,7 @@ import {
   invalidateAfterEnd,
   liveCursorsOf,
   markRunRecordsStale,
+  refetchRunRecords,
   writeLiveEvents,
 } from "./liveQueryCache.ts";
 
@@ -249,6 +250,46 @@ describe("writeLiveEvents の advisor_step と、途中経過の置き場", () =
     writeLiveEvents(queryClient, RUN, [{ kind: "advisor_step", data: { ...step(2), name: NAME } }]);
     const query = queryClient.getQueryCache().find({ queryKey: streamedStepsQueryKey(RUN, NAME) });
     expect(query?.options.gcTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("refetchRunRecords", () => {
+  /** summary と 4 つの区間 API を、queryFn 付きで読み込んだ QueryClient (failing の queryKey の読み直しは失敗する) */
+  const loadedClient = async (failing: { key: readonly unknown[] | null }) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const keys = [
+      summaryQueryKey(RUN),
+      rangeQueryKey(RUN, "requests"),
+      rangeQueryKey(RUN, "frames"),
+      rangeQueryKey(RUN, "pad"),
+      rangeQueryKey(RUN, "events"),
+    ];
+    for (const key of keys) {
+      await queryClient.prefetchQuery({
+        queryKey: key,
+        queryFn: async () => {
+          if (failing.key !== null && JSON.stringify(failing.key) === JSON.stringify(key)) {
+            throw new Error("読めない");
+          }
+          return key[0] === "summary" ? summary : range<RequestItem>([], 0);
+        },
+      });
+    }
+    return queryClient;
+  };
+
+  it("summary と 4 つの区間 API をすべて読み直せたら true", async () => {
+    const queryClient = await loadedClient({ key: null });
+    expect(await refetchRunRecords(queryClient, RUN)).toBe(true);
+  });
+
+  it("どれかが読めなければ false (開き直さない判断に使う)", async () => {
+    const failing: { key: readonly unknown[] | null } = { key: null };
+    const queryClient = await loadedClient(failing);
+    failing.key = rangeQueryKey(RUN, "frames");
+    expect(await refetchRunRecords(queryClient, RUN)).toBe(false);
+    failing.key = summaryQueryKey(RUN);
+    expect(await refetchRunRecords(queryClient, RUN)).toBe(false);
   });
 });
 

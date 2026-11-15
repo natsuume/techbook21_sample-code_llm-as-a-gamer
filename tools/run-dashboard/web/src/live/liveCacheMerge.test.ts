@@ -560,6 +560,48 @@ describe("mergeAdvisorSteps", () => {
     expect(mergeAdvisorSteps([a, a], [a, a, b])).toEqual([a, a, b]);
   });
 
+  describe("詳細が届いた step より先に進んでいるとき", () => {
+    const steps = [0, 1, 2, 3, 4, 5].map((t) => step(t, "Read", "tool_use", `file-${t}.md`));
+    const [s0, s1, s2, s3, s4, s5] = steps as [
+      AdvisorStep,
+      AdvisorStep,
+      AdvisorStep,
+      AdvisorStep,
+      AdvisorStep,
+      AdvisorStep,
+    ];
+
+    it("届いた step がすべて詳細の先頭からに含まれていれば、詳細の steps のまま", () => {
+      expect(mergeAdvisorSteps([s1, s2, s3, s4, s5], [s1, s2, s3])).toEqual([s1, s2, s3, s4, s5]);
+    });
+
+    it("届いた step がすべて詳細の途中からに含まれていれば、詳細の steps のまま", () => {
+      expect(mergeAdvisorSteps([s0, s1, s2, s3, s4, s5], [s2, s3, s4])).toEqual([
+        s0,
+        s1,
+        s2,
+        s3,
+        s4,
+        s5,
+      ]);
+    });
+
+    it("届いた step が詳細の途中から始まって詳細より先まであれば、詳細の後に足りない分だけを続ける", () => {
+      expect(mergeAdvisorSteps([s0, s1, s2, s3], [s2, s3, s4, s5])).toEqual([
+        s0,
+        s1,
+        s2,
+        s3,
+        s4,
+        s5,
+      ]);
+    });
+
+    it("同じ値の step は、詳細の中の数を保つ", () => {
+      expect(mergeAdvisorSteps([a, a], [a])).toEqual([a, a]);
+    });
+  });
+
   it("渡した配列は変えない", () => {
     const fetched = [a, b];
     const streamed = [b, c];

@@ -119,9 +119,11 @@ const pauseIfNavigating = (state: ViewState, via: SelectVia): Pick<ViewState, "f
  * - setDisplay live: replay で liveSession が active なら display live・follow true、一時停止中なら follow true。
  *   それ以外は変えない
  * - setDisplay replay: 追従中なら display replay・selectedN = latestN (再生位置を動かさない)・follow true、
- *   一時停止中なら display replay・follow true (selectedN は一時停止の選択のまま)。replay なら変えない
+ *   一時停止中なら display replay・follow true (selectedN は一時停止の選択のまま)。replay なら変えない。
+ *   latestN が null (表示中のデータがまだ無い・要求が無い) なら、追従中でも selectedN は今の値のまま
  * - liveEnded: liveSession ended・endReason (recordEnd なら "recordEnd"、そうでなければ "stalled")。
- *   追従中は display replay・selectedN = latestN・follow true も、一時停止中は display replay・follow true も変える
+ *   追従中は display replay・selectedN = latestN・follow true も、一時停止中は display replay・follow true も変える。
+ *   latestN が null なら、追従中でも selectedN は今の値のまま
  * - reopenLive: liveSession active・endReason null・display live・follow true
  * - setTab・setWidth・setFileView はその値だけを変える。toggleHeatmap・toggleAllQuestions は反転する
  * - detailN を変えるのは selectRun・runLoaded・selectRequest だけ (タブを切り替えるだけでは開く要求を固定しない)
@@ -183,7 +185,12 @@ export const viewReducer = (state: ViewState, action: ViewAction): ViewState => 
           : state;
       }
       if (following) {
-        return { ...state, display: "replay", selectedN: action.latestN, follow: true };
+        return {
+          ...state,
+          display: "replay",
+          selectedN: action.latestN ?? state.selectedN,
+          follow: true,
+        };
       }
       return paused ? { ...state, display: "replay", follow: true } : state;
     case "liveEnded": {
@@ -193,7 +200,12 @@ export const viewReducer = (state: ViewState, action: ViewAction): ViewState => 
         endReason: action.recordEnd ? "recordEnd" : "stalled",
       };
       if (following) {
-        return { ...ended, display: "replay", selectedN: action.latestN, follow: true };
+        return {
+          ...ended,
+          display: "replay",
+          selectedN: action.latestN ?? state.selectedN,
+          follow: true,
+        };
       }
       return paused ? { ...ended, display: "replay", follow: true } : ended;
     }

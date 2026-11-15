@@ -458,6 +458,16 @@ describe("viewReducer の setDisplay", () => {
       viewReducer(replayState, { type: "setDisplay", display: "replay", latestN: 20 }),
     ).toEqual(replayState);
   });
+
+  it("replay: 追従中でも latestN が null (読み込み中・要求なし) なら、selectedN は今の値のまま", () => {
+    expect(
+      viewReducer(followState, { type: "setDisplay", display: "replay", latestN: null }),
+    ).toEqual({
+      ...followState,
+      display: "replay",
+      follow: true,
+    });
+  });
 });
 
 describe("viewReducer の liveEnded と reopenLive", () => {
@@ -468,6 +478,18 @@ describe("viewReducer の liveEnded と reopenLive", () => {
       endReason: "recordEnd",
       display: "replay",
       selectedN: 20,
+      follow: true,
+    });
+  });
+
+  it("追従中に end を受け取っても latestN が null なら、selectedN は今の値のまま", () => {
+    expect(
+      viewReducer(followState, { type: "liveEnded", recordEnd: false, latestN: null }),
+    ).toEqual({
+      ...followState,
+      liveSession: "ended",
+      endReason: "stalled",
+      display: "replay",
       follow: true,
     });
   });

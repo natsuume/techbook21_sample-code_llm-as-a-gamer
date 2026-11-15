@@ -125,3 +125,28 @@ export const shouldReopenLive = (
   }
   return listed.inProgress && listed.readAt > inactiveSince;
 };
+
+/**
+ * 開き直す前の読み直しが終わった後にすること。
+ * - reopen: reopenLive を送る
+ * - waitForNextList: 送らず、次に読み終えた実行の一覧で、もう一度 shouldReopenLive で決める
+ * - ignore: 何もしない (読み直しを待つ間に、選んでいる実行が替わったか、すでにつないでいる)
+ */
+export type ReopenOutcome = "reopen" | "waitForNextList" | "ignore";
+
+/**
+ * 実行 requestedRun を開き直すための読み直しが終わった後にすることを返す。reloaded は summary と区間 API をすべて
+ * 読み直せたか、current は読み直しを終えた時点の選んでいる実行と liveSession。
+ * - current.run が requestedRun でないか、liveSession が active なら ignore
+ * - それ以外は、読み直せたら reopen、どれかが読めなければ waitForNextList (古い cursor でつながないため)
+ */
+export const reopenOutcome = (
+  reloaded: boolean,
+  requestedRun: string,
+  current: { run: string | null; liveSession: LiveSession },
+): ReopenOutcome => {
+  if (current.run !== requestedRun || current.liveSession === "active") {
+    return "ignore";
+  }
+  return reloaded ? "reopen" : "waitForNextList";
+};
