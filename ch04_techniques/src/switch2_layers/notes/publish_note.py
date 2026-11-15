@@ -84,6 +84,8 @@ def resolve_note_path(notes_dir: Path, note: str) -> Path:
         - notes_dir / note のシンボリックリンクを解決した先 (Path.resolve) が、notes_dir を解決した先の中に無い
           (途中のディレクトリーや文書自体が notes/ の外へのシンボリックリンクの場合)
         - 解決した先が notes_dir 自体、既にあるディレクトリー、または notes/.publish.lock
+        - 解決した先の親のうち notes_dir より下の要素に、既にあるディレクトリーでないもの (通常のファイルなど) がある
+          (例: strategy.md が文書のときの strategy.md/x.md。親のディレクトリーを作れないため)
     戻り値はシンボリックリンクを解決した先のパス (置き換えるのはリンク自体ではなく、その先の文書)。
     文書がまだ無くてもよい。
     """
@@ -119,5 +121,8 @@ def publish_note(
          親のディレクトリーが無ければ作る)、PUBLISHED (sha256 = そのバイト列の SHA-256)
     6. ロックを放す
     INVALID のときは notes/ の中を何も変えない。source の読み込みに失敗したら (OSError) INVALID にする。
+    ロックの中での親のディレクトリーの作成と置き換えの書き込みが OSError で失敗したときも、例外を外に出さず
+    INVALID (message に理由) にする。置き換えは一時ファイル + os.replace なので、失敗しても本体は元のまま。
+    ロックの取得 (4) の失敗も INVALID にする。publish-note の終了コードは 0 / 2 / 3 のどれかにする。
     """
     raise NotImplementedError

@@ -233,6 +233,26 @@ def test_directory_source_is_invalid(tmp_path):
     assert result.status is PublishStatus.INVALID
 
 
+def test_note_under_existing_file_is_invalid(tmp_path):
+    # advice.md は文書 (通常のファイル) なので、その下に文書を置けない
+    run_dir = make_run(tmp_path)
+    result = publish_note(run_dir, "advice.md/x.md", "none", edited_file(run_dir))
+    assert_nothing_published(run_dir, result)
+
+
+def test_write_failure_inside_lock_is_invalid(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path)
+    source = edited_file(run_dir)
+
+    def failing_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), source)
+    assert_nothing_published(run_dir, result)
+    assert result.message
+
+
 def test_missing_notes_directory_is_invalid(tmp_path):
     run_dir = tmp_path / "missing"
     result = publish_note(run_dir, "advice.md", "none", edited_file(run_dir))
@@ -335,7 +355,10 @@ def test_resolve_note_path_inside_notes(tmp_path):
     )
 
 
-@pytest.mark.parametrize("note", ["", "../x.md", "/etc/passwd", ".publish.lock", "map"])
+@pytest.mark.parametrize(
+    "note",
+    ["", "../x.md", "/etc/passwd", ".publish.lock", "map", "advice.md/x.md"],
+)
 def test_resolve_note_path_rejects_outside_paths(tmp_path, note):
     notes = make_run(tmp_path) / "notes"
     with pytest.raises(NotePathError):
