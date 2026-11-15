@@ -504,6 +504,9 @@ def test_map_prompt_file_follows_the_issue():
     for phrase in [
         # middle の記録を読み、一覧と文章に取り込む
         "map_records.jsonl",
+        # middle が遅れて足した行を取りこぼさないよう、前回の時刻の 60 秒前から読み直し、重ねて足さない
+        "60 秒前",
+        "重ねて足さない",
         # 一覧と文章の 2 つを、同じジョブで一致させて書く
         "map.json",
         "places.md",
