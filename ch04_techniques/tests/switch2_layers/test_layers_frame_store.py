@@ -1,6 +1,7 @@
 import json
 import random
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -436,6 +437,51 @@ def test_item_finished_while_close_waits_is_written_not_dropped(
     finally:
         release_timer.cancel()
         blocking.release.set()
+    assert len(frames_rows(root)) == 1
+    assert store.written == 1
+    assert store.dropped == 0
+
+
+class BlockingRowAppend:
+    """frames.jsonl の行の追記 (frame_store の append_json_line) を、release が立つまで止める。
+
+    書き出しスレッドが行を足すと決めた後、追記が終わらない状態 (ストレージが応答しないときなど) を作る。
+    """
+
+    def __init__(self, original: Callable[[Path, dict], None]):
+        self.original = original
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.writer_threads: list[threading.Thread] = []
+
+    def __call__(self, path: Path, row: dict) -> None:
+        self.writer_threads.append(threading.current_thread())
+        self.entered.set()
+        self.release.wait(WAIT_LIMIT_S)
+        self.original(path, row)
+
+
+@pytest.mark.parametrize("kind", ["interval", "surface"])
+def test_close_does_not_wait_for_a_stalled_row_append(tmp_path, monkeypatch, kind):
+    root = make_run(tmp_path)
+    blocking = BlockingRowAppend(frame_store_module.append_json_line)
+    monkeypatch.setattr(frame_store_module, "append_json_line", blocking)
+    store = FrameStore(RunPaths(root), interval_fps=5.0, interval_width=64)
+    try:
+        offer_one(store, kind)
+        assert blocking.entered.wait(WAIT_LIMIT_S)
+        # 行の追記が止まっていても、close は timeout_s の後に戻る
+        started = time.monotonic()
+        store.close(timeout_s=GIVE_UP_TIMEOUT_S)
+        assert time.monotonic() - started < WAIT_LIMIT_S / 2
+        # 行を足すと決めた後の 1 件は、close の時点では dropped に数えない
+        assert store.dropped == 0
+    finally:
+        blocking.release.set()
+    # 追記を終えた書き出しスレッドが、その 1 件を written に数える (行の数と件数が食い違わない)
+    writer = blocking.writer_threads[0]
+    writer.join(WAIT_LIMIT_S)
+    assert not writer.is_alive()
     assert len(frames_rows(root)) == 1
     assert store.written == 1
     assert store.dropped == 0
