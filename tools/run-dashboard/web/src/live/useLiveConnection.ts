@@ -2,7 +2,7 @@
 // 記録を TanStack Query のキャッシュに 1 秒に 4 回までまとめて足すフック。切れたら区間 API と summary を読み直して
 // つなぎ直し (EventSource の自動のつなぎ直しは使わない)、end を受け取ったら終わった実行の表示に替える。
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { livePath } from "../api/apiPaths.ts";
 import {
   LIVE_EVENT_KINDS,
@@ -31,7 +31,7 @@ import {
   writeLiveEvents,
 } from "./liveQueryCache.ts";
 import type { LiveConnection } from "./liveStatus.ts";
-import { nextFlushDelayMs, reconnectDelayMs } from "./liveTiming.ts";
+import { flushIntervalMs, nextFlushDelayMs, reconnectDelayMs } from "./liveTiming.ts";
 
 /** 接続のセッションが呼び出し側に知らせること */
 type LiveSessionCallbacks = {
@@ -39,14 +39,16 @@ type LiveSessionCallbacks = {
   onConnection: (connection: LiveConnection) => void;
   /** end を受け取った。latestN は記録を足した後の最後の要求の n */
   onEnded: (recordEnd: boolean, latestN: number | null) => void;
+  /** 今の、記録を足す最小の間隔 (ミリ秒)。足しを予約するたびに呼ぶ */
+  flushIntervalMs: () => number;
 };
 
 /**
  * 実行 run の /live につなぐセッションを始め、閉じる関数を返す。
  * - つなぐ位置は区間 API のキャッシュの cursor。キャッシュにイベントで足した記録があるか、キャッシュに古いものとしての
  *   印 (markRunRecordsStale) が付いていれば、先に読み直してからつなぐ (読み直しとつないだ後の足し込みを重ねない)
- * - イベントの種類ごとに受け取り、parseLiveEvent で読めたものをためる。ためた分は nextFlushDelayMs の時刻に
- *   1 回で writeLiveEvents で足す
+ * - イベントの種類ごとに受け取り、parseLiveEvent で読めたものをためる。ためた分は nextFlushDelayMs (間隔は
+ *   callbacks.flushIntervalMs()) の時刻に 1 回で writeLiveEvents で足す
  * - つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に読んだ詳細に、つなぐまでの
  *   間の step が欠けないようにするため)
  * - end: ためた分をすぐ足して閉じ、summary を無効にして onEnded
@@ -83,7 +85,10 @@ const openLiveSession = (
 
   const scheduleFlush = (): void => {
     if (flushTimer === undefined) {
-      flushTimer = setTimeout(flush, nextFlushDelayMs(lastFlushAt, performance.now()));
+      flushTimer = setTimeout(
+        flush,
+        nextFlushDelayMs(lastFlushAt, performance.now(), callbacks.flushIntervalMs()),
+      );
     }
   };
 
@@ -212,7 +217,8 @@ const liveConnectionOf = (
  * 選んでいる実行の /live への接続を管理し、接続の状態を返す (RunViewProvider の中で 1 回だけ呼び、
  * LiveConnectionContext で配る)。liveSession が active で、summary と 4 つの区間 API が読めたらつなぐ。
  * 実行を選び直す・liveSession が active でなくなる・アンマウントで閉じる。一時停止中も、終わった実行の表示中も、
- * 届いた記録はキャッシュに足し続ける。end を受け取ったら liveEnded を送る。
+ * 届いた記録はキャッシュに足し続ける。足す間隔は、表示する幅の今の値で flushIntervalMs が決める (幅を変えても
+ * つなぎ直さない)。end を受け取ったら liveEnded を送る。
  * 閉じたら、その実行の summary と区間 API のキャッシュに古いものとしての印を付ける (閉じた後も記録は書き足されうるため。
  * 次にその実行を選ぶと、TanStack Query が読み直す)
  */
@@ -229,6 +235,11 @@ export const useLiveConnection = (): LiveConnection => {
     useRangeItems(run, "events").data,
   ].every((data) => data !== undefined);
   const [session, setSession] = useState<LiveConnection>(CONNECTING);
+  // 接続を張り直さずに、足す間隔を今の幅で決めるため、幅は ref で渡す
+  const widthRef = useRef(state.width);
+  useEffect(() => {
+    widthRef.current = state.width;
+  }, [state.width]);
 
   useEffect(() => {
     if (run === null || !active || !loaded) {
@@ -237,6 +248,7 @@ export const useLiveConnection = (): LiveConnection => {
     const close = openLiveSession(queryClient, run, {
       onConnection: setSession,
       onEnded: (recordEnd, latestN) => dispatch({ type: "liveEnded", recordEnd, latestN }),
+      flushIntervalMs: () => flushIntervalMs(widthRef.current),
     });
     return () => {
       close();

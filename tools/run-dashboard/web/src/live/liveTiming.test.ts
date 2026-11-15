@@ -1,6 +1,8 @@
 // liveTiming のテスト。時間の定数と、次に記録を足すまでの待ち・つなぎ直すまでの待ちを確かめる
 import { describe, expect, it } from "vitest";
 import {
+  flushIntervalMs,
+  LIVE_FLUSH_INTERVAL_ALL_MS,
   LIVE_FLUSH_INTERVAL_MS,
   nextFlushDelayMs,
   RECONNECT_MAX_MS,
@@ -29,6 +31,22 @@ describe("nextFlushDelayMs", () => {
   it("ちょうど 250ms か、それより後なら 0", () => {
     expect(nextFlushDelayMs(1000, 1250)).toBe(0);
     expect(nextFlushDelayMs(1000, 1300)).toBe(0);
+  });
+
+  it("間隔を渡せば、前に足してからその間隔がたつまでの残りを返す", () => {
+    expect(nextFlushDelayMs(null, 5000, 1000)).toBe(0);
+    expect(nextFlushDelayMs(1000, 1250, 1000)).toBe(750);
+    expect(nextFlushDelayMs(1000, 2000, 1000)).toBe(0);
+  });
+});
+
+describe("flushIntervalMs", () => {
+  it("幅が「全体」なら 1 秒、それ以外は 250ms", () => {
+    expect(LIVE_FLUSH_INTERVAL_ALL_MS).toBe(1000);
+    expect(flushIntervalMs("all")).toBe(LIVE_FLUSH_INTERVAL_ALL_MS);
+    for (const width of [10, 30, 120] as const) {
+      expect(flushIntervalMs(width)).toBe(LIVE_FLUSH_INTERVAL_MS);
+    }
   });
 });
 
