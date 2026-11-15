@@ -2,6 +2,7 @@
 
 対象の模様は 8 ピクセル四方の白黒のブロックで、背景はなだらかな明るさの変化に弱いノイズを足したもの
 (一様な面は分散が 0 で、正規化相互相関が決まらないため、どちらにも模様を持たせる)。
+一様な対象の扱いだけは、一様な背景に一様な四角を置いた画像 (plain_captured) で確かめる。
 """
 
 import numpy as np
@@ -192,6 +193,29 @@ def test_threshold_decides_loss():
     tracker.start(tracking(0.0, 300), sprite_box(300))
     # 相関は 1 を超えないため、しきい値が 1 より大きければ必ず見失いになる
     assert not tracker.update(tracking(0.1, 300)).found
+
+
+def plain_captured(t: float, x: int) -> CapturedFrame:
+    """一様な背景 (明るさ 100) の左上 (x, SPRITE_Y) に、一様な四角 (明るさ 200) を置いたフレーム。UV 面は 128。"""
+    y_plane = np.full((FULL_HEIGHT, FULL_WIDTH), 100, np.uint8)
+    y_plane[SPRITE_Y : SPRITE_Y + SPRITE_SIZE, x : x + SPRITE_SIZE] = 200
+    uv_plane = np.full((FULL_HEIGHT // 2, FULL_WIDTH), 128, np.uint8)
+    return CapturedFrame(t=t, nv12=np.vstack([y_plane, uv_plane]))
+
+
+def test_uniform_target_is_lost_without_moving():
+    # 画素の値がすべて同じ見本では正規化相互相関が決まらず、cv2.TM_CCOEFF_NORMED は窓のどの位置でも 1 を返す。
+    # そうした見本は照合に使わず、同じ画像でも位置を変えずに見失いとする
+    tracker = NccBoxTracker()
+    tracker.start(
+        tracking_frame_from_captured(plain_captured(0.0, 600)), sprite_box(600)
+    )
+    for i in range(1, 3):
+        frame = tracking_frame_from_captured(plain_captured(i * 0.1, 600))
+        result = tracker.update(frame)
+        assert not result.found, f"found at frame {i}"
+        assert result.score == 0.0
+        assert center_error_px(result.box, 600) <= 1.0
 
 
 # --- 使い方の誤り ---

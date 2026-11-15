@@ -190,6 +190,21 @@ def test_loss_is_reported_in_status():
     assert state.boxes_at(t_at(4)) == ()
 
 
+def test_uniform_target_is_lost_and_requeried():
+    # 画素の値がすべて同じ対象は NCC で追えないため、追いつかせたフレームで見失いになり、次の要求で問い直す
+    state = BoxTrackingState()
+    state.set_targets(["自機"])
+    for i in range(3):
+        y_plane = np.full((FULL_HEIGHT, FULL_WIDTH), 100, np.uint8)
+        y_plane[SPRITE_Y : SPRITE_Y + SPRITE_SIZE, 600 : 600 + SPRITE_SIZE] = 200
+        uv_plane = np.full((FULL_HEIGHT // 2, FULL_WIDTH), 128, np.uint8)
+        state.on_frame(CapturedFrame(t=t_at(i), nv12=np.vstack([y_plane, uv_plane])))
+    assert state.start_from_jev("自機", sprite_box(600), t_at(0), request_index=1)
+    assert state.statuses() == {"自機": TargetStatus(lost=True, last_requery_index=1)}
+    assert state.boxes_at(t_at(2)) == ()
+    assert select_requery_targets(["自機"], state.statuses(), 2, 5) == ("自機",)
+
+
 def test_start_fails_when_queried_frame_is_not_retained():
     state = BoxTrackingState(tracker_factory=StillTracker)
     state.set_targets(["自機"])

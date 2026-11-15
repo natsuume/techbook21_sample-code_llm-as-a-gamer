@@ -11,6 +11,8 @@ NccBoxTracker (NCC = 正規化相互相関):
             足した窓を探す。窓の中で、見本ごとに cv2.matchTemplate (cv2.TM_CCOEFF_NORMED) を計算し、
             最大の相関の位置に box を動かす。見本は、最初の見本と、直近の見本 (相関が recent_threshold 以上だった
             位置の見た目。最後に更新したもの) の 2 つ。相関の最大値が threshold 未満なら見失いとする。
+            画素の値がすべて同じ見本は、相関が決まらない (TM_CCOEFF_NORMED は窓のどの位置でも 1 を返す) ため
+            照合に使わず、使える見本が無ければ見失いとする。
             見失ったときは、次の窓の中心を最後に見えていた位置のままにする (移動量は 0)
 """
 
@@ -133,6 +135,11 @@ def _crop(gray: np.ndarray, rect: _PixelRect) -> np.ndarray:
     return gray[rect.y : rect.y + rect.height, rect.x : rect.x + rect.width].copy()
 
 
+def _is_uniform(template: np.ndarray) -> bool:
+    """template の画素の値がすべて同じ (分散が 0) なら True。"""
+    return int(template.min()) == int(template.max())
+
+
 class NccBoxTracker:
     """BoxTracker の実装。NCC のテンプレートマッチング (モジュールの docstring)。
 
@@ -198,6 +205,7 @@ class NccBoxTracker:
         """frame.gray で見本を探し、結果を返す (モジュールの docstring の update)。
 
         - 窓は画像の中に切り詰める。窓が見本より小さければ、位置を変えずに score 0.0・found False を返す
+        - 画素の値がすべて同じ見本は照合に使わない。使える見本が無ければ、位置を変えずに score 0.0・found False を返す
         - 相関が数でない (nan など) 位置は 0.0 とみなす
         - 返す box は、最大の相関の位置にある見本と同じ大きさの範囲 (画像の中に収まる)
         - found なら移動量を (今回の中心 − 前回の中心) にして、今回の位置を次の前回の位置にする。見失ったら移動量を
@@ -217,7 +225,11 @@ class NccBoxTracker:
         window_image = gray[
             window.y : window.y + window.height, window.x : window.x + window.width
         ]
-        score, (offset_x, offset_y) = self._best_match(window_image)
+        match = self._best_match(window_image)
+        if match is None:
+            self._velocity = (0, 0)
+            return TrackResult(_normalized(rect, image_width, image_height), 0.0, False)
+        score, (offset_x, offset_y) = match
         found_rect = _PixelRect(
             x=window.x + offset_x,
             y=window.y + offset_y,
@@ -253,19 +265,25 @@ class NccBoxTracker:
             x=left, y=top, width=max(right - left, 0), height=max(bottom - top, 0)
         )
 
-    def _best_match(self, window_image: np.ndarray) -> tuple[float, tuple[int, int]]:
-        """見本ごとに窓の中の相関を計算し、(最大の相関, 窓の中のその位置の左上) を返す。数でない相関は 0.0 とみなす。"""
-        best_score = -math.inf
-        best_location = (0, 0)
+    def _best_match(
+        self, window_image: np.ndarray
+    ) -> tuple[float, tuple[int, int]] | None:
+        """見本ごとに窓の中の相関を計算し、(最大の相関, 窓の中のその位置の左上) を返す。数でない相関は 0.0 とみなす。
+
+        画素の値がすべて同じ見本は飛ばす。使える見本が無ければ None。
+        """
+        best: tuple[float, tuple[int, int]] | None = None
         for template in (self._first_template, self._recent_template):
-            if template is None:
+            if template is None or _is_uniform(template):
                 continue
             correlation = cv2.matchTemplate(
                 window_image, template, cv2.TM_CCOEFF_NORMED
             )
             correlation = np.nan_to_num(correlation, nan=0.0, posinf=0.0, neginf=0.0)
             _, max_value, _, max_location = cv2.minMaxLoc(correlation)
-            if max_value > best_score:
-                best_score = float(max_value)
-                best_location = (int(max_location[0]), int(max_location[1]))
-        return best_score, best_location
+            if best is None or max_value > best[0]:
+                best = (
+                    float(max_value),
+                    (int(max_location[0]), int(max_location[1])),
+                )
+        return best
