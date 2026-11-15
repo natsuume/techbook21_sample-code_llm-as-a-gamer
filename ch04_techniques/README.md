@@ -246,11 +246,11 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 
 | 層 | 動く間隔 | 受け持ち |
 |---|---|---|
-| surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、選んだフレーム、文書、middle の出力からコントローラーの操作を決めて送ります。必要なら deep に文書の更新を求めます |
+| surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、時刻と追えている box を書き込んだ画像、文書、middle の出力から、コントローラーの操作を決めて送ります (既定では TypeSafe の Jev に問います)。必要なら deep に文書の更新を求めます |
 | middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
 | deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | 操作説明・攻略情報・大方針・助言・マップの文書を書き直します。ジョブごとに `deep/<種類>-<連番>/` を作り、文書のコピーを `work/` に置きます |
 
-この版の surface と deep はフェイクで、モデルの API を呼びません。surface は何も押さない中立の操作を返して deep を求めず、deep は文書を変えずに成功を返します。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。3 層ともフェイク (`--middle fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
+この版の deep はフェイクで、モデルの API を呼ばず、文書を変えずに成功を返します。surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。3 層ともフェイク (`--surface fake --middle fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
 ### サブコマンド
 
@@ -261,10 +261,11 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします |
 | `switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH\|none --from FILE` | deep が編集したファイル (`--from`) の内容で、`notes/` の文書 (`--note`) を置き換えます |
 
-middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。
+middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。
 
 ```bash
 uv run --env-file .env switch2-layers run
+uv run switch2-layers run --surface fake --middle fake
 uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
 uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
@@ -287,6 +288,36 @@ gpt-6-luna には、変わらない指示 (developer メッセージ) と、場�
 
 `middle/calls.jsonl` の各行には、トークン数 (`usage`。入力・キャッシュから読んだ入力・キャッシュに書いた入力・出力・推論)、公式の単価から計算した概算の費用 (`cost_usd`。USD)、デバッグ用の応答の本文 (`response`。エラーの応答では本文の先頭を `error_body_head`) も書きます。
 
+### surface の実装 (`--surface`)
+
+run は、`--surface` で surface の実装を選びます。
+
+| 値 | 内容 |
+|---|---|
+| `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) を呼びます。環境変数 `TYPESAFE_API_KEY` に API キーが要ります |
+| `fake` | 何も押さない中立の操作を返し、deep を求めないフェイクです。API キーは要りません |
+
+`--surface jev` で `TYPESAFE_API_KEY` が無いとき (値が空か空白だけのときを含む) は、実機に触れず、実行ディレクトリーにも何も書かずに、エラーを表示して終了します (終了コード 2)。API キーは、`OPENAI_API_KEY` と同じく `.env` に書き、`uv run --env-file .env` で読み込ませることもできます。
+
+Jev には、役割と規則の説明、文書 (短期のタスクリスト・攻略情報・操作説明・助言)、middle の系列情報とその作成時刻、直近に送った操作、選んだ画像 (時刻のラベル付き) を送り、次の問いを 1 回の要求でまとめて問います。
+
+| 問い | 型 | 数 | 使い方 |
+|---|---|---|---|
+| ボタン | Choice (`none`・`hold`・`tap`) | 押せるボタンごと | `hold` と `tap` の確率の和が `none` を超えたら押します。`hold` が `tap` 以上なら押し続け、そうでなければ短押しです |
+| スティックの向き | Choice (`none`・負の向き・正の向き) | 2 本 × 横・縦 = 4 | 確率が最も高い向きに倒します (同率の最大は倒しません) |
+| スティックの強さ | Noul (50%・75%・100% 以上か) | 12 | 3 つの確率から、傾きを 0.25〜1.0 に決めます |
+| advisor 判定 | Noul | 操作説明・攻略情報・大方針・助言の 4 | 確率が `--threshold-advisor` を超えた文書の deep を求めます |
+| 情報ラベル | Noul | 操作説明・攻略情報・大方針・詰まり・マップの 5 | 確率を `surface.jsonl` の `info_labels` に書きます |
+| 場面転換 | Noul | 1 | 確率が 0.5 を超えたら、場面転換として次の middle に伝えます |
+| box の存在 | Noul | box の対象ごと | 確率が 0.5 未満の対象の box は使いません |
+| box | Box | 問い直す対象ごと | 最新のフレームでの対象の位置です |
+
+box で取る対象は、`notes/scenes/<場面ID>/box_targets.md` から、`- 名前: 説明` の形の行を先頭から最大 8 個読みます。このファイルが無いか空なら `notes/common/box_targets.md` を、それも無いか空なら固定の 4 つ (自機・敵・敵の攻撃・目標地点) を使います。Jev が返した box は、キャプチャーのすべてのフレーム (約 10 fps) で、NCC のテンプレートマッチング (縮小 0.5 のグレースケール) で追います。Jev に box を問い直すのは、まだ box が無い対象、見失った対象、前回の問い直しから `--box-requery-every` 回の要求がたった対象だけです。`box_targets.md` で名前が同じまま説明が変わった対象は、それまでの追跡をやめ、box が無い対象として問い直します。
+
+送る画像には、左上に時刻を、追えている対象には枠と名前を書き込みます。枠の色は、その要求の対象の一覧の中の順番で決まり、見失った対象があっても同じ対象は同じ色です。その要求で box を問い直す対象の枠と名前は、最新のフレームの画像には書き込みません (古いフレームには書き込みます)。
+
+応答の待ちは 10 秒までです。HTTP のエラー、JSON として読めない応答、確率の欠け・範囲外・数でない値は surface の失敗として数え、再試行せずに次の要求で送り直します。Box の答えの座標か確信度が 0〜1 の外か、幅か高さが 0 以下のときは、その対象の box だけを無しとして扱い、ほかの問いの答えは使います。
+
 ### run の起動引数
 
 `switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
@@ -305,8 +336,11 @@ gpt-6-luna には、変わらない指示 (developer メッセージ) と、場�
 | `--deep-timeout S` | deep のジョブの実行時間の上限 (秒) | 300 | 0 より大きい有限の値 |
 | `--allow-home` | 押せるボタンに HOME を足します | オフ | なし (付けるとオン) |
 | `--middle {fake,luna}` | middle の実装 (「middle の実装」の節)。`luna` は gpt-6-luna を呼び、環境変数 `OPENAI_API_KEY` が要ります | `luna` | `fake`、`luna` |
+| `--surface {jev,fake}` | surface の実装 (「surface の実装」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
+| `--threshold-advisor P` | surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求めます | 0.5 | 0〜1 |
+| `--box-requery-every N` | 追えている box も、前回の問い直しからこの回数の要求がたったら Jev に問い直します | 5 | 1 以上の整数 |
 
-範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
 同じ文書の deep のジョブは、前のジョブが実行中でも、前回の起動から `--deep-min-start-interval` 秒たっていれば並行して起動します。間隔の中に来た要求は捨て、`run.jsonl` に `deep_skipped` を書きます。起動から `--deep-timeout` 秒たったジョブには停止を求め、5 秒たっても終わらなければ強制終了します。
 
@@ -317,17 +351,17 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | ファイル | 内容 |
 |---|---|
 | `run.jsonl` | 起動 (`start`。起動引数を含む)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
-| `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、待ち時間、失敗の説明を書きます |
+| `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます |
 | `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
-| `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を書き込んだもの)。複数の要求で送った同じフレームは 1 回だけ保存します |
+| `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
 | `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置)。surface は要求ごとにこのファイルを読みます |
 | `middle/calls.jsonl` | middle の実行ごとの記録。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書とその SHA-256) と、対象の文書のコピーを置く `work/` があります |
 | `notes/` | 文書 (次の表) |
 
-`surface.jsonl` に書く画像のファイル名は、保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
+`surface.jsonl` に書く画像のファイル名は、その要求で送った画像の保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
 
 `notes/` には、起動時に次の文書を作ります。
 
@@ -335,7 +369,8 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 |---|---|
 | `notes/common/controls.md` | 共通の操作説明。押せるボタンを、まだ確かめていない印 `unknown` を付けて並べます |
 | `notes/common/tips.md` | 共通の攻略情報 (見出しだけ) |
-| `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)。起動時は空で、`tasks.md` は middle が書きます。場面の操作説明と攻略情報が無いか空なら、surface は共通の文書を使います |
+| `notes/common/box_targets.md` | surface が box で取る対象の共通の一覧。固定の 4 つ (自機・敵・敵の攻撃・目標地点) を `- 名前: 説明` の行で並べます |
+| `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)・box で取る対象 (`box_targets.md`)。起動時は空で、`tasks.md` は middle が書きます。場面の操作説明・攻略情報・box で取る対象が無いか空なら、surface は共通の文書を使います |
 | `notes/strategy.md` | 大方針 (見出しだけ) |
 | `notes/advice.md` | 詰まったときの助言 (見出しだけ) |
 | `notes/map/` | マップの文書 (起動時は空) |

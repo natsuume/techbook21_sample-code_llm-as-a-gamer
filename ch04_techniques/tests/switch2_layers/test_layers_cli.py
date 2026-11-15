@@ -29,7 +29,12 @@ from switch2_layers.settings import (
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_WINDOW_S,
     MiddleKind,
+    RunSettings,
+    SurfaceKind,
 )
+from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.jev_surface import JevSurfaceDecider
+from switch2_layers.surface.surface_assembly import SurfaceAssembly
 
 COMMANDS = ["run", "middle-once", "deep-once", "publish-note"]
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -136,6 +141,125 @@ def test_run_rejects_auto_seconds_shorter_than_min_interval_without_hardware(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--deep-auto-seconds" in captured.err
+
+
+# --- run の surface の引数と API キー ---
+
+
+@pytest.fixture
+def no_hardware(monkeypatch):
+    """run が実機 (ブリッジとキャプチャー) に触れたらテストを失敗させ、TYPESAFE_API_KEY を消す。"""
+
+    def must_not_start_bridge(**kwargs):
+        raise AssertionError("the bridge must not be started")
+
+    def must_not_start_capture(*args, **kwargs):
+        raise AssertionError("the capture must not be started")
+
+    monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
+    monkeypatch.setattr(cli, "Capture", must_not_start_capture)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+def failing_bridge(**kwargs):
+    """最初のブリッジの起動に失敗するブリッジの偽物 (実機に触れる手前で止める)。"""
+    raise BridgeStartError("stub bridge failed")
+
+
+def test_run_surface_defaults_follow_the_issue():
+    args = build_parser().parse_args(["run"])
+    assert args.surface == "jev"
+    assert args.threshold_advisor == 0.5
+    assert args.box_requery_every == 5
+
+
+def test_run_accepts_surface_options():
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--surface",
+            "fake",
+            "--threshold-advisor",
+            "0.7",
+            "--box-requery-every",
+            "3",
+        ]
+    )
+    settings = cli.run_settings_from_args(args)
+    assert settings.surface is SurfaceKind.FAKE
+    assert settings.threshold_advisor == 0.7
+    assert settings.box_requery_every == 3
+
+
+def test_run_rejects_unknown_surface():
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["run", "--surface", "luna"])
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_run_without_typesafe_api_key_exits_before_hardware(
+    no_hardware, monkeypatch, capsys, key
+):
+    if key is not None:
+        monkeypatch.setenv("TYPESAFE_API_KEY", key)
+    code = main(["run", "--middle", "fake"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "TYPESAFE_API_KEY" in captured.err
+
+
+def test_run_range_error_is_reported_before_api_key(no_hardware, capsys):
+    code = main(["run", "--threshold-advisor", "1.5"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--threshold-advisor" in err
+    assert "TYPESAFE_API_KEY" not in err
+
+
+def test_run_box_requery_every_range_error(no_hardware, capsys):
+    code = main(["run", "--surface", "fake", "--box-requery-every", "0"])
+    assert code == 2
+    assert "--box-requery-every" in capsys.readouterr().err
+
+
+def test_run_with_fake_surface_does_not_need_api_key(no_hardware, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
+    code = main(["run", "--surface", "fake", "--middle", "fake"])
+    # API キーの確かめを通り、ブリッジの起動 (偽物) まで進んだ
+    assert code == 1
+    assert "stub bridge failed" in capsys.readouterr().err
+
+
+def test_run_builds_surface_with_api_key_and_closes_it(
+    no_hardware, monkeypatch, capsys
+):
+    built: list[tuple[RunSettings, str | None]] = []
+    closed: list[bool] = []
+
+    def fake_build(settings: RunSettings, api_key: str | None) -> SurfaceAssembly:
+        built.append((settings, api_key))
+        return SurfaceAssembly(
+            decider=FakeSurfaceDecider(),
+            on_frame=None,
+            boxes_at=None,
+            on_run_directory=None,
+            close=lambda: closed.append(True),
+        )
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
+    monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
+    code = main(["run", "--threshold-advisor", "0.6", "--middle", "fake"])
+    assert code == 1
+    assert len(built) == 1
+    settings, api_key = built[0]
+    assert api_key == "test-key"
+    assert settings.surface is SurfaceKind.JEV
+    assert settings.threshold_advisor == 0.6
+    # ブリッジの起動に失敗しても、surface の部品は閉じる
+    assert closed == [True]
 
 
 def test_deep_once_rejects_unknown_document_kind():
@@ -437,7 +561,7 @@ def test_run_with_fake_middle_does_not_need_api_key(monkeypatch, capsys):
 
     # API キーの確かめを通り、ブリッジの起動 (ここでは失敗させる) まで進む
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--middle", "fake"])
+    code = main(["run", "--middle", "fake", "--surface", "fake"])
     assert code == 1
     assert "no bridge in test" in capsys.readouterr().err
 
@@ -475,7 +599,7 @@ def stub_hardware_and_app(monkeypatch) -> list:
 def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
     monkeypatch.setenv(API_KEY_ENV, "sk-test")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run"]) == 0
+    assert main(["run", "--surface", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.LUNA
     assert isinstance(parts.middle, LunaMiddleAnalyzer)
@@ -484,10 +608,58 @@ def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
 
 def test_run_passes_fake_middle_to_app(monkeypatch):
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake"]) == 0
+    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.FAKE
     assert isinstance(parts.middle, FakeMiddleAnalyzer)
+
+
+def test_run_passes_fake_surface_to_app_without_hooks(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    [(settings, parts)] = created
+    assert settings.surface is SurfaceKind.FAKE
+    assert isinstance(parts.surface, FakeSurfaceDecider)
+    assert parts.on_frame is None
+    assert parts.surface_boxes_at is None
+    assert parts.surface_plan_boxes is None
+    assert parts.on_run_directory is None
+
+
+def test_run_passes_jev_surface_parts_to_app_by_default(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "  ts-test  ")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--box-requery-every", "2"]) == 0
+    [(settings, parts)] = created
+    # run.jsonl の start に書く起動引数 (settings) と、動かす surface が一致する
+    assert settings.surface is SurfaceKind.JEV
+    decider = parts.surface
+    assert isinstance(decider, JevSurfaceDecider)
+    assert decider.client.api_key == "ts-test"
+    assert decider.settings.box_requery_every == 2
+    assert parts.on_frame == decider.tracking.on_frame
+    assert parts.surface_boxes_at == decider.tracking.boxes_at
+    assert parts.surface_plan_boxes == decider.plan_boxes
+    assert parts.on_run_directory == decider.use_run_directory
+
+
+def test_run_closes_surface_parts_after_app_stops(monkeypatch):
+    closed: list[bool] = []
+
+    def fake_build(settings: RunSettings, api_key: str | None) -> SurfaceAssembly:
+        return SurfaceAssembly(
+            decider=FakeSurfaceDecider(),
+            on_frame=None,
+            boxes_at=None,
+            on_run_directory=None,
+            close=lambda: closed.append(True),
+        )
+
+    monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
+    stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    assert closed == [True]
 
 
 @pytest.mark.parametrize("value", [None, "", "   "], ids=["unset", "empty", "blank"])

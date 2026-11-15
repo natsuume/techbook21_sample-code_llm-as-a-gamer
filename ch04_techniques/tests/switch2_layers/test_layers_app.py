@@ -8,6 +8,7 @@ import types
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pytest
 from switch2_remote.controller_state import NEUTRAL_REPORT
@@ -23,16 +24,21 @@ from switch2_layers.app import (
 from switch2_layers.deep.deep_types import DeepJob, DeepResult
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.error_text import describe_exception
+from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.hardware.capture_source import LatestCapture
 from switch2_layers.hardware.capture_watcher import REASON_STALE_FRAME
 from switch2_layers.middle.fake_middle import FAKE_SCENE_NAME, FakeMiddleAnalyzer
 from switch2_layers.middle.middle_loop import middle_failure_reason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 from switch2_layers.pad_action import PadAction
+from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import RunSettings
+from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
-from switch2_layers.surface.surface_types import SurfaceInput, SurfaceOutput
+from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
 SAFETY_TIMEOUT_S = 20.0  # 止まらないときに、テストを終わらせるために止める秒数
@@ -609,3 +615,165 @@ def test_failure_while_starting_deep_scheduler_thread_cleans_up_and_writes_stop(
     recorder = StartPartsRecorder(monkeypatch, None, error)
     app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
     check_failed_start(tmp_path, app, error, recorder, [])
+
+
+class SurfaceHooks:
+    """LayersParts の surface の接続点 (on_run_directory・on_frame・surface_boxes_at) の偽物。呼ばれ方を記録する。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.run_directories: list[Path] = []
+        # on_run_directory が呼ばれたときに、box の対象の一覧の初期ファイルがあったか
+        self.box_targets_existed: list[bool] = []
+        self.frames_before_run_directory = 0
+        self.frame_times: list[float] = []
+        self.boxes_at_times: list[float] = []
+
+    def on_run_directory(self, paths: RunPaths) -> None:
+        with self.lock:
+            self.run_directories.append(paths.root)
+            self.box_targets_existed.append(
+                (paths.notes_dir / "common" / "box_targets.md").is_file()
+            )
+            self.frames_before_run_directory = len(self.frame_times)
+
+    def on_frame(self, frame: CapturedFrame) -> None:
+        with self.lock:
+            self.frame_times.append(frame.t)
+
+    def boxes_at(self, t: float) -> list[Box]:
+        with self.lock:
+            self.boxes_at_times.append(t)
+        return []
+
+
+def test_surface_hooks_are_connected(tmp_path):
+    sender = FakeSender()
+    hooks = SurfaceHooks()
+    base = parts(sender)
+    app = LayersApp(
+        settings(tmp_path),
+        dataclasses.replace(
+            base,
+            on_frame=hooks.on_frame,
+            surface_boxes_at=hooks.boxes_at,
+            on_run_directory=hooks.on_run_directory,
+        ),
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    # 実行ディレクトリーを作り、notes/ の初期ファイルを書いた後、フレームを渡す前に 1 回だけ呼んだ
+    assert hooks.run_directories == [root]
+    assert hooks.box_targets_existed == [True]
+    assert hooks.frames_before_run_directory == 0
+    # キャプチャーの新しいフレームを渡した (時刻は増える順)
+    assert len(hooks.frame_times) >= 5
+    assert hooks.frame_times == sorted(set(hooks.frame_times))
+    # surface に送った画像ごとに、その時刻の box を求めた
+    surface_rows = read_rows(root / "surface.jsonl")
+    sent_times = {frame["t"] for row in surface_rows for frame in row["frames"]}
+    assert sent_times
+    assert sent_times <= set(hooks.boxes_at_times)
+    assert set(hooks.boxes_at_times) <= set(hooks.frame_times)
+
+
+def test_initial_notes_include_box_targets(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender))
+    reason, root = run_app(app, stop_after=0.5)
+    assert reason == REASON_INTERRUPTED
+    text = (root / "notes" / "common" / "box_targets.md").read_text(encoding="utf-8")
+    assert parse_box_targets(text) == DEFAULT_BOX_TARGETS
+
+
+class RecordingPlanBoxes:
+    """LayersParts.surface_plan_boxes の偽物。呼ばれた場面 ID を記録し、どの box も書き込まない書き込み方を返す。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.calls: list[str | None] = []
+
+    def __call__(self, scene_id: str | None) -> BoxDrawingPlan:
+        with self.lock:
+            self.calls.append(scene_id)
+        return BoxDrawingPlan(target_numbers={})
+
+
+def test_surface_plan_boxes_is_asked_once_per_request(tmp_path):
+    sender = FakeSender()
+    plan = RecordingPlanBoxes()
+    app = LayersApp(
+        settings(tmp_path), dataclasses.replace(parts(sender), surface_plan_boxes=plan)
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    rows = read_rows(root / "surface.jsonl")
+    assert rows
+    # 要求ごとに 1 回 (止める合図で記録を書かずに抜けた最後の 1 回の分だけ多いことがある)
+    assert len(rows) <= len(plan.calls) <= len(rows) + 1
+    # 文書の場面 ID (middle が決める前は None)
+    assert [row["scene_id"] for row in rows] == plan.calls[: len(rows)]
+
+
+def mock_jev_answers(request: httpx.Request) -> httpx.Response:
+    """Jev の偽物の応答。選択肢の問いは none、box の存在は 0.9、ほかの noul は 0.0、box は固定の位置。"""
+    payload = json.loads(request.content)
+    answers: dict[str, object] = {}
+    for name, question in payload["questions"].items():
+        if question["type"] == "choice":
+            answers[name] = {
+                "type": "choice",
+                "choice": "none",
+                "confidence": 1.0,
+                "probabilities": {
+                    choice: 1.0 if choice == "none" else 0.0
+                    for choice in question["criteria"]
+                },
+            }
+        elif question["type"] == "noul":
+            value = 0.9 if name.startswith("box_exists_") else 0.0
+            answers[name] = {"type": "noul", "noul": value}
+        else:
+            answers[name] = {
+                "type": "box",
+                "box": {"top": 0.2, "bottom": 0.4, "left": 0.1, "right": 0.3},
+                "confidence": None,
+            }
+    return httpx.Response(
+        200, json={"model": "jev-1.14.0", "answers": answers, "usage": {}}
+    )
+
+
+def test_jev_surface_parts_run_together_with_mock_jev(tmp_path):
+    sender = FakeSender()
+    http = httpx.Client(transport=httpx.MockTransport(mock_jev_answers))
+    run_settings = settings(tmp_path)
+    surface = build_surface_assembly(run_settings, "test-key", http_client=http)
+    app = LayersApp(
+        run_settings,
+        dataclasses.replace(
+            parts(sender, surface=surface.decider),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            surface_plan_boxes=surface.plan_boxes,
+            on_run_directory=surface.on_run_directory,
+        ),
+    )
+    try:
+        reason, root = run_app(app, stop_after=1.5)
+    finally:
+        surface.close()
+    assert reason == REASON_INTERRUPTED
+    rows = read_rows(root / "surface.jsonl")
+    assert rows
+    assert all(row["error"] is None for row in rows)
+    # 最初の要求では、どの対象もまだ box が無いので Jev に問い、Jev の box を記録する
+    first_boxes = rows[0]["boxes"]
+    assert [box["label"] for box in first_boxes] == [
+        target.name for target in DEFAULT_BOX_TARGETS
+    ]
+    assert {box["source"] for box in first_boxes} == {"jev"}
+    # 記録した画像のファイルは、保存した画像の一覧にある
+    saved = {row["file"] for row in read_rows(root / "frames.jsonl")}
+    assert {frame["file"] for frame in rows[0]["frames"]} <= saved
+    assert read_rows(root / "run.jsonl")[0]["args"]["surface"] == "jev"

@@ -19,7 +19,8 @@ class SentFrame:
     """surface に送った画像 1 枚の記録。
 
     t      フレームの時刻
-    file   保存を予約した画像の実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg。
+    file   その要求で送った画像の保存を予約した、実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg。
+           同じ t で書き込んだ box の違う 2 つ目以降は frames/surface/<tミリ秒9桁>-<番号>.jpg。
            frame_store.FrameStore.save_surface の戻り値)。null でない file は保存を予約したことを表し、
            画像を書き終えたことは表さない (書き込みに失敗するか、終了時に捨てられて、画像が無いことがある。
            書けた画像は frames.jsonl に行がある)。保存を捨てた (キューが満杯・終了の後) なら None
@@ -69,7 +70,10 @@ def info_label_to_json(label: InfoLabel) -> dict[str, object]:
 
 
 def box_to_json(box: Box) -> dict[str, object]:
-    """box を {"label", "x_min", "y_min", "x_max", "y_max", "confidence"} にする。"""
+    """box を {"label", "x_min", "y_min", "x_max", "y_max", "confidence", "source"} にする。
+
+    confidence は None なら null。source は出どころの値 ("jev" / "tracker") で、None (不明) なら null。
+    """
     return {
         "label": box.label,
         "x_min": box.x_min,
@@ -77,6 +81,7 @@ def box_to_json(box: Box) -> dict[str, object]:
         "x_max": box.x_max,
         "y_max": box.y_max,
         "confidence": box.confidence,
+        "source": None if box.source is None else box.source.value,
     }
 
 

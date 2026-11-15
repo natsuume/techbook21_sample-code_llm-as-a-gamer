@@ -4,7 +4,9 @@
 *_settings_errors で範囲を確かめてから使う。範囲の誤りのメッセージには、起動引数の名前 (--middle-interval 等) を含める。
 キャプチャーのフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に固定する。
 middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
-読む (openai_api_key_errors で有無を確かめる)。API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
+読む (openai_api_key_errors で有無を確かめる)。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
+環境変数 TYPESAFE_API_KEY_ENV から読む (typesafe_api_key_errors で有無を確かめる)。
+API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 """
 
 import dataclasses
@@ -16,6 +18,7 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
+from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
 
 
 class MiddleKind(StrEnum):
@@ -52,6 +55,20 @@ DEFAULT_MAX_MIDDLE_ERRORS = 5
 DEFAULT_DEEP_MIN_START_INTERVAL_S = 15.0
 DEFAULT_DEEP_AUTO_SECONDS = 60.0
 DEFAULT_DEEP_TIMEOUT_S = 300.0
+DEFAULT_THRESHOLD_ADVISOR = 0.5
+DEFAULT_BOX_REQUERY_EVERY = 5
+
+
+class SurfaceKind(StrEnum):
+    """run の surface の実装 (--surface の値)。"""
+
+    JEV = "jev"  # TypeSafe Jev を呼ぶ (surface.jev_surface.JevSurfaceDecider)
+    FAKE = "fake"  # 骨組みのフェイク (surface.fake_surface.FakeSurfaceDecider)
+
+
+DEFAULT_SURFACE = SurfaceKind.JEV
+# --surface jev の API キーを読む環境変数の名前
+TYPESAFE_API_KEY_ENV = JEV_API_KEY_ENV
 
 
 @dataclass(frozen=True)
@@ -74,6 +91,11 @@ class RunSettings:
     allow_home                  押せるボタンに HOME を足す (--allow-home、既定 False)
     middle                      middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
                                 OPENAI_API_KEY が要る (openai_api_key_errors)
+    surface                     surface の実装 (--surface、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
+    threshold_advisor           advisor 判定のしきい値。確率がこれを超えた種類の deep を呼ぶ
+                                (--threshold-advisor、既定 0.5。0 以上 1 以下)
+    box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
+                                (--box-requery-every、既定 5。1 以上)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -88,6 +110,9 @@ class RunSettings:
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
     allow_home: bool = False
     middle: MiddleKind = DEFAULT_MIDDLE_KIND
+    surface: SurfaceKind = DEFAULT_SURFACE
+    threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
+    box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
 
 
 @dataclass(frozen=True)
@@ -142,6 +167,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     範囲は RunSettings の docstring のとおり。nan はどの範囲にも入らないものとして扱い、
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
+    メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
+    --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -191,6 +218,12 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             "--deep-timeout must be a finite number more than 0: "
             f"{settings.deep_timeout_s}"
+        )
+    if not 0.0 <= settings.threshold_advisor <= 1.0:
+        errors.append(f"--threshold-advisor must be 0..1: {settings.threshold_advisor}")
+    if settings.box_requery_every < 1:
+        errors.append(
+            f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
         )
     return errors
 
@@ -255,12 +288,35 @@ def openai_api_key_errors(middle: MiddleKind, environ: Mapping[str, str]) -> lis
     ]
 
 
+def typesafe_api_key_errors(
+    surface: SurfaceKind, environ: Mapping[str, str]
+) -> list[str]:
+    """--surface の実装に要る API キーが環境変数 environ にあるかを確かめ、無ければメッセージのリストを返す。
+
+    surface が JEV で、environ の TYPESAFE_API_KEY_ENV が無いか、空か空白だけなら、TYPESAFE_API_KEY と
+    --surface fake (API キーなしで動かす方法) を含むメッセージを 1 つ返す。それ以外 (キーがある、FAKE) は空のリスト。
+    メッセージに API キーの値は含めない。cli は実機に触れる前にこれを確かめ、誤りがあれば終了コード 2 で終わる。
+    """
+    if surface is not SurfaceKind.JEV:
+        return []
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--surface {SurfaceKind.JEV.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV}. Set it, or use --surface {SurfaceKind.FAKE.value} "
+            "to run without an API key"
+        )
+    ]
+
+
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle は値の文字列 "fake" / "luna") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle と surface は値の文字列 "fake" / "luna"・"jev" / "fake") にする。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
+    value["surface"] = settings.surface.value
     return value

@@ -292,6 +292,73 @@ def test_different_surface_frames_are_saved_separately(tmp_path):
     ]
 
 
+BOXES_A = (("自機", 0.1, 0.2, 0.3, 0.4),)
+BOXES_B = (("自機", 0.15, 0.2, 0.35, 0.4),)
+
+
+def test_same_t_with_different_boxes_is_saved_as_numbered_files(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    plain = jpeg_image(32, 18)
+    boxed_a = jpeg_image(34, 18)
+    boxed_b = jpeg_image(36, 18)
+    # その t で最初に保存する内容は <tミリ秒9桁>.jpg、違う内容は -2・-3 …
+    assert store.save_surface(5.0, plain) == "frames/surface/000005000.jpg"
+    assert store.save_surface(5.0, boxed_a, BOXES_A) == "frames/surface/000005000-2.jpg"
+    assert store.save_surface(5.0, boxed_b, BOXES_B) == "frames/surface/000005000-3.jpg"
+    # 同じ内容は同じファイル (1 回だけ保存する)
+    assert store.save_surface(5.0, boxed_a, BOXES_A) == "frames/surface/000005000-2.jpg"
+    assert store.save_surface(5.0, plain, ()) == "frames/surface/000005000.jpg"
+    assert store.write_queued() == 3
+    surface_dir = root / "frames" / "surface"
+    assert (surface_dir / "000005000.jpg").read_bytes() == plain.jpeg
+    assert (surface_dir / "000005000-2.jpg").read_bytes() == boxed_a.jpeg
+    assert (surface_dir / "000005000-3.jpg").read_bytes() == boxed_b.jpeg
+    assert [(row["t"], row["file"], row["width"]) for row in frames_rows(root)] == [
+        (5.0, "frames/surface/000005000.jpg", 32),
+        (5.0, "frames/surface/000005000-2.jpg", 34),
+        (5.0, "frames/surface/000005000-3.jpg", 36),
+    ]
+
+
+def test_first_content_of_a_t_uses_the_plain_name_even_with_boxes(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    assert (
+        store.save_surface(6.0, jpeg_image(), BOXES_A) == "frames/surface/000006000.jpg"
+    )
+    assert store.save_surface(6.0, jpeg_image(), ()) == "frames/surface/000006000-2.jpg"
+    # 別の t の番号は、t ごとに 1 から数える
+    assert (
+        store.save_surface(6.1, jpeg_image(), BOXES_B) == "frames/surface/000006100.jpg"
+    )
+
+
+def test_failed_numbered_surface_write_keeps_its_file_name(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    image = jpeg_image()
+    assert store.save_surface(7.0, image) == "frames/surface/000007000.jpg"
+    store.write_queued()
+    surface_dir = root / "frames" / "surface"
+    # 2 つ目の内容の書き込みを失敗させる (ディレクトリーの書き込みを禁じる代わりに、同じ名前のディレクトリーを置く)
+    (surface_dir / "000007000-2.jpg").mkdir()
+    assert store.save_surface(7.0, image, BOXES_A) == "frames/surface/000007000-2.jpg"
+    assert store.write_queued() == 0
+    assert store.dropped == 1
+    # 予約から外れた内容をもう一度渡すと、同じ番号のファイル名で入れ直す
+    (surface_dir / "000007000-2.jpg").rmdir()
+    assert store.save_surface(7.0, image, BOXES_A) == "frames/surface/000007000-2.jpg"
+    assert store.write_queued() == 1
+    assert (surface_dir / "000007000-2.jpg").read_bytes() == image.jpeg
+
+
 # --- 上限付きのキューと捨てた件数 ---
 
 

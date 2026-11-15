@@ -3,9 +3,10 @@
     switch2-layers run [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--max-surface-errors N]
                        [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
-                       [--middle fake|luna]
-        実機で 3 層を動かす。surface と deep はフェイク (surface.fake_surface・deep.fake_deep)、middle は --middle で
-        選んだ実装を使う
+                       [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
+        実機で 3 層を動かす。surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
+        middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep はフェイク
+        (deep.fake_deep) を使う
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]
@@ -16,6 +17,9 @@
 --middle (run と middle-once) は middle の実装を選ぶ。既定の luna は gpt-6-luna を呼び (middle.luna_middle)、
 fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境変数 OPENAI_API_KEY が無い (空を含む) ときは、
 実機 (ブリッジ・キャプチャー) と実行ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
+--surface (run) は surface の実装を選ぶ。既定の jev は TypeSafe Jev を呼び (surface.jev_surface)、fake は骨組みの
+フェイク (surface.fake_surface) を使う。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、実機と実行
+ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
 
 引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値など) は argparse が使い方とともに
 表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブコマンドの処理が標準エラー出力に書いて
@@ -47,6 +51,7 @@ from switch2_layers.notes.publish_note import publish_note
 from switch2_layers.settings import (
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
+    DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_TIMEOUT_S,
@@ -58,23 +63,31 @@ from switch2_layers.settings import (
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
     DEFAULT_RUNS_DIR,
+    DEFAULT_SURFACE,
+    DEFAULT_THRESHOLD_ADVISOR,
     INTERVAL_FPS_MAX,
     INTERVAL_WIDTH_MAX,
     INTERVAL_WIDTH_MIN,
     MIDDLE_INTERVAL_MAX_S,
     MIDDLE_INTERVAL_MIN_S,
     OPENAI_API_KEY_ENV,
+    TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     MiddleKind,
     MiddleOnceSettings,
     PublishNoteSettings,
     RunSettings,
+    SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
     run_settings_errors,
+    typesafe_api_key_errors,
 )
-from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.surface_assembly import (
+    SurfaceAssembly,
+    build_surface_assembly,
+)
 
 PROG = "switch2-layers"
 # 範囲の誤りで返す終了コード (argparse の使い方の誤りと同じ)
@@ -104,12 +117,17 @@ def build_parser() -> argparse.ArgumentParser:
 def add_run_parser(
     commands: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """サブコマンド run の引数を定義する。既定値は settings の DEFAULT_* と同じ。"""
+    """サブコマンド run の引数を定義する。既定値は settings の DEFAULT_* と同じ。
+
+    --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
+    --box-requery-every は int (既定 5)。
+    """
     parser = commands.add_parser(
         "run",
-        help="実機で 3 層を動かす (surface と deep はフェイク)",
+        help="実機で 3 層を動かす (deep はフェイク)",
         description=(
-            "実機で 3 層を動かす。surface と deep はフェイクで、middle は --middle で選ぶ。Ctrl+C で止まる"
+            "実機で 3 層を動かす。surface は --surface、middle は --middle で選び、deep はフェイク。"
+            "Ctrl+C で止まる"
         ),
     )
     parser.add_argument(
@@ -199,6 +217,33 @@ def add_run_parser(
         help="押せるボタンに HOME を足す (既定では HOME を押さない)",
     )
     add_middle_kind_argument(parser)
+    parser.add_argument(
+        "--surface",
+        choices=[kind.value for kind in SurfaceKind],
+        default=DEFAULT_SURFACE.value,
+        help=(
+            "surface の実装。jev は TypeSafe Jev を呼び、環境変数 TYPESAFE_API_KEY が要る。"
+            f"fake は中立の操作を返すフェイク (既定 {DEFAULT_SURFACE.value})"
+        ),
+    )
+    parser.add_argument(
+        "--threshold-advisor",
+        type=float,
+        default=DEFAULT_THRESHOLD_ADVISOR,
+        help=(
+            "surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求める "
+            f"(0〜1。既定 {DEFAULT_THRESHOLD_ADVISOR:g})"
+        ),
+    )
+    parser.add_argument(
+        "--box-requery-every",
+        type=int,
+        default=DEFAULT_BOX_REQUERY_EVERY,
+        help=(
+            "追えている box も、前回の問い直しからこの回数の要求がたったら Jev に問い直す "
+            f"(1 以上。既定 {DEFAULT_BOX_REQUERY_EVERY})"
+        ),
+    )
     parser.set_defaults(handler=run_command)
 
 
@@ -315,7 +360,7 @@ def add_publish_note_parser(
 
 
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
-    """run の Namespace を RunSettings にする (範囲は確かめない)。"""
+    """run の Namespace を RunSettings にする (範囲は確かめない。--surface は SurfaceKind にする)。"""
     return RunSettings(
         runs_dir=args.runs_dir,
         interval_fps=args.interval_fps,
@@ -329,6 +374,9 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         deep_timeout_s=args.deep_timeout,
         allow_home=args.allow_home,
         middle=MiddleKind(args.middle),
+        surface=SurfaceKind(args.surface),
+        threshold_advisor=args.threshold_advisor,
+        box_requery_every=args.box_requery_every,
     )
 
 
@@ -384,15 +432,21 @@ def run_command(args: argparse.Namespace) -> int:
        (実機には触れない)
     2. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
        (実機にも実行ディレクトリーにも触れない)
-    3. middle = create_middle_analyzer(settings.middle, os.environ)
-    4. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
+    3. settings.typesafe_api_key_errors(settings.surface, os.environ)。誤りがあれば (jev で環境変数 TYPESAFE_API_KEY が
+       無いか空)、その変数名を含むメッセージを標準エラー出力に書いて EXIT_USAGE を返す (実機には触れない)。
+       jev なら API キーは環境変数 TYPESAFE_API_KEY の前後の空白を除いたもの、fake なら None (読まない)
+    4. middle = create_middle_analyzer(settings.middle, os.environ)
+    5. surface.surface_assembly.build_surface_assembly(settings, API キー) で surface の部品を作る
+    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    5. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
-    6. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
-       bridge_state=supervisor の state を返す関数, surface=FakeSurfaceDecider(), middle=3 の middle,
-       deep=FakeDeepRunner())).run() で動かし、止まるまで待つ
-    7. 止まったら、作れた部品を capture.close()、supervisor.close() の順に閉じる
+    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
+    8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
+       bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
+       deep=FakeDeepRunner(), on_frame=部品の on_frame, surface_boxes_at=部品の boxes_at,
+       on_run_directory=部品の on_run_directory, surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
+    9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close() の順に閉じる
+       (5 の後に 6 で失敗しても、surface の部品は閉じる)
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
     settings = run_settings_from_args(args)
@@ -404,7 +458,30 @@ def run_command(args: argparse.Namespace) -> int:
     if key_errors:
         _print_errors(key_errors)
         return EXIT_USAGE
+    surface_key_errors = typesafe_api_key_errors(settings.surface, os.environ)
+    if surface_key_errors:
+        _print_errors(surface_key_errors)
+        return EXIT_USAGE
+    surface_api_key = (
+        os.environ.get(TYPESAFE_API_KEY_ENV, "").strip()
+        if settings.surface is SurfaceKind.JEV
+        else None
+    )
     middle = create_middle_analyzer(settings.middle, os.environ)
+    surface = build_surface_assembly(settings, surface_api_key)
+    try:
+        return _run_with_hardware(settings, middle, surface)
+    finally:
+        surface.close()
+
+
+def _run_with_hardware(
+    settings: RunSettings, middle: MiddleAnalyzer, surface: SurfaceAssembly
+) -> int:
+    """run_command の 6〜9 (ブリッジとキャプチャーを作って LayersApp を動かし、閉じる)。終了コードを返す。
+
+    surface の部品は閉じない (run_command が閉じる)。
+    """
     try:
         supervisor = BridgeSupervisor(
             start_bridge=Bridge, reset_radio=reset_bluetooth_radio
@@ -419,9 +496,13 @@ def run_command(args: argparse.Namespace) -> int:
             frame_reader=SwitchCaptureReader(capture),
             report_sender=supervisor,
             bridge_state=lambda: supervisor.state,
-            surface=FakeSurfaceDecider(),
+            surface=surface.decider,
             middle=middle,
             deep=FakeDeepRunner(),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            on_run_directory=surface.on_run_directory,
+            surface_plan_boxes=surface.plan_boxes,
         )
         reason = LayersApp(settings, parts).run()
     finally:
