@@ -22,7 +22,7 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from switch2_layers.buttons import allowed_buttons
@@ -32,6 +32,7 @@ from switch2_layers.deep.deep_scheduler import (
     DeepSchedulerSettings,
 )
 from switch2_layers.deep.deep_types import DeepRunner
+from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
 from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
@@ -112,6 +113,31 @@ class _StartedParts:
     loop_threads: tuple[threading.Thread, ...]
 
 
+@dataclass
+class _PartsBuiltSoFar:
+    """start が途中までに作った部品。start の途中で例外が出たときに、作ったものだけを後片付けするために使う。
+
+    run_log          run.jsonl に start を書き終えた RunLog (書き終える前は None)
+    pad_output       PadOutput (作る前は None)
+    frame_store      FrameStore (作る前は None)
+    capture_source   CaptureSource (作る前は None)
+    deep_scheduler   DeepScheduler (作る前は None)
+    loop_threads     作った surface と middle のループのスレッド (起動したかどうかは Thread.is_alive で見分ける)
+    """
+
+    run_log: RunLog | None = None
+    pad_output: PadOutput | None = None
+    frame_store: FrameStore | None = None
+    capture_source: CaptureSource | None = None
+    deep_scheduler: DeepScheduler | None = None
+    loop_threads: list[threading.Thread] = field(default_factory=list)
+
+
+def _start_failure_reason(error: BaseException) -> str:
+    """start の途中で error が出て止まるときの理由 `start failed: <例外の説明>` を返す。"""
+    return f"start failed: {describe_exception(error)}"
+
+
 class LayersApp:
     """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
@@ -176,6 +202,16 @@ class LayersApp:
             if self._start_called:
                 raise RuntimeError("LayersApp.start can be called only once")
             self._start_called = True
+        built = _PartsBuiltSoFar()
+        try:
+            return self._build_and_start(built)
+        except BaseException as error:
+            # Ctrl+C の KeyboardInterrupt も、作った部品とスレッドを残さないよう後片付けしてから外に出す
+            self._clean_up_failed_start(built, error)
+            raise
+
+    def _build_and_start(self, built: _PartsBuiltSoFar) -> RunPaths:
+        """start の 1〜7 を行う。作った部品は、作った直後に built に記録する。"""
         settings = self.settings
         parts = self.parts
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
@@ -187,6 +223,7 @@ class LayersApp:
         run_log.write(
             EVENT_START, run_dir=str(paths.root), args=run_settings_to_json(settings)
         )
+        built.run_log = run_log
         # 4: 操作の送信
         operation_log = OperationLog(paths.operations_log, clock)
         pad_output = PadOutput(
@@ -195,12 +232,15 @@ class LayersApp:
             clock=parts.monotonic,
             on_operation=operation_log.write,
         )
+        built.pad_output = pad_output
         # 5: キャプチャーのフレーム
         frame_buffer = FrameBuffer()
         frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
+        built.frame_store = frame_store
         capture_source = CaptureSource(
             parts.frame_reader, clock, frame_buffer, frame_store
         )
+        built.capture_source = capture_source
         capture_watcher = CaptureWatcher(
             parts.frame_reader.is_ended, capture_source.latest_t, clock
         )
@@ -222,6 +262,7 @@ class LayersApp:
                 timeout_s=settings.deep_timeout_s,
             ),
         )
+        built.deep_scheduler = deep_scheduler
         deep_scheduler.start()
         # 7: surface と middle のループ
         surface_loop = SurfaceLoop(
@@ -268,6 +309,7 @@ class LayersApp:
                 daemon=True,
             ),
         )
+        built.loop_threads.extend(loop_threads)
         with self._lock:
             self._started = _StartedParts(
                 paths=paths,
@@ -282,6 +324,42 @@ class LayersApp:
         for thread in loop_threads:
             self.start_thread(thread)
         return paths
+
+    def _clean_up_failed_start(
+        self, built: _PartsBuiltSoFar, error: BaseException
+    ) -> None:
+        """start の途中で error が出たときの後片付け (start の docstring)。作っていない部品は飛ばす。"""
+        self.request_stop(_start_failure_reason(error))
+        with self._lock:
+            # 後で close を呼んでも、もう一度は閉じない
+            self._closed = True
+            output_stopped = self._output_stopped
+        # 先に別のスレッドが理由だけを決めていた場合も、合図は必ず立てる (close の 0 と同じ)
+        self._stop_event.set()
+        # request_stop は、_started を記録する前なら合図を立てるだけなので、作った PadOutput をここで中立にする
+        if built.pad_output is not None and not output_stopped:
+            built.pad_output.stop_output()
+            with self._lock:
+                self._output_stopped = True
+        # close と同じ順に閉じる
+        for thread in built.loop_threads:
+            if thread.is_alive():  # 起動したスレッドだけを待つ
+                thread.join(LOOP_JOIN_TIMEOUT_S)
+        if built.deep_scheduler is not None:
+            built.deep_scheduler.close()
+        if built.capture_source is not None:
+            built.capture_source.close()
+        if built.frame_store is not None:
+            built.frame_store.close()
+        if built.run_log is not None:
+            if built.frame_store is not None:
+                built.run_log.write(
+                    EVENT_FRAMES_DROPPED, count=built.frame_store.dropped
+                )
+            built.run_log.write(EVENT_STOP, reason=self._current_reason())
+            built.run_log.close()
+        if built.pad_output is not None:
+            built.pad_output.close()
 
     @property
     def paths(self) -> RunPaths | None:

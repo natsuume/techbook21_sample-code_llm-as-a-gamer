@@ -95,9 +95,9 @@ def run_middle_step(
 
     1. now_t = clock.now() で build_middle_input(paths, now_t, window_s)
     2. t_sent = clock.now() で analyze を呼び、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
-    3. middle_output_writer.write_middle_output と同じ順と内容で出力を書く (generated_t=t_received):
+    3. write_middle_output(paths, 入力, 出力, generated_t=t_received, stop) で出力を書く:
        notes/scenes/<場面ID>/tasks.md → middle/state.json → notes/scene_labels.json (新しい場面のときだけ)。
-       それぞれのファイルを書く直前に stop を確かめる
+       それぞれのファイルを書く直前に stop を確かめる (立っていたら write_middle_output が None を返す)
     4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に、request の直前に stop を確かめてから
        deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
        外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
@@ -118,20 +118,23 @@ def run_middle_step(
         output = analyzer.analyze(middle_input)
     except Exception as error:
         t_received = clock.now()
-        if stop is not None and stop.is_set():
+        if _is_stopped(stop):
             return STOPPED_STEP_RESULT
         logger.debug("middle analyze failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error)
+        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
     t_received = clock.now()
-    if stop is not None and stop.is_set():
+    if _is_stopped(stop):
         return STOPPED_STEP_RESULT
     try:
+        # tasks.md・middle/state.json・notes/scene_labels.json のそれぞれを書く直前に stop を確かめる
         write_result = write_middle_output(
-            paths, middle_input, output, generated_t=t_received
+            paths, middle_input, output, generated_t=t_received, stop=stop
         )
     except Exception as error:
         logger.debug("writing the middle output failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error)
+        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
+    if write_result is None:
+        return STOPPED_STEP_RESULT
     new_scene = write_result.new_scene
     deep_kinds = NEW_SCENE_DEEP_KINDS if new_scene is not None else ()
     request_errors: list[tuple[DocumentKind, str]] = []
@@ -139,6 +142,8 @@ def run_middle_step(
     if new_scene is not None and deep_requests is not None:
         requests_sent = True
         for kind in deep_kinds:
+            if _is_stopped(stop):
+                return STOPPED_STEP_RESULT
             try:
                 deep_requests.request(kind, DeepTrigger.NEW_SCENE, new_scene.id)
             except Exception as error:
@@ -153,6 +158,8 @@ def run_middle_step(
         deep_requests_sent=requests_sent,
         error=None,
     )
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
     append_json_line(paths.middle_calls, middle_call_row(record))
     return MiddleStepResult(
         ok=True,
@@ -170,8 +177,14 @@ def _record_failure(
     t_received: float,
     middle_input: MiddleInput | None,
     error: Exception,
+    stop: threading.Event | None,
 ) -> MiddleStepResult:
-    """失敗した回の行を calls.jsonl に書き、ok=False の結果を返す。"""
+    """失敗した回の行を calls.jsonl に書き、ok=False の結果を返す。
+
+    書く直前に stop を確かめ、立っていれば書かずに STOPPED_STEP_RESULT を返す。
+    """
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
     description = describe_exception(error)
     record = MiddleCallRecord(
         t_sent=t_sent,
@@ -186,6 +199,11 @@ def _record_failure(
     return MiddleStepResult(
         ok=False, state=None, new_scene=None, deep_requests=(), error=description
     )
+
+
+def _is_stopped(stop: threading.Event | None) -> bool:
+    """止める合図 stop が立っていれば True。stop が None (合図を確かめない) なら False。"""
+    return stop is not None and stop.is_set()
 
 
 @dataclass(frozen=True)

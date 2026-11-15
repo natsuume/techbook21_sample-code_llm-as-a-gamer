@@ -187,7 +187,11 @@ class FrameStore:
         self.interval_width = interval_width
         self.capacity = capacity
         self.jpeg_quality = jpeg_quality
+        # 受け付けとキューと件数のロック。受け付ける側が待たないよう、この中では I/O をしない
         self._condition = threading.Condition()
+        # frames.jsonl に行を足すことと、close が書き終えるのをあきらめること (_given_up) を決めるロック。
+        # 行の追記 (I/O) はこの中で行う。両方を持つときは、このロックを先に取る
+        self._row_lock = threading.Lock()
         self._queue: deque[_SaveItem] = deque()
         self._next_due_t: float | None = None
         # 予約した (キューに入れた、または書けた) surface の画像の t (ミリ秒)
@@ -196,8 +200,10 @@ class FrameStore:
         self._dropped = 0
         self._accepting = True
         self._closed = False
-        self._given_up = False  # close の時間切れで書き出しをやめた
-        self._writing = False  # 書き出しスレッドが 1 件を書いている途中
+        # close の時間切れで書き出しをやめた。_row_lock と _condition の両方を持って書き換える
+        self._given_up = False
+        # 書き出しスレッドが 1 件を書いている途中で、まだ written にも dropped にも数えていない
+        self._writing = False
         self._thread: threading.Thread | None = None
         if start_thread:
             self._thread = threading.Thread(
@@ -291,7 +297,9 @@ class FrameStore:
         thread = self._thread
         if thread is not None:
             thread.join(max(timeout_s, 0.0))
-        with self._condition:
+        # 書き出しスレッドが行を足すかを決めるのと同じロックの中であきらめる
+        # (書いている途中の 1 件を、written と dropped の一方だけに数える)
+        with self._row_lock, self._condition:
             if thread is None or thread.is_alive():
                 # 書き終えられなかった分を捨てた件数に数え、書き出しスレッドにはこれ以上書かせない
                 self._dropped += len(self._queue) + (1 if self._writing else 0)
@@ -324,19 +332,23 @@ class FrameStore:
         """
         try:
             record = self._write_image(item)
-            append_json_line(self.paths.frames_log, frame_record_row(record))
+            with self._row_lock:
+                # _given_up は _row_lock を持って書き換えるので、ここで読んだ値は行を足し終えるまで変わらない
+                if self._given_up:
+                    return False
+                append_json_line(self.paths.frames_log, frame_record_row(record))
+                with self._condition:
+                    self._written += 1
+                    self._writing = False
+            return True
         except (OSError, ValueError):
             logger.warning("failed to save a %s frame", item.kind, exc_info=True)
             with self._condition:
                 if not self._given_up:
                     self._dropped += 1
+                    self._writing = False
                     self._release_reservation_locked(item)
             return False
-        with self._condition:
-            if self._given_up:
-                return False
-            self._written += 1
-        return True
 
     def _write_image(self, item: _SaveItem) -> FrameRecord:
         """item の画像を書き、frames.jsonl に足す FrameRecord を返す。"""

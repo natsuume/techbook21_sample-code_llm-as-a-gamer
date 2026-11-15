@@ -13,9 +13,12 @@ surface が middle/state.json の新しい場面を読んだときに、その�
       new_scene になる (初めての場面の deep の要求が出る)
     - 4 で失敗したら、middle/state.json には新しい場面が書かれているが、一覧には無い。次の回では同じ名前が再び
       新しい場面 (同じ ID) として扱われ、new_scene になる (deep の要求がもう一度出る)
+止める合図 (stop) を渡すと、2〜4 のそれぞれのファイルを書く直前に確かめ、立っていれば残りを書かずに抜ける
+(書く順は変えず、それまでに書いたファイルは戻さない)。
 middle/calls.jsonl の行は middle_loop.run_middle_step が書く。
 """
 
+import threading
 from dataclasses import dataclass
 
 from switch2_layers.deep.deep_types import DocumentKind
@@ -59,8 +62,11 @@ def write_middle_output(
     middle_input: MiddleInput,
     output: MiddleOutput,
     generated_t: float,
-) -> MiddleWriteResult:
+    stop: threading.Event | None = None,
+) -> MiddleWriteResult | None:
     """output を実行ディレクトリー paths に書く (モジュールの docstring の順)。
+
+    stop は止める合図。None なら合図を確かめない。
 
     1. output.scene_name が空でなければ (前後の空白を除いて)、notes.scene_labels.read_scene_labels で一覧を読み、
        notes.scene_labels.resolve_scene(一覧, scene_name, first_seen_t=middle_input.t) で場面と、新しい場面かを決める
@@ -71,6 +77,8 @@ def write_middle_output(
        operations_rows_offset=middle_input.operations_rows_offset) を middle/state.json に置き換えて書く
     4. 新しい場面なら、notes.scene_labels.add_scene_label(notes/scene_labels.json, 新しい場面) で一覧に足す。
        足した場面が戻り値の new_scene
+    2〜4 のそれぞれのファイルを書く直前に stop を確かめ、立っていれば残りを書かずに None を返す
+    (それより前に書いたファイルは戻さない)。
     書き込みの例外はそのまま出す (それより前に書いたファイルは戻さない。失敗したときの挙動はモジュールの docstring)。
     """
     scene: SceneLabel | None = None
@@ -80,6 +88,8 @@ def write_middle_output(
         labels = read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)
         scene, is_new = resolve_scene(labels, scene_name, first_seen_t=middle_input.t)
     if scene is not None:
+        if _is_stopped(stop):
+            return None
         tasks_path = paths.notes_dir / scene_note(scene.id, "tasks")
         tasks_path.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(tasks_path, output.tasks)
@@ -95,9 +105,18 @@ def write_middle_output(
         surface_rows_offset=middle_input.surface_rows_offset,
         operations_rows_offset=middle_input.operations_rows_offset,
     )
+    if _is_stopped(stop):
+        return None
     write_json_atomic(paths.middle_state, middle_state_to_json(state))
     new_scene: SceneLabel | None = None
     if scene is not None and is_new:
+        if _is_stopped(stop):
+            return None
         add_scene_label(paths.notes_dir / SCENE_LABELS_FILE, scene)
         new_scene = scene
     return MiddleWriteResult(state=state, new_scene=new_scene)
+
+
+def _is_stopped(stop: threading.Event | None) -> bool:
+    """止める合図 stop が立っていれば True。stop が None (合図を確かめない) なら False。"""
+    return stop is not None and stop.is_set()
