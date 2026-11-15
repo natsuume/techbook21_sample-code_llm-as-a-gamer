@@ -8,10 +8,13 @@ from switch2_layers.frames.surface_frames import (
     BOX_COLORS,
     SURFACE_MAX_FRAMES,
     SURFACE_WINDOW_S,
+    BoxDrawingPlan,
     build_surface_image,
     draw_boxes,
     draw_frame_time,
+    drawn_boxes_key,
     format_frame_label,
+    select_boxes_to_draw,
     select_surface_frames,
 )
 from switch2_layers.surface.surface_types import Box, BoxSource
@@ -212,3 +215,87 @@ def test_build_surface_image_draws_boxes_and_time():
     # JPEG の誤差の範囲で、box を描いてから時刻を書いた画像と同じ
     difference = np.abs(decoded.astype(int) - expected_bgr.astype(int))
     assert float(difference.mean()) < 2.0
+
+
+def test_draw_boxes_colors_follow_numbers_in_target_list():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    first = Box("a", 0.1, 0.6, 0.2, 0.8, 0.9, BoxSource.TRACKER)
+    second = Box("b", 0.6, 0.6, 0.8, 0.8, None, BoxSource.JEV)
+    # 一覧の番号で色を決める (並びの位置ではない)。5 番は先頭の色に戻る
+    drawn = draw_boxes(image, [first, second], {"a": 3, "b": 5})
+    assert tuple(int(v) for v in drawn[250, 64]) == BOX_COLORS[2]
+    assert tuple(int(v) for v in drawn[250, 384]) == BOX_COLORS[0]
+
+
+def test_same_target_keeps_its_color_when_another_target_is_missing():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    second = Box("b", 0.6, 0.6, 0.8, 0.8, None, BoxSource.JEV)
+    # 1 番の対象を見失っていても、2 番の対象は 2 番の色
+    drawn = draw_boxes(image, [second], {"a": 1, "b": 2})
+    assert tuple(int(v) for v in drawn[250, 384]) == BOX_COLORS[1]
+
+
+def test_draw_boxes_skips_names_without_numbers():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    drawn = draw_boxes(image, [BOX], {"敵": 1})
+    assert np.array_equal(drawn, image)
+
+
+def test_build_surface_image_passes_target_numbers():
+    frame = CapturedFrame(t=3.25, nv12=gray_nv12(1280, 720))
+    first = build_surface_image(
+        frame, width=640, boxes=[BOX], target_numbers={"自機": 1}
+    )
+    second = build_surface_image(
+        frame, width=640, boxes=[BOX], target_numbers={"自機": 2}
+    )
+    decoded = cv2.imdecode(np.frombuffer(second.jpeg, np.uint8), cv2.IMREAD_COLOR)
+    shrunk = shrink_to_width(nv12_to_bgr(frame.nv12), 640)
+    expected_bgr = draw_frame_time(draw_boxes(shrunk, [BOX], {"自機": 2}), 3.25)
+    difference = np.abs(decoded.astype(int) - expected_bgr.astype(int))
+    assert float(difference.mean()) < 2.0
+    assert first.jpeg != second.jpeg
+
+
+# --- 書き込む box の選び方と、保存の重複を除くキー ---
+
+PLAYER = Box("自機", 0.1, 0.1, 0.2, 0.2, 0.9, BoxSource.TRACKER)
+ENEMY = Box("敵", 0.5, 0.5, 0.6, 0.6, 0.8, BoxSource.TRACKER)
+DOOR = Box("扉", 0.7, 0.1, 0.8, 0.3, 0.7, BoxSource.TRACKER)
+
+
+def test_select_boxes_without_plan_keeps_all():
+    assert select_boxes_to_draw([PLAYER, ENEMY], None, is_latest=True) == (
+        PLAYER,
+        ENEMY,
+    )
+
+
+def test_requeried_target_is_hidden_only_on_latest_frame():
+    plan = BoxDrawingPlan(
+        target_numbers={"自機": 1, "敵": 2}, hidden_on_latest=frozenset({"自機"})
+    )
+    assert select_boxes_to_draw([PLAYER, ENEMY], plan, is_latest=True) == (ENEMY,)
+    assert select_boxes_to_draw([PLAYER, ENEMY], plan, is_latest=False) == (
+        PLAYER,
+        ENEMY,
+    )
+
+
+def test_boxes_of_targets_outside_the_list_are_not_drawn():
+    plan = BoxDrawingPlan(target_numbers={"自機": 1, "敵": 2})
+    assert select_boxes_to_draw([PLAYER, DOOR, ENEMY], plan, is_latest=False) == (
+        PLAYER,
+        ENEMY,
+    )
+
+
+def test_drawn_boxes_key_is_names_and_coordinates():
+    assert drawn_boxes_key([]) == ()
+    assert drawn_boxes_key([PLAYER, ENEMY]) == (
+        ("自機", 0.1, 0.1, 0.2, 0.2),
+        ("敵", 0.5, 0.5, 0.6, 0.6),
+    )
+    # 確信度と出どころは画像に書かないので、キーに入れない
+    same_place = Box("自機", 0.1, 0.1, 0.2, 0.2, None, BoxSource.JEV)
+    assert drawn_boxes_key([same_place]) == drawn_boxes_key([PLAYER])

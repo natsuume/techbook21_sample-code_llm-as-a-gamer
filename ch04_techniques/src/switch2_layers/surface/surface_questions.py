@@ -22,6 +22,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from switch2_remote.controller_state import BUTTON_ORDER
+
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.surface.box_targets import BoxTarget
 
@@ -208,12 +210,20 @@ def box_exists_question_name(number: int) -> str:
 
     number が 1 未満なら ValueError。
     """
-    raise NotImplementedError
+    _check_target_number(number)
+    return f"box_exists_{number}"
 
 
 def box_question_name(number: int) -> str:
     """対象の一覧の <number> 番目 (1 始まり) の対象の、box の問いの ID box_<number> を返す。number が 1 未満なら ValueError。"""
-    raise NotImplementedError
+    _check_target_number(number)
+    return f"box_{number}"
+
+
+def _check_target_number(number: int) -> None:
+    """対象の番号 number が 1 未満なら ValueError にする。"""
+    if number < 1:
+        raise ValueError(f"target number must be 1 or more: {number}")
 
 
 def latest_frame_path(frame_count: int) -> str:
@@ -221,7 +231,9 @@ def latest_frame_path(frame_count: int) -> str:
 
     `frames[<frame_count - 1>].image` の形 (例: 5 枚なら frames[4].image)。frame_count が 1 未満なら ValueError。
     """
-    raise NotImplementedError
+    if frame_count < 1:
+        raise ValueError(f"frame_count must be 1 or more: {frame_count}")
+    return f"{FRAMES_STATE_KEY}[{frame_count - 1}].image"
 
 
 def build_button_questions(allowed_buttons: Collection[str]) -> list[SurfaceQuestion]:
@@ -231,7 +243,18 @@ def build_button_questions(allowed_buttons: Collection[str]) -> list[SurfaceQues
     文は「今、<BUTTON_LABELS の呼び名>をどうするか。」(例: 「今、A ボタンをどうするか。」)。
     allowed_buttons の中の BUTTON_ORDER に無い名前は無視する。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=f"button_{button}",
+            instructions=f"今、{BUTTON_LABELS[button]}をどうするか。",
+            kind=QuestionKind.BUTTON,
+            target=button,
+            question_type=QuestionType.CHOICE,
+            choices=BUTTON_CHOICES,
+        )
+        for button in BUTTON_ORDER
+        if button in allowed_buttons
+    ]
 
 
 def build_stick_direction_questions() -> list[SurfaceQuestion]:
@@ -240,7 +263,20 @@ def build_stick_direction_questions() -> list[SurfaceQuestion]:
     name は stick_<スティック>_<軸>、target は <スティック>_<軸>、型は choice、選択肢は STICK_DIRECTION_CHOICES[軸]。
     文は「今、<スティックの呼び名>を<軸の呼び名>に倒すか。」(例: 「今、左スティックを左右に倒すか。」)。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=f"stick_{stick}_{axis}",
+            instructions=(
+                f"今、{STICK_LABELS[stick]}を{STICK_AXIS_LABELS[axis]}に倒すか。"
+            ),
+            kind=QuestionKind.STICK_DIRECTION,
+            target=f"{stick}_{axis}",
+            question_type=QuestionType.CHOICE,
+            choices=STICK_DIRECTION_CHOICES[axis],
+        )
+        for stick in STICKS
+        for axis in STICK_AXES
+    ]
 
 
 def build_stick_strength_questions() -> list[SurfaceQuestion]:
@@ -250,7 +286,22 @@ def build_stick_strength_questions() -> list[SurfaceQuestion]:
     50 と 75 の文は「<スティックの呼び名>を<軸の呼び名>に倒す場合、傾きを <段階>% 以上にするべきか。」、
     100 の文は「<スティックの呼び名>を<軸の呼び名>に倒す場合、傾きをいっぱい (100%) にするべきか。」。
     """
-    raise NotImplementedError
+    questions: list[SurfaceQuestion] = []
+    for stick in STICKS:
+        for axis in STICK_AXES:
+            subject = f"{STICK_LABELS[stick]}を{STICK_AXIS_LABELS[axis]}に倒す場合"
+            for level in STICK_STRENGTH_LEVELS:
+                amount = "いっぱい (100%) " if level == 100 else f" {level}% 以上"
+                questions.append(
+                    SurfaceQuestion(
+                        name=f"stick_{stick}_{axis}_at_least_{level}",
+                        instructions=f"{subject}、傾きを{amount}にするべきか。",
+                        kind=QuestionKind.STICK_STRENGTH,
+                        target=f"{stick}_{axis}_{level}",
+                        question_type=QuestionType.NOUL,
+                    )
+                )
+    return questions
 
 
 def build_advisor_questions() -> list[SurfaceQuestion]:
@@ -258,7 +309,16 @@ def build_advisor_questions() -> list[SurfaceQuestion]:
 
     name は advisor_<種類の値>、target は種類の値、型は noul、文は ADVISOR_QUESTION_TEXTS[種類]。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=f"advisor_{kind.value}",
+            instructions=ADVISOR_QUESTION_TEXTS[kind],
+            kind=QuestionKind.ADVISOR,
+            target=kind.value,
+            question_type=QuestionType.NOUL,
+        )
+        for kind in ADVISOR_KINDS
+    ]
 
 
 def build_info_label_questions(frame_path: str) -> list[SurfaceQuestion]:
@@ -267,13 +327,28 @@ def build_info_label_questions(frame_path: str) -> list[SurfaceQuestion]:
     name は info_<名前>、target は名前、型は noul、文は INFO_LABEL_QUESTION_TEXTS[名前] の {frame} を frame_path
     (latest_frame_path の値) に置き換えたもの。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=f"info_{name}",
+            instructions=INFO_LABEL_QUESTION_TEXTS[name].format(frame=frame_path),
+            kind=QuestionKind.INFO_LABEL,
+            target=name,
+            question_type=QuestionType.NOUL,
+        )
+        for name in INFO_LABEL_NAMES
+    ]
 
 
 def build_scene_change_question() -> SurfaceQuestion:
     """場面転換の問いを返す。name は SCENE_CHANGE_QUESTION_NAME、target は空文字列、型は noul、
     文は SCENE_CHANGE_QUESTION_TEXT。"""
-    raise NotImplementedError
+    return SurfaceQuestion(
+        name=SCENE_CHANGE_QUESTION_NAME,
+        instructions=SCENE_CHANGE_QUESTION_TEXT,
+        kind=QuestionKind.SCENE_CHANGE,
+        target="",
+        question_type=QuestionType.NOUL,
+    )
 
 
 def build_box_exists_questions(
@@ -285,7 +360,16 @@ def build_box_exists_questions(
     文は BOX_EXISTS_QUESTION_TEXT の {frame} を frame_path に、{name} と {description} を対象の名前と説明に
     置き換えたもの。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=box_exists_question_name(number),
+            instructions=_target_text(BOX_EXISTS_QUESTION_TEXT, target, frame_path),
+            kind=QuestionKind.BOX_EXISTS,
+            target=target.name,
+            question_type=QuestionType.NOUL,
+        )
+        for number, target in enumerate(targets, start=1)
+    ]
 
 
 def build_box_questions(
@@ -297,7 +381,24 @@ def build_box_questions(
     型は box、文は BOX_QUESTION_TEXT を build_box_exists_questions と同じ規則で置き換えたもの。
     requery_names の中の targets に無い名前は無視する。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=box_question_name(number),
+            instructions=_target_text(BOX_QUESTION_TEXT, target, frame_path),
+            kind=QuestionKind.BOX,
+            target=target.name,
+            question_type=QuestionType.BOX,
+        )
+        for number, target in enumerate(targets, start=1)
+        if target.name in requery_names
+    ]
+
+
+def _target_text(template: str, target: BoxTarget, frame_path: str) -> str:
+    """template の {frame} を frame_path に、{name} と {description} を target の名前と説明に置き換えて返す。"""
+    return template.format(
+        frame=frame_path, name=target.name, description=target.description
+    )
 
 
 def build_surface_questions(
@@ -311,4 +412,14 @@ def build_surface_questions(
     frame_path = latest_frame_path(frame_count) を、情報ラベル・box の存在・box の問いの文に使う。
     ボタンの問いは allowed_buttons のボタンだけ (HOME は --allow-home のときだけ allowed_buttons に入る)。
     """
-    raise NotImplementedError
+    frame_path = latest_frame_path(frame_count)
+    return (
+        *build_button_questions(allowed_buttons),
+        *build_stick_direction_questions(),
+        *build_stick_strength_questions(),
+        *build_advisor_questions(),
+        *build_info_label_questions(frame_path),
+        build_scene_change_question(),
+        *build_box_exists_questions(targets, frame_path),
+        *build_box_questions(targets, requery_names, frame_path),
+    )

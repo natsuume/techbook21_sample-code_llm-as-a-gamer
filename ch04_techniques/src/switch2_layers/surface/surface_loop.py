@@ -1,19 +1,21 @@
 """surface のループ。1 回の要求の処理 (SurfaceLoop.step) と、それを繰り返すスレッドの本体 (SurfaceLoop.run)。
 
 1 回の要求の流れ (step):
-    1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選び、各画像の左上に t を書き込み、追えている box の
-       枠と名前も書き込んで JPEG にする。
-       送る画像は frames/surface/ に保存する (同じ t は 1 回だけ)。2 秒以内のフレームが無ければ要求を送らず、
+    1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選ぶ。2 秒以内のフレームが無ければ要求を送らず、
        NO_FRAME_RETRY_S 秒待って選び直す
     2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書を読む
-    3. SurfaceDecider.decide を呼ぶ
-    4. 出力の操作をボタンの制限に通してから送る (PadOutput.apply)
-    5. 1 行を surface.jsonl に書く
-    6. deep を呼ぶ要求を deep のスケジューラーに渡す
-    7. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
+    3. 画像を作る: 各画像の左上に t を書き込み、追えている box の枠と名前も書き込んで JPEG にする。どの box を
+       書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
+       Box を問い直す対象は、最新のフレームの画像に書き込まない)。
+       送る画像は frames/surface/ に保存する (t と、書き込んだ box の内容の組ごとに 1 回だけ)
+    4. SurfaceDecider.decide を呼ぶ
+    5. 出力の操作をボタンの制限に通してから送る (PadOutput.apply)
+    6. 1 行を surface.jsonl に書く
+    7. deep を呼ぶ要求を deep のスケジューラーに渡す
+    8. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
 decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S 秒待つ。max_errors 回続けたら on_stop で全体を止める。
 ブリッジの復旧中は要求を送らず、操作を中立にして BRIDGE_WAIT_S 秒待つ。
-止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (4 の apply と、decide の失敗の後の neutral) が戻ったとき
+止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (5 の apply と、decide の失敗の後の neutral) が戻ったとき
 (成功・失敗とも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、その回の
 残りの送信・記録 (surface.jsonl・run.jsonl)・deep の要求をせずにループを抜ける (止めた後に記録を増やさない)。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。
@@ -40,8 +42,11 @@ from switch2_layers.frames.frame_store import FrameStore
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
 from switch2_layers.frames.surface_frames import (
     SURFACE_IMAGE_WIDTH,
+    BoxDrawingPlan,
     build_surface_image,
+    drawn_boxes_key,
     format_frame_label,
+    select_boxes_to_draw,
     select_surface_frames,
 )
 from switch2_layers.hardware.pad_output import OutputStoppedError, PadOutput
@@ -141,6 +146,9 @@ class SurfaceLoopParts:
     on_stop         全体を止める関数 (理由の文字列を受け取る)
     boxes_at        フレームの時刻 t を受け取り、その画像に書き込む box を返す関数 (run の surface が jev なら
                     surface.box_tracking_state.BoxTrackingState.boxes_at)。None (既定) なら box を書き込まない
+    plan_boxes      場面 ID を受け取り、その要求の box の書き込み方 (frames.surface_frames.BoxDrawingPlan) を返す関数
+                    (run の surface が jev なら surface.jev_surface.JevSurfaceDecider.plan_boxes)。step が要求ごとに
+                    1 回、画像を作る前に呼ぶ。None (既定) なら、boxes_at の box をすべて書き込み、色は box の並びで決める
     """
 
     paths: RunPaths
@@ -154,6 +162,7 @@ class SurfaceLoopParts:
     bridge_state: Callable[[], str]
     on_stop: Callable[[str], None]
     boxes_at: Callable[[float], Sequence[Box]] | None = None
+    plan_boxes: Callable[[str | None], BoxDrawingPlan] | None = None
 
 
 def surface_failure_reason(count: int) -> str:
@@ -188,11 +197,16 @@ class SurfaceLoop:
            (使えない間は毎回は呼ばない)
         2. now_t = clock.now()。frames.surface_frames.select_surface_frames(frame_buffer.frames(), now_t) が空なら
            NO_FRAMES (wait_s = NO_FRAME_RETRY_S) を返す
-        3. 選んだフレームを build_surface_image(frame, image_width, jpeg_quality, boxes) で JPEG にし、
-           frame_store.save_surface(t, 画像) で保存して、SurfaceFrame(t, jpeg, format_frame_label(t)) にする。
-           boxes は boxes_at(frame.t) (boxes_at が None なら空)。boxes_at が例外 (Exception) を出したら、logging で
+        3. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) を読む
+        4. 書き込み方 plan = plan_boxes(documents.scene_id) を 1 回求める (plan_boxes が None なら plan も None)。
+           plan_boxes が例外 (Exception) を出したら、logging で警告を書き、この要求のどの画像にも box を書き込まない
+           (decide の失敗には数えない)。
+           選んだフレームごとに、boxes_at(frame.t) (boxes_at が None なら空) から
+           frames.surface_frames.select_boxes_to_draw(boxes, plan, 最新のフレームか) で書き込む box を選び、
+           build_surface_image(frame, image_width, jpeg_quality, その box, plan.target_numbers (plan が None なら None))
+           で JPEG にする。frame_store.save_surface(t, 画像, drawn_boxes_key(その box)) で保存して、
+           SurfaceFrame(t, jpeg, format_frame_label(t)) にする。boxes_at が例外 (Exception) を出したら、logging で
            警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。保存する画像と送る画像は同じもの
-        4. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) を読む
         5. t_sent = clock.now() で SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t,
            直近の操作) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
         6. decide が例外 (Exception) を出したら:
@@ -240,9 +254,11 @@ class SurfaceLoop:
             return SurfaceStepResult(
                 SurfaceStepOutcome.NO_FRAMES, NO_FRAME_RETRY_S, None
             )
-        frames, sent_frames = self._prepare_frames(selected)
         context = read_surface_context(parts.paths.middle_state)
         documents = read_surface_documents(parts.paths.notes_dir, context.scene_id)
+        frames, sent_frames = self._prepare_frames(
+            selected, self._box_plan(documents.scene_id)
+        )
         surface_input = SurfaceInput(
             t=now_t,
             frames=frames,
@@ -286,17 +302,57 @@ class SurfaceLoop:
                 return
             stop.wait(result.wait_s)
 
+    def _box_plan(self, scene_id: str | None) -> BoxDrawingPlan | None:
+        """この要求の box の書き込み方を plan_boxes で求める (step の 4)。
+
+        plan_boxes が None なら None。例外を出したら警告を書き、box を書き込まない書き込み方 (対象が空) を返す。
+        """
+        plan_boxes = self.parts.plan_boxes
+        if plan_boxes is None:
+            return None
+        try:
+            return plan_boxes(scene_id)
+        except Exception:
+            logger.warning("planning the surface boxes failed", exc_info=True)
+            return BoxDrawingPlan(target_numbers={})
+
+    def _boxes_at(self, t: float) -> Sequence[Box]:
+        """時刻 t のフレームの box を boxes_at で求める (step の 4)。
+
+        boxes_at が None なら空。例外を出したら警告を書き、空を返す。
+        """
+        boxes_at = self.parts.boxes_at
+        if boxes_at is None:
+            return ()
+        try:
+            return boxes_at(t)
+        except Exception:
+            logger.warning("getting the surface boxes at t=%s failed", t, exc_info=True)
+            return ()
+
     def _prepare_frames(
-        self, selected: Sequence[CapturedFrame]
+        self, selected: Sequence[CapturedFrame], plan: BoxDrawingPlan | None
     ) -> tuple[tuple[SurfaceFrame, ...], tuple[SentFrame, ...]]:
-        """選んだフレームを JPEG にして保存を予約し、(送る画像, 記録に書く画像) を返す (step の 3)。"""
+        """選んだフレームを、plan のとおりに box を書き込んだ JPEG にして保存を予約し、(送る画像, 記録に書く画像) を
+        返す (step の 4)。"""
         frames: list[SurfaceFrame] = []
         sent_frames: list[SentFrame] = []
+        latest_t = selected[-1].t
+        target_numbers = None if plan is None else plan.target_numbers
         for frame in selected:
-            image = build_surface_image(
-                frame, self.settings.image_width, self.settings.jpeg_quality
+            boxes = select_boxes_to_draw(
+                self._boxes_at(frame.t), plan, frame.t == latest_t
             )
-            file = self.parts.frame_store.save_surface(frame.t, image)
+            image = build_surface_image(
+                frame,
+                self.settings.image_width,
+                self.settings.jpeg_quality,
+                boxes,
+                target_numbers,
+            )
+            file = self.parts.frame_store.save_surface(
+                frame.t, image, drawn_boxes_key(boxes)
+            )
             frames.append(
                 SurfaceFrame(frame.t, image.jpeg, format_frame_label(frame.t))
             )

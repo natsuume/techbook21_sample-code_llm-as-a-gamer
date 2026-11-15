@@ -16,6 +16,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from switch2_layers.file_io import read_text_or_empty
+from switch2_layers.notes.note_paths import COMMON_DIR, SCENES_DIR, is_scene_id
+
 BOX_TARGETS_FILE = "box_targets.md"
 MAX_BOX_TARGETS = 8  # 1 回の要求で box を取る対象の最大の数
 BOX_TARGETS_HEADING = "# box で取るもの"
@@ -46,7 +49,7 @@ DEFAULT_BOX_TARGETS: tuple[BoxTarget, ...] = (
 
 def common_box_targets_note() -> str:
     """共通の対象の一覧の notes/ からの相対パス common/box_targets.md を返す (notes.note_paths.COMMON_DIR の下)。"""
-    raise NotImplementedError
+    return f"{COMMON_DIR}/{BOX_TARGETS_FILE}"
 
 
 def scene_box_targets_note(scene_id: str) -> str:
@@ -54,7 +57,9 @@ def scene_box_targets_note(scene_id: str) -> str:
 
     scene_id が場面 ID の形 (notes.note_paths.is_scene_id) でなければ ValueError。
     """
-    raise NotImplementedError
+    if not is_scene_id(scene_id):
+        raise ValueError(f"invalid scene id: {scene_id!r}")
+    return f"{SCENES_DIR}/{scene_id}/{BOX_TARGETS_FILE}"
 
 
 def initial_box_targets_text() -> str:
@@ -63,7 +68,11 @@ def initial_box_targets_text() -> str:
     1 行目が BOX_TARGETS_HEADING、空行の後に、DEFAULT_BOX_TARGETS を順に 1 行ずつ `- <名前>: <説明>` で並べる。
     末尾は改行。parse_box_targets で読み直すと DEFAULT_BOX_TARGETS になる。
     """
-    raise NotImplementedError
+    lines = [BOX_TARGETS_HEADING, ""]
+    lines += [
+        f"- {target.name}: {target.description}" for target in DEFAULT_BOX_TARGETS
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def parse_box_targets(text: str) -> tuple[BoxTarget, ...]:
@@ -73,7 +82,21 @@ def parse_box_targets(text: str) -> tuple[BoxTarget, ...]:
     どちらかが空の行、同じ名前の 2 つ目以降の行は無視する。MAX_BOX_TARGETS 個に達したら残りの行は読まない。
     書式に合う行が無ければ空のタプルを返す。
     """
-    raise NotImplementedError
+    targets: list[BoxTarget] = []
+    seen_names: set[str] = set()
+    for line in text.splitlines():
+        if len(targets) >= MAX_BOX_TARGETS:
+            break
+        match = BOX_TARGET_LINE_PATTERN.fullmatch(line.rstrip())
+        if match is None:
+            continue
+        name = match.group("name").strip()
+        description = match.group("description").strip()
+        if not name or not description or name in seen_names:
+            continue
+        seen_names.add(name)
+        targets.append(BoxTarget(name, description))
+    return tuple(targets)
 
 
 def read_box_targets(notes_dir: Path, scene_id: str | None) -> tuple[BoxTarget, ...]:
@@ -82,4 +105,16 @@ def read_box_targets(notes_dir: Path, scene_id: str | None) -> tuple[BoxTarget, 
     scene_id が None、または場面 ID の形でなければ、場面が決まっていないものとして 1 を飛ばす。
     戻り値は 1〜MAX_BOX_TARGETS 個 (どのファイルも空なら DEFAULT_BOX_TARGETS)。
     """
-    raise NotImplementedError
+    if scene_id is not None and is_scene_id(scene_id):
+        scene_targets = _read_targets_file(notes_dir / scene_box_targets_note(scene_id))
+        if scene_targets:
+            return scene_targets
+    common_targets = _read_targets_file(notes_dir / common_box_targets_note())
+    if common_targets:
+        return common_targets
+    return DEFAULT_BOX_TARGETS
+
+
+def _read_targets_file(path: Path) -> tuple[BoxTarget, ...]:
+    """path の対象の一覧を読む。無い・読めないファイルは空のタプルにする (file_io.read_text_or_empty)。"""
+    return parse_box_targets(read_text_or_empty(path))

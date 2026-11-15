@@ -17,7 +17,7 @@ from switch2_layers.deep.deep_types import (
 from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
-from switch2_layers.frames.surface_frames import build_surface_image
+from switch2_layers.frames.surface_frames import BoxDrawingPlan, build_surface_image
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
 from switch2_layers.records.run_log import RunLog
@@ -798,6 +798,106 @@ def test_boxes_error_draws_no_boxes_without_counting_as_failure(tmp_path):
     result = harness.loop.step()
     assert result.outcome is SurfaceStepOutcome.SENT
     assert boxes.calls == [10.0]
+    frame = harness.buffer.frames()[0]
+    assert (
+        decider.inputs[0].frames[0].jpeg
+        == build_surface_image(frame, 320, DEFAULT_JPEG_QUALITY).jpeg
+    )
+    assert harness.loop.consecutive_errors == 0
+
+
+# --- 要求ごとの書き込み方 (plan_boxes) ---
+
+PLAYER = Box("自機", 0.1, 0.1, 0.4, 0.5, 0.9, BoxSource.TRACKER)
+ENEMY = Box("敵", 0.5, 0.4, 0.9, 0.9, 0.8, BoxSource.TRACKER)
+NUMBERS = {"自機": 1, "敵": 2}
+
+
+class RecordingPlan:
+    """plan_boxes の偽物。呼ばれた場面 ID を記録し、plans を順に返す (最後の 1 つは繰り返す)。"""
+
+    def __init__(self, *plans: BoxDrawingPlan | Exception):
+        self.plans = list(plans)
+        self.calls: list[str | None] = []
+
+    def __call__(self, scene_id: str | None) -> BoxDrawingPlan:
+        self.calls.append(scene_id)
+        plan = self.plans.pop(0) if len(self.plans) > 1 else self.plans[0]
+        if isinstance(plan, Exception):
+            raise plan
+        return plan
+
+
+def with_plan(harness: Harness, plan_boxes: RecordingPlan) -> None:
+    """harness のループを、boxes_at がいつも [PLAYER, ENEMY] を返し、plan_boxes を使うものに作り直す。"""
+    parts = dataclasses.replace(
+        harness.loop.parts, boxes_at=lambda t: [PLAYER, ENEMY], plan_boxes=plan_boxes
+    )
+    harness.loop = SurfaceLoop(parts, harness.loop.settings)
+
+
+def expected_jpeg(frame: CapturedFrame, boxes: list[Box]) -> bytes:
+    return build_surface_image(frame, 320, DEFAULT_JPEG_QUALITY, boxes, NUMBERS).jpeg
+
+
+def test_requeried_target_is_not_drawn_on_latest_frame(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    write_state(harness.root, scene_id="scene-002")
+    plan = RecordingPlan(BoxDrawingPlan(NUMBERS, hidden_on_latest=frozenset({"自機"})))
+    with_plan(harness, plan)
+    add_frames(harness, [9.0, 10.0])
+    assert harness.loop.step().outcome is SurfaceStepOutcome.SENT
+    # 要求ごとに 1 回、文書の場面 ID で求める
+    assert plan.calls == ["scene-002"]
+    frames = {frame.t: frame for frame in harness.buffer.frames()}
+    sent = decider.inputs[0].frames
+    # 古いフレームには両方、最新のフレームには問い直す対象 (自機) を除いて書き込む
+    assert sent[0].jpeg == expected_jpeg(frames[9.0], [PLAYER, ENEMY])
+    assert sent[1].jpeg == expected_jpeg(frames[10.0], [ENEMY])
+
+
+def test_same_t_with_different_boxes_is_saved_to_another_file(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    plan = RecordingPlan(
+        BoxDrawingPlan(NUMBERS, hidden_on_latest=frozenset({"自機"})),
+        BoxDrawingPlan(NUMBERS),
+    )
+    with_plan(harness, plan)
+    add_frames(harness, [9.0, 10.0])
+    harness.loop.step()
+    # 次の要求では t = 10.0 は最新でなくなり、自機も書き込むので、別のファイルに保存する
+    harness.monotonic.now = ORIGIN + 10.5
+    add_frames(harness, [10.5])
+    harness.loop.step()
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert [frame["file"] for frame in rows[0]["frames"]] == [
+        "frames/surface/000009000.jpg",
+        "frames/surface/000010000.jpg",
+    ]
+    assert [frame["file"] for frame in rows[1]["frames"]] == [
+        "frames/surface/000009000.jpg",
+        "frames/surface/000010000-2.jpg",
+        "frames/surface/000010500.jpg",
+    ]
+    harness.store.write_queued()
+    surface_dir = harness.root / "frames" / "surface"
+    first_sent = decider.inputs[0].frames[1].jpeg
+    second_sent = decider.inputs[1].frames[1].jpeg
+    # 記録の file は、その要求で送った画像を指す
+    assert (surface_dir / "000010000.jpg").read_bytes() == first_sent
+    assert (surface_dir / "000010000-2.jpg").read_bytes() == second_sent
+    assert first_sent != second_sent
+
+
+def test_plan_error_draws_no_boxes_without_counting_as_failure(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    with_plan(harness, RecordingPlan(RuntimeError("no run directory")))
+    add_frames(harness, [10.0])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
     frame = harness.buffer.frames()[0]
     assert (
         decider.inputs[0].frames[0].jpeg

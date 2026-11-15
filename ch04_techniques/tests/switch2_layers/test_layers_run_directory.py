@@ -109,6 +109,22 @@ def test_frame_file_name_uses_nine_digit_milliseconds():
         frame_file_name(-0.5)
 
 
+def test_numbered_frame_file_name_for_second_and_later_contents():
+    assert frame_file_name(12.345, 1) == "000012345.jpg"
+    assert frame_file_name(12.345, 2) == "000012345-2.jpg"
+    assert frame_file_name(0.1, 13) == "000000100-13.jpg"
+    with pytest.raises(ValueError):
+        frame_file_name(1.0, 0)
+
+
+def test_numbered_surface_frame_path():
+    root = Path("/runs/20261115-142233")
+    paths = RunPaths(root)
+    assert paths.surface_frame(2.0, 3) == (
+        root / "frames" / "surface" / "000002000-3.jpg"
+    )
+
+
 def test_frame_paths_and_relative_paths():
     root = Path("/runs/20261115-142233")
     paths = RunPaths(root)

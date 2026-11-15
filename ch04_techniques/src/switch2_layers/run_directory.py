@@ -4,7 +4,8 @@
     run.jsonl                               実行の記録 (records.run_log)
     frames.jsonl                            保存した画像の一覧 (frames.frame_store)
     frames/interval/<tミリ秒9桁>.jpg          一定間隔のフレーム
-    frames/surface/<tミリ秒9桁>.jpg           surface に送った画像
+    frames/surface/<tミリ秒9桁>.jpg           surface に送った画像 (同じ t で書き込んだ box が違う 2 つ目以降は
+                                            <tミリ秒9桁>-2.jpg・<tミリ秒9桁>-3.jpg …)
     surface.jsonl                           surface の 1 回ごとの記録
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
@@ -30,6 +31,10 @@ from switch2_layers.notes.note_paths import (
     STRATEGY_NOTE,
 )
 from switch2_layers.run_clock import t_to_milliseconds
+from switch2_layers.surface.box_targets import (
+    common_box_targets_note,
+    initial_box_targets_text,
+)
 
 RUN_DIRECTORY_NAME_FORMAT = "%Y%m%d-%H%M%S"
 RUN_LOG_FILE = "run.jsonl"
@@ -122,23 +127,32 @@ class RunPaths:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
         return self.interval_frames_dir / frame_file_name(t)
 
-    def surface_frame(self, t: float) -> Path:
-        """時刻 t の surface に送った画像のパス surface_frames_dir / frame_file_name(t)。"""
-        return self.surface_frames_dir / frame_file_name(t)
+    def surface_frame(self, t: float, number: int = 1) -> Path:
+        """時刻 t の surface に送った画像のうち number 番目 (1 始まり) の内容のもののパス
+        surface_frames_dir / frame_file_name(t, number)。"""
+        return self.surface_frames_dir / frame_file_name(t, number)
 
     def relative(self, path: Path) -> str:
         """path の root からの相対パスを / 区切りの文字列で返す (記録の file に書く形)。root の外なら ValueError。"""
         return path.relative_to(self.root).as_posix()
 
 
-def frame_file_name(t: float) -> str:
-    """時刻 t の画像のファイル名 `<tミリ秒9桁>.jpg` を返す (例: t=12.345 → 000012345.jpg)。
+def frame_file_name(t: float, number: int = 1) -> str:
+    """時刻 t の画像のファイル名を返す。
 
-    ミリ秒は run_clock.t_to_milliseconds(t)。9 桁に満たなければ先頭を 0 で埋める。t が負なら ValueError。
+    number が 1 なら `<tミリ秒9桁>.jpg` (例: t=12.345 → 000012345.jpg)、2 以上なら `<tミリ秒9桁>-<number>.jpg`
+    (例: 000012345-2.jpg。同じ t で内容の違う 2 つ目以降の surface の画像に使う)。
+    ミリ秒は run_clock.t_to_milliseconds(t)。9 桁に満たなければ先頭を 0 で埋める。t が負か number が 1 未満なら
+    ValueError。
     """
     if t < 0:
         raise ValueError(f"frame time must not be negative: {t}")
-    return f"{t_to_milliseconds(t):0{FRAME_FILE_DIGITS}d}{FRAME_FILE_SUFFIX}"
+    if number < 1:
+        raise ValueError(f"frame file number must be 1 or more: {number}")
+    stem = f"{t_to_milliseconds(t):0{FRAME_FILE_DIGITS}d}"
+    if number > 1:
+        stem = f"{stem}-{number}"
+    return f"{stem}{FRAME_FILE_SUFFIX}"
 
 
 def run_directory_name(started_at: datetime) -> str:
@@ -224,6 +238,7 @@ def write_initial_notes(paths: RunPaths, allowed_buttons: Collection[str]) -> No
         notes / COMMON_DIR / "controls.md", initial_common_controls(allowed_buttons)
     )
     write_text_atomic(notes / COMMON_DIR / "tips.md", INITIAL_COMMON_TIPS)
+    write_text_atomic(notes / common_box_targets_note(), initial_box_targets_text())
     write_text_atomic(notes / STRATEGY_NOTE, INITIAL_STRATEGY)
     write_text_atomic(notes / ADVICE_NOTE, INITIAL_ADVICE)
     write_json_atomic(notes / SCENE_LABELS_FILE, INITIAL_SCENE_LABELS)

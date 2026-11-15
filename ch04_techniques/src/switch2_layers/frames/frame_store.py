@@ -4,8 +4,10 @@
   frames/interval/<tミリ秒9桁>.jpg に保存する。保存の予定時刻を 1 / interval_fps 秒ずつ進め (advance_interval_schedule)、
   予定時刻以後の最初のフレームを保存する。予定時刻を保存したフレームの t からではなく前回の予定時刻から進めるため、
   キャプチャーのフレームの間隔 (0.1 秒) の倍数でない間隔 (3・7・9 fps など) でも、平均して指定のレートになる
-- surface の画像の保存: surface に送った JPEG を frames/surface/<tミリ秒9桁>.jpg に保存する。
-  同じキャプチャー時刻 (t のミリ秒) のフレームを複数の要求で送った場合は 1 回だけ保存する
+- surface の画像の保存: surface に送った JPEG を frames/surface/ に保存する。キャプチャー時刻 (t のミリ秒) と、
+  画像に書き込んだ box の内容 (frames.surface_frames.drawn_boxes_key) の組ごとに 1 回だけ保存する。
+  ファイル名は、その t で最初に保存する内容なら <tミリ秒9桁>.jpg、同じ t で内容の違う 2 つ目以降は
+  <tミリ秒9桁>-2.jpg・<tミリ秒9桁>-3.jpg … (内容ごとの番号は、保存に失敗しても変えない)
 - 画像は置き換えの書き込み (file_io.write_bytes_atomic) で書き、画像を書き終えた後に frames.jsonl に
   {"t", "kind": "interval" | "surface", "file": 実行ディレクトリーからの相対パス, "width", "height"} の 1 行を足す
 
@@ -21,6 +23,7 @@ close の待ちが時間切れになったら、書き出しスレッドが画�
 import logging
 import threading
 from collections import deque
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -70,12 +73,14 @@ class FrameRecord:
 
 @dataclass(frozen=True)
 class _SaveItem:
-    """キューに入れる保存の 1 件。interval なら nv12、surface なら image を持つ。"""
+    """キューに入れる保存の 1 件。interval なら nv12、surface なら image と、内容 (content) とその番号 (number) を持つ。"""
 
     kind: FrameKind
     t: float
     nv12: np.ndarray | None = None
     image: EncodedImage | None = None
+    content: Hashable = ()
+    number: int = 1
 
 
 def _record_from_row(row: dict[str, object]) -> FrameRecord | None:
@@ -193,8 +198,10 @@ class FrameStore:
         self._condition = threading.Condition()
         self._queue: deque[_SaveItem] = deque()
         self._next_due_t: float | None = None
-        # 予約した (キューに入れた、または書けた) surface の画像の t (ミリ秒)
-        self._reserved_surface: set[int] = set()
+        # 予約した (キューに入れた、または書けた) surface の画像の (t のミリ秒, 内容)
+        self._reserved_surface: set[tuple[int, Hashable]] = set()
+        # surface の画像の t のミリ秒 → その t で受け付けた内容の並び (位置 + 1 がファイル名の番号)
+        self._surface_contents: dict[int, list[Hashable]] = {}
         self._written = 0
         self._dropped = 0
         self._accepting = True
@@ -233,29 +240,45 @@ class FrameStore:
             self._condition.notify_all()
             return True
 
-    def save_surface(self, t: float, image: EncodedImage) -> str | None:
+    def save_surface(
+        self, t: float, image: EncodedImage, content: Hashable = ()
+    ) -> str | None:
         """surface に送った時刻 t のフレームの画像 image を、保存の分としてキューに入れる。
 
-        戻り値は保存先の実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg)。この相対パスは
-        「保存を予約した」ことを表し、画像を書き終えたことは表さない (書き込みに失敗するか、close で捨てられて、
-        画像が書かれないことがある)。
-        - 同じ t (ミリ秒) の画像をキューに入れて、まだ書き込みに失敗していなければ、入れずに同じ相対パスを返す
-          (1 回だけ保存する)
+        content は画像に書き込んだ box の内容 (frames.surface_frames.drawn_boxes_key の値。box を書き込んでいなければ
+        空のタプル)。戻り値は保存先の実行ディレクトリーからの相対パスで、t (ミリ秒) と content の組ごとに決まる:
+        その t で最初に渡された content なら frames/surface/<tミリ秒9桁>.jpg、同じ t で n 番目 (n >= 2) に渡された
+        違う content なら frames/surface/<tミリ秒9桁>-<n>.jpg。組の番号は一度決めたら変えない。
+        この相対パスは「保存を予約した」ことを表し、画像を書き終えたことは表さない (書き込みに失敗するか、close で
+        捨てられて、画像が書かれないことがある)。
+        - 同じ t (ミリ秒) と content の組の画像をキューに入れて、まだ書き込みに失敗していなければ、入れずに同じ
+          相対パスを返す (組ごとに 1 回だけ保存する)
         - キューが満杯か、close の後なら入れずに dropped を 1 増やして None を返す
-          (その t は保存していないものとして扱い、次に同じ t が渡されたときにもう一度入れようとする)
-        - 書き込みに失敗した t と、close で書き終えられずに捨てた t は、予約から外す。次に同じ t が渡されたときに
-          もう一度入れようとする
+          (その組は保存していないものとして扱い、次に同じ組が渡されたときにもう一度入れようとする)
+        - 書き込みに失敗した組と、close で書き終えられずに捨てた組は、予約から外す。次に同じ組が渡されたときに
+          もう一度 (同じ相対パスで) 入れようとする
         """
         milliseconds = t_to_milliseconds(t)
-        relative = self.paths.relative(self.paths.surface_frame(t))
         with self._condition:
-            if milliseconds in self._reserved_surface:
+            contents = self._surface_contents.setdefault(milliseconds, [])
+            if content in contents:
+                number = contents.index(content) + 1
+            else:
+                number = len(contents) + 1
+            relative = self.paths.relative(self.paths.surface_frame(t, number))
+            if (milliseconds, content) in self._reserved_surface:
                 return relative
             if not self._accepting or len(self._queue) >= self.capacity:
                 self._dropped += 1
                 return None
-            self._reserved_surface.add(milliseconds)
-            self._queue.append(_SaveItem(kind="surface", t=t, image=image))
+            if content not in contents:
+                contents.append(content)
+            self._reserved_surface.add((milliseconds, content))
+            self._queue.append(
+                _SaveItem(
+                    kind="surface", t=t, image=image, content=content, number=number
+                )
+            )
             self._condition.notify_all()
             return relative
 
@@ -382,7 +405,7 @@ class FrameStore:
             if item.image is None:
                 raise ValueError("surface frame without image")
             image = item.image
-            path = self.paths.surface_frame(item.t)
+            path = self.paths.surface_frame(item.t, item.number)
         write_bytes_atomic(path, image.jpeg)
         return FrameRecord(
             t=item.t,
@@ -393,9 +416,9 @@ class FrameStore:
         )
 
     def _release_reservation_locked(self, item: _SaveItem) -> None:
-        """surface の画像なら、その t の予約を外す。呼び出し側が _condition を持つ。"""
+        """surface の画像なら、その t と内容の組の予約を外す (組の番号は残す)。呼び出し側が _condition を持つ。"""
         if item.kind == "surface":
-            self._reserved_surface.discard(t_to_milliseconds(item.t))
+            self._reserved_surface.discard((t_to_milliseconds(item.t), item.content))
 
     def _run_writer(self) -> None:
         """書き出しスレッドの本体。キューの分を古い順に書き、受け付けをやめてキューが空になったら終わる。"""

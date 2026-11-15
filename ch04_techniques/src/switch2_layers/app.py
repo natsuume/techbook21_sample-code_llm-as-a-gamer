@@ -3,7 +3,7 @@
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep) は LayersParts で受け取る。
 cli の run は実機の部品と各層 (surface は --surface で選ぶ。middle と deep はフェイク) を渡し、テストはフェイクの
 キャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点 (on_frame・surface_boxes_at・
-on_run_directory) も LayersParts で受け取る。
+surface_plan_boxes・on_run_directory) も LayersParts で受け取る。
 
 止まる条件 (どれも、操作を中立にして出力を止め、全体を止めて、run.jsonl の stop に理由を書く):
     - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED
@@ -39,6 +39,7 @@ from switch2_layers.deep.deep_types import DeepRunner
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
+from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
 from switch2_layers.hardware.capture_watcher import CaptureWatcher
 from switch2_layers.hardware.pad_output import PadOutput, ReportSender
@@ -101,6 +102,9 @@ class LayersParts:
     on_run_directory
                     実行ディレクトリーを作った後に 1 回呼ぶ関数 (RunPaths を受け取る)。run の surface が jev なら、
                     対象の一覧を読む notes/ を surface に渡す。None (既定) なら呼ばない
+    surface_plan_boxes
+                    surface に送る画像への box の書き込み方を、要求ごとに場面 ID から返す関数
+                    (SurfaceLoopParts.plan_boxes)。None (既定) なら、surface_boxes_at の box をすべて書き込む
     """
 
     frame_reader: LatestFrameReader
@@ -114,6 +118,7 @@ class LayersParts:
     on_frame: Callable[[CapturedFrame], None] | None = None
     surface_boxes_at: Callable[[float], Sequence[Box]] | None = None
     on_run_directory: Callable[[RunPaths], None] | None = None
+    surface_plan_boxes: Callable[[str | None], BoxDrawingPlan] | None = None
 
 
 @dataclass(frozen=True)
@@ -215,7 +220,8 @@ class LayersApp:
            on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            timeout_s は deep_timeout_s) を作って start する (タイムアウトと自動の呼び出しの判定のスレッド)
-        7. SurfaceLoop (max_errors = max_surface_errors、boxes_at = parts.surface_boxes_at) と
+        7. SurfaceLoop (max_errors = max_surface_errors、boxes_at = parts.surface_boxes_at、
+           plan_boxes = parts.surface_plan_boxes) と
            MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
            on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
@@ -258,6 +264,8 @@ class LayersApp:
             EVENT_START, run_dir=str(paths.root), args=run_settings_to_json(settings)
         )
         built.run_log = run_log
+        if parts.on_run_directory is not None:
+            parts.on_run_directory(paths)
         # 4: 操作の送信
         operation_log = OperationLog(paths.operations_log, clock)
         pad_output = PadOutput(
@@ -272,7 +280,11 @@ class LayersApp:
         frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
         built.frame_store = frame_store
         capture_source = CaptureSource(
-            parts.frame_reader, clock, frame_buffer, frame_store
+            parts.frame_reader,
+            clock,
+            frame_buffer,
+            frame_store,
+            on_frame=parts.on_frame,
         )
         built.capture_source = capture_source
         capture_watcher = CaptureWatcher(
@@ -311,6 +323,8 @@ class LayersApp:
                 clock=clock,
                 bridge_state=parts.bridge_state,
                 on_stop=self.request_stop,
+                boxes_at=parts.surface_boxes_at,
+                plan_boxes=parts.surface_plan_boxes,
             ),
             SurfaceLoopSettings(max_errors=settings.max_surface_errors),
         )

@@ -13,7 +13,7 @@ class SurfaceFrame:
     """surface に送る画像 1 枚。
 
     t       フレームの時刻 (実行の経過秒)
-    jpeg    左上に t を書き込んだ JPEG のバイト列 (frames.surface_frames.build_surface_image)
+    jpeg    左上に t を、追えている box の枠と名前を書き込んだ JPEG のバイト列 (frames.surface_frames.build_surface_image)
     label   画像のラベル (frames.surface_frames.format_frame_label(t))
     """
 

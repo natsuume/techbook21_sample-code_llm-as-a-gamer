@@ -16,12 +16,20 @@ recent_actions と frames は古い順。画像 (SurfaceInput.frames の JPEG) �
     1. 要求の番号を 1 増やす (最初の decide が 1)
     2. 対象の一覧を surface.box_targets.read_box_targets(notes/, 場面 ID) で読み、BoxTrackingState.set_targets に渡す
     3. 問い直す対象を box_tracking_state.select_requery_targets で選ぶ
+       (2 と 3 は、送る画像を作る前に plan_boxes で済ませていれば、そのときの結果を使う)
     4. 問いの一覧 (surface_questions.build_surface_questions) と state を作り、JevClient.ask で送る
     5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)
     6. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
-       Jev の box を出す (出どころ jev)。Jev の box が使えない (幅か高さが 0 以下で None) なら、追跡をやめ、box を
-       出さない。ほかの対象は、要求の最新のフレームで追跡が見えていれば、その位置を出す (出どころ tracker)
+       Jev の box を出す (出どころ jev)。Jev の box が使えない (座標か確信度が 0〜1 の外、幅か高さが 0 以下で
+       None) なら、追跡をやめ、box を出さない。ほかの対象は、要求の最新のフレームで追跡が見えていれば、その位置を
+       出す (出どころ tracker)
 ask の例外 (JevError など) はそのまま外に出す (surface のループが surface の失敗として数える)。
+
+送る画像への box の書き込み (plan_boxes):
+    surface のループは、送る画像を作る前に plan_boxes(場面 ID) を呼ぶ。plan_boxes は次の要求の 2 と 3 を行って結果を
+    持ち、書き込み方 (frames.surface_frames.BoxDrawingPlan: 対象の一覧の中の番号と、最新のフレームに書き込まない
+    問い直す対象) を返す。続く decide は、要求の番号と場面 ID が同じなら、その結果をそのまま使う
+    (最新のフレームに書き込まなかった対象と、Box を問い直す対象を一致させるため)。
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -29,19 +37,40 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from switch2_layers.frames.surface_frames import BoxDrawingPlan
+from switch2_layers.pad_action import action_to_json
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_THRESHOLD_ADVISOR,
 )
-from switch2_layers.surface.box_tracking_state import BoxTrackingState
+from switch2_layers.surface.action_rules import (
+    decide_deep_kinds,
+    decide_info_labels,
+    decide_pad_action,
+    decide_scene_changed,
+    visible_target_names,
+)
+from switch2_layers.surface.box_targets import BoxTarget, read_box_targets
+from switch2_layers.surface.box_tracker import NormalizedBox
+from switch2_layers.surface.box_tracking_state import (
+    BoxTrackingState,
+    select_requery_targets,
+)
 from switch2_layers.surface.jev_client import (
     JevAnswers,
     JevImage,
     new_asset_reference,
 )
-from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_questions import (
+    SURFACE_INSTRUCTIONS,
+    SurfaceQuestion,
+    box_question_name,
+    build_surface_questions,
+)
 from switch2_layers.surface.surface_types import (
+    Box,
+    BoxSource,
     RecentAction,
     SurfaceDocuments,
     SurfaceInput,
@@ -78,17 +107,39 @@ class JevSurfaceSettings:
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
 
 
+@dataclass(frozen=True)
+class _RequestTargets:
+    """1 回の要求の box の対象 (モジュールの docstring の decide の流れの 2 と 3 の結果)。
+
+    request_index   要求の番号
+    scene_id        対象の一覧を読んだ場面 ID
+    targets         対象の一覧
+    requery_names   Box を問い直す対象の名前 (targets の順)
+    """
+
+    request_index: int
+    scene_id: str | None
+    targets: tuple[BoxTarget, ...]
+    requery_names: tuple[str, ...]
+
+
 def relative_time_label(t: float, request_t: float) -> str:
     """時刻 t のラベル `t=<t を小数第 3 位まで> 秒 (<何秒前> 秒前)` を返す (例: "t=12.345 秒 (0.4 秒前)")。
 
     何秒前は request_t − t を小数第 1 位まで書いた値。負なら 0.0 にする。
     """
-    raise NotImplementedError
+    ago = max(request_t - t, 0.0)
+    return f"t={t:.3f} 秒 ({ago:.1f} 秒前)"
 
 
 def documents_to_state(documents: SurfaceDocuments) -> dict[str, str]:
     """文書を state の documents {"tasks", "tips", "controls", "advice"} (この順) にする。"""
-    raise NotImplementedError
+    return {
+        "tasks": documents.tasks,
+        "tips": documents.tips,
+        "controls": documents.controls,
+        "advice": documents.advice,
+    }
 
 
 def timeline_to_state(
@@ -98,7 +149,12 @@ def timeline_to_state(
 
     created は relative_time_label(generated_t, request_t)。generated_t が None なら NO_TIMELINE_TEXT。
     """
-    raise NotImplementedError
+    created = (
+        NO_TIMELINE_TEXT
+        if generated_t is None
+        else relative_time_label(generated_t, request_t)
+    )
+    return {"created": created, "text": timeline}
 
 
 def recent_actions_to_state(
@@ -108,7 +164,13 @@ def recent_actions_to_state(
 
     time は relative_time_label(操作の t, request_t)、held・taps・sticks は pad_action.action_to_json の値。
     """
-    raise NotImplementedError
+    return [
+        {
+            "time": relative_time_label(recent.t, request_t),
+            **action_to_json(recent.action),
+        }
+        for recent in recent_actions
+    ]
 
 
 def build_surface_state(
@@ -119,7 +181,25 @@ def build_surface_state(
     references は surface_input.frames と同じ順・同じ数の画像の参照文字列。frames の各要素は
     {"label": relative_time_label(frame.t, surface_input.t), "image": 参照文字列}。数が合わなければ ValueError。
     """
-    raise NotImplementedError
+    if len(references) != len(surface_input.frames):
+        raise ValueError(
+            f"{len(references)} references for {len(surface_input.frames)} frames"
+        )
+    request_t = surface_input.t
+    return {
+        "instructions": SURFACE_INSTRUCTIONS,
+        "documents": documents_to_state(surface_input.documents),
+        "timeline": timeline_to_state(
+            surface_input.timeline, surface_input.timeline_generated_t, request_t
+        ),
+        "recent_actions": recent_actions_to_state(
+            surface_input.recent_actions, request_t
+        ),
+        "frames": [
+            {"label": relative_time_label(frame.t, request_t), "image": reference}
+            for frame, reference in zip(surface_input.frames, references, strict=True)
+        ],
+    }
 
 
 class JevSurfaceDecider:
@@ -130,7 +210,7 @@ class JevSurfaceDecider:
     settings         設定
     notes_dir        文書のディレクトリー (notes/)。None なら use_run_directory で後から渡す
     make_reference   画像の参照文字列を作る関数 (既定 jev_client.new_asset_reference。呼ぶたびに異なる文字列を返す)
-    decide は 1 つのスレッド (surface のループ) からだけ呼ぶ。
+    decide と plan_boxes は 1 つのスレッド (surface のループ) からだけ呼ぶ。
     """
 
     def __init__(
@@ -142,19 +222,44 @@ class JevSurfaceDecider:
         make_reference: Callable[[], str] = new_asset_reference,
     ) -> None:
         """属性を持つ。要求の番号は 0 から始める。"""
-        raise NotImplementedError
+        self.client = client
+        self.tracking = tracking
+        self.settings = settings
+        self.notes_dir = notes_dir
+        self.make_reference = make_reference
+        self._request_count = 0
+        # plan_boxes が決めた次の要求の box の対象 (decide が受け取ったら None に戻す)
+        self._planned: _RequestTargets | None = None
 
     @property
     def request_count(self) -> int:
         """これまでに decide を呼んだ回数 (直前の要求の番号)。"""
-        raise NotImplementedError
+        return self._request_count
 
     def use_run_directory(self, paths: RunPaths) -> None:
         """実行ディレクトリーの notes/ (paths.notes_dir) を、対象の一覧を読むディレクトリーにする。
 
         app.LayersApp が実行ディレクトリーを作った後、スレッドを起動する前に 1 回呼ぶ (LayersParts.on_run_directory)。
         """
-        raise NotImplementedError
+        self.notes_dir = paths.notes_dir
+
+    def plan_boxes(self, scene_id: str | None) -> BoxDrawingPlan:
+        """次の decide の要求 (番号 request_count + 1) の box の対象を決めて持ち、送る画像への書き込み方を返す。
+
+        モジュールの docstring の decide の流れの 2 と 3 を、場面 ID scene_id で行う (BoxTrackingState.set_targets も
+        呼ぶ)。戻り値の target_numbers は対象の名前 → 対象の一覧の中の番号 (1 始まり)、hidden_on_latest は Box を
+        問い直す対象の名前。もう一度呼んだら、前の結果を捨てて決め直す。
+        notes_dir がまだ無ければ (use_run_directory の前) RuntimeError。
+        """
+        planned = self._select_targets(self._request_count + 1, scene_id)
+        self._planned = planned
+        return BoxDrawingPlan(
+            target_numbers={
+                target.name: number
+                for number, target in enumerate(planned.targets, start=1)
+            },
+            hidden_on_latest=frozenset(planned.requery_names),
+        )
 
     def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
         """surface_input から Jev に問いを送り、出力を返す (モジュールの docstring の流れ)。
@@ -169,5 +274,119 @@ class JevSurfaceDecider:
         Jev の box で追跡を始められなかったとき (問い合わせたフレームを捨てた後など) も、Jev の box は出す
         (その対象は追跡していないため、次の要求で問い直す)。Jev の box が None (使える box が無い) の対象は、
         存在の確率に依らず追跡をやめ (BoxTrackingState.forget)、box を出さない (次の要求で問い直す)。
+        直前の plan_boxes の結果が、この要求の番号と場面 ID (surface_input.documents.scene_id) のものなら、対象の一覧と
+        問い直す対象はその結果を使う。そうでなければ、ここで決める。
         """
-        raise NotImplementedError
+        if self.notes_dir is None:
+            raise RuntimeError("JevSurfaceDecider.decide needs the run directory")
+        self._request_count += 1
+        request_index = self._request_count
+        scene_id = surface_input.documents.scene_id
+        planned, self._planned = self._planned, None
+        if (
+            planned is None
+            or planned.request_index != request_index
+            or planned.scene_id != scene_id
+        ):
+            planned = self._select_targets(request_index, scene_id)
+        frames = surface_input.frames
+        references = [self.make_reference() for _ in frames]
+        images = [
+            JevImage(reference, frame.jpeg)
+            for reference, frame in zip(references, frames, strict=True)
+        ]
+        questions = build_surface_questions(
+            self.settings.allowed_buttons,
+            planned.targets,
+            planned.requery_names,
+            len(frames),
+        )
+        answers = self.client.ask(
+            build_surface_state(surface_input, references), questions, images
+        )
+        return SurfaceOutput(
+            action=decide_pad_action(answers.choices, answers.nouls, questions),
+            deep_kinds=decide_deep_kinds(
+                answers.nouls, self.settings.threshold_advisor
+            ),
+            info_labels=decide_info_labels(answers.nouls),
+            boxes=self._decide_boxes(planned, answers, frames[-1].t),
+            scene_changed=decide_scene_changed(answers.nouls),
+        )
+
+    def _select_targets(
+        self, request_index: int, scene_id: str | None
+    ) -> _RequestTargets:
+        """番号 request_index の要求の box の対象を決める (モジュールの docstring の decide の流れの 2 と 3)。
+
+        notes_dir がまだ無ければ RuntimeError。
+        """
+        if self.notes_dir is None:
+            raise RuntimeError("JevSurfaceDecider needs the run directory")
+        targets = read_box_targets(self.notes_dir, scene_id)
+        names = [target.name for target in targets]
+        self.tracking.set_targets(names)
+        requery_names = select_requery_targets(
+            names,
+            self.tracking.statuses(),
+            request_index,
+            self.settings.box_requery_every,
+        )
+        return _RequestTargets(request_index, scene_id, targets, requery_names)
+
+    def _decide_boxes(
+        self, planned: _RequestTargets, answers: JevAnswers, latest_t: float
+    ) -> tuple[Box, ...]:
+        """答えと追跡から、要求の最新のフレーム (時刻 latest_t) の box を対象の一覧の順で返す (decide の流れの 6)。"""
+        visible = visible_target_names(answers.nouls, planned.targets)
+        requery = set(planned.requery_names)
+        boxes: list[Box] = []
+        for number, target in enumerate(planned.targets, start=1):
+            name = target.name
+            if name in requery:
+                jev_box = answers.boxes.get(box_question_name(number))
+                if jev_box is None or name not in visible:
+                    # 使える box が無いか、写っていない: 追跡をやめ、次の要求で問い直す
+                    self.tracking.forget(name)
+                    continue
+                self.tracking.start_from_jev(
+                    name,
+                    NormalizedBox(
+                        left=jev_box.left,
+                        top=jev_box.top,
+                        right=jev_box.right,
+                        bottom=jev_box.bottom,
+                    ),
+                    latest_t,
+                    planned.request_index,
+                )
+                boxes.append(
+                    Box(
+                        label=name,
+                        x_min=jev_box.left,
+                        y_min=jev_box.top,
+                        x_max=jev_box.right,
+                        y_max=jev_box.bottom,
+                        confidence=jev_box.confidence,
+                        source=BoxSource.JEV,
+                    )
+                )
+                continue
+            if name not in visible:
+                self.tracking.forget(name)
+                continue
+            result = self.tracking.result_at(name, latest_t)
+            if result is None or not result.found:
+                continue
+            boxes.append(
+                Box(
+                    label=name,
+                    x_min=result.box.left,
+                    y_min=result.box.top,
+                    x_max=result.box.right,
+                    y_max=result.box.bottom,
+                    confidence=min(max(result.score, 0.0), 1.0),
+                    source=BoxSource.TRACKER,
+                )
+            )
+        return tuple(boxes)

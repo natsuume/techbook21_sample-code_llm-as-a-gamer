@@ -33,6 +33,7 @@ from switch2_layers.settings import (
     SurfaceKind,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.jev_surface import JevSurfaceDecider
 from switch2_layers.surface.surface_assembly import SurfaceAssembly
 
 COMMANDS = ["run", "middle-once", "deep-once", "publish-note"]
@@ -611,6 +612,54 @@ def test_run_passes_fake_middle_to_app(monkeypatch):
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.FAKE
     assert isinstance(parts.middle, FakeMiddleAnalyzer)
+
+
+def test_run_passes_fake_surface_to_app_without_hooks(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    [(settings, parts)] = created
+    assert settings.surface is SurfaceKind.FAKE
+    assert isinstance(parts.surface, FakeSurfaceDecider)
+    assert parts.on_frame is None
+    assert parts.surface_boxes_at is None
+    assert parts.surface_plan_boxes is None
+    assert parts.on_run_directory is None
+
+
+def test_run_passes_jev_surface_parts_to_app_by_default(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "  ts-test  ")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--box-requery-every", "2"]) == 0
+    [(settings, parts)] = created
+    # run.jsonl の start に書く起動引数 (settings) と、動かす surface が一致する
+    assert settings.surface is SurfaceKind.JEV
+    decider = parts.surface
+    assert isinstance(decider, JevSurfaceDecider)
+    assert decider.client.api_key == "ts-test"
+    assert decider.settings.box_requery_every == 2
+    assert parts.on_frame == decider.tracking.on_frame
+    assert parts.surface_boxes_at == decider.tracking.boxes_at
+    assert parts.surface_plan_boxes == decider.plan_boxes
+    assert parts.on_run_directory == decider.use_run_directory
+
+
+def test_run_closes_surface_parts_after_app_stops(monkeypatch):
+    closed: list[bool] = []
+
+    def fake_build(settings: RunSettings, api_key: str | None) -> SurfaceAssembly:
+        return SurfaceAssembly(
+            decider=FakeSurfaceDecider(),
+            on_frame=None,
+            boxes_at=None,
+            on_run_directory=None,
+            close=lambda: closed.append(True),
+        )
+
+    monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
+    stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    assert closed == [True]
 
 
 @pytest.mark.parametrize("value", [None, "", "   "], ids=["unset", "empty", "blank"])

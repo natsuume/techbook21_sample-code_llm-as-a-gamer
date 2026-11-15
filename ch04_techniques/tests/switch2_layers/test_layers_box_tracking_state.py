@@ -309,3 +309,59 @@ def test_tracker_error_stops_only_that_target():
     assert state.start_from_jev("敵", NormalizedBox(0.5, 0.6, 0.7, 0.8), t_at(0), 1)
     feed(state, range(1, 2))
     assert set(state.statuses()) == {"敵"}
+
+
+def test_restart_replaces_position_at_queried_frame_with_jev_box():
+    trackers: list[StillTracker] = []
+
+    def factory() -> StillTracker:
+        trackers.append(StillTracker())
+        return trackers[-1]
+
+    state = BoxTrackingState(tracker_factory=factory)
+    state.set_targets(["自機"])
+    feed(state, range(3))
+    first = NormalizedBox(0.1, 0.1, 0.2, 0.2)
+    second = NormalizedBox(0.5, 0.5, 0.6, 0.6)
+    assert state.start_from_jev("自機", first, t_at(0), 1)
+    feed(state, range(3, 6))
+    # t = 0.3 には、最初の追跡の位置がある
+    assert state.result_at("自機", t_at(3)).box == first
+    assert state.start_from_jev("自機", second, t_at(3), 6)
+    # 問い合わせたフレームちょうどの古い追跡の位置は残らず、Jev の box (出どころ jev) になる
+    assert state.result_at("自機", t_at(3)) is None
+    assert state.boxes_at(t_at(3)) == (
+        Box("自機", 0.5, 0.5, 0.6, 0.6, None, BoxSource.JEV),
+    )
+    # それより古いフレームは最初の追跡の位置のまま、新しいフレームは始め直した追跡の位置
+    assert state.boxes_at(t_at(2)) == (
+        Box("自機", 0.1, 0.1, 0.2, 0.2, 0.9, BoxSource.TRACKER),
+    )
+    assert state.boxes_at(t_at(4)) == (
+        Box("自機", 0.5, 0.5, 0.6, 0.6, 0.9, BoxSource.TRACKER),
+    )
+    # 最初に始めたフレームの Jev の box も残る
+    assert state.boxes_at(t_at(0)) == (
+        Box("自機", 0.1, 0.1, 0.2, 0.2, None, BoxSource.JEV),
+    )
+
+
+def test_jev_box_at_queried_frame_is_dropped_after_retain_seconds():
+    state = BoxTrackingState(tracker_factory=StillTracker, retain_s=1.0)
+    state.set_targets(["自機"])
+    feed(state, range(3))
+    assert state.start_from_jev("自機", NormalizedBox(0.1, 0.2, 0.3, 0.4), t_at(2), 1)
+    assert [box.source for box in state.boxes_at(t_at(2))] == [BoxSource.JEV]
+    # 最新が t = 3.5 になると、t = 0.2 は 1 秒より古いので捨てる
+    feed(state, range(3, 36))
+    assert state.boxes_at(t_at(2)) == ()
+    assert [box.source for box in state.boxes_at(t_at(35))] == [BoxSource.TRACKER]
+
+
+def test_forget_drops_jev_box_at_queried_frame():
+    state = BoxTrackingState(tracker_factory=StillTracker)
+    state.set_targets(["自機"])
+    feed(state, range(2))
+    assert state.start_from_jev("自機", NormalizedBox(0.1, 0.2, 0.3, 0.4), t_at(0), 1)
+    state.forget("自機")
+    assert state.boxes_at(t_at(0)) == ()

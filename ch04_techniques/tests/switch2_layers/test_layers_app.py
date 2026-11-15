@@ -8,6 +8,7 @@ import types
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pytest
 from switch2_remote.controller_state import NEUTRAL_REPORT
@@ -24,6 +25,7 @@ from switch2_layers.deep.deep_types import DeepJob, DeepResult
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.hardware.capture_source import LatestCapture
 from switch2_layers.hardware.capture_watcher import REASON_STALE_FRAME
 from switch2_layers.middle.fake_middle import FAKE_SCENE_NAME, FakeMiddleAnalyzer
@@ -34,6 +36,7 @@ from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
@@ -681,3 +684,96 @@ def test_initial_notes_include_box_targets(tmp_path):
     assert reason == REASON_INTERRUPTED
     text = (root / "notes" / "common" / "box_targets.md").read_text(encoding="utf-8")
     assert parse_box_targets(text) == DEFAULT_BOX_TARGETS
+
+
+class RecordingPlanBoxes:
+    """LayersParts.surface_plan_boxes の偽物。呼ばれた場面 ID を記録し、どの box も書き込まない書き込み方を返す。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.calls: list[str | None] = []
+
+    def __call__(self, scene_id: str | None) -> BoxDrawingPlan:
+        with self.lock:
+            self.calls.append(scene_id)
+        return BoxDrawingPlan(target_numbers={})
+
+
+def test_surface_plan_boxes_is_asked_once_per_request(tmp_path):
+    sender = FakeSender()
+    plan = RecordingPlanBoxes()
+    app = LayersApp(
+        settings(tmp_path), dataclasses.replace(parts(sender), surface_plan_boxes=plan)
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    rows = read_rows(root / "surface.jsonl")
+    assert rows
+    # 要求ごとに 1 回 (止める合図で記録を書かずに抜けた最後の 1 回の分だけ多いことがある)
+    assert len(rows) <= len(plan.calls) <= len(rows) + 1
+    # 文書の場面 ID (middle が決める前は None)
+    assert [row["scene_id"] for row in rows] == plan.calls[: len(rows)]
+
+
+def mock_jev_answers(request: httpx.Request) -> httpx.Response:
+    """Jev の偽物の応答。選択肢の問いは none、box の存在は 0.9、ほかの noul は 0.0、box は固定の位置。"""
+    payload = json.loads(request.content)
+    answers: dict[str, object] = {}
+    for name, question in payload["questions"].items():
+        if question["type"] == "choice":
+            answers[name] = {
+                "type": "choice",
+                "choice": "none",
+                "confidence": 1.0,
+                "probabilities": {
+                    choice: 1.0 if choice == "none" else 0.0
+                    for choice in question["criteria"]
+                },
+            }
+        elif question["type"] == "noul":
+            value = 0.9 if name.startswith("box_exists_") else 0.0
+            answers[name] = {"type": "noul", "noul": value}
+        else:
+            answers[name] = {
+                "type": "box",
+                "box": {"top": 0.2, "bottom": 0.4, "left": 0.1, "right": 0.3},
+                "confidence": None,
+            }
+    return httpx.Response(
+        200, json={"model": "jev-1.14.0", "answers": answers, "usage": {}}
+    )
+
+
+def test_jev_surface_parts_run_together_with_mock_jev(tmp_path):
+    sender = FakeSender()
+    http = httpx.Client(transport=httpx.MockTransport(mock_jev_answers))
+    run_settings = settings(tmp_path)
+    surface = build_surface_assembly(run_settings, "test-key", http_client=http)
+    app = LayersApp(
+        run_settings,
+        dataclasses.replace(
+            parts(sender, surface=surface.decider),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            surface_plan_boxes=surface.plan_boxes,
+            on_run_directory=surface.on_run_directory,
+        ),
+    )
+    try:
+        reason, root = run_app(app, stop_after=1.5)
+    finally:
+        surface.close()
+    assert reason == REASON_INTERRUPTED
+    rows = read_rows(root / "surface.jsonl")
+    assert rows
+    assert all(row["error"] is None for row in rows)
+    # 最初の要求では、どの対象もまだ box が無いので Jev に問い、Jev の box を記録する
+    first_boxes = rows[0]["boxes"]
+    assert [box["label"] for box in first_boxes] == [
+        target.name for target in DEFAULT_BOX_TARGETS
+    ]
+    assert {box["source"] for box in first_boxes} == {"jev"}
+    # 記録した画像のファイルは、保存した画像の一覧にある
+    saved = {row["file"] for row in read_rows(root / "frames.jsonl")}
+    assert {frame["file"] for frame in rows[0]["frames"]} <= saved
+    assert read_rows(root / "run.jsonl")[0]["args"]["surface"] == "jev"

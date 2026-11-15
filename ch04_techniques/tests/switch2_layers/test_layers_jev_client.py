@@ -358,24 +358,8 @@ def test_unrequested_answers_and_choices_are_ignored():
             "box_1",
             {
                 "type": "box",
-                "box": {"top": 0.1, "bottom": 1.2, "left": 0.3, "right": 0.4},
-                "confidence": 0.5,
-            },
-        ),
-        (
-            "box_1",
-            {
-                "type": "box",
                 "box": {"top": 0.1, "bottom": 0.2, "left": True, "right": 0.4},
                 "confidence": 0.5,
-            },
-        ),
-        (
-            "box_1",
-            {
-                "type": "box",
-                "box": {"top": 0.1, "bottom": 0.2, "left": 0.3, "right": 0.4},
-                "confidence": 1.5,
             },
         ),
         (
@@ -417,6 +401,47 @@ def test_box_without_area_is_no_usable_box_not_an_error(edges):
     parsed = parse_answers(body_with(answers), QUESTIONS)
     assert parsed.boxes["box_1"] is None
     # ほかの問いの答えは読める (要求全体を失敗にしない)
+    assert parsed.nouls == {"scene_changed": 0.25}
+
+
+@pytest.mark.parametrize(
+    "edges, confidence",
+    [
+        # 下端が 1 を超える
+        ({"top": 0.1, "bottom": 1.2, "left": 0.3, "right": 0.4}, 0.5),
+        # 左端が負
+        ({"top": 0.1, "bottom": 0.2, "left": -0.01, "right": 0.4}, None),
+        # 確信度が 1 を超える
+        ({"top": 0.1, "bottom": 0.2, "left": 0.3, "right": 0.4}, 1.5),
+        # 確信度が負
+        ({"top": 0.1, "bottom": 0.2, "left": 0.3, "right": 0.4}, -0.5),
+        # 有限でない座標 (0〜1 の外として扱う)
+        ({"top": 0.1, "bottom": float("inf"), "left": 0.3, "right": 0.4}, 0.5),
+    ],
+)
+def test_box_out_of_range_is_no_usable_box_not_an_error(edges, confidence):
+    answers = good_answers()
+    answers["box_1"] = {"type": "box", "box": edges, "confidence": confidence}
+    parsed = parse_answers(body_with(answers), QUESTIONS)
+    assert parsed.boxes["box_1"] is None
+    # ほかの問いの答えは読める (要求全体を失敗にしない)
+    assert parsed.nouls == {"scene_changed": 0.25}
+    assert parsed.choices["button_A"] == {"none": 0.2, "hold": 0.7, "tap": 0.1}
+
+
+def test_box_without_confidence_key_has_null_confidence():
+    answers = good_answers()
+    del answers["box_1"]["confidence"]
+    parsed = parse_answers(body_with(answers), QUESTIONS)
+    assert parsed.boxes["box_1"] == JevBox(0.2, 0.66, 0.19, 0.68, None)
+
+
+def test_out_of_range_box_in_body_does_not_fail_the_request():
+    answers = good_answers()
+    answers["box_1"]["box"]["right"] = 1.25
+    client, _ = client_returning(json_response(body_with(answers)))
+    parsed = client.ask(STATE, QUESTIONS, IMAGES)
+    assert parsed.boxes == {"box_1": None}
     assert parsed.nouls == {"scene_changed": 0.25}
 
 

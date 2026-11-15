@@ -42,6 +42,15 @@ def test_jev_surface_connects_tracking_and_run_directory():
     assert not http.is_closed
 
 
+def test_jev_surface_connects_plan_boxes_and_fake_has_none():
+    http = httpx.Client(transport=httpx.MockTransport(unused_transport))
+    assembly = build_surface_assembly(RunSettings(), "test-key", http_client=http)
+    assert assembly.plan_boxes == assembly.decider.plan_boxes
+    assembly.close()
+    fake = build_surface_assembly(RunSettings(surface=SurfaceKind.FAKE), None)
+    assert fake.plan_boxes is None
+
+
 def test_jev_surface_without_buttons_home_by_default():
     http = httpx.Client(transport=httpx.MockTransport(unused_transport))
     assembly = build_surface_assembly(RunSettings(), "test-key", http_client=http)

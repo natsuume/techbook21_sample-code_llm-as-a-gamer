@@ -12,6 +12,7 @@ from switch2_layers.settings import (
     DEFAULT_SURFACE,
     DEFAULT_THRESHOLD_ADVISOR,
     OPENAI_API_KEY_ENV,
+    TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     MiddleKind,
     MiddleOnceSettings,
@@ -22,6 +23,7 @@ from switch2_layers.settings import (
     openai_api_key_errors,
     run_settings_errors,
     run_settings_to_json,
+    typesafe_api_key_errors,
 )
 
 
@@ -263,3 +265,25 @@ def test_api_key_is_not_in_the_message():
 @pytest.mark.parametrize("environ", [{}, {"OPENAI_API_KEY": "sk-test"}])
 def test_fake_never_needs_api_key(environ):
     assert openai_api_key_errors(MiddleKind.FAKE, environ) == []
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [{}, {"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": " \n"}, {"OTHER": "x"}],
+)
+def test_jev_surface_without_api_key_is_an_error(environ):
+    errors = typesafe_api_key_errors(SurfaceKind.JEV, environ)
+    assert len(errors) == 1
+    assert TYPESAFE_API_KEY_ENV == "TYPESAFE_API_KEY"
+    assert "TYPESAFE_API_KEY" in errors[0]
+    # キーなしで動かす方法を示す
+    assert "--surface fake" in errors[0]
+
+
+def test_jev_surface_with_api_key_has_no_error():
+    assert typesafe_api_key_errors(SurfaceKind.JEV, {"TYPESAFE_API_KEY": "ts-x"}) == []
+
+
+@pytest.mark.parametrize("environ", [{}, {"TYPESAFE_API_KEY": "ts-x"}])
+def test_fake_surface_never_needs_api_key(environ):
+    assert typesafe_api_key_errors(SurfaceKind.FAKE, environ) == []

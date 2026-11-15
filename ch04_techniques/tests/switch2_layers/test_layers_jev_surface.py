@@ -541,3 +541,81 @@ def test_failed_request_does_not_count_as_requery(tmp_path):
     asker.error = None
     decider.decide(surface_input())
     assert len(names_of(asker.questions_of(1), QuestionKind.BOX)) == 4
+
+
+# --- 送る画像への書き込み方 (plan_boxes) ---
+
+
+def test_plan_boxes_gives_target_numbers_and_requeried_targets(tmp_path):
+    asker = FakeAsker(all_visible())
+    decider, tracking = make_decider(tmp_path, asker, requery_every=2)
+    feed(tracking, FRAME_TIMES)
+    first_plan = decider.plan_boxes(None)
+    assert first_plan.target_numbers == {
+        "自機": 1,
+        "敵": 2,
+        "敵の攻撃": 3,
+        "目標地点": 4,
+    }
+    # 最初の要求では、どの対象もまだ box が無いので問い直す (最新のフレームには書き込まない)
+    assert first_plan.hidden_on_latest == frozenset(first_plan.target_numbers)
+    decider.decide(surface_input())
+    feed(tracking, [10.2, 10.4])
+    # 2 回目: どの対象も追えていて、問い直さない
+    assert decider.plan_boxes(None).hidden_on_latest == frozenset()
+    decider.decide(surface_input(times=(10.0, 10.2, 10.4), request_t=10.4))
+    feed(tracking, [10.6])
+    # 3 回目: 前回の問い直しから 2 回たったので、すべて問い直す
+    assert decider.plan_boxes(None).hidden_on_latest == frozenset(
+        first_plan.target_numbers
+    )
+
+
+def test_plan_boxes_reads_scene_targets(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    scene_dir = tmp_path / "notes" / "scenes" / "scene-003"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "box_targets.md").write_text(
+        "- 扉: 木の扉\n- 鍵: 黄色い鍵\n", encoding="utf-8"
+    )
+    assert decider.plan_boxes("scene-003").target_numbers == {"扉": 1, "鍵": 2}
+
+
+def test_decide_uses_planned_requery_targets(tmp_path):
+    asker = FakeAsker(all_visible())
+    decider, tracking = make_decider(tmp_path, asker)
+    feed(tracking, FRAME_TIMES)
+    decider.decide(surface_input())
+    feed(tracking, [10.2])
+    plan = decider.plan_boxes(None)
+    assert plan.hidden_on_latest == frozenset()
+    # 書き込み方を決めた後に自機を見失っても、この要求では問い直さない (画像には自機を書き込んだため)
+    tracking.forget("自機")
+    decider.decide(surface_input(times=(9.5, 10.0, 10.2), request_t=10.2))
+    assert names_of(asker.questions_of(1), QuestionKind.BOX) == []
+    # 次の要求で問い直す
+    feed(tracking, [10.4])
+    assert decider.plan_boxes(None).hidden_on_latest == frozenset({"自機"})
+    decider.decide(surface_input(times=(10.0, 10.2, 10.4), request_t=10.4))
+    assert names_of(asker.questions_of(2), QuestionKind.BOX) == ["box_1"]
+
+
+def test_plan_for_another_scene_is_not_used(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    scene_dir = tmp_path / "notes" / "scenes" / "scene-003"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "box_targets.md").write_text("- 扉: 木の扉\n", encoding="utf-8")
+    decider.plan_boxes("scene-003")
+    # decide の文書の場面 (場面なし) と違うので、対象の一覧を読み直す
+    decider.decide(surface_input())
+    exists = names_of(asker.questions_of(0), QuestionKind.BOX_EXISTS)
+    assert len(exists) == len(DEFAULT_BOX_TARGETS)
+
+
+def test_plan_boxes_before_run_directory_is_an_error(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker, with_notes=False)
+    with pytest.raises(RuntimeError):
+        decider.plan_boxes(None)
