@@ -23,6 +23,8 @@ import type { LiveEndReason, LiveSession } from "../state/viewState.ts";
 import { parseLiveEvent } from "./liveEvents.ts";
 import {
   clearStreamedSteps,
+  clearSummaryOverrides,
+  createSummaryOverridesHolder,
   discardStreamedSteps,
   hasAppendedRecords,
   hasStaleRecords,
@@ -50,10 +52,12 @@ type LiveSessionCallbacks = {
  * - つなぐ位置は区間 API のキャッシュの cursor。キャッシュにイベントで足した記録があるか、キャッシュに古いものとしての
  *   印 (markRunRecordsStale) が付いていれば、先に読み直してからつなぐ (読み直しとつないだ後の足し込みを重ねない)
  * - イベントの種類ごとに受け取り、parseLiveEvent で読めたものをためる。ためた分は nextFlushDelayMs (間隔は
- *   callbacks.flushIntervalMs()) の時刻に 1 回で writeLiveEvents で足す
- * - つなぐたびに (つなぎ直しを含む)、advisor の途中経過の置き場を空にする (サーバーは接続した後に追記された行の
- *   途中経過だけを送るため)。つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に
- *   読んだ詳細に、つなぐまでの間の step が欠けないようにするため)
+ *   callbacks.flushIntervalMs()) の時刻に 1 回で writeLiveEvents で足す。その接続の上書き用の値の入れ物を渡し、
+ *   足し込みが起こした summary の読み直しの後に、受け取った advisor_run・note_version・stats を当て直させる
+ * - つなぐたびに (つなぎ直しを含む)、advisor の途中経過の置き場と上書き用の値を空にする (サーバーは接続した後に
+ *   追記された行の途中経過だけを送り、advisor_run・note_version・stats は接続した直後にすべて送り直すため)。
+ *   つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に読んだ詳細に、つなぐまでの
+ *   間の step が欠けないようにするため)
  * - end: ためた分をすぐ足して閉じ、summary とすべての要求の詳細を無効にして (invalidateAfterEnd) onEnded
  * - error: すぐ閉じ (自動のつなぎ直しを使わない)、ためた分を足して reconnecting にする。reconnectDelayMs(失敗の
  *   回数) 待って summary と区間 API を読み直し、読めたら新しい cursor でつなぐ。読めないか、つないで最初の
@@ -73,6 +77,8 @@ const openLiveSession = (
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let failures = 0;
+  // 今の接続で受け取った summary 向けのイベントの最新の値 (ライブが起こした summary の読み直しの後に当て直す)
+  const summaryOverrides = createSummaryOverridesHolder();
 
   const flush = (): void => {
     clearTimeout(flushTimer);
@@ -83,7 +89,7 @@ const openLiveSession = (
     const events = buffered;
     buffered = [];
     lastFlushAt = performance.now();
-    writeLiveEvents(queryClient, run, events);
+    writeLiveEvents(queryClient, run, events, summaryOverrides);
   };
 
   const scheduleFlush = (): void => {
@@ -136,6 +142,7 @@ const openLiveSession = (
   const connect = (): void => {
     closeSource();
     clearStreamedSteps(queryClient, run);
+    clearSummaryOverrides(summaryOverrides);
     const id = connectionId;
     const eventSource = new EventSource(livePath(run, liveCursorsOf(queryClient, run)));
     source = eventSource;

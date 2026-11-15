@@ -1,6 +1,7 @@
 // ライブで使う、TanStack Query のキャッシュの読み書き。届いたイベントを summary・区間 API のキャッシュと、advisor の
-// 途中経過の置き場に足し、読み直すキャッシュを無効にする。/live につなぐ位置 (cursor) を区間 API のキャッシュから読み、
-// 区間 API と summary を読み直す。
+// 途中経過の置き場に足し、読み直すキャッシュを無効にする (足し込みが起こした summary の読み直しの後には、受け取った
+// summary 向けの値を当て直す)。/live につなぐ位置 (cursor) を区間 API のキャッシュから読み、区間 API と summary を
+// 読み直す。
 import type { QueryClient } from "@tanstack/react-query";
 import type { RangeKind } from "../api/apiPaths.ts";
 import type {
@@ -24,9 +25,13 @@ import {
 } from "../api/queries.ts";
 import {
   applyLiveEvents,
+  applySummaryOverrides,
+  EMPTY_SUMMARY_OVERRIDES,
   type LiveCaches,
   type LiveInvalidation,
   type LiveMergeResult,
+  recordSummaryOverrides,
+  type SummaryOverrides,
 } from "./liveCacheMerge.ts";
 
 /**
@@ -90,17 +95,60 @@ const invalidationQueryKey = (run: string, invalidation: LiveInvalidation) => {
 };
 
 /**
+ * 1 つの接続の上書き用の値 (SummaryOverrides) の入れ物。writeLiveEvents が足し、ライブが起こした summary の読み直しの
+ * 後に、その時点の値を当て直す。接続を開くたびに clearSummaryOverrides で空にする
+ */
+export type SummaryOverridesHolder = { current: SummaryOverrides };
+
+/** 空の上書き用の値の入れ物を作る */
+export const createSummaryOverridesHolder = (): SummaryOverridesHolder => ({
+  current: EMPTY_SUMMARY_OVERRIDES,
+});
+
+/** 上書き用の値の入れ物を空にする (サーバーは接続した直後に advisor_run・note_version のすべてと stats を送るため) */
+export const clearSummaryOverrides = (holder: SummaryOverridesHolder): void => {
+  holder.current = EMPTY_SUMMARY_OVERRIDES;
+};
+
+/**
+ * 実行 run の summary のキャッシュに、入れ物の今の上書き用の値を当て直す。読み直しに失敗した (status が success で
+ * ない) ときと、キャッシュに無いときは何もしない (キャッシュは前の値のまま残っている)
+ */
+const reapplySummaryOverrides = (
+  queryClient: QueryClient,
+  run: string,
+  holder: SummaryOverridesHolder,
+): void => {
+  const queryKey = summaryQueryKey(run);
+  const summary = queryClient.getQueryData<RunSummary>(queryKey);
+  if (summary === undefined || queryClient.getQueryState(queryKey)?.status !== "success") {
+    return;
+  }
+  const applied = applySummaryOverrides(summary, holder.current);
+  if (applied !== summary) {
+    queryClient.setQueryData(queryKey, applied);
+  }
+};
+
+/**
  * 届いた順のイベントを実行 run のキャッシュに足し、applyLiveEvents の結果を返す。
  * - summary と 4 つの区間 API は、変わったものだけを setQueryData で書き換える
  * - advisor_step は、advisor の実行ごとの途中経過の置き場 (streamedStepsQueryKey) の末尾に、届いた順に足す
  *   (advisor の実行の詳細がキャッシュに無くても足す。詳細の表示は mergeAdvisorSteps で詳細の steps とつなぐ)
  * - 読み直すキャッシュ (invalidations) を invalidateQueries で無効にする (使っている query は読み直される)
+ * - overrides を渡すと、イベントのうち summary 向けのもの (advisor_run・note_version・stats) の最新の値をそこに足し、
+ *   summary の読み直しが終わった後に、その時点の値を読み直した summary に当て直す (読み直しの応答は、読み直しを
+ *   始めた時点のサーバーの値のため、その間に足した値を含まないことがある)
  */
 export const writeLiveEvents = (
   queryClient: QueryClient,
   run: string,
   events: readonly LiveEvent[],
+  overrides?: SummaryOverridesHolder,
 ): LiveMergeResult => {
+  if (overrides !== undefined) {
+    overrides.current = recordSummaryOverrides(overrides.current, events);
+  }
   const before = readLiveCaches(queryClient, run);
   const result = applyLiveEvents(before, events);
   const after = result.caches;
@@ -118,10 +166,14 @@ export const writeLiveEvents = (
     ]);
   }
   for (const invalidation of result.invalidations) {
-    void queryClient.invalidateQueries({
+    // invalidateQueries は、使っている query の読み直しが終わる (失敗を含む) と resolve する
+    const refetched = queryClient.invalidateQueries({
       queryKey: invalidationQueryKey(run, invalidation),
       exact: true,
     });
+    if (invalidation.type === "summary" && overrides !== undefined) {
+      void refetched.then(() => reapplySummaryOverrides(queryClient, run, overrides));
+    }
   }
   return result;
 };

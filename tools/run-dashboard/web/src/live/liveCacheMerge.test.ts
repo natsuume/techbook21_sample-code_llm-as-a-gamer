@@ -13,7 +13,14 @@ import type {
   SummaryAdvisorRun,
   SummaryNoteVersion,
 } from "../api/apiTypes.ts";
-import { applyLiveEvents, type LiveCaches, mergeAdvisorSteps } from "./liveCacheMerge.ts";
+import {
+  applyLiveEvents,
+  applySummaryOverrides,
+  EMPTY_SUMMARY_OVERRIDES,
+  type LiveCaches,
+  mergeAdvisorSteps,
+  recordSummaryOverrides,
+} from "./liveCacheMerge.ts";
 
 // テスト用の要求。受信時刻は送信時刻の 0.5 秒後
 const request = (n: number, tSent: number): RequestItem => ({
@@ -510,6 +517,122 @@ describe("applyLiveEvents の読めていないキャッシュと読み直しの
       { kind: "end", data: { record_end: true } },
     ]);
     expect(input).toStrictEqual(snapshot);
+  });
+});
+
+describe("recordSummaryOverrides", () => {
+  const stats = (tEnd: number) => ({
+    t_end: tEnd,
+    counts: { requests: 1, frames: 2, pad: 3 },
+    decide_s_median: 0.5,
+  });
+
+  it("advisor_run は name ごと、note_version は version ごとに最後に届いた値、stats は最後の 1 つを持つ", () => {
+    const overrides = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "advisor_run", data: advisorRun("advisor-tips-001", "tips") },
+      { kind: "note_version", data: noteVersion(1) },
+      { kind: "stats", data: stats(10) },
+      { kind: "advisor_run", data: advisorRun("advisor-tips-001", "tips", { t_end: 4 }) },
+      { kind: "advisor_run", data: advisorRun("advisor-strategy-001", "strategy") },
+      { kind: "note_version", data: noteVersion(1, { t: 7 }) },
+      { kind: "stats", data: stats(12) },
+    ]);
+    expect([...overrides.advisorRuns.entries()]).toEqual([
+      ["advisor-tips-001", advisorRun("advisor-tips-001", "tips", { t_end: 4 })],
+      ["advisor-strategy-001", advisorRun("advisor-strategy-001", "strategy")],
+    ]);
+    expect([...overrides.noteVersions.entries()]).toEqual([[1, noteVersion(1, { t: 7 })]]);
+    expect(overrides.stats).toEqual(stats(12));
+  });
+
+  it("前の値に足し、渡した値は変えない", () => {
+    const first = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "note_version", data: noteVersion(0) },
+    ]);
+    const second = recordSummaryOverrides(first, [{ kind: "note_version", data: noteVersion(1) }]);
+    expect([...second.noteVersions.keys()]).toEqual([0, 1]);
+    expect([...first.noteVersions.keys()]).toEqual([0]);
+    expect(EMPTY_SUMMARY_OVERRIDES.noteVersions.size).toBe(0);
+  });
+
+  it("summary 向けのイベントが無ければ、渡した値をそのまま返す", () => {
+    const overrides = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "request", data: request(1, 1) },
+      { kind: "frame", data: frame(1) },
+      { kind: "advisor_step", data: { ...step(1, "Read"), name: "advisor-tips-001" } },
+      { kind: "end", data: { record_end: true } },
+    ]);
+    expect(overrides).toBe(EMPTY_SUMMARY_OVERRIDES);
+  });
+});
+
+describe("applySummaryOverrides", () => {
+  it("advisor_run は name で置き換え・役割の順に挿し、note_version は version で置き換え・昇順に挿し、stats を置き換える", () => {
+    const before = summary({
+      t_end: 10,
+      counts: { requests: 1, frames: 1, pad: 1 },
+      decide_s_median: null,
+      advisor_runs: [
+        advisorRun("advisor-controls-001", "controls"),
+        advisorRun("advisor-tips-001", "tips"),
+      ],
+      note_versions: [noteVersion(0), noteVersion(2)],
+    });
+    const overrides = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "advisor_run", data: advisorRun("advisor-tips-001", "tips", { t_end: 9 }) },
+      { kind: "advisor_run", data: advisorRun("advisor-strategy-001", "strategy") },
+      { kind: "note_version", data: noteVersion(3) },
+      { kind: "note_version", data: noteVersion(1) },
+      { kind: "note_version", data: noteVersion(2, { t: 8 }) },
+      {
+        kind: "stats",
+        data: { t_end: 12, counts: { requests: 2, frames: 3, pad: 4 }, decide_s_median: 0.25 },
+      },
+    ]);
+    expect(applySummaryOverrides(before, overrides)).toEqual({
+      ...before,
+      t_end: 12,
+      counts: { requests: 2, frames: 3, pad: 4 },
+      decide_s_median: 0.25,
+      advisor_runs: [
+        advisorRun("advisor-controls-001", "controls"),
+        advisorRun("advisor-strategy-001", "strategy"),
+        advisorRun("advisor-tips-001", "tips", { t_end: 9 }),
+      ],
+      note_versions: [noteVersion(0), noteVersion(1), noteVersion(2, { t: 8 }), noteVersion(3)],
+    });
+  });
+
+  it("上書き用の値が空か、すべて summary と同じ値なら、summary をそのまま返す", () => {
+    const before = summary({
+      advisor_runs: [advisorRun("advisor-tips-001", "tips")],
+      note_versions: [noteVersion(0)],
+    });
+    expect(applySummaryOverrides(before, EMPTY_SUMMARY_OVERRIDES)).toBe(before);
+    const same = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "advisor_run", data: advisorRun("advisor-tips-001", "tips") },
+      { kind: "note_version", data: noteVersion(0) },
+      {
+        kind: "stats",
+        data: {
+          t_end: before.t_end,
+          counts: before.counts,
+          decide_s_median: before.decide_s_median,
+        },
+      },
+    ]);
+    expect(applySummaryOverrides(before, same)).toBe(before);
+  });
+
+  it("渡した summary と上書き用の値は変えない", () => {
+    const before = summary({ note_versions: [noteVersion(0)] });
+    const snapshot = structuredClone(before);
+    const overrides = recordSummaryOverrides(EMPTY_SUMMARY_OVERRIDES, [
+      { kind: "note_version", data: noteVersion(1) },
+    ]);
+    applySummaryOverrides(before, overrides);
+    expect(before).toStrictEqual(snapshot);
+    expect([...overrides.noteVersions.keys()]).toEqual([1]);
   });
 });
 

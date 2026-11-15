@@ -1,7 +1,7 @@
 // liveQueryCache のテスト。本物の QueryClient のキャッシュに、届いたイベントを足すこと・イベントで足した記録の有無・
 // つなぐ位置・advisor の途中経過の置き場への足し方と空にする・捨てる動き・読み直すキャッシュの無効化を確かめる
-import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import type {
   AdvisorDetail,
   AdvisorStep,
@@ -11,6 +11,8 @@ import type {
   RangeResponse,
   RequestItem,
   RunSummary,
+  SummaryAdvisorRun,
+  SummaryNoteVersion,
 } from "../api/apiTypes.ts";
 import {
   advisorQueryKey,
@@ -23,6 +25,8 @@ import {
 } from "../api/queries.ts";
 import {
   clearStreamedSteps,
+  clearSummaryOverrides,
+  createSummaryOverridesHolder,
   discardStreamedSteps,
   hasAppendedRecords,
   hasStaleRecords,
@@ -318,5 +322,133 @@ describe("writeLiveEvents の読み直し", () => {
     ]);
     expect(queryClient.getQueryState(summaryQueryKey(RUN))?.isInvalidated).toBe(true);
     expect(queryClient.getQueryState(requestQueryKey(RUN, 1))?.isInvalidated).toBe(true);
+  });
+});
+
+describe("上書き用の値の入れ物と、summary の読み直しの後の当て直し", () => {
+  const newVersion: SummaryNoteVersion = {
+    version: 1,
+    t: 3,
+    request: 1,
+    initial: false,
+    changed: [{ kind: "tips", by: "advisor-tips-001" }],
+  };
+  const newRun: SummaryAdvisorRun = {
+    name: "advisor-tips-001",
+    role: "tips",
+    request: 1,
+    t_start: 1,
+    t_end: null,
+    returncode: null,
+    denials: null,
+    result: null,
+  };
+  const newStats = {
+    t_end: 4,
+    counts: { requests: 1, frames: 5, pad: 2 },
+    decide_s_median: 0.25,
+  };
+  const oldSummary: RunSummary = { ...summary, note_versions: [], advisor_runs: [] };
+
+  /**
+   * summary を使っている (observer のある) QueryClient を作る。最初の読み込みは oldSummary を返し、その後の読み直しは
+   * respond を呼ぶまで応答を遅らせる (呼ぶと、その値か例外で応答する)
+   */
+  const observedClient = async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let calls = 0;
+    const pending: ((outcome: RunSummary | Error) => void)[] = [];
+    const observer = new QueryObserver<RunSummary>(queryClient, {
+      queryKey: summaryQueryKey(RUN),
+      queryFn: () => {
+        calls += 1;
+        if (calls === 1) {
+          return Promise.resolve(oldSummary);
+        }
+        return new Promise<RunSummary>((resolve, reject) => {
+          pending.push((outcome) =>
+            outcome instanceof Error ? reject(outcome) : resolve(outcome),
+          );
+        });
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.waitFor(() => expect(queryClient.getQueryData(summaryQueryKey(RUN))).toBeDefined());
+    queryClient.setQueryData(rangeQueryKey(RUN, "events"), range<EventItem>([], 400));
+    return {
+      queryClient,
+      unsubscribe,
+      respond: (outcome: RunSummary | Error) => pending.shift()?.(outcome),
+      pendingCount: () => pending.length,
+    };
+  };
+  const summaryOf = (queryClient: QueryClient) =>
+    queryClient.getQueryData<RunSummary>(summaryQueryKey(RUN));
+
+  it("summary の読み直しの応答が遅れる間に足した note_version・advisor_run・stats が、応答の後も残る", async () => {
+    const { queryClient, unsubscribe, respond, pendingCount } = await observedClient();
+    const holder = createSummaryOverridesHolder();
+    // start の行は summary の読み直しを起こす
+    writeLiveEvents(queryClient, RUN, [{ kind: "run", data: { t: 0, event: "start" } }], holder);
+    await vi.waitFor(() => expect(pendingCount()).toBe(1));
+    writeLiveEvents(
+      queryClient,
+      RUN,
+      [
+        { kind: "note_version", data: newVersion },
+        { kind: "advisor_run", data: newRun },
+        { kind: "stats", data: newStats },
+      ],
+      holder,
+    );
+    expect(summaryOf(queryClient)?.note_versions).toEqual([newVersion]);
+    // 読み直しの応答は、足した値を含まない古い summary
+    respond(oldSummary);
+    await vi.waitFor(() =>
+      expect(queryClient.getQueryState(summaryQueryKey(RUN))?.fetchStatus).toBe("idle"),
+    );
+    await vi.waitFor(() => expect(summaryOf(queryClient)?.note_versions).toEqual([newVersion]));
+    const after = summaryOf(queryClient);
+    expect(after?.advisor_runs).toEqual([newRun]);
+    expect(after?.t_end).toBe(newStats.t_end);
+    expect(after?.counts).toEqual(newStats.counts);
+    expect(after?.decide_s_median).toBe(newStats.decide_s_median);
+    unsubscribe();
+  });
+
+  it("読み直しに失敗したときは、キャッシュの前の値 (足した値を含む) がそのまま残る", async () => {
+    const { queryClient, unsubscribe, respond, pendingCount } = await observedClient();
+    const holder = createSummaryOverridesHolder();
+    writeLiveEvents(queryClient, RUN, [{ kind: "run", data: { t: 0, event: "start" } }], holder);
+    await vi.waitFor(() => expect(pendingCount()).toBe(1));
+    writeLiveEvents(queryClient, RUN, [{ kind: "note_version", data: newVersion }], holder);
+    respond(new Error("読めない"));
+    await vi.waitFor(() =>
+      expect(queryClient.getQueryState(summaryQueryKey(RUN))?.status).toBe("error"),
+    );
+    expect(summaryOf(queryClient)?.note_versions).toEqual([newVersion]);
+    unsubscribe();
+  });
+
+  it("入れ物は summary 向けのイベントの最新の値を持ち、clearSummaryOverrides で空になる", () => {
+    const holder = createSummaryOverridesHolder();
+    writeLiveEvents(
+      seededClient(),
+      RUN,
+      [
+        { kind: "note_version", data: newVersion },
+        { kind: "advisor_run", data: newRun },
+        { kind: "stats", data: newStats },
+      ],
+      holder,
+    );
+    expect([...holder.current.noteVersions.values()]).toEqual([newVersion]);
+    expect([...holder.current.advisorRuns.values()]).toEqual([newRun]);
+    expect(holder.current.stats).toEqual(newStats);
+    clearSummaryOverrides(holder);
+    expect(holder.current.noteVersions.size).toBe(0);
+    expect(holder.current.advisorRuns.size).toBe(0);
+    expect(holder.current.stats).toBeNull();
   });
 });

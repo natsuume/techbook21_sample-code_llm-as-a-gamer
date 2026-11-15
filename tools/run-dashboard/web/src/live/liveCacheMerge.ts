@@ -302,6 +302,98 @@ export const applyLiveEvents = (
   };
 };
 
+/**
+ * 1 つの接続で受け取った、summary 向けのイベントの最新の値 (上書き用の値)。ライブが起こした summary の読み直しの
+ * 応答は、読み直しを始めた時点のサーバーの値で、その後に足した値を含まないことがあるため、読み直しの後に当て直す。
+ * - advisorRuns: advisor_run の data を name ごとに (最後に届いた値)
+ * - noteVersions: note_version の data を version ごとに (最後に届いた値)
+ * - stats: 最後に届いた stats の data (届いていなければ null)
+ */
+export type SummaryOverrides = {
+  advisorRuns: ReadonlyMap<string, SummaryAdvisorRun>;
+  noteVersions: ReadonlyMap<number, SummaryNoteVersion>;
+  stats: LiveStats | null;
+};
+
+/** 何も受け取っていない上書き用の値 */
+export const EMPTY_SUMMARY_OVERRIDES: SummaryOverrides = {
+  advisorRuns: new Map(),
+  noteVersions: new Map(),
+  stats: null,
+};
+
+/**
+ * 上書き用の値 overrides に、届いた順のイベント events のうち summary 向けのもの (advisor_run・note_version・stats) を
+ * 足した値を返す。advisor_run は name ごと、note_version は version ごとに後から届いた値で置き換え、stats は最後の
+ * 1 つにする。summary 向けのイベントが無ければ overrides をそのまま返す。渡した値は変えない
+ */
+export const recordSummaryOverrides = (
+  overrides: SummaryOverrides,
+  events: readonly LiveEvent[],
+): SummaryOverrides => {
+  let advisorRuns: Map<string, SummaryAdvisorRun> | null = null;
+  let noteVersions: Map<number, SummaryNoteVersion> | null = null;
+  let stats = overrides.stats;
+  let changed = false;
+  for (const event of events) {
+    switch (event.kind) {
+      case "advisor_run":
+        advisorRuns ??= new Map(overrides.advisorRuns);
+        advisorRuns.set(event.data.name, event.data);
+        changed = true;
+        break;
+      case "note_version":
+        noteVersions ??= new Map(overrides.noteVersions);
+        noteVersions.set(event.data.version, event.data);
+        changed = true;
+        break;
+      case "stats":
+        stats = event.data;
+        changed = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return changed
+    ? {
+        advisorRuns: advisorRuns ?? overrides.advisorRuns,
+        noteVersions: noteVersions ?? overrides.noteVersions,
+        stats,
+      }
+    : overrides;
+};
+
+/**
+ * summary に上書き用の値 overrides を当て直した summary を返す。applyLiveEvents が summary に note_version・
+ * advisor_run・stats を当てるのと同じ規則 (note_versions は version で置き換え・番号の昇順の位置に挿す、advisor_runs は
+ * name で置き換え・役割の順と連番の昇順の位置に挿す、stats は t_end・counts・decide_s_median を置き換える) で、
+ * note_version を番号の昇順に、advisor_run を届いた名前の順に、最後に stats を当てる。変わらなければ summary を
+ * そのまま返す。渡した値は変えない
+ */
+export const applySummaryOverrides = (
+  summary: RunSummary,
+  overrides: SummaryOverrides,
+): RunSummary => {
+  const events: LiveEvent[] = [
+    ...[...overrides.noteVersions.values()]
+      .sort((left, right) => left.version - right.version)
+      .map((data): LiveEvent => ({ kind: "note_version", data })),
+    ...[...overrides.advisorRuns.values()].map(
+      (data): LiveEvent => ({ kind: "advisor_run", data }),
+    ),
+    ...(overrides.stats === null ? [] : [{ kind: "stats", data: overrides.stats } as const]),
+  ];
+  if (events.length === 0) {
+    return summary;
+  }
+  const { caches } = applyLiveEvents(
+    { summary, requests: undefined, frames: undefined, pad: undefined, events: undefined },
+    events,
+  );
+  return caches.summary ?? summary;
+};
+
 /** 2 つの step が、t・tool・summary で同じか (kind は比べない) */
 const isSameStep = (left: AdvisorStep, right: AdvisorStep): boolean =>
   left.t === right.t && left.tool === right.tool && left.summary === right.summary;
