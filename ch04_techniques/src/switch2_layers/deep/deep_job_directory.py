@@ -8,9 +8,11 @@
   map では、work/map/ をいつも作る (文書が無くても)
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from switch2_layers.deep.deep_types import DeepJob, DocumentKey, DocumentKind
+from switch2_layers.notes.note_paths import deep_document_notes
 from switch2_layers.run_directory import RunPaths
 
 JOB_FILE = "job.json"
@@ -33,16 +35,25 @@ def next_job_number(deep_dir: Path, kind: DocumentKind) -> int:
     raise NotImplementedError
 
 
-def create_job_directory(paths: RunPaths, job: DeepJob) -> Path:
+def create_job_directory(
+    paths: RunPaths,
+    job: DeepJob,
+    list_documents: Callable[[Path, DocumentKey], list[str]] = deep_document_notes,
+) -> Path:
     """job のディレクトリーを deep/ に作り、job.json と work/ を用意して、そのパスを返す。
 
+    list_documents は対象の文書の相対パスを列挙する関数 (既定 notes.note_paths.deep_document_notes)。テストでは、
+    列挙した後に消える文書を表すため、無いパスを返す関数を渡せる。
     1. 連番 next_job_number(paths.deep_dir, job.kind) で deep/<種類>-<連番>/ を mkdir(exist_ok=False) で作る。
        既にあれば (同時に作られた場合) 連番を 1 増やして作り直す
-    2. 対象の文書 notes.note_paths.deep_document_notes(paths.notes_dir, job.key) のそれぞれについて、
-       本体のファイルがあればバイト列を 1 回読み、そのバイト列を work/<相対パス> に書き (親のディレクトリーを作る)、
-       同じバイト列の SHA-256 を記録する (コピーとハッシュが同じ内容を表すようにする)。無ければ NO_DOCUMENT_SHA256
+    2. 対象の文書 list_documents(paths.notes_dir, job.key) のそれぞれについて、本体のファイルのバイト列を 1 回だけ読み、
+       そのバイト列を work/<相対パス> に書き (親のディレクトリーを作る)、同じバイト列の SHA-256 を記録する
+       (コピーとハッシュが同じ内容を表すようにする)。読むときに文書が無ければ (FileNotFoundError、または通常の
+       ファイルでない。列挙した後に消えた文書を含む)、無い文書として扱う: コピーせず、sha256 を NO_DOCUMENT_SHA256 にする
     3. work/ を作る (コピーが無くても)。map なら work/map/ も作る
     4. job.json を置き換えの書き込みで書く (モジュールの docstring の形。documents は 2 の順)
+    無い文書以外の失敗 (OSError) は、そのまま外に出す (呼び出し側の DeepScheduler.request から外に出て、
+    surface と middle のループが deep_request_error として記録する)。
     """
     raise NotImplementedError
 

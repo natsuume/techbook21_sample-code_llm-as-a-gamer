@@ -64,7 +64,11 @@ def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
     - controls・tips で場面あり: [scenes/<場面ID>/<種類>.md, common/<種類>.md] (場面の文書と共通の文書の両方)
     - controls・tips で場面なし: [common/<種類>.md]
     - strategy: [strategy.md]、advice: [advice.md]
-    - map: notes_dir/map/ の下の通常のファイルすべての相対パス (map/... の形、文字列の順)。無ければ空のリスト
-    map 以外は、ファイルがまだ無くてもパスを返す。
+    - map: notes_dir/map/ の下の通常のファイルの相対パス (map/... の形、文字列の順)。無ければ空のリスト。
+      次のものは除く (置き換えの書き込みの途中や、kill されたジョブが残したファイルを文書として扱わないため):
+        - パスの要素のどれかが `.` で始まるもの (隠しファイルと隠しディレクトリーの下)
+        - 名前が置き換えの一時ファイルの規則 (file_io.is_temporary_file_name) に当たるもの
+    map 以外は、ファイルがまだ無くてもパスを返す。列挙した後にファイルが消えることがあるため、読む側は
+    読むときに無い文書を扱う (deep_job_directory.create_job_directory)。
     """
     raise NotImplementedError

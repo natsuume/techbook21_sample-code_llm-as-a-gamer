@@ -1,14 +1,18 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 from switch2_layers.file_io import (
+    JsonLinesChunk,
     append_json_line,
     format_json,
     format_json_line,
+    is_temporary_file_name,
     read_json_lines,
+    read_json_lines_from,
     read_text_or_empty,
     sha256_bytes,
     sha256_file,
@@ -18,6 +22,40 @@ from switch2_layers.file_io import (
 )
 
 ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+# --- 一時ファイルの名前の規則 ---
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        (".places.md.k3j9x.tmp", True),
+        (".a.tmp", True),
+        ("places.md", False),
+        ("places.tmp", False),
+        (".places.md", False),
+        (".publish.lock", False),
+    ],
+)
+def test_is_temporary_file_name(name, expected):
+    assert is_temporary_file_name(name) is expected
+
+
+def test_temporary_file_used_for_replacement_follows_the_rule(tmp_path, monkeypatch):
+    sources: list[str] = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):
+        sources.append(Path(src).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", recording_replace)
+    write_bytes_atomic(tmp_path / "places.md", b"x")
+    monkeypatch.undo()
+    assert len(sources) == 1
+    assert is_temporary_file_name(sources[0])
+    assert sources[0].startswith(".places.md.")
 
 
 # --- 置き換えの書き込み ---
@@ -182,3 +220,77 @@ def test_sha256_file(tmp_path):
     assert sha256_file(tmp_path / "missing.md") is None
     # 通常のファイルでないもの (ディレクトリー) も None
     assert sha256_file(tmp_path) is None
+
+
+# --- バイト位置から完全な行を読む ---
+
+
+def test_read_from_start_returns_complete_lines_and_end_offset(tmp_path):
+    path = tmp_path / "operations.jsonl"
+    data = b'{"t": 1.0}\n{"t": 1.0, "n": 2}\n'
+    path.write_bytes(data)
+    assert read_json_lines_from(path, 0) == JsonLinesChunk(
+        rows=[{"t": 1.0}, {"t": 1.0, "n": 2}], end_offset=len(data), restarted=False
+    )
+
+
+def test_partial_last_line_is_not_read_and_not_counted(tmp_path):
+    path = tmp_path / "surface.jsonl"
+    complete = b'{"t_received": 1.0}\n'
+    path.write_bytes(complete + b'{"t_received": 2.0')
+    chunk = read_json_lines_from(path, 0)
+    assert chunk.rows == [{"t_received": 1.0}]
+    assert chunk.end_offset == len(complete)
+    # 書きかけの行が完全になってから、その位置から読むと読める
+    with path.open("ab") as file:
+        file.write(b"}\n")
+    later = read_json_lines_from(path, chunk.end_offset)
+    assert later.rows == [{"t_received": 2.0}]
+    assert later.end_offset == path.stat().st_size
+
+
+def test_reading_from_end_offset_returns_only_appended_lines(tmp_path):
+    path = tmp_path / "operations.jsonl"
+    path.write_bytes(b'{"t": 13.0, "n": 1}\n')
+    first = read_json_lines_from(path, 0)
+    # 同じ t の行が、読んだ後に追記される
+    with path.open("ab") as file:
+        file.write(b'{"t": 13.0, "n": 2}\n')
+    second = read_json_lines_from(path, first.end_offset)
+    assert second.rows == [{"t": 13.0, "n": 2}]
+    # 新しい行が無ければ空で、位置は変わらない
+    third = read_json_lines_from(path, second.end_offset)
+    assert third == JsonLinesChunk(
+        rows=[], end_offset=second.end_offset, restarted=False
+    )
+
+
+def test_offset_beyond_file_size_reads_from_start(tmp_path):
+    path = tmp_path / "surface.jsonl"
+    data = b'{"t_received": 1.0}\n'
+    path.write_bytes(data)
+    assert read_json_lines_from(path, 1000) == JsonLinesChunk(
+        rows=[{"t_received": 1.0}], end_offset=len(data), restarted=True
+    )
+    assert read_json_lines_from(path, -1).restarted is True
+
+
+def test_missing_file_reads_nothing(tmp_path):
+    path = tmp_path / "surface.jsonl"
+    assert read_json_lines_from(path, 0) == JsonLinesChunk(
+        rows=[], end_offset=0, restarted=False
+    )
+    assert read_json_lines_from(path, 50) == JsonLinesChunk(
+        rows=[], end_offset=0, restarted=True
+    )
+
+
+def test_skipped_lines_still_advance_offset_and_offsets_count_bytes(tmp_path):
+    path = tmp_path / "surface.jsonl"
+    data = b"{broken\n[1]\n\n" + '{"name": "町"}\n'.encode()
+    path.write_bytes(data)
+    chunk = read_json_lines_from(path, 0)
+    assert chunk.rows == [{"name": "町"}]
+    # 位置はバイトで数える (「町」は UTF-8 で 3 バイト)
+    assert chunk.end_offset == len(data)
+    assert chunk.end_offset > len(data.decode())

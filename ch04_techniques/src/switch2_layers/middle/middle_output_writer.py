@@ -55,8 +55,8 @@ def write_middle_output(
        (一覧は書き換えない)。scene_name が None か空なら、場面 ID も場面名も None (tasks.md も一覧も書かない)
     2. 場面 ID があれば、notes/scenes/<場面ID>/tasks.md を output.tasks で置き換える (ディレクトリーが無ければ作る)
     3. MiddleState(generated_t, based_on_t=middle_input.t, scene_id, scene_name (前後の空白を除いたもの), is_stuck,
-       stuck_description, surface_wait_s, timeline, surface_rows_until_t=middle_input.surface_rows_until_t,
-       operations_rows_until_t=middle_input.operations_rows_until_t) を middle/state.json に置き換えて書く
+       stuck_description, surface_wait_s, timeline, surface_rows_offset=middle_input.surface_rows_offset,
+       operations_rows_offset=middle_input.operations_rows_offset) を middle/state.json に置き換えて書く
     4. 新しい場面なら、notes.scene_labels.add_scene_label(notes/scene_labels.json, 新しい場面) で一覧に足す。
        足した場面が戻り値の new_scene
     書き込みの例外はそのまま出す (それより前に書いたファイルは戻さない。失敗したときの挙動はモジュールの docstring)。

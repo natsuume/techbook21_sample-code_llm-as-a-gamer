@@ -10,6 +10,12 @@
   deep は本体を読み直し、取り込むか上書きするかを決めて、今のハッシュを付けてもう一度実行する
 - --note が notes/ の外を指す (絶対パス・.. を含む・notes/ の外へのシンボリックリンク) か、--from が無いときは、
   何もせず終了コード 2
+- --from も置き場所を限る。シンボリックリンクを解決した先が、同じ実行のいずれかの deep のジョブの work/
+  (<run-dir>/deep/<種類>-<連番3桁>/work/ の下) に無ければ、何もせず終了コード 2。
+  理由: deep (Claude Code) に publish-note の実行だけを許す使い方で、プロンプトインジェクションを受けた deep が、
+  自分では読めないホストのファイル (.env など) を --from に指定して notes/ に写すと、その内容が Decision Model や
+  middle への要求に入ってしまう。--from をジョブの作業用のディレクトリーに限ることで、deep が自分で書いたもの
+  (と job の用意で写した文書) だけを本体に入れられるようにする
 - ハッシュの比較と置き換えは、notes/.publish.lock のファイルロック (fcntl.flock の排他ロック) の中で行う。
   同じ実行の publish-note どうしは、比較から置き換えまでを 1 つずつ行う
 """
@@ -35,6 +41,10 @@ class PublishStatus(StrEnum):
 
 class NotePathError(ValueError):
     """--note が notes/ の外を指すか、文書のファイルとして使えないパスだった。"""
+
+
+class SourcePathError(ValueError):
+    """--from が deep のジョブの work/ の外を指すか、通常のファイルでなかった。"""
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,20 @@ def resolve_note_path(notes_dir: Path, note: str) -> Path:
     raise NotImplementedError
 
 
+def resolve_source_path(run_dir: Path, source: Path) -> Path:
+    """--from の値 source を、シンボリックリンクを解決した先のパスにして返す。
+
+    解決した先 (Path.resolve) を、run_dir/deep を解決した先からの相対パスにしたとき、次のすべてを満たさなければ
+    SourcePathError にする:
+        - run_dir/deep の下にある
+        - 1 つ目の要素が deep のジョブのディレクトリー名 (deep.deep_job_directory.parse_job_directory_name で読める名前)
+        - 2 つ目の要素が work で、その下にある (work/ 自体や、job.json などの work/ の外のファイルは不可)
+        - 通常のファイルである
+    途中のディレクトリーやファイル自体が、work/ の外へのシンボリックリンクなら、解決した先が外になるため不可。
+    """
+    raise NotImplementedError
+
+
 def publish_note(
     run_dir: Path, note: str, base_sha256: str, source: Path
 ) -> PublishResult:
@@ -87,12 +111,12 @@ def publish_note(
 
     1. run_dir/notes がディレクトリーでなければ INVALID
     2. resolve_note_path が NotePathError なら INVALID
-    3. source が通常のファイルでなければ INVALID
+    3. resolve_source_path が SourcePathError なら INVALID (無いファイル・通常のファイルでないものを含む)
     4. notes/.publish.lock を開いて排他ロックを取る (ロックのファイルが無ければ作る)
     5. ロックの中で本体の今の SHA-256 (無ければ NO_NOTE_SHA256) を計算し、base_sha256 (大文字小文字を区別しない) と比べる
        - 一致しなければ置き換えず CONFLICT (current_sha256 = 今のハッシュ)
-       - 一致したら、source を読んだバイト列で本体を置き換え (file_io.write_bytes_atomic。親のディレクトリーが無ければ作る)、
-         PUBLISHED (sha256 = そのバイト列の SHA-256)
+       - 一致したら、3 で解決した先のファイルを読んだバイト列で本体を置き換え (file_io.write_bytes_atomic。
+         親のディレクトリーが無ければ作る)、PUBLISHED (sha256 = そのバイト列の SHA-256)
     6. ロックを放す
     INVALID のときは notes/ の中を何も変えない。source の読み込みに失敗したら (OSError) INVALID にする。
     """

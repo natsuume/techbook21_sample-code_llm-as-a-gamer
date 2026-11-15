@@ -87,3 +87,19 @@ def test_deep_document_notes_for_map_lists_files(tmp_path):
     (tmp_path / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
     (tmp_path / "map" / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
     assert deep_document_notes(tmp_path, key) == ["map/places.md", "map/town/house.md"]
+
+
+def test_map_listing_skips_temporary_and_hidden_files(tmp_path):
+    key = DocumentKey(DocumentKind.MAP, None)
+    map_dir = tmp_path / "map"
+    (map_dir / "town").mkdir(parents=True)
+    (map_dir / ".hidden").mkdir()
+    (map_dir / "places.md").write_text("# 場所\n", encoding="utf-8")
+    # 置き換えの書き込みの途中 (や kill された後) に残る一時ファイル
+    (map_dir / ".places.md.x7k2q.tmp").write_text("書きかけ", encoding="utf-8")
+    (map_dir / "town" / ".house.md.a1b2c.tmp").write_text("書きかけ", encoding="utf-8")
+    # `.` で始まる名前と、その下のファイル
+    (map_dir / ".notes").write_text("x", encoding="utf-8")
+    (map_dir / ".hidden" / "inside.md").write_text("x", encoding="utf-8")
+    (map_dir / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
+    assert deep_document_notes(tmp_path, key) == ["map/places.md", "map/town/house.md"]

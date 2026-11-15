@@ -253,7 +253,7 @@ def add_publish_note_parser(
         type=Path,
         required=True,
         metavar="FILE",
-        help="編集したファイル",
+        help="編集したファイル (同じ実行の deep/<種類>-<連番>/work/ の中に限る)",
     )
     parser.set_defaults(handler=publish_note_command)
 

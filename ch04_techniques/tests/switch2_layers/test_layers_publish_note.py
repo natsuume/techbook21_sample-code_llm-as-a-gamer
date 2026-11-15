@@ -13,8 +13,10 @@ from switch2_layers.notes.publish_note import (
     NotePathError,
     PublishResult,
     PublishStatus,
+    SourcePathError,
     publish_note,
     resolve_note_path,
+    resolve_source_path,
 )
 
 ADVICE = "# 助言\n"
@@ -34,8 +36,14 @@ def make_run(tmp_path: Path) -> Path:
     return run_dir
 
 
-def edited_file(tmp_path: Path, text: str = EDITED) -> Path:
-    path = tmp_path / "work" / "advice.md"
+def edited_file(
+    run_dir: Path,
+    text: str = EDITED,
+    name: str = "advice.md",
+    job: str = "advice-001",
+) -> Path:
+    """deep のジョブの work/ に、deep が編集したファイルを書いて返す (publish-note の --from に渡せる置き場所)。"""
+    path = run_dir / "deep" / job / "work" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
@@ -63,7 +71,7 @@ def test_result_exit_code_and_stdout_json():
 
 def test_publish_replaces_note_when_hash_matches(tmp_path):
     run_dir = make_run(tmp_path)
-    result = publish_note(run_dir, "advice.md", sha(ADVICE), edited_file(tmp_path))
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), edited_file(run_dir))
     assert result.status is PublishStatus.PUBLISHED
     assert result.sha256 == sha(EDITED)
     assert result.exit_code() == 0
@@ -75,7 +83,7 @@ def test_publish_replaces_note_when_hash_matches(tmp_path):
 def test_publish_accepts_uppercase_hash(tmp_path):
     run_dir = make_run(tmp_path)
     result = publish_note(
-        run_dir, "advice.md", sha(ADVICE).upper(), edited_file(tmp_path)
+        run_dir, "advice.md", sha(ADVICE).upper(), edited_file(run_dir)
     )
     assert result.status is PublishStatus.PUBLISHED
 
@@ -83,7 +91,7 @@ def test_publish_accepts_uppercase_hash(tmp_path):
 def test_publish_creates_missing_note_with_base_none(tmp_path):
     run_dir = make_run(tmp_path)
     result = publish_note(
-        run_dir, "scenes/scene-002/controls.md", "none", edited_file(tmp_path)
+        run_dir, "scenes/scene-002/controls.md", "none", edited_file(run_dir)
     )
     assert result.status is PublishStatus.PUBLISHED
     target = run_dir / "notes" / "scenes" / "scene-002" / "controls.md"
@@ -92,7 +100,7 @@ def test_publish_creates_missing_note_with_base_none(tmp_path):
 
 def test_publish_leaves_no_temp_files(tmp_path):
     run_dir = make_run(tmp_path)
-    publish_note(run_dir, "advice.md", sha(ADVICE), edited_file(tmp_path))
+    publish_note(run_dir, "advice.md", sha(ADVICE), edited_file(run_dir))
     names = sorted(p.name for p in (run_dir / "notes").iterdir())
     assert names == [".publish.lock", "advice.md", "common", "map"]
 
@@ -103,7 +111,7 @@ def test_publish_leaves_no_temp_files(tmp_path):
 def test_conflict_when_hash_differs(tmp_path):
     run_dir = make_run(tmp_path)
     result = publish_note(
-        run_dir, "advice.md", sha("old version"), edited_file(tmp_path)
+        run_dir, "advice.md", sha("old version"), edited_file(run_dir)
     )
     assert result.status is PublishStatus.CONFLICT
     assert result.current_sha256 == sha(ADVICE)
@@ -113,7 +121,7 @@ def test_conflict_when_hash_differs(tmp_path):
 
 def test_conflict_when_note_exists_but_base_is_none(tmp_path):
     run_dir = make_run(tmp_path)
-    result = publish_note(run_dir, "advice.md", "none", edited_file(tmp_path))
+    result = publish_note(run_dir, "advice.md", "none", edited_file(run_dir))
     assert result.status is PublishStatus.CONFLICT
     assert result.current_sha256 == sha(ADVICE)
 
@@ -121,7 +129,7 @@ def test_conflict_when_note_exists_but_base_is_none(tmp_path):
 def test_conflict_when_note_does_not_exist_but_base_is_a_hash(tmp_path):
     run_dir = make_run(tmp_path)
     result = publish_note(
-        run_dir, "scenes/scene-001/tips.md", sha(ADVICE), edited_file(tmp_path)
+        run_dir, "scenes/scene-001/tips.md", sha(ADVICE), edited_file(run_dir)
     )
     assert result.status is PublishStatus.CONFLICT
     assert result.current_sha256 == "none"
@@ -130,7 +138,7 @@ def test_conflict_when_note_does_not_exist_but_base_is_a_hash(tmp_path):
 
 def test_only_one_of_concurrent_publishes_with_same_base_succeeds(tmp_path):
     run_dir = make_run(tmp_path)
-    sources = [edited_file(tmp_path / str(i), f"v{i}") for i in range(8)]
+    sources = [edited_file(run_dir, f"v{i}", name=f"advice-{i}.md") for i in range(8)]
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
         futures = [
             pool.submit(publish_note, run_dir, "advice.md", sha(ADVICE), source)
@@ -161,7 +169,7 @@ def test_only_one_of_concurrent_publishes_with_same_base_succeeds(tmp_path):
 def test_invalid_note_paths_change_nothing(tmp_path, note):
     run_dir = make_run(tmp_path)
     (run_dir / "run.jsonl").write_text("{}\n", encoding="utf-8")
-    result = publish_note(run_dir, note, "none", edited_file(tmp_path))
+    result = publish_note(run_dir, note, "none", edited_file(run_dir))
     assert result.status is PublishStatus.INVALID
     assert result.exit_code() == 2
     assert result.stdout_json() is None
@@ -172,7 +180,7 @@ def test_invalid_note_paths_change_nothing(tmp_path, note):
 def test_absolute_note_path_is_invalid(tmp_path):
     run_dir = make_run(tmp_path)
     target = run_dir / "notes" / "advice.md"
-    result = publish_note(run_dir, str(target), sha(ADVICE), edited_file(tmp_path))
+    result = publish_note(run_dir, str(target), sha(ADVICE), edited_file(run_dir))
     assert result.status is PublishStatus.INVALID
     assert target.read_text(encoding="utf-8") == ADVICE
 
@@ -182,7 +190,7 @@ def test_symlink_to_outside_of_notes_is_invalid(tmp_path):
     outside = tmp_path / "outside.md"
     outside.write_text("outside\n", encoding="utf-8")
     os.symlink(outside, run_dir / "notes" / "link.md")
-    result = publish_note(run_dir, "link.md", sha("outside\n"), edited_file(tmp_path))
+    result = publish_note(run_dir, "link.md", sha("outside\n"), edited_file(run_dir))
     assert result.status is PublishStatus.INVALID
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
@@ -193,7 +201,7 @@ def test_symlinked_directory_to_outside_of_notes_is_invalid(tmp_path):
     outside_dir.mkdir()
     os.symlink(outside_dir, run_dir / "notes" / "scenes")
     result = publish_note(
-        run_dir, "scenes/scene-001/tips.md", "none", edited_file(tmp_path)
+        run_dir, "scenes/scene-001/tips.md", "none", edited_file(run_dir)
     )
     assert result.status is PublishStatus.INVALID
     assert list(outside_dir.iterdir()) == []
@@ -203,7 +211,7 @@ def test_symlink_inside_notes_replaces_the_link_target(tmp_path):
     run_dir = make_run(tmp_path)
     notes = run_dir / "notes"
     os.symlink(notes / "advice.md", notes / "alias.md")
-    result = publish_note(run_dir, "alias.md", sha(ADVICE), edited_file(tmp_path))
+    result = publish_note(run_dir, "alias.md", sha(ADVICE), edited_file(run_dir))
     assert result.status is PublishStatus.PUBLISHED
     assert (notes / "advice.md").read_text(encoding="utf-8") == EDITED
     assert (notes / "alias.md").is_symlink()
@@ -211,22 +219,108 @@ def test_symlink_inside_notes_replaces_the_link_target(tmp_path):
 
 def test_missing_source_file_is_invalid(tmp_path):
     run_dir = make_run(tmp_path)
-    result = publish_note(run_dir, "advice.md", sha(ADVICE), tmp_path / "missing.md")
+    missing = run_dir / "deep" / "advice-001" / "work" / "missing.md"
+    missing.parent.mkdir(parents=True)
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), missing)
     assert result.status is PublishStatus.INVALID
     assert (run_dir / "notes" / "advice.md").read_text(encoding="utf-8") == ADVICE
 
 
 def test_directory_source_is_invalid(tmp_path):
     run_dir = make_run(tmp_path)
-    result = publish_note(run_dir, "advice.md", sha(ADVICE), tmp_path)
+    work = edited_file(run_dir).parent
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), work)
     assert result.status is PublishStatus.INVALID
 
 
 def test_missing_notes_directory_is_invalid(tmp_path):
-    result = publish_note(
-        tmp_path / "missing", "advice.md", "none", edited_file(tmp_path)
-    )
+    run_dir = tmp_path / "missing"
+    result = publish_note(run_dir, "advice.md", "none", edited_file(run_dir))
     assert result.status is PublishStatus.INVALID
+
+
+# --- --from の置き場所 (deep のジョブの work/ の中だけ) ---
+
+
+def assert_nothing_published(run_dir: Path, result: PublishResult) -> None:
+    assert result.status is PublishStatus.INVALID
+    assert result.exit_code() == 2
+    assert result.stdout_json() is None
+    assert (run_dir / "notes" / "advice.md").read_text(encoding="utf-8") == ADVICE
+
+
+def test_source_outside_run_directory_is_invalid(tmp_path):
+    run_dir = make_run(tmp_path)
+    # deep が読めないはずのホストのファイル (.env など) を写そうとする
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=secret\n", encoding="utf-8")
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), secret)
+    assert_nothing_published(run_dir, result)
+
+
+def test_source_in_run_directory_but_outside_deep_is_invalid(tmp_path):
+    run_dir = make_run(tmp_path)
+    (run_dir / "run.jsonl").write_text("{}\n", encoding="utf-8")
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), run_dir / "run.jsonl")
+    assert_nothing_published(run_dir, result)
+
+
+def test_job_json_is_not_a_valid_source(tmp_path):
+    run_dir = make_run(tmp_path)
+    edited_file(run_dir)
+    job_json = run_dir / "deep" / "advice-001" / "job.json"
+    job_json.write_text("{}", encoding="utf-8")
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), job_json)
+    assert_nothing_published(run_dir, result)
+
+
+def test_work_of_directory_that_is_not_a_job_is_invalid(tmp_path):
+    run_dir = make_run(tmp_path)
+    source = edited_file(run_dir, job="notes")
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), source)
+    assert_nothing_published(run_dir, result)
+
+
+def test_symlink_in_work_to_outside_is_invalid(tmp_path):
+    run_dir = make_run(tmp_path)
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=secret\n", encoding="utf-8")
+    work = edited_file(run_dir).parent
+    os.symlink(secret, work / "linked.md")
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), work / "linked.md")
+    assert_nothing_published(run_dir, result)
+
+
+def test_work_directory_symlinked_to_outside_is_invalid(tmp_path):
+    run_dir = make_run(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "advice.md").write_text("outside\n", encoding="utf-8")
+    job_dir = run_dir / "deep" / "advice-002"
+    job_dir.mkdir(parents=True)
+    os.symlink(outside, job_dir / "work")
+    result = publish_note(
+        run_dir, "advice.md", sha(ADVICE), job_dir / "work" / "advice.md"
+    )
+    assert_nothing_published(run_dir, result)
+
+
+def test_source_path_with_dotdot_resolving_into_work_is_accepted(tmp_path):
+    run_dir = make_run(tmp_path)
+    source = edited_file(run_dir)
+    roundabout = source.parent / ".." / "work" / source.name
+    result = publish_note(run_dir, "advice.md", sha(ADVICE), roundabout)
+    assert result.status is PublishStatus.PUBLISHED
+
+
+def test_resolve_source_path(tmp_path):
+    run_dir = make_run(tmp_path)
+    source = edited_file(run_dir, name="sub/advice.md", job="map-012")
+    assert resolve_source_path(run_dir, source) == source.resolve()
+    with pytest.raises(SourcePathError):
+        resolve_source_path(run_dir, run_dir / "notes" / "advice.md")
+    with pytest.raises(SourcePathError):
+        resolve_source_path(run_dir, source.parent.parent)
 
 
 # --- resolve_note_path ---

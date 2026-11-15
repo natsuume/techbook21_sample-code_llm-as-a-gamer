@@ -15,8 +15,8 @@ STATE = MiddleState(
     stuck_description="",
     surface_wait_s=0.2,
     timeline="## 直近",
-    surface_rows_until_t=4.8,
-    operations_rows_until_t=4.9,
+    surface_rows_offset=120,
+    operations_rows_offset=40,
 )
 
 
@@ -31,11 +31,11 @@ def test_round_trip():
         "stuck_description",
         "surface_wait_s",
         "timeline",
-        "surface_rows_until_t",
-        "operations_rows_until_t",
+        "surface_rows_offset",
+        "operations_rows_offset",
     ]
-    assert value["surface_rows_until_t"] == 4.8
-    assert value["operations_rows_until_t"] == 4.9
+    assert value["surface_rows_offset"] == 120
+    assert value["operations_rows_offset"] == 40
     assert middle_state_from_json(value) == STATE
 
 
@@ -46,15 +46,15 @@ def test_null_scene_is_allowed():
     assert state.scene_name is None
 
 
-def test_null_row_bounds_are_allowed():
+def test_zero_offsets_are_allowed():
     value = {
         **middle_state_to_json(STATE),
-        "surface_rows_until_t": None,
-        "operations_rows_until_t": None,
+        "surface_rows_offset": 0,
+        "operations_rows_offset": 0,
     }
     state = middle_state_from_json(value)
-    assert state.surface_rows_until_t is None
-    assert state.operations_rows_until_t is None
+    assert state.surface_rows_offset == 0
+    assert state.operations_rows_offset == 0
 
 
 @pytest.mark.parametrize(
@@ -69,9 +69,11 @@ def test_null_row_bounds_are_allowed():
         {"is_stuck": "no"},
         {"stuck_description": None},
         {"timeline": ["a"]},
-        {"surface_rows_until_t": "4.8"},
-        {"surface_rows_until_t": True},
-        {"operations_rows_until_t": [4.9]},
+        {"surface_rows_offset": None},
+        {"surface_rows_offset": -1},
+        {"surface_rows_offset": 1.5},
+        {"surface_rows_offset": True},
+        {"operations_rows_offset": "40"},
     ],
 )
 def test_wrong_types_are_rejected(changes):
@@ -86,7 +88,7 @@ def test_non_object_is_rejected(value):
 
 
 @pytest.mark.parametrize(
-    "key", ["timeline", "surface_rows_until_t", "operations_rows_until_t"]
+    "key", ["timeline", "surface_rows_offset", "operations_rows_offset"]
 )
 def test_missing_key_is_rejected(key):
     value = middle_state_to_json(STATE)

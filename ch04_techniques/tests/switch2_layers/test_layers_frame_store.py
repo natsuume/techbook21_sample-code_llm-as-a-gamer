@@ -3,13 +3,14 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.frame_store import (
     FrameRecord,
     FrameStore,
+    advance_interval_schedule,
     frame_record_row,
-    is_interval_due,
     latest_frame_t,
     read_frame_records,
 )
@@ -44,15 +45,66 @@ def frames_rows(root: Path) -> list[dict]:
 
 # --- 一定間隔の判定 ---
 
+CAPTURE_FPS = (
+    10  # キャプチャーがフレームを残すレート (switch2_remote.capture の処理レート)
+)
+DURATION_S = 60  # レートを確かめる区間の長さ (秒)
 
-def test_is_interval_due():
-    assert is_interval_due(None, 0.0, 5.0)
-    assert is_interval_due(1.0, 1.2, 5.0)
-    # 揺らぎを許す: 1 / 5 秒の 0.9 倍 (0.18 秒) たてば対象
-    assert is_interval_due(1.0, 1.19, 5.0)
-    assert is_interval_due(0.0, 0.18, 5.0)
-    assert not is_interval_due(1.0, 1.17, 5.0)
-    assert not is_interval_due(1.0, 1.1, 5.0)
+
+def capture_times(start: float, count: int) -> list[float]:
+    """start から 0.1 秒ごとの、ミリ秒に丸めた count 個のフレームの時刻。"""
+    return [round(start + i / CAPTURE_FPS, 3) for i in range(count)]
+
+
+def saved_times(times: list[float], interval_fps: float) -> list[float]:
+    """advance_interval_schedule で、times のうち保存の対象になるフレームの時刻を返す。"""
+    next_due: float | None = None
+    saved = []
+    for t in times:
+        due, next_due = advance_interval_schedule(next_due, t, interval_fps)
+        if due:
+            saved.append(t)
+    return saved
+
+
+def test_first_frame_is_always_saved():
+    due, next_due = advance_interval_schedule(None, 3.0, 5.0)
+    assert due is True
+    assert next_due == pytest.approx(3.2)
+
+
+def test_schedule_advances_from_previous_due_time_not_from_frame_time():
+    # 予定時刻 1.0 に 0.05 秒遅れたフレームを保存しても、次の予定時刻は 1.05 + 0.2 ではなく 1.0 + 0.2
+    due, next_due = advance_interval_schedule(1.0, 1.05, 5.0)
+    assert due is True
+    assert next_due == pytest.approx(1.2)
+    # 予定時刻の前のフレームは対象でなく、予定時刻は変わらない
+    assert advance_interval_schedule(1.2, 1.1, 5.0) == (False, 1.2)
+
+
+def test_rounded_frame_time_just_before_due_time_counts():
+    # t はミリ秒に丸めた値なので、予定時刻の 0.5 ミリ秒前までは予定時刻に達したものとして扱う
+    due, _ = advance_interval_schedule(0.30000000000000004, 0.3, 10.0)
+    assert due is True
+    assert advance_interval_schedule(0.3, 0.299, 10.0)[0] is False
+
+
+@pytest.mark.parametrize("interval_fps", [3, 5, 7, 9, 10])
+def test_saved_rate_matches_interval_fps(interval_fps):
+    times = capture_times(0.0, DURATION_S * CAPTURE_FPS)
+    saved = saved_times(times, interval_fps)
+    assert abs(len(saved) - DURATION_S * interval_fps) <= 1
+    assert saved[0] == 0.0
+
+
+def test_no_burst_after_frames_stop_and_resume():
+    # 0〜2 秒のフレームの後、10 秒まで途切れてから再開する
+    times = capture_times(0.0, 21) + capture_times(10.0, 21)
+    saved = saved_times(times, 5.0)
+    after_gap = [t for t in saved if t >= 10.0]
+    # 途切れた分をまとめて保存せず、再開したフレームから 0.2 秒ごとに保存する
+    assert after_gap[:3] == [10.0, 10.2, 10.4]
+    assert len([t for t in saved if 10.0 <= t < 10.2]) == 1
 
 
 # --- 一定間隔の保存 ---
@@ -218,9 +270,20 @@ def test_dropped_interval_frame_still_advances_the_interval(tmp_path):
     store.offer_interval(captured(0.0))
     assert store.offer_interval(captured(0.2)) is False
     store.write_queued()
-    # 0.2 は捨てたが、次の対象の起点は 0.2 に進んでいる
+    # 0.2 は捨てたが、次の予定時刻は 0.4 に進んでいる
     assert store.offer_interval(captured(0.3)) is False
     assert store.offer_interval(captured(0.4)) is True
+
+
+def test_offer_interval_follows_schedule_for_rate_not_dividing_capture_rate(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=3.0, interval_width=64, start_thread=False
+    )
+    times = capture_times(0.0, 30)
+    offered = [t for t in times if store.offer_interval(captured(t))]
+    # 3 fps: 予定時刻 0・1/3・2/3・1・… 以後の最初のフレームを保存し、3 秒で 9 枚
+    assert offered == [0.0, 0.4, 0.7, 1.0, 1.4, 1.7, 2.0, 2.4, 2.7]
 
 
 def test_close_counts_unwritten_items_and_stops_accepting(tmp_path):

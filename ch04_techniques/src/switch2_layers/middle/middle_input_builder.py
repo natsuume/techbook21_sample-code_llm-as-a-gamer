@@ -9,19 +9,22 @@ run の middle のループと middle-once は、同じ build_middle_input で�
     notes/strategy.md                    大方針
     notes/scenes/<場面ID>/tasks.md        現在の場面の短期タスクリスト
 
-「前回の middle の実行以降」の行の決め方:
-    - 行の時刻は、surface.jsonl では t_received、operations.jsonl では t を使う
-    - 下限は、入力を作った時刻 (based_on_t) ではなく、前回までに実際に読んだ行の時刻の最大値
-      (前回の middle/state.json の surface_rows_until_t と operations_rows_until_t)。この値より後の行を読む
-    - 上限は今回の入力の時刻 now_t (この時刻以前の行を読む)
-    - 今回読んだ行の時刻の最大値を、今回の MiddleInput の surface_rows_until_t・operations_rows_until_t にし、
-      出力を書くときに middle/state.json に記録する。読んだ行が無ければ前回の値のまま (後退も前進もしない)
-前提: 行は時刻の順に追記される。surface.jsonl は surface の 1 本のスレッドだけが t_received の順に書き、
-operations.jsonl は records.operation_log.OperationLog がロックの中で t を取って書く (同じ t の行はありうる)。
-surface は t_received を決めた後、操作の送信 (ブリッジの ack の待ち) を挟んでから行を追記するため、入力を作った時点で
-「t_received が now_t 以下なのに、まだ書かれていない行」がありうる。下限を実際に読んだ行から決めることで、
-その行も次の入力に含める。
-analyze が失敗して middle/state.json を書かなかった回は下限を進めないため、その回に読んだ行は次の入力にも含める。
+「前回の middle の実行以降」の行の決め方 (surface.jsonl と operations.jsonl のそれぞれで同じ):
+    - 行の時刻ではなく、ファイルのバイト位置で区切る。前回の middle/state.json の surface_rows_offset・
+      operations_rows_offset の位置から、その時点でファイルにある完全な行 (改行で終わる行) をすべて読む
+      (file_io.read_json_lines_from)。上限の時刻は設けない
+    - 改行で終わらない最後の行 (書いている途中の行) は読まず、位置にも含めない。次の回に完全な行として読む
+    - 今回読んだ完全な行の末尾の位置を、今回の MiddleInput の surface_rows_offset・operations_rows_offset にし、
+      出力を書くときに middle/state.json に記録する。読んだ行が無ければ位置は変わらない
+    - 前回の middle/state.json が無い・壊れているときは、先頭 (位置 0) から読む。記録した位置がファイルの大きさを
+      超えるとき (ファイルを作り直した等) も先頭から読む。このとき、前に読んだ行をもう一度入力に含めることがある
+時刻で区切らないのは次の理由による:
+    - surface は t_received を決めた後、操作の送信 (ブリッジの ack の待ち) を挟んでから行を追記するため、入力を作った時点で
+      「t_received が入力の時刻以前なのに、まだ書かれていない行」がありうる
+    - operations.jsonl には同じ t (ミリ秒) の行がありうるため、時刻の最大値より後を読む方法では、同じ t の 2 行の
+      書き込みの間に読むと、後の行がどの入力にも入らない
+analyze か出力の書き込みが失敗して middle/state.json を書かなかった回は位置を進めないため、その回に読んだ行は
+次の入力にも含める。
 """
 
 from collections.abc import Sequence
@@ -68,17 +71,14 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - frames: select_interval_frames(read_frame_records(paths), now_t, window_s) の各画像を読んだ MiddleFrame。
       画像のファイルが読めないものは除く
     - previous_state: read_middle_state(paths.middle_state)
-    - surface_rows: surface.jsonl の行のうち、下限 < t_received <= now_t のもの (書かれた順)。
-      下限は previous_state.surface_rows_until_t。previous_state が None か、その値が None なら下限なし。
-      t_received が数 (bool を除く) でない行は除く
-    - operation_rows: operations.jsonl の行のうち、下限 < t <= now_t のもの (下限は previous_state.operations_rows_until_t。
-      決め方は surface_rows と同じ)
-    - surface_rows_until_t: surface_rows の t_received の最大値。surface_rows が空なら下限の値 (None を含む)
-    - operations_rows_until_t: operation_rows の t の最大値。operation_rows が空なら下限の値 (None を含む)
+    - surface_rows と surface_rows_offset: file_io.read_json_lines_from(surface.jsonl, 前回の位置) の rows と end_offset。
+      前回の位置は previous_state.surface_rows_offset (previous_state が None なら 0)。位置がファイルの大きさを超えていれば
+      read_json_lines_from が先頭から読む。行の時刻 (t_received) では選ばない
+    - operation_rows と operations_rows_offset: operations.jsonl について同じ (前回の位置は previous_state.operations_rows_offset)
     - scene_change_reported: surface_rows のどれかの scene_changed が True なら True
     - scene_labels: notes.scene_labels.read_scene_labels(notes/scene_labels.json)
     - strategy: notes/strategy.md (無ければ空文字列)
     - current_tasks: previous_state の scene_id の tasks.md (場面が無いか、文書が無ければ空文字列)
-    ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列) にする。
+    ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0) にする。
     """
     raise NotImplementedError

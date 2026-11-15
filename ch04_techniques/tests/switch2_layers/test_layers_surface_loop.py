@@ -64,11 +64,15 @@ class FakeDeepSink:
 
     def __init__(self):
         self.requests: list[tuple[DocumentKind, DeepTrigger, str | None]] = []
+        # この種類の要求では、この例外を出す (deep のジョブのディレクトリーの用意の失敗など)
+        self.fail_for: dict[DocumentKind, Exception] = {}
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
     ) -> DeepRequestResult:
         self.requests.append((kind, trigger, scene_id))
+        if kind in self.fail_for:
+            raise self.fail_for[kind]
         return DeepRequestResult(started=True)
 
 
@@ -360,6 +364,44 @@ def test_deep_requests_are_passed_to_scheduler_in_kind_order(tmp_path):
     assert result.row is not None
     assert result.row["deep_requests"] == ["tips", "strategy"]
     assert result.row["scene_changed"] is True
+
+
+def test_deep_request_error_is_recorded_without_stopping(tmp_path):
+    output = SurfaceOutput(
+        action=NEUTRAL_ACTION,
+        deep_kinds=frozenset({DocumentKind.MAP, DocumentKind.TIPS}),
+    )
+    decider = ScriptedDecider(output)
+    harness = make_harness(tmp_path, decider, max_errors=1)
+    harness.deep_sink.fail_for[DocumentKind.TIPS] = FileNotFoundError(
+        "notes/map/.places.md.tmp"
+    )
+    write_state(harness.root, scene_id="scene-001")
+    add_frames(harness, [9.9])
+    for _ in range(2):
+        result = harness.loop.step()
+        assert result.outcome is SurfaceStepOutcome.SENT
+    # 例外を出した種類の後の種類 (map) も要求を続ける
+    assert harness.deep_sink.requests[:2] == [
+        (DocumentKind.TIPS, DeepTrigger.SURFACE, "scene-001"),
+        (DocumentKind.MAP, DeepTrigger.SURFACE, "scene-001"),
+    ]
+    # decide の失敗には数えず、全体も止めない
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    errors = [
+        row
+        for row in read_rows(harness.root / "run.jsonl")
+        if row["event"] == "deep_request_error"
+    ]
+    assert len(errors) == 2
+    assert errors[0]["source"] == "surface"
+    assert errors[0]["kind"] == "tips"
+    assert errors[0]["trigger"] == "surface"
+    assert errors[0]["scene_id"] == "scene-001"
+    assert ".places.md.tmp" in errors[0]["error"]
+    assert result.row is not None
+    assert result.row["deep_requests"] == ["tips", "map"]
 
 
 def test_recent_actions_are_passed_to_next_request(tmp_path):

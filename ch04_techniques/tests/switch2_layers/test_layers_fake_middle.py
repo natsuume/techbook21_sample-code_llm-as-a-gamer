@@ -17,8 +17,8 @@ def middle_input(t: float) -> MiddleInput:
         previous_state=None,
         strategy="",
         current_tasks="",
-        surface_rows_until_t=None,
-        operations_rows_until_t=None,
+        surface_rows_offset=0,
+        operations_rows_offset=0,
     )
 
 

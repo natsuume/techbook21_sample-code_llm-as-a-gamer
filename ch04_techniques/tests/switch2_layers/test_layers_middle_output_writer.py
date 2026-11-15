@@ -22,8 +22,8 @@ STATE_KEYS = [
     "stuck_description",
     "surface_wait_s",
     "timeline",
-    "surface_rows_until_t",
-    "operations_rows_until_t",
+    "surface_rows_offset",
+    "operations_rows_offset",
 ]
 EMPTY_LABELS = {"scenes": []}
 
@@ -40,8 +40,8 @@ def make_run(tmp_path: Path) -> Path:
 
 def middle_input(
     t: float,
-    surface_rows_until_t: float | None = None,
-    operations_rows_until_t: float | None = None,
+    surface_rows_offset: int = 0,
+    operations_rows_offset: int = 0,
 ) -> MiddleInput:
     return MiddleInput(
         t=t,
@@ -53,8 +53,8 @@ def middle_input(
         previous_state=None,
         strategy="",
         current_tasks="",
-        surface_rows_until_t=surface_rows_until_t,
-        operations_rows_until_t=operations_rows_until_t,
+        surface_rows_offset=surface_rows_offset,
+        operations_rows_offset=operations_rows_offset,
     )
 
 
@@ -82,7 +82,7 @@ def test_new_scene_deep_kinds_are_controls_and_tips():
 def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
     root = make_run(tmp_path)
     result = write_middle_output(
-        RunPaths(root), middle_input(12.0, 11.5, 11.8), output("町"), 12.8
+        RunPaths(root), middle_input(12.0, 210, 84), output("町"), 12.8
     )
     assert result.new_scene == SceneLabel("scene-001", "町", 12.0)
     assert result.state == MiddleState(
@@ -94,8 +94,8 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         stuck_description="扉の前で止まっている",
         surface_wait_s=0.5,
         timeline="## 直近\n町",
-        surface_rows_until_t=11.5,
-        operations_rows_until_t=11.8,
+        surface_rows_offset=210,
+        operations_rows_offset=84,
     )
     assert read_json(root / "notes" / "scene_labels.json") == {
         "scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 12.0}]
@@ -114,17 +114,17 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         "stuck_description": "扉の前で止まっている",
         "surface_wait_s": 0.5,
         "timeline": "## 直近\n町",
-        "surface_rows_until_t": 11.5,
-        "operations_rows_until_t": 11.8,
+        "surface_rows_offset": 210,
+        "operations_rows_offset": 84,
     }
 
 
-def test_row_bounds_of_input_are_written_to_state(tmp_path):
+def test_row_offsets_of_input_are_written_to_state(tmp_path):
     root = make_run(tmp_path)
     write_middle_output(RunPaths(root), middle_input(3.0), output(None), 3.5)
     state = read_json(root / "middle" / "state.json")
-    assert state["surface_rows_until_t"] is None
-    assert state["operations_rows_until_t"] is None
+    assert state["surface_rows_offset"] == 0
+    assert state["operations_rows_offset"] == 0
 
 
 def test_known_scene_name_is_not_added_again(tmp_path):

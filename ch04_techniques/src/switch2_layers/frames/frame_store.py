@@ -1,7 +1,9 @@
 """フレームの画像の保存 (frames/interval/・frames/surface/) と、保存した画像の一覧 frames.jsonl。
 
 - 一定間隔の保存: キャプチャーのフレームを interval_fps のフレームレートで間引き、幅 interval_width に縮小して
-  frames/interval/<tミリ秒9桁>.jpg に保存する
+  frames/interval/<tミリ秒9桁>.jpg に保存する。保存の予定時刻を 1 / interval_fps 秒ずつ進め (advance_interval_schedule)、
+  予定時刻以後の最初のフレームを保存する。予定時刻を保存したフレームの t からではなく前回の予定時刻から進めるため、
+  キャプチャーのフレームの間隔 (0.1 秒) の倍数でない間隔 (3・7・9 fps など) でも、平均して指定のレートになる
 - surface の画像の保存: surface に送った JPEG を frames/surface/<tミリ秒9桁>.jpg に保存する。
   同じキャプチャー時刻 (t のミリ秒) のフレームを複数の要求で送った場合は 1 回だけ保存する
 - 画像は置き換えの書き込み (file_io.write_bytes_atomic) で書き、画像を書き終えた後に frames.jsonl に
@@ -20,9 +22,9 @@ from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY, EncodedIm
 from switch2_layers.run_directory import RunPaths
 
 DEFAULT_QUEUE_CAPACITY = 64  # キューに入れておける保存の件数の上限
-# 一定間隔の保存で、前に保存の対象にしたフレームから 1 / interval_fps 秒のこの割合以上たったフレームを次の対象にする。
-# キャプチャーのフレームの間隔の揺らぎで、保存の間隔が 1 フレーム分延びないようにするため
-INTERVAL_JITTER_RATIO = 0.9
+# フレームの t と保存の予定時刻を比べるときの許容 (秒)。t はミリ秒に丸めた値で、予定時刻は 1 / interval_fps の
+# 足し算の誤差を含むため、丸めの半分だけ早いフレームも予定時刻に達したものとして扱う
+INTERVAL_TIME_TOLERANCE_S = 0.0005
 DEFAULT_CLOSE_TIMEOUT_S = 5.0
 
 FrameKind = Literal["interval", "surface"]
@@ -64,11 +66,18 @@ def latest_frame_t(paths: RunPaths) -> float | None:
     raise NotImplementedError
 
 
-def is_interval_due(last_t: float | None, t: float, interval_fps: float) -> bool:
-    """時刻 t のフレームが一定間隔の保存の対象かを返す。
+def advance_interval_schedule(
+    next_due_t: float | None, t: float, interval_fps: float
+) -> tuple[bool, float]:
+    """時刻 t のフレームを一定間隔の保存の対象にするかを決め、(対象なら True, 次の予定時刻) を返す。
 
-    last_t (前に対象にしたフレームの t) が None なら True。そうでなければ
-    t - last_t >= INTERVAL_JITTER_RATIO / interval_fps なら True。
+    period = 1 / interval_fps として:
+        - next_due_t が None (最初のフレーム): 対象。次の予定時刻は t + period
+        - t < next_due_t - INTERVAL_TIME_TOLERANCE_S (予定時刻の前): 対象でない。次の予定時刻は next_due_t のまま
+        - 予定時刻に達していて、遅れ (t - next_due_t) が period 未満: 対象。次の予定時刻は next_due_t + period
+          (保存したフレームの t からではなく、前回の予定時刻から進める)
+        - 遅れが period 以上 (フレームが途切れて 1 周期以上遅れた): 対象。次の予定時刻は t + period に置き直す
+          (途切れた分をまとめて何枚も保存しない)
     """
     raise NotImplementedError
 
@@ -97,10 +106,10 @@ class FrameStore:
         raise NotImplementedError
 
     def offer_interval(self, frame: CapturedFrame) -> bool:
-        """frame が一定間隔の保存の対象 (is_interval_due) なら、保存の分としてキューに入れ、入れたら True を返す。
+        """frame が一定間隔の保存の対象 (advance_interval_schedule) なら、保存の分としてキューに入れ、入れたら True を返す。
 
         - 対象でなければ何もせず False
-        - 対象なら、キューに入れられたかに関わらず、次の対象の判定の起点 (last_t) を frame.t にする
+        - 対象なら、キューに入れられたかに関わらず、次の予定時刻を advance_interval_schedule の値に進める
         - キューが満杯か、close の後なら入れずに dropped を 1 増やして False
         縮小・JPEG 化・書き込みはしない (書き出しスレッドで行う)。
         """

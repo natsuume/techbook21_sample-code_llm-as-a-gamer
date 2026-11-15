@@ -167,6 +167,53 @@ def test_strategy_job(tmp_path):
     assert (job_dir / "work" / "strategy.md").read_text(encoding="utf-8") == STRATEGY
 
 
+def test_document_gone_after_listing_is_treated_as_missing(tmp_path):
+    root = make_run(tmp_path)
+    (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
+
+    def list_with_vanished_file(notes_dir: Path, key: DocumentKey) -> list[str]:
+        # 列挙した時点ではあった map/gone.md が、読む前に消えた (publish-note の置き換えの途中など)
+        return ["map/gone.md", "map/places.md"]
+
+    job_dir = create_job_directory(
+        RunPaths(root), job(DocumentKind.MAP), list_documents=list_with_vanished_file
+    )
+    assert read_json(job_dir / "job.json")["documents"] == [
+        {"note": "map/gone.md", "sha256": "none"},
+        {"note": "map/places.md", "sha256": sha("# 場所\n")},
+    ]
+    assert not (job_dir / "work" / "map" / "gone.md").exists()
+    assert (job_dir / "work" / "map" / "places.md").exists()
+
+
+def test_listed_path_that_is_not_a_regular_file_is_treated_as_missing(tmp_path):
+    root = make_run(tmp_path)
+    (root / "notes" / "map" / "town").mkdir()
+
+    def list_directory(notes_dir: Path, key: DocumentKey) -> list[str]:
+        return ["map/town"]
+
+    job_dir = create_job_directory(
+        RunPaths(root), job(DocumentKind.MAP), list_documents=list_directory
+    )
+    assert read_json(job_dir / "job.json")["documents"] == [
+        {"note": "map/town", "sha256": "none"}
+    ]
+
+
+def test_map_job_does_not_copy_temporary_files(tmp_path):
+    root = make_run(tmp_path)
+    (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
+    (root / "notes" / "map" / ".places.md.x7k2q.tmp").write_text(
+        "書きかけ", encoding="utf-8"
+    )
+    job_dir = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
+    assert [doc["note"] for doc in read_json(job_dir / "job.json")["documents"]] == [
+        "map/places.md"
+    ]
+    assert sorted(p.name for p in (job_dir / "work" / "map").iterdir()) == ["places.md"]
+
+
 def test_map_job_copies_all_map_files_and_always_has_work_map(tmp_path):
     root = make_run(tmp_path)
     empty_job = create_job_directory(RunPaths(root), job(DocumentKind.MAP))

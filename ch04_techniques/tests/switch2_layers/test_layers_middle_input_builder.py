@@ -22,8 +22,8 @@ STATE = {
     "stuck_description": "扉の前で止まっている",
     "surface_wait_s": 1.0,
     "timeline": "## 直近",
-    "surface_rows_until_t": 5.0,
-    "operations_rows_until_t": 5.0,
+    "surface_rows_offset": 0,
+    "operations_rows_offset": 0,
 }
 
 
@@ -133,6 +133,21 @@ def test_select_interval_frames_of_nothing():
 # --- 入力の作り方 ---
 
 
+def jsonl_text(rows: list[dict]) -> str:
+    return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+
+
+def byte_length(rows: list[dict]) -> int:
+    """rows を JSON Lines で書いたときのバイト数 (その次の行の始まりの位置)。"""
+    return len(jsonl_text(rows).encode())
+
+
+def write_state(root: Path, **changes: object) -> None:
+    (root / "middle" / "state.json").write_text(
+        json.dumps({**STATE, **changes}), encoding="utf-8"
+    )
+
+
 def test_empty_run_gives_empty_input(tmp_path):
     root = make_run(tmp_path)
     middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
@@ -145,8 +160,8 @@ def test_empty_run_gives_empty_input(tmp_path):
     assert middle_input.previous_state is None
     assert middle_input.strategy == ""
     assert middle_input.current_tasks == ""
-    assert middle_input.surface_rows_until_t is None
-    assert middle_input.operations_rows_until_t is None
+    assert middle_input.surface_rows_offset == 0
+    assert middle_input.operations_rows_offset == 0
 
 
 def test_frames_are_read_from_saved_interval_images(tmp_path):
@@ -166,119 +181,97 @@ def test_frames_with_missing_files_are_skipped(tmp_path):
     assert [frame.t for frame in middle_input.frames] == [18.0, 20.0]
 
 
-def test_rows_since_previous_middle_run(tmp_path):
+def test_rows_are_read_from_previous_offsets(tmp_path):
     root = make_run(tmp_path)
-    (root / "middle" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")
-    write_jsonl(
-        root / "surface.jsonl",
-        [
-            surface_row(4.0),
-            surface_row(5.0),
-            surface_row(6.0),
-            surface_row(7.0),
-            surface_row(30.0),
-        ],
-    )
-    write_jsonl(
-        root / "operations.jsonl",
-        [
-            {"t": 4.9, "source": "apply"},
-            {"t": 5.1, "source": "apply"},
-            {"t": 7.5, "source": "neutral"},
-        ],
+    surface = [surface_row(4.0), surface_row(5.0), surface_row(6.0), surface_row(30.0)]
+    operations = [
+        {"t": 4.9, "source": "apply"},
+        {"t": 5.1, "source": "apply"},
+        {"t": 7.5, "source": "neutral"},
+    ]
+    write_jsonl(root / "surface.jsonl", surface)
+    write_jsonl(root / "operations.jsonl", operations)
+    # 前回は surface の 2 行と operations の 1 行まで読んだ
+    write_state(
+        root,
+        surface_rows_offset=byte_length(surface[:2]),
+        operations_rows_offset=byte_length(operations[:1]),
     )
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
-    # 前回までに読んだ行の時刻 (5.0) より後で、今回の t (20.0) 以前の行
-    assert [row["t_received"] for row in middle_input.surface_rows] == [6.0, 7.0]
+    # 前回の位置から、ファイルにある完全な行をすべて読む (今回の t より新しい 30.0 の行も読む)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [6.0, 30.0]
     assert [row["t"] for row in middle_input.operation_rows] == [5.1, 7.5]
-    assert middle_input.previous_state == MiddleState(**STATE)
-    # 次の入力の下限は、今回読んだ行の時刻の最大値 (20.0 より後の 30.0 の行は読んでいない)
-    assert middle_input.surface_rows_until_t == 7.0
-    assert middle_input.operations_rows_until_t == 7.5
+    assert middle_input.previous_state is not None
+    assert middle_input.surface_rows_offset == byte_length(surface)
+    assert middle_input.operations_rows_offset == byte_length(operations)
 
 
-def test_lower_bound_comes_from_rows_read_not_from_input_time(tmp_path):
-    # 前回の入力を作った時刻 (based_on_t = 10.0) より前の t_received を持つ行でも、前回の入力の後に追記されて
-    # まだ読んでいなければ (前回読んだ行の最大 6.0 より後なら)、今回の入力に含める
+def test_row_with_same_time_after_offset_is_read(tmp_path):
     root = make_run(tmp_path)
-    state = {
-        **STATE,
-        "based_on_t": 10.0,
-        "surface_rows_until_t": 6.0,
-        "operations_rows_until_t": 6.5,
-    }
-    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    write_jsonl(
-        root / "surface.jsonl",
-        [surface_row(6.0), surface_row(7.0, scene_changed=True), surface_row(12.0)],
-    )
-    write_jsonl(
-        root / "operations.jsonl",
-        [{"t": 6.5}, {"t": 8.0}, {"t": 11.0}],
-    )
+    first = [{"t": 13.0, "source": "apply"}]
+    write_jsonl(root / "operations.jsonl", first + [{"t": 13.0, "source": "neutral"}])
+    write_state(root, operations_rows_offset=byte_length(first))
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    # 前回読んだ行と同じ t の行でも、前回の位置より後に書かれていれば読む
+    assert [row["source"] for row in middle_input.operation_rows] == ["neutral"]
+
+
+def test_row_with_earlier_time_after_offset_is_read(tmp_path):
+    root = make_run(tmp_path)
+    first = [surface_row(8.0)]
+    write_jsonl(root / "surface.jsonl", first + [surface_row(7.0, scene_changed=True)])
+    write_state(root, based_on_t=10.0, surface_rows_offset=byte_length(first))
     middle_input = build_middle_input(RunPaths(root), now_t=15.0, window_s=10.0)
-    assert [row["t_received"] for row in middle_input.surface_rows] == [7.0, 12.0]
-    assert [row["t"] for row in middle_input.operation_rows] == [8.0, 11.0]
-    # 遅れて書かれた行の場面転換の印も middle に届く
+    # 前回の入力の時刻 (10.0) より前の t_received を持つ行でも、前回の位置より後なら読む
+    assert [row["t_received"] for row in middle_input.surface_rows] == [7.0]
     assert middle_input.scene_change_reported is True
-    assert middle_input.surface_rows_until_t == 12.0
-    assert middle_input.operations_rows_until_t == 11.0
 
 
-def test_bounds_neither_move_back_nor_forward_without_new_rows(tmp_path):
+def test_partial_last_line_is_not_read_nor_counted(tmp_path):
     root = make_run(tmp_path)
-    state = {
-        **STATE,
-        "based_on_t": 10.0,
-        "surface_rows_until_t": 6.0,
-        "operations_rows_until_t": None,
-    }
-    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    # 読んだことのある行と、今回の t より新しい行だけがある
-    write_jsonl(
-        root / "surface.jsonl", [surface_row(5.0), surface_row(6.0), surface_row(25.0)]
-    )
-    write_jsonl(root / "operations.jsonl", [{"t": 21.0}])
+    complete = [surface_row(1.0)]
+    write_jsonl(root / "surface.jsonl", complete, partial_line='{"t_received": 2.0')
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [1.0]
+    assert middle_input.surface_rows_offset == byte_length(complete)
+
+
+def test_offset_beyond_file_size_reads_from_start(tmp_path):
+    root = make_run(tmp_path)
+    rows = [surface_row(1.0), surface_row(2.0)]
+    write_jsonl(root / "surface.jsonl", rows)
+    write_state(root, surface_rows_offset=100_000)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [1.0, 2.0]
+    assert middle_input.surface_rows_offset == byte_length(rows)
+
+
+def test_offsets_stay_without_new_rows(tmp_path):
+    root = make_run(tmp_path)
+    rows = [surface_row(1.0)]
+    write_jsonl(root / "surface.jsonl", rows)
+    write_state(root, surface_rows_offset=byte_length(rows), operations_rows_offset=0)
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert middle_input.surface_rows == ()
     assert middle_input.operation_rows == ()
-    # 入力を作った時刻 (20.0) にも、今回の t より新しい行の時刻にも進めない
-    assert middle_input.surface_rows_until_t == 6.0
-    assert middle_input.operations_rows_until_t is None
-
-
-def test_null_bounds_in_previous_state_read_all_rows(tmp_path):
-    root = make_run(tmp_path)
-    state = {
-        **STATE,
-        "based_on_t": 10.0,
-        "surface_rows_until_t": None,
-        "operations_rows_until_t": None,
-    }
-    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    write_jsonl(root / "surface.jsonl", [surface_row(4.0), surface_row(11.0)])
-    write_jsonl(root / "operations.jsonl", [{"t": 3.0}])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
-    assert [row["t_received"] for row in middle_input.surface_rows] == [4.0, 11.0]
-    assert [row["t"] for row in middle_input.operation_rows] == [3.0]
-    assert middle_input.surface_rows_until_t == 11.0
-    assert middle_input.operations_rows_until_t == 3.0
+    assert middle_input.surface_rows_offset == byte_length(rows)
+    assert middle_input.operations_rows_offset == 0
 
 
 def test_all_rows_without_previous_state(tmp_path):
     root = make_run(tmp_path)
-    write_jsonl(
-        root / "surface.jsonl",
-        [surface_row(1.0), surface_row(2.0), {"t_received": "bad"}],
-        partial_line='{"t_received": 3.0',
-    )
+    complete = [surface_row(1.0), surface_row(2.0), {"t_received": "bad"}]
+    write_jsonl(root / "surface.jsonl", complete, partial_line='{"t_received": 3.0')
     write_jsonl(root / "operations.jsonl", [{"t": 0.5}, {"t": 25.0}])
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
-    assert [row["t_received"] for row in middle_input.surface_rows] == [1.0, 2.0]
-    assert [row["t"] for row in middle_input.operation_rows] == [0.5]
-    # 書いている途中の行 (3.0) と、時刻が数でない行は、下限の計算にも使わない
-    assert middle_input.surface_rows_until_t == 2.0
-    assert middle_input.operations_rows_until_t == 0.5
+    # 先頭から、完全な行をすべて読む (行の時刻では選ばない)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [
+        1.0,
+        2.0,
+        "bad",
+    ]
+    assert [row["t"] for row in middle_input.operation_rows] == [0.5, 25.0]
+    assert middle_input.surface_rows_offset == byte_length(complete)
 
 
 def test_broken_previous_state_is_treated_as_missing(tmp_path):

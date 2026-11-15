@@ -31,11 +31,13 @@ FIRST_FRAME_POLL_S = 0.2  # 最初のフレームが frames.jsonl に載った�
 class MiddleStepResult:
     """middle の 1 回分の結果。
 
-    ok              analyze と出力の書き込みに成功したら True
-    state           書いた middle/state.json の値。失敗したら None
-    new_scene       一覧に新しく足した場面。無ければ None
-    deep_requests   初めての場面のために deep を呼ぶ文書の種類 (new_scene があれば controls と tips。無ければ空)
-    error           失敗の説明。成功なら None
+    ok                    analyze と出力の書き込みに成功したら True
+    state                 書いた middle/state.json の値。失敗したら None
+    new_scene             一覧に新しく足した場面。無ければ None
+    deep_requests         初めての場面のために deep を呼ぶ文書の種類 (new_scene があれば controls と tips。無ければ空)
+    error                 失敗の説明。成功なら None
+    deep_request_errors   deep の要求で受け口が出した例外の (種類, 説明)。要求の順。無ければ空
+                          (要求の例外は ok に影響しない)
     """
 
     ok: bool
@@ -43,6 +45,7 @@ class MiddleStepResult:
     new_scene: SceneLabel | None
     deep_requests: tuple[DocumentKind, ...]
     error: str | None
+    deep_request_errors: tuple[tuple[DocumentKind, str], ...] = ()
 
 
 def run_middle_step(
@@ -58,9 +61,10 @@ def run_middle_step(
     2. t_sent = clock.now() で analyze を呼び、戻ったら (例外でも) t_received = clock.now()
     3. write_middle_output(paths, 入力, 出力, generated_t=t_received)
     4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に
-       deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ
+       deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
+       外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
     5. middle/calls.jsonl に middle_call_record.middle_call_row の行を書く
-       (deep_requests_sent は deep_requests が None でなく、要求を渡したら True)
+       (deep_requests_sent は deep_requests が None でなく、要求を渡したら True。要求が例外を出した場合も True)
     1〜3 の例外 (Exception) は外に出さず、error の行を calls.jsonl に書いて ok=False の結果を返す
     (middle/state.json は、書く前に失敗したなら前回の出力のまま)。
     """
@@ -124,6 +128,8 @@ class MiddleLoop:
         - 成功したら、続けて失敗した回数を 0 にする
         - 失敗したら回数を 1 増やし、run_log に middle_error {"error": 説明, "count": 続けて失敗した回数} を書く。
           回数が max_errors に達したら on_stop(middle_failure_reason(回数)) を呼ぶ
+        - 結果の deep_request_errors ごとに、run_log に deep_request_error {"source": "middle", "kind", "trigger": "new_scene",
+          "scene_id": new_scene の ID, "error": 説明} を書く (失敗の回数には数えず、ループも止めない)
         run_middle_step の結果をそのまま返す。
         """
         raise NotImplementedError

@@ -168,9 +168,16 @@ def make_saved_run(tmp_path: Path) -> Path:
     return run_dir
 
 
+def job_work_file(run_dir: Path) -> Path:
+    """deep のジョブの work/ の中のファイルのパスを返す (publish-note の --from に使える置き場所。親は作る)。"""
+    path = run_dir / "deep" / "tips-001" / "work" / "edited.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_publish_note_command_publishes_and_prints_json(tmp_path, capsys):
     run_dir = make_saved_run(tmp_path)
-    edited = tmp_path / "edited.md"
+    edited = job_work_file(run_dir)
     edited.write_text("# 助言\n\n新しい助言\n", encoding="utf-8")
     code = main(
         [
@@ -196,7 +203,7 @@ def test_publish_note_command_publishes_and_prints_json(tmp_path, capsys):
 
 def test_publish_note_command_conflict_exit_code(tmp_path, capsys):
     run_dir = make_saved_run(tmp_path)
-    edited = tmp_path / "edited.md"
+    edited = job_work_file(run_dir)
     edited.write_text("x", encoding="utf-8")
     code = main(
         [
@@ -219,7 +226,7 @@ def test_publish_note_command_conflict_exit_code(tmp_path, capsys):
 
 def test_publish_note_command_outside_path_exit_code(tmp_path, capsys):
     run_dir = make_saved_run(tmp_path)
-    edited = tmp_path / "edited.md"
+    edited = job_work_file(run_dir)
     edited.write_text("x", encoding="utf-8")
     code = main(
         [
@@ -237,6 +244,28 @@ def test_publish_note_command_outside_path_exit_code(tmp_path, capsys):
     assert code == EXIT_INVALID == 2
     assert capsys.readouterr().out == ""
     assert not (run_dir / "run.jsonl").exists()
+
+
+def test_publish_note_command_rejects_source_outside_job_work(tmp_path, capsys):
+    run_dir = make_saved_run(tmp_path)
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=secret\n", encoding="utf-8")
+    code = main(
+        [
+            "publish-note",
+            "--run-dir",
+            str(run_dir),
+            "--note",
+            "scenes/scene-001/tips.md",
+            "--base-sha256",
+            "none",
+            "--from",
+            str(secret),
+        ]
+    )
+    assert code == EXIT_INVALID == 2
+    assert capsys.readouterr().out == ""
+    assert not (run_dir / "notes" / "scenes").exists()
 
 
 def test_middle_once_command_writes_middle_outputs(tmp_path, capsys):

@@ -153,10 +153,11 @@ class SurfaceLoop:
            blocked_buttons は buttons.filter_action(出力の操作, pad_output.allowed_buttons) の結果にする。送れたら、送った操作を
            直近の操作に足す (RECENT_ACTIONS_COUNT 件まで)。apply の例外は、decide の失敗の回数に数えない
         8. surface.jsonl に 1 行書く (deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に並べたもの、
-           wait_s は SurfaceContext.wait_s)。surface.jsonl に書くのはこのスレッドだけで、行は t_received の順に並ぶ
-           (middle の入力は、読んだ行の t_received の最大値より後の行を次に読む)
+           wait_s は SurfaceContext.wait_s)。surface.jsonl に書くのはこのスレッドだけ
         9. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、deep_requests.request(種類, DeepTrigger.SURFACE, 現在の場面 ID)
-           を呼ぶ
+           を呼ぶ。request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error
+           {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、残りの種類の要求を続ける
+           (decide の失敗の回数には数えず、ループも止めない)
         SENT (wait_s = SurfaceContext.wait_s) を返す。
         """
         raise NotImplementedError
