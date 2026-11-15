@@ -208,12 +208,13 @@ def _stick_position(value: object) -> tuple[float, float] | None:
 
 
 def _is_finite_number(value: object) -> bool:
-    """value が有限の数 (int・float。bool を除く) なら True。"""
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    """value が有限の数 (int・float。bool を除く) で、float にできるなら True。"""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # float の範囲を超える int
+        return False
 
 
 def _clip(text: str) -> str:

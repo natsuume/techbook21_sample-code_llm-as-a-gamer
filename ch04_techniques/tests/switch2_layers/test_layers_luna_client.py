@@ -145,6 +145,17 @@ def test_transport_error_is_raised_without_body(exception):
     assert error_info.value.response_body is None
 
 
+def test_transport_error_text_is_not_in_the_description():
+    # ヘッダーに使えない文字を含む API キーでは、httpx の例外の文がヘッダーの値 (API キー) を含む
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError("Illegal header value b'Bearer sk-secret\\n'")
+
+    with pytest.raises(LunaCallError) as error_info:
+        post_responses(mock_client(handler), "sk-secret\n", PAYLOAD)
+    assert "sk-secret" not in str(error_info.value)
+    assert "LocalProtocolError" in str(error_info.value)
+
+
 @pytest.mark.parametrize("text", ["not json", "[1, 2]", '"text"'])
 def test_body_that_is_not_a_json_object_is_an_error(text):
     def handler(request: httpx.Request) -> httpx.Response:

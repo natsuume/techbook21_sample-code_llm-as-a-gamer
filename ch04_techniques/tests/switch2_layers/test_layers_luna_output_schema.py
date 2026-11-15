@@ -99,7 +99,7 @@ def test_wait_at_the_boundaries_is_accepted(wait):
     assert isinstance(result.surface_wait_s, float)
 
 
-@pytest.mark.parametrize("wait", [0.19, 2.01, 0, -1, 10])
+@pytest.mark.parametrize("wait", [0.19, 2.01, 0, -1, 10, 10**400])
 def test_wait_out_of_range_is_an_error(wait):
     with pytest.raises(ValueError):
         parse_middle_output(output_text(surface_wait_s=wait))

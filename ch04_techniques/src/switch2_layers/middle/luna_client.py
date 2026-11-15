@@ -61,7 +61,8 @@ def post_responses(
 
     ヘッダーは build_headers(api_key)、タイムアウトは timeout_s 秒 (httpx の timeout)。
     - httpx の例外 (httpx.HTTPError。接続できない、タイムアウトなど) は LunaCallError にする
-      (response_body と error_body_head は None。説明には例外の説明を含める)
+      (response_body と error_body_head は None。説明には例外のクラス名だけを含める。例外の文は、ヘッダーに
+      使えない文字を含む API キーのときに、ヘッダーの値 (API キー) をそのまま含むため入れない)
     - 2xx 以外の応答は、ステータスコードと本文の先頭を説明に含め、error_body_head に本文の先頭
       ERROR_BODY_HEAD_CHARS 文字を入れた LunaCallError にする
     - 本文が JSON でないか、JSON の object でなければ、error_body_head に本文の先頭を入れた LunaCallError にする
@@ -75,9 +76,9 @@ def post_responses(
             timeout=timeout_s,
         )
     except httpx.HTTPError as error:
-        # httpx の例外の説明には、要求のヘッダー (API キー) は入らない
+        # 例外の文は API キーを含むことがあるので、クラス名だけを書く
         raise LunaCallError(
-            f"gpt-6-luna request failed: {type(error).__name__}: {error}"
+            f"gpt-6-luna request failed: {type(error).__name__}"
         ) from error
     body_head = response.text[:ERROR_BODY_HEAD_CHARS]
     if not response.is_success:

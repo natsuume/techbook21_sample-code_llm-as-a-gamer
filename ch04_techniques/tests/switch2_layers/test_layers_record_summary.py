@@ -165,6 +165,18 @@ def test_operation_rows_with_invalid_time_are_skipped():
     assert summarize_operation_rows(rows) == "- t=5.000: 短押し: B"
 
 
+def test_values_too_large_for_float_are_skipped():
+    # float の範囲を超える int は、例外を出さずに読み飛ばす
+    huge = 10**400
+    operation_rows = [operation(huge, taps=["A"]), operation(5.0, taps=["B"])]
+    assert summarize_operation_rows(operation_rows) == "- t=5.000: 短押し: B"
+    surface_rows = [
+        surface(huge),
+        surface(3.0, info_labels=[{"name": "huge", "probability": huge}]),
+    ]
+    assert summarize_surface_rows(surface_rows) == "surface の要求 1 回 (失敗 0 回)"
+
+
 @pytest.mark.parametrize(
     "rows", [[], [operation(None)], [{"unexpected": 1}]], ids=["empty", "no-t", "junk"]
 )

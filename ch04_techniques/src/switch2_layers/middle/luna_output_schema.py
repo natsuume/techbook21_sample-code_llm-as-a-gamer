@@ -156,11 +156,12 @@ def _boolean(value: Mapping[str, object], key: str) -> bool:
 
 def _surface_wait(item: object) -> float:
     """surface_wait_s の値 item が有限の数 (bool を除く) で範囲の中なら float にして返す。それ以外は ValueError。"""
+    # 範囲を先に確かめる (float の範囲を超える int は、math.isfinite が OverflowError を出すため)
     if (
         isinstance(item, int | float)
         and not isinstance(item, bool)
-        and math.isfinite(item)
         and SURFACE_WAIT_MIN_S <= item <= SURFACE_WAIT_MAX_S
+        and math.isfinite(item)
     ):
         return float(item)
     raise ValueError(
