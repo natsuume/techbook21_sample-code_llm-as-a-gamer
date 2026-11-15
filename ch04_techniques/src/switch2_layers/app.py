@@ -11,7 +11,8 @@ cli の run は実機の部品とフェイクの層を渡し、テストはフ�
     - surface か middle が続けて失敗した                                surface_loop・middle_loop の理由
 ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。
 start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら、それまでに作った部品と起動したスレッドだけを
-止めて閉じ、run.jsonl の stop に理由を書いてから、その例外を外に出す (LayersApp.start)。
+止めて閉じ、run.jsonl の stop に理由を書いてから、その例外を外に出す (LayersApp.start)。後片付けの 1 段階が例外を
+出しても、logging で警告を書いて残りの段階を続ける。
 
 スレッド:
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
@@ -19,6 +20,7 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
     wait を呼んだスレッド (run ではメインスレッド) が、止まる条件を MONITOR_INTERVAL_S ごとに確かめる。
 """
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -65,6 +67,9 @@ from switch2_layers.surface.surface_loop import (
     SurfaceLoopSettings,
 )
 from switch2_layers.surface.surface_types import SurfaceDecider
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 REASON_INTERRUPTED = "interrupted"
 REASON_BRIDGE_FAILED = "bridge recovery failed"
@@ -136,6 +141,19 @@ class _PartsBuiltSoFar:
 def _start_failure_reason(error: BaseException) -> str:
     """start の途中で error が出て止まるときの理由 `start failed: <例外の説明>` を返す。"""
     return f"start failed: {describe_exception(error)}"
+
+
+def _run_cleanup_step(step: Callable[[], object], description: str) -> None:
+    """start の途中の例外の後片付けの 1 段階 step を呼ぶ。
+
+    step が例外 (Exception) を出したら、logging で警告を書いて捨てる (残りの段階を続け、start の例外を外に出すため)。
+    """
+    try:
+        step()
+    except Exception:
+        logger.warning(
+            "failed to %s while cleaning up a failed start", description, exc_info=True
+        )
 
 
 class LayersApp:
@@ -328,7 +346,10 @@ class LayersApp:
     def _clean_up_failed_start(
         self, built: _PartsBuiltSoFar, error: BaseException
     ) -> None:
-        """start の途中で error が出たときの後片付け (start の docstring)。作っていない部品は飛ばす。"""
+        """start の途中で error が出たときの後片付け (start の docstring)。作っていない部品は飛ばす。
+
+        部品を閉じる・run.jsonl に書くそれぞれの段階は _run_cleanup_step で呼び、1 つが例外を出しても残りを続ける。
+        """
         self.request_stop(_start_failure_reason(error))
         with self._lock:
             # 後で close を呼んでも、もう一度は閉じない
@@ -337,8 +358,9 @@ class LayersApp:
         # 先に別のスレッドが理由だけを決めていた場合も、合図は必ず立てる (close の 0 と同じ)
         self._stop_event.set()
         # request_stop は、_started を記録する前なら合図を立てるだけなので、作った PadOutput をここで中立にする
-        if built.pad_output is not None and not output_stopped:
-            built.pad_output.stop_output()
+        pad_output = built.pad_output
+        if pad_output is not None and not output_stopped:
+            _run_cleanup_step(pad_output.stop_output, "stop the pad output")
             with self._lock:
                 self._output_stopped = True
         # close と同じ順に閉じる
@@ -346,20 +368,28 @@ class LayersApp:
             if thread.is_alive():  # 起動したスレッドだけを待つ
                 thread.join(LOOP_JOIN_TIMEOUT_S)
         if built.deep_scheduler is not None:
-            built.deep_scheduler.close()
+            _run_cleanup_step(built.deep_scheduler.close, "close the deep scheduler")
         if built.capture_source is not None:
-            built.capture_source.close()
-        if built.frame_store is not None:
-            built.frame_store.close()
-        if built.run_log is not None:
-            if built.frame_store is not None:
-                built.run_log.write(
-                    EVENT_FRAMES_DROPPED, count=built.frame_store.dropped
+            _run_cleanup_step(built.capture_source.close, "close the capture source")
+        frame_store = built.frame_store
+        if frame_store is not None:
+            _run_cleanup_step(frame_store.close, "close the frame store")
+        run_log = built.run_log
+        if run_log is not None:
+            if frame_store is not None:
+                _run_cleanup_step(
+                    lambda: run_log.write(
+                        EVENT_FRAMES_DROPPED, count=frame_store.dropped
+                    ),
+                    "write the dropped frames",
                 )
-            built.run_log.write(EVENT_STOP, reason=self._current_reason())
-            built.run_log.close()
-        if built.pad_output is not None:
-            built.pad_output.close()
+            _run_cleanup_step(
+                lambda: run_log.write(EVENT_STOP, reason=self._current_reason()),
+                "write the stop",
+            )
+            _run_cleanup_step(run_log.close, "close run.jsonl")
+        if pad_output is not None:
+            _run_cleanup_step(pad_output.close, "close the pad output")
 
     @property
     def paths(self) -> RunPaths | None:

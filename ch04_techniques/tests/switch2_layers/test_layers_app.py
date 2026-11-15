@@ -4,6 +4,7 @@ import dataclasses
 import json
 import threading
 import time
+import types
 from collections.abc import Callable
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 from switch2_remote.controller_state import NEUTRAL_REPORT
 
 import switch2_layers.app as app_module
+import switch2_layers.deep.deep_scheduler as deep_scheduler_module
 from switch2_layers.app import (
     REASON_BRIDGE_FAILED,
     REASON_INTERRUPTED,
@@ -578,3 +580,32 @@ def test_failure_while_starting_loop_threads_cleans_up_and_writes_stop(
         start_thread=starter,
     )
     check_failed_start(tmp_path, app, error, recorder, starter.started)
+
+
+def threading_with_unstartable_thread(error: BaseException) -> types.SimpleNamespace:
+    """threading と同じ名前を持ち、Thread だけを start で error を出すスレッドに替えたものを返す。
+
+    スレッドを作れないとき (資源が足りないときなど) の再現に使う。
+    """
+
+    class UnstartableThread(threading.Thread):
+        def start(self) -> None:
+            raise error
+
+    names = {name: getattr(threading, name) for name in dir(threading)}
+    names["Thread"] = UnstartableThread
+    return types.SimpleNamespace(**names)
+
+
+def test_failure_while_starting_deep_scheduler_thread_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch
+):
+    # DeepScheduler.start がスレッドを起動できないと、後片付けの DeepScheduler.close も例外を出す。
+    # その後の段階 (キャプチャー・画像の書き出し・PadOutput を閉じる、stop を書く) も行われることを確かめる
+    error = RuntimeError("can't start new thread")
+    monkeypatch.setattr(
+        deep_scheduler_module, "threading", threading_with_unstartable_thread(error)
+    )
+    recorder = StartPartsRecorder(monkeypatch, None, error)
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
+    check_failed_start(tmp_path, app, error, recorder, [])
