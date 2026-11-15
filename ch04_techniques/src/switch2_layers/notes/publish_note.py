@@ -20,9 +20,16 @@
   同じ実行の publish-note どうしは、比較から置き換えまでを 1 つずつ行う
 """
 
+import fcntl
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from switch2_layers.deep.deep_job_directory import WORK_DIR, parse_job_directory_name
+from switch2_layers.error_text import describe_exception
+from switch2_layers.file_io import sha256_bytes, sha256_file, write_bytes_atomic
+from switch2_layers.notes.note_paths import PUBLISH_LOCK_FILE
+from switch2_layers.run_directory import DEEP_DIR, NOTES_DIR
 
 EXIT_PUBLISHED = 0
 EXIT_INVALID = 2
@@ -64,7 +71,11 @@ class PublishResult:
 
     def exit_code(self) -> int:
         """終了コード (PUBLISHED → EXIT_PUBLISHED、CONFLICT → EXIT_CONFLICT、INVALID → EXIT_INVALID) を返す。"""
-        raise NotImplementedError
+        if self.status is PublishStatus.PUBLISHED:
+            return EXIT_PUBLISHED
+        if self.status is PublishStatus.CONFLICT:
+            return EXIT_CONFLICT
+        return EXIT_INVALID
 
     def stdout_json(self) -> dict[str, str] | None:
         """標準出力に書く JSON の値を返す。
@@ -72,7 +83,11 @@ class PublishResult:
         PUBLISHED → {"status": "published", "sha256": sha256}、CONFLICT → {"status": "conflict", "current_sha256":
         current_sha256}、INVALID → None (標準出力には何も書かない)。
         """
-        raise NotImplementedError
+        if self.status is PublishStatus.PUBLISHED:
+            return {"status": "published", "sha256": self.sha256 or ""}
+        if self.status is PublishStatus.CONFLICT:
+            return {"status": "conflict", "current_sha256": self.current_sha256 or ""}
+        return None
 
 
 def resolve_note_path(notes_dir: Path, note: str) -> Path:
@@ -89,7 +104,26 @@ def resolve_note_path(notes_dir: Path, note: str) -> Path:
     戻り値はシンボリックリンクを解決した先のパス (置き換えるのはリンク自体ではなく、その先の文書)。
     文書がまだ無くてもよい。
     """
-    raise NotImplementedError
+    if not note or PurePosixPath(note).is_absolute() or Path(note).is_absolute():
+        raise NotePathError(f"--note must be a relative path inside notes/: {note!r}")
+    if ".." in PurePosixPath(note).parts:
+        raise NotePathError(f"--note must not contain '..': {note!r}")
+    notes_root = notes_dir.resolve()
+    target = (notes_dir / note).resolve()
+    if target == notes_root or notes_root not in target.parents:
+        raise NotePathError(f"--note points outside notes/: {note!r}")
+    if target.is_dir():
+        raise NotePathError(f"--note points to a directory: {note!r}")
+    if target == notes_root / PUBLISH_LOCK_FILE:
+        raise NotePathError(f"--note must not be the lock file: {note!r}")
+    for parent in target.parents:
+        if parent == notes_root:
+            break
+        if parent.exists() and not parent.is_dir():
+            raise NotePathError(
+                f"--note is under a file that is not a directory: {note!r}"
+            )
+    return target
 
 
 def resolve_source_path(run_dir: Path, source: Path) -> Path:
@@ -103,7 +137,25 @@ def resolve_source_path(run_dir: Path, source: Path) -> Path:
         - 通常のファイルである
     途中のディレクトリーやファイル自体が、work/ の外へのシンボリックリンクなら、解決した先が外になるため不可。
     """
-    raise NotImplementedError
+    deep_root = (run_dir / DEEP_DIR).resolve()
+    resolved = source.resolve()
+    try:
+        parts = resolved.relative_to(deep_root).parts
+    except ValueError:
+        raise SourcePathError(
+            f"--from must be inside deep/<kind>-<number>/work/: {source}"
+        ) from None
+    if (
+        len(parts) < 3
+        or parse_job_directory_name(parts[0]) is None
+        or parts[1] != WORK_DIR
+    ):
+        raise SourcePathError(
+            f"--from must be inside deep/<kind>-<number>/work/: {source}"
+        )
+    if not resolved.is_file():
+        raise SourcePathError(f"--from is not a regular file: {source}")
+    return resolved
 
 
 def publish_note(
@@ -125,4 +177,45 @@ def publish_note(
     INVALID (message に理由) にする。置き換えは一時ファイル + os.replace なので、失敗しても本体は元のまま。
     ロックの取得 (4) の失敗も INVALID にする。publish-note の終了コードは 0 / 2 / 3 のどれかにする。
     """
-    raise NotImplementedError
+    notes_dir = run_dir / NOTES_DIR
+    if not notes_dir.is_dir():
+        return _invalid(f"notes directory not found: {notes_dir}")
+    try:
+        target = resolve_note_path(notes_dir, note)
+        source_path = resolve_source_path(run_dir, source)
+    except (NotePathError, SourcePathError) as error:
+        return _invalid(str(error))
+    try:
+        lock_file = (notes_dir / PUBLISH_LOCK_FILE).open("ab")
+    except OSError as error:
+        return _invalid(f"cannot open the lock file: {describe_exception(error)}")
+    with lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as error:
+            return _invalid(f"cannot lock notes/: {describe_exception(error)}")
+        try:
+            return _compare_and_replace(target, base_sha256, source_path)
+        except OSError as error:
+            return _invalid(f"cannot publish the note: {describe_exception(error)}")
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _compare_and_replace(target: Path, base_sha256: str, source: Path) -> PublishResult:
+    """ロックの中で、本体の今の SHA-256 と base_sha256 を比べ、一致したら source の内容で本体を置き換える。
+
+    書き込みの OSError はそのまま出す (呼び出し側が INVALID にする)。
+    """
+    current = sha256_file(target) or NO_NOTE_SHA256
+    if current != base_sha256.strip().lower():
+        return PublishResult(PublishStatus.CONFLICT, current_sha256=current)
+    data = source.read_bytes()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_bytes_atomic(target, data)
+    return PublishResult(PublishStatus.PUBLISHED, sha256=sha256_bytes(data))
+
+
+def _invalid(message: str) -> PublishResult:
+    """理由 message の INVALID の結果を返す。"""
+    return PublishResult(PublishStatus.INVALID, message=message)

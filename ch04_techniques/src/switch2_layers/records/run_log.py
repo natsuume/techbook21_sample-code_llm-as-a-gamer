@@ -3,9 +3,11 @@
 surface・middle・deep のスケジューラー・deep のジョブ・終了処理の各スレッドから書くため、追記は 1 つのロックの中で行う。
 """
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from switch2_layers.file_io import append_json_line
 from switch2_layers.run_clock import RunClock
 
 # event の名前
@@ -30,6 +32,8 @@ class RunLog:
     path    run.jsonl のパス (親のディレクトリーは呼び出し側が作る)
     clock   t を付ける時計
     echo    要約の 1 行 (`<t> <event> <キー>=<値> ...`) を受け取る関数。None (既定) なら画面に出さない
+    close の後の write は何も書かずに戻る (例外にしない)。終了処理が stop を書いて close した後に、止まり切らなかった
+    スレッドが書こうとしても、stop の後ろに行が増えないようにするため。
     """
 
     def __init__(
@@ -39,7 +43,11 @@ class RunLog:
         echo: Callable[[str], None] | None = None,
     ) -> None:
         """属性を持つ。ファイルはまだ作らない。"""
-        raise NotImplementedError
+        self.path = path
+        self.clock = clock
+        self.echo = echo
+        self._lock = threading.Lock()
+        self._closed = False
 
     def write(self, event: str, /, **fields: object) -> None:
         """{"t": clock.now(), "event": event, **fields} を 1 行追記する (file_io.append_json_line)。
@@ -48,5 +56,32 @@ class RunLog:
         複数のスレッドから呼んでよい (追記と echo はロックの中で行う)。
         fields に "t" か "event" のキーがあれば ValueError にする (何も書かない)。
         JSON にできない値 (Path など) は文字列にする。
+        close の後は何も書かずに戻る (fields のキーの誤りは close の後も ValueError にする)。
         """
-        raise NotImplementedError
+        reserved = {"t", "event"} & fields.keys()
+        if reserved:
+            raise ValueError(f"fields must not contain {sorted(reserved)}")
+        with self._lock:
+            if self._closed:
+                return
+            row: dict[str, object] = {"t": self.clock.now(), "event": event, **fields}
+            append_json_line(self.path, row)
+            if self.echo is not None:
+                self.echo(summarize_row(row))
+
+    def close(self) -> None:
+        """以後の write を無視するようにする。2 回目以降の呼び出しは何もしない。
+
+        ロックの中で切り替えるため、書いている途中の行は書き終えてから閉じる。
+        """
+        with self._lock:
+            self._closed = True
+
+
+def summarize_row(row: dict[str, object]) -> str:
+    """run.jsonl の行を、画面に出す要約の 1 行 `<t> <event> <キー>=<値> ...` (改行を含まない) にする。"""
+    parts = [f"{row['t']}", str(row["event"])]
+    parts += [
+        f"{key}={value}" for key, value in row.items() if key not in ("t", "event")
+    ]
+    return " ".join(" ".join(parts).split())

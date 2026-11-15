@@ -17,14 +17,22 @@
 request・check_auto・check_timeouts・close を直接呼ぶ。
 """
 
+import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
-from switch2_layers.deep.deep_job_directory import create_job_directory
+from switch2_layers.deep.deep_job_directory import (
+    create_job_directory,
+    find_previous_latest_frame_t,
+)
 from switch2_layers.deep.deep_types import (
+    DOCUMENT_KINDS,
+    SCENE_DOCUMENT_KINDS,
     DeepJob,
     DeepRequestResult,
     DeepRunner,
@@ -32,9 +40,23 @@ from switch2_layers.deep.deep_types import (
     DocumentKey,
     DocumentKind,
 )
-from switch2_layers.records.run_log import RunLog
-from switch2_layers.run_clock import RunClock
-from switch2_layers.run_directory import RunPaths
+from switch2_layers.error_text import describe_exception
+from switch2_layers.frames.frame_store import latest_frame_t
+from switch2_layers.notes.note_paths import document_key, is_scene_id
+from switch2_layers.records.run_log import (
+    EVENT_DEEP_END,
+    EVENT_DEEP_REQUEST_ERROR,
+    EVENT_DEEP_SKIPPED,
+    EVENT_DEEP_START,
+    EVENT_DEEP_STOP,
+    RunLog,
+)
+from switch2_layers.run_clock import RunClock, round_to_milliseconds
+from switch2_layers.run_directory import RunPaths, open_run_directory
+from switch2_layers.surface.middle_state_reader import read_surface_context
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # タイムアウトと自動の呼び出しを判定する間隔 (秒)
 CHECK_INTERVAL_S = 0.5
@@ -83,12 +105,21 @@ def execute_deep_job(runner: DeepRunner, job: DeepJob, job_dir: Path) -> DeepJob
     結果の stopped が True なら STOPPED、そうでなく ok が True なら OK、False なら FAILED (message は結果の message)。
     例外 (Exception) なら ERROR (message は例外の説明。例外は外に出さない)。
     """
-    raise NotImplementedError
+    try:
+        result = runner.run(job, job_dir)
+    except Exception as error:
+        logger.warning("deep job %s raised an exception", job_dir, exc_info=True)
+        return DeepJobOutcome(DeepJobStatus.ERROR, describe_exception(error))
+    if result.stopped:
+        return DeepJobOutcome(DeepJobStatus.STOPPED, result.message)
+    if result.ok:
+        return DeepJobOutcome(DeepJobStatus.OK, result.message)
+    return DeepJobOutcome(DeepJobStatus.FAILED, result.message)
 
 
 def start_daemon_thread(body: Callable[[], None]) -> None:
     """body を daemon スレッドで起動し、終わるのを待たずに戻る (start_job_thread の既定値)。"""
-    raise NotImplementedError
+    threading.Thread(target=body, name="deep-job", daemon=True).start()
 
 
 @dataclass(frozen=True)
@@ -137,6 +168,37 @@ class DeepSchedulerParts:
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
 
 
+@dataclass
+class _RunningJob:
+    """スケジューラーが起動したジョブ 1 件の状態。ロックの中で読み書きする。
+
+    job           ジョブの依頼
+    job_dir       ジョブのディレクトリー
+    relative      ジョブのディレクトリーの実行ディレクトリーからの相対パス (run.jsonl の job)
+    started_t     起動した t
+    stop_t        stop を呼んだ t。まだ止めていなければ None
+    stop_reason   止めた理由。まだ止めていなければ None
+    ended         deep_end を書いた (run が戻った・kill した・スレッドを起動できなかった) なら True
+    """
+
+    job: DeepJob
+    job_dir: Path
+    relative: str
+    started_t: float
+    stop_t: float | None = None
+    stop_reason: DeepStopReason | None = None
+    ended: bool = False
+
+    def fields(self) -> dict[str, object]:
+        """run.jsonl の deep_start・deep_stop・deep_end に共通の項目 {"kind", "scene_id", "trigger", "job"} を返す。"""
+        return {
+            "kind": self.job.kind.value,
+            "scene_id": self.job.scene_id,
+            "trigger": self.job.trigger.value,
+            "job": self.relative,
+        }
+
+
 class DeepScheduler:
     """deep のジョブを起動し、止める。
 
@@ -150,7 +212,20 @@ class DeepScheduler:
         self, parts: DeepSchedulerParts, settings: DeepSchedulerSettings
     ) -> None:
         """ジョブの記録が空の状態で作る。自動の呼び出しのスレッドは start で起動する。"""
-        raise NotImplementedError
+        self.parts = parts
+        self.settings = settings
+        self._lock = threading.Lock()
+        self._created_t = parts.clock.now()
+        # 実行中のジョブ (起動した順)
+        self._running: list[_RunningJob] = []
+        # 文書ごとの前回の起動の t と、前回の終了の t (request の失敗を含む)
+        self._last_start_t: dict[DocumentKey, float] = {}
+        self._last_end_t: dict[DocumentKey, float] = {}
+        # 種類ごとに、前回の check_auto で見た対象の文書と、それが対象になった t
+        self._auto_targets: dict[DocumentKind, tuple[DocumentKey, float]] = {}
+        self._closed = False
+        self._stop_checks = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -182,7 +257,55 @@ class DeepScheduler:
               deep_end {..., "status": "error", "message": 説明, "stop_reason": null} を書いてから、例外をそのまま出す
               (deep_start と対応させるため、ジョブのディレクトリーは残す)
         """
-        raise NotImplementedError
+        key = document_key(kind, scene_id)
+        parts = self.parts
+        with self._lock:
+            now = parts.clock.now()
+            if self._closed:
+                self._write_skipped_locked(key, trigger, SKIP_CLOSED)
+                return DeepRequestResult(started=False, reason=SKIP_CLOSED)
+            last_start = self._last_start_t.get(key)
+            if (
+                last_start is not None
+                and now - last_start < self.settings.min_start_interval_s
+            ):
+                self._write_skipped_locked(
+                    key,
+                    trigger,
+                    SKIP_MIN_START_INTERVAL,
+                    since_last_start_s=round_to_milliseconds(now - last_start),
+                )
+                return DeepRequestResult(started=False, reason=SKIP_MIN_START_INTERVAL)
+            job = DeepJob(
+                kind=kind,
+                scene_id=key.scene_id,
+                trigger=trigger,
+                requested_t=now,
+                previous_latest_frame_t=find_previous_latest_frame_t(parts.paths, key),
+                latest_frame_t=parts.latest_frame_t(),
+            )
+            try:
+                job_dir = parts.prepare_job_directory(parts.paths, job)
+            except Exception:
+                # 失敗を前回の終了と同じに扱い、自動の呼び出しが同じ失敗をすぐ繰り返さないようにする
+                self._last_end_t[key] = now
+                raise
+            running = _RunningJob(job, job_dir, parts.paths.relative(job_dir), now)
+            self._last_start_t[key] = now
+            self._running.append(running)
+            parts.run_log.write(EVENT_DEEP_START, **running.fields())
+        try:
+            parts.start_job_thread(partial(self._run_job, running))
+        except Exception as error:
+            with self._lock:
+                self._finish_locked(
+                    running,
+                    DeepJobStatus.ERROR,
+                    describe_exception(error),
+                    parts.clock.now(),
+                )
+            raise
+        return DeepRequestResult(started=True, job_dir=job_dir)
 
     def check_auto(self) -> list[DeepRequestResult]:
         """自動の呼び出しを 1 回判定し、request を呼んだ結果 (起動したものと、最小間隔で捨てたもの) を
@@ -201,7 +324,31 @@ class DeepScheduler:
                request が失敗を前回の終了として記録するため、その文書は失敗した時刻から auto_seconds の間、再び要求しない
         close の後は何もせず空のリストを返す。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._closed:
+                return []
+        scene_id = self.parts.current_scene_id()
+        results: list[DeepRequestResult] = []
+        for kind in DOCUMENT_KINDS:
+            try:
+                key = document_key(kind, scene_id)
+                with self._lock:
+                    if self._closed:
+                        break
+                    due = self._auto_due_locked(kind, key, self.parts.clock.now())
+                if due:
+                    results.append(self.request(kind, DeepTrigger.AUTO, scene_id))
+            except Exception as error:
+                logger.debug("automatic deep request failed", exc_info=True)
+                self.parts.run_log.write(
+                    EVENT_DEEP_REQUEST_ERROR,
+                    source="auto",
+                    kind=kind.value,
+                    trigger=DeepTrigger.AUTO.value,
+                    scene_id=scene_id,
+                    error=describe_exception(error),
+                )
+        return results
 
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
@@ -218,11 +365,26 @@ class DeepScheduler:
         "stop_reason"} を書いてから、ロックの外で runner.kill(job_dir) を呼ぶ。
         runner.stop と runner.kill の例外 (Exception) は外に出さず、logging で警告を書く。
         """
-        raise NotImplementedError
+        actions: list[tuple[Callable[[Path], None], _RunningJob]] = []
+        with self._lock:
+            if self._closed:
+                return
+            now = self.parts.clock.now()
+            for running in list(self._running):
+                if running.stop_t is None:
+                    if now - running.started_t >= self.settings.timeout_s:
+                        self._mark_stopped_locked(running, DeepStopReason.TIMEOUT, now)
+                        actions.append((self.parts.runner.stop, running))
+                elif now - running.stop_t >= self.settings.stop_grace_s:
+                    self._mark_killed_locked(running, now)
+                    actions.append((self.parts.runner.kill, running))
+        for action, running in actions:
+            _call_runner(action, running.job_dir)
 
     def is_running(self, key: DocumentKey) -> bool:
         """文書 key のジョブが 1 つ以上実行中なら True を返す。"""
-        raise NotImplementedError
+        with self._lock:
+            return any(running.job.key == key for running in self._running)
 
     def start(self) -> None:
         """CHECK_INTERVAL_S ごとに check_timeouts を呼んでから check_auto を呼ぶスレッド (daemon) を起動する。
@@ -230,7 +392,13 @@ class DeepScheduler:
         2 回目以降は何もしない。check_timeouts と check_auto の想定外の例外 (Exception) は、スレッドを止めずに
         logging で警告を書く。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._thread is not None or self._closed:
+                return
+            self._thread = threading.Thread(
+                target=self._run_checks, name="deep-scheduler", daemon=True
+            )
+            self._thread.start()
 
     def close(self) -> None:
         """以後の要求を捨て、実行中のジョブを止める。2 回目以降の呼び出しは何もしない。
@@ -244,7 +412,140 @@ class DeepScheduler:
         5. まだ実行中のジョブを kill する (check_timeouts の kill_job の手順)
         3 と 5 は、ジョブを起動した順に行う。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            thread = self._thread
+        # 1. 判定のスレッドを止める (ロックを持たずに待つ)
+        self._stop_checks.set()
+        if thread is not None:
+            thread.join()
+        # 2. まだ止めていないジョブを止める
+        clock = self.parts.clock
+        with self._lock:
+            now = clock.now()
+            to_stop = [running for running in self._running if running.stop_t is None]
+            for running in to_stop:
+                self._mark_stopped_locked(running, DeepStopReason.CLOSE, now)
+        for running in to_stop:
+            _call_runner(self.parts.runner.stop, running.job_dir)
+        # 3. run が戻るのを最大 stop_grace_s 秒待つ
+        deadline = clock.now() + self.settings.stop_grace_s
+        while self._has_running_jobs() and clock.now() < deadline:
+            self.parts.sleep(CLOSE_POLL_INTERVAL_S)
+        # 4. まだ戻らないジョブを kill する
+        with self._lock:
+            now = clock.now()
+            to_kill = list(self._running)
+            for running in to_kill:
+                self._mark_killed_locked(running, now)
+        for running in to_kill:
+            _call_runner(self.parts.runner.kill, running.job_dir)
+
+    def _run_job(self, running: _RunningJob) -> None:
+        """ジョブの本体。run を呼び、戻ったときにまだ kill していなければ deep_end を書く。"""
+        outcome = execute_deep_job(self.parts.runner, running.job, running.job_dir)
+        with self._lock:
+            if running.ended:
+                # kill した後に戻った。deep_end は kill のときに書いてある
+                return
+            self._finish_locked(
+                running, outcome.status, outcome.message, self.parts.clock.now()
+            )
+
+    def _finish_locked(
+        self, running: _RunningJob, status: DeepJobStatus, message: str, now: float
+    ) -> None:
+        """ジョブを終わったものにする: 実行中から外し、前回の終了の t を now にして、deep_end を書く。"""
+        running.ended = True
+        if running in self._running:
+            self._running.remove(running)
+        self._last_end_t[running.job.key] = now
+        self.parts.run_log.write(
+            EVENT_DEEP_END,
+            **running.fields(),
+            status=status.value,
+            message=message,
+            stop_reason=None
+            if running.stop_reason is None
+            else running.stop_reason.value,
+        )
+
+    def _mark_stopped_locked(
+        self, running: _RunningJob, reason: DeepStopReason, now: float
+    ) -> None:
+        """stop を呼んだ t と理由を記録し、deep_stop を書く (runner.stop は呼び出し側がロックの外で呼ぶ)。"""
+        running.stop_t = now
+        running.stop_reason = reason
+        self.parts.run_log.write(
+            EVENT_DEEP_STOP, **running.fields(), reason=reason.value
+        )
+
+    def _mark_killed_locked(self, running: _RunningJob, now: float) -> None:
+        """ジョブを kill 済みにして deep_end (status killed) を書く (runner.kill は呼び出し側がロックの外で呼ぶ)。"""
+        since_stop = 0.0 if running.stop_t is None else now - running.stop_t
+        self._finish_locked(
+            running,
+            DeepJobStatus.KILLED,
+            f"killed {since_stop:.1f} seconds after stop",
+            now,
+        )
+
+    def _write_skipped_locked(
+        self, key: DocumentKey, trigger: DeepTrigger, reason: str, **extra: object
+    ) -> None:
+        """deep_skipped {"kind", "scene_id", "trigger", "reason", ...extra} を書く。"""
+        self.parts.run_log.write(
+            EVENT_DEEP_SKIPPED,
+            kind=key.kind.value,
+            scene_id=key.scene_id,
+            trigger=trigger.value,
+            reason=reason,
+            **extra,
+        )
+
+    def _auto_due_locked(
+        self, kind: DocumentKind, key: DocumentKey, now: float
+    ) -> bool:
+        """種類 kind の対象 key を自動で呼ぶ時刻になっていれば True を返す (check_auto の 2〜4)。"""
+        target = self._auto_targets.get(kind)
+        if target is None:
+            since = self._created_t
+        elif target[0] != key:
+            since = now
+        else:
+            since = target[1]
+        self._auto_targets[kind] = (key, since)
+        if any(running.job.key == key for running in self._running):
+            return False
+        base_t = self._last_end_t.get(key, since)
+        return now - base_t >= self.settings.auto_seconds
+
+    def _has_running_jobs(self) -> bool:
+        """実行中のジョブが 1 つ以上あれば True を返す。"""
+        with self._lock:
+            return bool(self._running)
+
+    def _run_checks(self) -> None:
+        """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts と check_auto を呼ぶ。"""
+        while not self._stop_checks.wait(CHECK_INTERVAL_S):
+            try:
+                self.check_timeouts()
+            except Exception:
+                logger.warning("checking deep job timeouts failed", exc_info=True)
+            try:
+                self.check_auto()
+            except Exception:
+                logger.warning("checking automatic deep requests failed", exc_info=True)
+
+
+def _call_runner(action: Callable[[Path], None], job_dir: Path) -> None:
+    """runner.stop か runner.kill を呼ぶ。例外は外に出さず、logging で警告を書く。"""
+    try:
+        action(job_dir)
+    except Exception:
+        logger.warning("stopping deep job %s failed", job_dir, exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -278,4 +579,21 @@ def run_deep_once(
     最小の起動間隔とタイムアウトは確かめない (run が戻るまで待つ)。run.jsonl には書かない。
     run_dir がディレクトリーでなければ FileNotFoundError、scene_id が場面 ID の形でなければ ValueError にする。
     """
-    raise NotImplementedError
+    paths = open_run_directory(run_dir)
+    if scene_id is not None and not is_scene_id(scene_id):
+        raise ValueError(f"invalid scene id: {scene_id!r}")
+    if scene_id is None and kind in SCENE_DOCUMENT_KINDS:
+        scene_id = read_surface_context(paths.middle_state).scene_id
+    key = document_key(kind, scene_id)
+    latest = latest_frame_t(paths)
+    job = DeepJob(
+        kind=kind,
+        scene_id=key.scene_id,
+        trigger=DeepTrigger.MANUAL,
+        requested_t=latest if latest is not None else 0.0,
+        previous_latest_frame_t=find_previous_latest_frame_t(paths, key),
+        latest_frame_t=latest,
+    )
+    job_dir = create_job_directory(paths, job)
+    outcome = execute_deep_job(runner, job, job_dir)
+    return DeepOnceResult(job_dir=job_dir, job=paths.relative(job_dir), outcome=outcome)

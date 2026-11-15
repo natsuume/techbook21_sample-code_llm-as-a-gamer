@@ -13,12 +13,12 @@ T_DECIMALS = 3  # t の小数の桁数 (ミリ秒の精度)
 
 def round_to_milliseconds(seconds: float) -> float:
     """seconds を小数第 3 位 (ミリ秒) に丸めた値 round(seconds, T_DECIMALS) を返す。"""
-    raise NotImplementedError
+    return round(seconds, T_DECIMALS)
 
 
 def t_to_milliseconds(t: float) -> int:
     """t (秒) をミリ秒の整数 round(t * 1000) にする。フレームの画像のファイル名に使う。"""
-    raise NotImplementedError
+    return round(t * 1000)
 
 
 class RunClock:
@@ -34,23 +34,24 @@ class RunClock:
         origin: float | None = None,
     ) -> None:
         """monotonic と起点を持つ。origin が None なら、ここで monotonic() を 1 回呼んで起点にする。"""
-        raise NotImplementedError
+        self._monotonic = monotonic
+        self._origin = monotonic() if origin is None else origin
 
     @property
     def origin(self) -> float:
         """t = 0 とする monotonic の値。"""
-        raise NotImplementedError
+        return self._origin
 
     def now(self) -> float:
         """今の t = round_to_milliseconds(monotonic() - origin) を返す。"""
-        raise NotImplementedError
+        return self.t_of(self._monotonic())
 
     def t_of(self, monotonic_value: float) -> float:
         """monotonic の値 (キャプチャーのフレームの時刻など) を t = round_to_milliseconds(monotonic_value - origin) に直す。
 
         起点より前の値なら負の t を返す。
         """
-        raise NotImplementedError
+        return round_to_milliseconds(monotonic_value - self._origin)
 
 
 def frozen_clock(t: float) -> RunClock:
@@ -58,4 +59,4 @@ def frozen_clock(t: float) -> RunClock:
 
     middle-once と deep-once で、保存済みの実行の最後の時刻に時計を固定するために使う。
     """
-    raise NotImplementedError
+    return RunClock(monotonic=lambda: t, origin=0.0)

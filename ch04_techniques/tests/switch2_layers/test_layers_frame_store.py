@@ -239,6 +239,40 @@ def test_same_surface_frame_is_saved_only_once(tmp_path):
     assert [row["t"] for row in frames_rows(root)] == [2.0]
 
 
+def test_failed_surface_write_releases_reservation(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    surface_dir = root / "frames" / "surface"
+    # 画像を書くディレクトリーをファイルに置き換え、書き込みを失敗させる
+    surface_dir.rmdir()
+    surface_dir.write_text("not a directory", encoding="utf-8")
+    image = jpeg_image()
+    assert store.save_surface(3.0, image) == "frames/surface/000003000.jpg"
+    assert store.write_queued() == 0
+    assert store.dropped == 1
+    # 書けなかった t は予約から外し、後の要求で入れ直す
+    surface_dir.unlink()
+    surface_dir.mkdir()
+    assert store.save_surface(3.0, image) == "frames/surface/000003000.jpg"
+    assert store.write_queued() == 1
+    assert (surface_dir / "000003000.jpg").read_bytes() == image.jpeg
+    assert [row["t"] for row in frames_rows(root)] == [3.0]
+
+
+def test_surface_frames_discarded_at_close_are_not_written(tmp_path):
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    # 予約したパスを返すが、書く前に close で捨てられると画像は書かれない
+    assert store.save_surface(4.0, jpeg_image()) == "frames/surface/000004000.jpg"
+    store.close(timeout_s=0.1)
+    assert store.dropped == 1
+    assert not (root / "frames" / "surface" / "000004000.jpg").exists()
+
+
 def test_different_surface_frames_are_saved_separately(tmp_path):
     root = make_run(tmp_path)
     store = FrameStore(

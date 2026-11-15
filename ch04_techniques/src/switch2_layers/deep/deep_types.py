@@ -73,7 +73,7 @@ class DeepJob:
     @property
     def key(self) -> DocumentKey:
         """このジョブの文書のキー DocumentKey(kind, scene_id) を返す。"""
-        raise NotImplementedError
+        return DocumentKey(self.kind, self.scene_id)
 
 
 @dataclass(frozen=True)

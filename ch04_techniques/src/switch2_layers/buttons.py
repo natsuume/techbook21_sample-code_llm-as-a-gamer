@@ -7,11 +7,11 @@ surface.jsonl の blocked_buttons に記録する。
 """
 
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from switch2_remote.controller_state import BUTTON_ORDER
 
-from switch2_layers.pad_action import PadAction
+from switch2_layers.pad_action import PadAction, sort_buttons
 
 HOME_BUTTON = "HOME"
 # コントローラーのボタンのすべて (17 個)
@@ -20,7 +20,9 @@ ALL_BUTTONS: tuple[str, ...] = BUTTON_ORDER
 
 def allowed_buttons(allow_home: bool) -> frozenset[str]:
     """押せるボタンの集合を返す。allow_home が False なら ALL_BUTTONS から HOME を除いた 16 個、True なら 17 個。"""
-    raise NotImplementedError
+    if allow_home:
+        return frozenset(ALL_BUTTONS)
+    return frozenset(ALL_BUTTONS) - {HOME_BUTTON}
 
 
 @dataclass(frozen=True)
@@ -41,4 +43,13 @@ def filter_action(action: PadAction, allowed: Collection[str]) -> FilteredAction
     blocked_buttons は held と taps のどちらかから外した名前。スティックは変えない。
     何も外さなければ、action と同じ値の操作と空の blocked_buttons を返す。
     """
-    raise NotImplementedError
+    allowed_set = frozenset(allowed)
+    held = frozenset(action.held) & allowed_set
+    taps = frozenset(action.taps) & allowed_set
+    blocked = (set(action.held) - allowed_set) | (set(action.taps) - allowed_set)
+    if not blocked:
+        return FilteredAction(action=action, blocked_buttons=())
+    return FilteredAction(
+        action=replace(action, held=held, taps=taps),
+        blocked_buttons=tuple(sort_buttons(blocked)),
+    )

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 DEFAULT_JPEG_QUALITY = 85
@@ -23,7 +24,7 @@ class EncodedImage:
 
 def nv12_to_bgr(nv12: np.ndarray) -> np.ndarray:
     """NV12 のフレームを BGR の画像 (cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)) にする。"""
-    raise NotImplementedError
+    return cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
 
 
 def shrink_to_width(bgr: np.ndarray, width: int) -> np.ndarray:
@@ -31,7 +32,11 @@ def shrink_to_width(bgr: np.ndarray, width: int) -> np.ndarray:
 
     高さは round(元の高さ * width / 元の幅)、補間は cv2.INTER_AREA。幅が width 以下なら bgr をそのまま返す (拡大しない)。
     """
-    raise NotImplementedError
+    original_height, original_width = bgr.shape[:2]
+    if original_width <= width:
+        return bgr
+    height = round(original_height * width / original_width)
+    return cv2.resize(bgr, (width, height), interpolation=cv2.INTER_AREA)
 
 
 def encode_jpeg(bgr: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> EncodedImage:
@@ -40,4 +45,11 @@ def encode_jpeg(bgr: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> Encoded
     幅と高さは bgr の形から取る。符号化に失敗したら (cv2.imencode が False を返すか cv2.error を出したら。
     空の画像を含む) ValueError にする。
     """
-    raise NotImplementedError
+    try:
+        ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    except cv2.error as error:
+        raise ValueError(f"failed to encode image as JPEG: {error}") from error
+    if not ok:
+        raise ValueError("failed to encode image as JPEG")
+    height, width = bgr.shape[:2]
+    return EncodedImage(jpeg=encoded.tobytes(), width=int(width), height=int(height))

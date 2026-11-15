@@ -1,5 +1,6 @@
 """骨組みのための surface のフェイク。中立の操作を返し、deep を呼ばない。"""
 
+from switch2_layers.pad_action import NEUTRAL_ACTION
 from switch2_layers.surface.surface_types import SurfaceInput, SurfaceOutput
 
 
@@ -11,4 +12,4 @@ class FakeSurfaceDecider:
 
         deep_kinds・info_labels・boxes は空、scene_changed は False。surface_input は使わない。
         """
-        raise NotImplementedError
+        return SurfaceOutput(action=NEUTRAL_ACTION)

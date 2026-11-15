@@ -8,6 +8,8 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from switch2_remote.controller_state import BUTTON_ORDER
+
 STICK_NEUTRAL: tuple[float, float] = (0.0, 0.0)
 
 
@@ -34,7 +36,12 @@ NEUTRAL_ACTION = PadAction()
 
 def is_neutral(action: PadAction) -> bool:
     """action が held も taps も空で、両方のスティックが (0, 0) なら True を返す。"""
-    raise NotImplementedError
+    return (
+        not action.held
+        and not action.taps
+        and tuple(action.left_stick) == STICK_NEUTRAL
+        and tuple(action.right_stick) == STICK_NEUTRAL
+    )
 
 
 def sort_buttons(names: Iterable[str]) -> list[str]:
@@ -42,7 +49,10 @@ def sort_buttons(names: Iterable[str]) -> list[str]:
 
     BUTTON_ORDER にある名前をその順に並べ、BUTTON_ORDER に無い名前 (知らない名前) は後ろに文字列の順で並べる。
     """
-    raise NotImplementedError
+    unique = set(names)
+    known = [name for name in BUTTON_ORDER if name in unique]
+    unknown = sorted(unique - set(BUTTON_ORDER))
+    return known + unknown
 
 
 def action_to_json(action: PadAction) -> dict[str, object]:
@@ -50,4 +60,8 @@ def action_to_json(action: PadAction) -> dict[str, object]:
 
     {"held": sort_buttons(held), "taps": sort_buttons(taps), "sticks": {"LS": [x, y], "RS": [x, y]}}
     """
-    raise NotImplementedError
+    return {
+        "held": sort_buttons(action.held),
+        "taps": sort_buttons(action.taps),
+        "sticks": {"LS": list(action.left_stick), "RS": list(action.right_stick)},
+    }

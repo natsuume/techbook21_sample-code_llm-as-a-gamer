@@ -4,6 +4,8 @@ hardware.capture_source.CaptureSource のスレッドが add で足し、surface
 読み書きは 1 つのロックの中で行う。
 """
 
+import threading
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,7 +28,8 @@ class CapturedFrame:
 
 def frame_size(frame: CapturedFrame) -> tuple[int, int]:
     """frame の (幅, 高さ) を返す。高さは NV12 の行数 * 2 / 3。"""
-    raise NotImplementedError
+    height = frame.nv12.shape[0] * 2 // 3
+    return (int(frame.nv12.shape[1]), int(height))
 
 
 class FrameBuffer:
@@ -34,19 +37,30 @@ class FrameBuffer:
 
     def __init__(self, max_age_s: float = DEFAULT_BUFFER_SECONDS) -> None:
         """空のバッファーを作る。"""
-        raise NotImplementedError
+        self.max_age_s = max_age_s
+        self._lock = threading.Lock()
+        self._frames: deque[CapturedFrame] = deque()
 
     def add(self, frame: CapturedFrame) -> bool:
         """frame を末尾に足し、t が frame.t - max_age_s より小さいフレームを先頭から捨てる。足したら True を返す。
 
         frame.t が持っている最新のフレームの t 以下なら、足さずに False を返す (同じフレームを 2 回持たない)。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._frames and frame.t <= self._frames[-1].t:
+                return False
+            self._frames.append(frame)
+            oldest_kept = frame.t - self.max_age_s
+            while self._frames[0].t < oldest_kept:
+                self._frames.popleft()
+            return True
 
     def frames(self) -> list[CapturedFrame]:
         """持っているフレームを古い順に並べたリスト (コピー) を返す。"""
-        raise NotImplementedError
+        with self._lock:
+            return list(self._frames)
 
     def latest(self) -> CapturedFrame | None:
         """最も新しいフレームを返す。まだ無ければ None。"""
-        raise NotImplementedError
+        with self._lock:
+            return self._frames[-1] if self._frames else None

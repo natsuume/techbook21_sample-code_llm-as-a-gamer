@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
 
 
@@ -121,7 +122,18 @@ class MiddleAnalyzer(Protocol):
 
 def middle_state_to_json(state: MiddleState) -> dict[str, object]:
     """MiddleState を middle/state.json の辞書 (モジュールの docstring のキーの順) にする。"""
-    raise NotImplementedError
+    return {
+        "generated_t": state.generated_t,
+        "based_on_t": state.based_on_t,
+        "scene_id": state.scene_id,
+        "scene_name": state.scene_name,
+        "is_stuck": state.is_stuck,
+        "stuck_description": state.stuck_description,
+        "surface_wait_s": state.surface_wait_s,
+        "timeline": state.timeline,
+        "surface_rows_offset": state.surface_rows_offset,
+        "operations_rows_offset": state.operations_rows_offset,
+    }
 
 
 def middle_state_from_json(value: object) -> MiddleState:
@@ -132,4 +144,78 @@ def middle_state_from_json(value: object) -> MiddleState:
     0 以上の整数 (bool を除く)、scene_id と scene_name は文字列か null、is_stuck は真偽、stuck_description と timeline は
     文字列。scene_id が文字列なら場面 ID の形に限る。
     """
-    raise NotImplementedError
+    if isinstance(value, dict):
+        return _middle_state_from_object(value)
+    raise ValueError("middle state must be a JSON object")
+
+
+def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
+    """middle/state.json の object を MiddleState にする (middle_state_from_json の本体)。"""
+    scene_id = _optional_string(value, "scene_id")
+    if scene_id is not None and not is_scene_id(scene_id):
+        raise ValueError(f"invalid scene id in middle state: {scene_id!r}")
+    return MiddleState(
+        generated_t=_number(value, "generated_t"),
+        based_on_t=_number(value, "based_on_t"),
+        scene_id=scene_id,
+        scene_name=_optional_string(value, "scene_name"),
+        is_stuck=_boolean(value, "is_stuck"),
+        stuck_description=_string(value, "stuck_description"),
+        surface_wait_s=_number(value, "surface_wait_s"),
+        timeline=_string(value, "timeline"),
+        surface_rows_offset=_offset(value, "surface_rows_offset"),
+        operations_rows_offset=_offset(value, "operations_rows_offset"),
+    )
+
+
+# 以下の読み取りは、契約 (middle_state_from_json) どおり型の誤りも ValueError にする。
+# 型が合えば値を返し、合わなければ if の後で ValueError を出す
+
+
+def _field(value: Mapping[str, object], key: str) -> object:
+    """value[key] を返す。キーが無ければ ValueError。"""
+    if key not in value:
+        raise ValueError(f"middle state has no {key!r}")
+    return value[key]
+
+
+def _number(value: Mapping[str, object], key: str) -> float:
+    """value[key] が数 (bool を除く) ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if isinstance(item, int | float) and not isinstance(item, bool):
+        return float(item)
+    raise ValueError(f"{key!r} in middle state must be a number: {item!r}")
+
+
+def _offset(value: Mapping[str, object], key: str) -> int:
+    """value[key] が 0 以上の整数 (bool を除く) ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+        return item
+    raise ValueError(
+        f"{key!r} in middle state must be a non-negative integer: {item!r}"
+    )
+
+
+def _string(value: Mapping[str, object], key: str) -> str:
+    """value[key] が文字列ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"{key!r} in middle state must be a string: {item!r}")
+
+
+def _optional_string(value: Mapping[str, object], key: str) -> str | None:
+    """value[key] が文字列か null ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if item is None or isinstance(item, str):
+        return item
+    raise ValueError(f"{key!r} in middle state must be a string or null: {item!r}")
+
+
+def _boolean(value: Mapping[str, object], key: str) -> bool:
+    """value[key] が真偽ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} in middle state must be a boolean: {item!r}")

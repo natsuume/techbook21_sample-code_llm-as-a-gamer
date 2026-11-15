@@ -1,4 +1,6 @@
+import dataclasses
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -526,3 +528,100 @@ def test_bridge_recovering_sends_no_request_and_neutralizes_once(tmp_path):
     harness.bridge["state"] = "ok"
     assert harness.loop.step().outcome is SurfaceStepOutcome.SENT
     assert len(decider.inputs) == 1
+
+
+# --- decide の間に止められたとき ---
+
+
+class StoppingDecider(ScriptedDecider):
+    """decide の中で止める合図を立てる SurfaceDecider の偽物 (decide の応答を待つ間に全体が止められた場合)。"""
+
+    def __init__(self, stop: threading.Event, result: SurfaceOutput | Exception):
+        super().__init__(result)
+        self.stop = stop
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        self.stop.set()
+        return super().decide(surface_input)
+
+
+def test_stop_during_decide_sends_and_writes_nothing(tmp_path):
+    stop = threading.Event()
+    output = SurfaceOutput(
+        action=PadAction(held=frozenset({"A"})),
+        deep_kinds=frozenset({DocumentKind.TIPS}),
+    )
+    decider = StoppingDecider(stop, output)
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    result = harness.loop.step(stop)
+    assert result.outcome is SurfaceStepOutcome.STOPPED
+    assert result.wait_s == 0.0
+    assert result.row is None
+    assert len(decider.inputs) == 1
+    # 操作を送らず、surface.jsonl・run.jsonl に書かず、deep も呼ばない
+    assert harness.sender.reports == []
+    assert read_rows(harness.root / "surface.jsonl") == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert harness.deep_sink.requests == []
+
+
+def test_stop_during_failed_decide_writes_nothing(tmp_path):
+    stop = threading.Event()
+    decider = StoppingDecider(stop, RuntimeError("model failed"))
+    harness = make_harness(tmp_path, decider, max_errors=1)
+    add_frames(harness, [9.9])
+    result = harness.loop.step(stop)
+    assert result.outcome is SurfaceStepOutcome.STOPPED
+    # 失敗の回数に数えず、中立の操作も送らず、surface_error も書かない
+    assert harness.loop.consecutive_errors == 0
+    assert harness.sender.reports == []
+    assert read_rows(harness.root / "surface.jsonl") == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert harness.stops == []
+
+
+class StopBeforeApplyPadOutput(PadOutput):
+    """apply の直前に全体が止められた場合の PadOutput (止める合図を立ててから出力を止める。app.request_stop の順)。"""
+
+    def __init__(self, stop: threading.Event, sender: FakeSender):
+        super().__init__(sender, ALLOWED_WITHOUT_HOME, start_timer=False)
+        self.stop = stop
+
+    def apply(self, action: PadAction):
+        self.stop.set()
+        self.stop_output()
+        return super().apply(action)
+
+
+def test_stop_between_decide_and_apply_writes_nothing(tmp_path):
+    stop = threading.Event()
+    output = SurfaceOutput(
+        action=PadAction(held=frozenset({"A"})),
+        deep_kinds=frozenset({DocumentKind.TIPS}),
+    )
+    harness = make_harness(tmp_path, ScriptedDecider(output))
+    harness.loop.parts = dataclasses.replace(
+        harness.loop.parts, pad_output=StopBeforeApplyPadOutput(stop, harness.sender)
+    )
+    add_frames(harness, [9.9])
+    result = harness.loop.step(stop)
+    # decide の後の確かめでは立っていなかったが、apply が OutputStoppedError を出したときには立っていた
+    assert result.outcome is SurfaceStepOutcome.STOPPED
+    assert result.row is None
+    assert harness.sender.reports == [NEUTRAL_REPORT]
+    assert read_rows(harness.root / "surface.jsonl") == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert harness.deep_sink.requests == []
+
+
+def test_run_returns_when_stopped_during_decide(tmp_path):
+    stop = threading.Event()
+    decider = StoppingDecider(stop, neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    # 同じスレッドで呼ぶ。decide の中で stop が立つので、1 回で戻る
+    harness.loop.run(stop)
+    assert len(decider.inputs) == 1
+    assert read_rows(harness.root / "surface.jsonl") == []
+    assert harness.stops == []

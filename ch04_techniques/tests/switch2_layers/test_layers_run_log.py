@@ -76,3 +76,15 @@ def test_run_log_from_many_threads_keeps_lines_whole(tmp_path):
             future.result()
     rows = read_rows(path)
     assert len(rows) == 200
+
+
+def test_writes_after_close_are_ignored(tmp_path):
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path, RunClock(FakeMonotonic(0.0)))
+    log.write("stop", reason="interrupted")
+    log.close()
+    # 終了処理の後に、止まり切らなかったスレッドが書こうとしても、例外にせず何も書かない
+    log.write("middle_error", error="late", count=1)
+    log.close()
+    rows = read_rows(path)
+    assert [row["event"] for row in rows] == ["stop"]

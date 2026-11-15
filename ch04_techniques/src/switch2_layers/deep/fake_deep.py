@@ -10,12 +10,10 @@ class FakeDeepRunner:
 
     def run(self, job: DeepJob, job_dir: Path) -> DeepResult:
         """何もせず DeepResult(ok=True) を返す (文書も job_dir も変えない)。"""
-        raise NotImplementedError
+        return DeepResult(ok=True)
 
     def stop(self, job_dir: Path) -> None:
         """何もしない (run は既に戻っている)。例外は出さない。"""
-        raise NotImplementedError
 
     def kill(self, job_dir: Path) -> None:
         """何もしない (run は既に戻っている)。例外は出さない。"""
-        raise NotImplementedError

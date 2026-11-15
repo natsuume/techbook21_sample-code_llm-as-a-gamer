@@ -5,6 +5,7 @@
 判定は純粋な関数 capture_stop_reason に分け、app.LayersApp の見張りのループが CaptureWatcher.check_once を呼ぶ。
 """
 
+import threading
 from collections.abc import Callable
 
 from switch2_layers.run_clock import RunClock
@@ -26,7 +27,13 @@ def capture_stop_reason(
     - latest_frame_t があり、now_t - latest_frame_t >= STALE_FRAME_TIMEOUT_S なら REASON_STALE_FRAME
     - どれでもなければ None
     """
-    raise NotImplementedError
+    if ended:
+        return REASON_CAPTURE_ENDED
+    if latest_frame_t is None:
+        return REASON_NO_FIRST_FRAME if now_t >= FIRST_FRAME_TIMEOUT_S else None
+    if now_t - latest_frame_t >= STALE_FRAME_TIMEOUT_S:
+        return REASON_STALE_FRAME
+    return None
 
 
 class CaptureWatcher:
@@ -44,11 +51,21 @@ class CaptureWatcher:
         clock: RunClock,
     ) -> None:
         """属性を持つ。スレッドは起動しない。"""
-        raise NotImplementedError
+        self.is_ended = is_ended
+        self.latest_frame_t = latest_frame_t
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._reason: str | None = None
 
     def check_once(self) -> str | None:
         """capture_stop_reason(is_ended(), latest_frame_t(), clock.now()) を計算し、理由があれば覚えて返す。
 
         一度理由を覚えたら、以後は計算せずにその理由を返す。止まっていなければ None。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._reason is not None:
+                return self._reason
+            self._reason = capture_stop_reason(
+                self.is_ended(), self.latest_frame_t(), self.clock.now()
+            )
+            return self._reason

@@ -45,4 +45,28 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
     行数、scene_id・scene_name・surface_wait_s は write_result.state の値、new_scene は write_result.new_scene が
     あれば True、deep_requests は種類の値 (文字列) のリスト。
     """
-    raise NotImplementedError
+    middle_input = record.middle_input
+    state = None if record.write_result is None else record.write_result.state
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "based_on_t": None if middle_input is None else middle_input.t,
+        "frames": []
+        if middle_input is None
+        else [{"t": frame.t, "file": frame.file} for frame in middle_input.frames],
+        "surface_rows": 0 if middle_input is None else len(middle_input.surface_rows),
+        "operation_rows": 0
+        if middle_input is None
+        else len(middle_input.operation_rows),
+        "scene_change_reported": False
+        if middle_input is None
+        else middle_input.scene_change_reported,
+        "scene_id": None if state is None else state.scene_id,
+        "scene_name": None if state is None else state.scene_name,
+        "new_scene": record.write_result is not None
+        and record.write_result.new_scene is not None,
+        "surface_wait_s": None if state is None else state.surface_wait_s,
+        "deep_requests": [kind.value for kind in record.deep_requests],
+        "deep_requests_sent": record.deep_requests_sent,
+        "error": record.error,
+    }

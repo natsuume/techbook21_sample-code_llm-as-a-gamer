@@ -181,6 +181,34 @@ def test_frames_with_missing_files_are_skipped(tmp_path):
     assert [frame.t for frame in middle_input.frames] == [18.0, 20.0]
 
 
+def test_frames_outside_interval_directory_are_skipped(tmp_path):
+    root = make_run(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"not an image")
+    (root / "notes" / "strategy.md").write_bytes(b"# notes")
+    # frames.jsonl の file が frames/interval/ の外を指す行 (書き換えられた記録)
+    rows = [
+        {
+            "t": 18.0,
+            "kind": "interval",
+            "file": "../secret.txt",
+            "width": 64,
+            "height": 36,
+        },
+        {
+            "t": 19.0,
+            "kind": "interval",
+            "file": "notes/strategy.md",
+            "width": 64,
+            "height": 36,
+        },
+        {"t": 20.0, "kind": "interval", "file": str(secret), "width": 64, "height": 36},
+    ]
+    write_jsonl(root / "frames.jsonl", rows)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.frames == ()
+
+
 def test_rows_are_read_from_previous_offsets(tmp_path):
     root = make_run(tmp_path)
     surface = [surface_row(4.0), surface_row(5.0), surface_row(6.0), surface_row(30.0)]

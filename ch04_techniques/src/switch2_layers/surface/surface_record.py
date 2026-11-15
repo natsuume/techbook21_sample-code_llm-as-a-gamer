@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from switch2_layers.deep.deep_types import DocumentKind
-from switch2_layers.pad_action import PadAction
+from switch2_layers.pad_action import PadAction, action_to_json
 from switch2_layers.surface.surface_types import Box, InfoLabel, SurfaceDocuments
 
 
@@ -19,8 +19,10 @@ class SentFrame:
     """surface に送った画像 1 枚の記録。
 
     t      フレームの時刻
-    file   保存した画像の実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg)。
-           保存を捨てた (キューが満杯) なら None
+    file   保存を予約した画像の実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg。
+           frame_store.FrameStore.save_surface の戻り値)。null でない file は保存を予約したことを表し、
+           画像を書き終えたことは表さない (書き込みに失敗するか、終了時に捨てられて、画像が無いことがある。
+           書けた画像は frames.jsonl に行がある)。保存を捨てた (キューが満杯・終了の後) なら None
     """
 
     t: float
@@ -63,12 +65,19 @@ class SurfaceRecord:
 
 def info_label_to_json(label: InfoLabel) -> dict[str, object]:
     """情報ラベルを {"name", "probability"} にする。"""
-    raise NotImplementedError
+    return {"name": label.name, "probability": label.probability}
 
 
 def box_to_json(box: Box) -> dict[str, object]:
     """box を {"label", "x_min", "y_min", "x_max", "y_max", "confidence"} にする。"""
-    raise NotImplementedError
+    return {
+        "label": box.label,
+        "x_min": box.x_min,
+        "y_min": box.y_min,
+        "x_max": box.x_max,
+        "y_max": box.y_max,
+        "confidence": box.confidence,
+    }
 
 
 def surface_row(record: SurfaceRecord) -> dict[str, object]:
@@ -79,4 +88,23 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
     action は pad_action.action_to_json(action) (None なら null)、blocked_buttons はリスト、
     deep_requests は種類の値 (文字列) のリスト、info_labels と boxes は info_label_to_json・box_to_json のリスト。
     """
-    raise NotImplementedError
+    documents = record.documents
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "frames": [{"t": frame.t, "file": frame.file} for frame in record.frames],
+        "scene_id": documents.scene_id,
+        "uses_common": {
+            "controls": documents.uses_common_controls,
+            "tips": documents.uses_common_tips,
+        },
+        "middle_generated_t": record.middle_generated_t,
+        "action": None if record.action is None else action_to_json(record.action),
+        "blocked_buttons": list(record.blocked_buttons),
+        "deep_requests": [kind.value for kind in record.deep_requests],
+        "info_labels": [info_label_to_json(label) for label in record.info_labels],
+        "boxes": [box_to_json(box) for box in record.boxes],
+        "scene_changed": record.scene_changed,
+        "wait_s": record.wait_s,
+        "error": record.error,
+    }

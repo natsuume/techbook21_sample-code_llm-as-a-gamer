@@ -34,7 +34,9 @@ def test_default_run_settings_are_valid():
         {"middle_window_s": 0.5},
         {"max_middle_errors": 1},
         {"deep_min_start_interval_s": 0.0},
-        {"deep_auto_seconds": 0.5},
+        # deep_auto_seconds は deep_min_start_interval_s 以上に限るため、最小間隔も小さくして境界を確かめる
+        {"deep_auto_seconds": 0.5, "deep_min_start_interval_s": 0.0},
+        {"deep_auto_seconds": 15.0, "deep_min_start_interval_s": 15.0},
         {"deep_timeout_s": 0.5},
         {"allow_home": True},
     ],
@@ -72,6 +74,25 @@ def test_out_of_range_values_are_reported_with_option_name(changes, option):
     errors = run_settings_errors(dataclasses.replace(RunSettings(), **changes))
     assert len(errors) == 1
     assert option in errors[0]
+
+
+@pytest.mark.parametrize(
+    "auto_seconds, min_start_interval",
+    [(14.9, 15.0), (5.0, 15.0), (60.0, 61.0)],
+)
+def test_auto_seconds_shorter_than_min_start_interval_is_an_error(
+    auto_seconds, min_start_interval
+):
+    # 自動の呼び出しが最小間隔より短いと、判定の周期ごとに要求が捨てられ続けるため、引数の誤りにする
+    errors = run_settings_errors(
+        RunSettings(
+            deep_auto_seconds=auto_seconds,
+            deep_min_start_interval_s=min_start_interval,
+        )
+    )
+    assert len(errors) == 1
+    assert "--deep-auto-seconds" in errors[0]
+    assert "--deep-min-start-interval" in errors[0]
 
 
 def test_multiple_errors_are_all_reported():

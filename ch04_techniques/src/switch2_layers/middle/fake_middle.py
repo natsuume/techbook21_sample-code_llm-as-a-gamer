@@ -13,4 +13,11 @@ class FakeMiddleAnalyzer:
         """MiddleOutput(scene_name=FAKE_SCENE_NAME, is_stuck=False, stuck_description="",
         surface_wait_s=FAKE_SURFACE_WAIT_S, timeline="", tasks="") を返す。middle_input は使わない。
         """
-        raise NotImplementedError
+        return MiddleOutput(
+            scene_name=FAKE_SCENE_NAME,
+            is_stuck=False,
+            stuck_description="",
+            surface_wait_s=FAKE_SURFACE_WAIT_S,
+            timeline="",
+            tasks="",
+        )

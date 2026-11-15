@@ -236,6 +236,53 @@ def test_waiting_tap_is_not_rescheduled_by_later_apply():
     assert sender.reports[-1][0] & A_BIT
 
 
+def test_tap_right_after_timer_release_waits_for_gap():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    # タイマーが TAP_PRESS_S の時点で A を離す (最後に離した時刻 = TAP_PRESS_S)
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    # 離してから TAP_RELEASE_GAP_S たつ前に、同じボタンの短押しが来る
+    clock.now = TAP_PRESS_S + 0.03
+    output.apply(PadAction(taps=frozenset({"A"})))
+    # すぐには押さない
+    assert sender.reports[-1][0] & A_BIT == 0
+    count = len(sender.reports)
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # 「離した時刻 + 間隔」に押す
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert sender.reports[-1][0] & A_BIT
+
+
+def test_tap_after_release_from_held_waits_for_gap():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 1.0
+    # A を押し続けから外す (最後に離した時刻 = 1.0)
+    output.apply(PadAction())
+    clock.now = 1.05
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert sender.reports[-1][0] & A_BIT == 0
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert sender.reports[-1][0] & A_BIT
+
+
+def test_tap_long_after_release_starts_immediately():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    # 離してから TAP_RELEASE_GAP_S 以上たっていれば、この apply のレポートですぐ押す
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert sender.reports[-1][0] & A_BIT
+
+
 @pytest.mark.parametrize("stop", ["neutral", "stop_output"])
 def test_neutral_and_stop_cancel_waiting_taps(stop):
     output, sender, clock, _ = make_output()

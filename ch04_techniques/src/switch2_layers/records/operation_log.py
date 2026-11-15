@@ -5,11 +5,13 @@ hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent �
 surface のスレッド (apply) と終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
 """
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from switch2_layers.pad_action import PadAction
+from switch2_layers.file_io import append_json_line
+from switch2_layers.pad_action import PadAction, action_to_json
 from switch2_layers.run_clock import RunClock
 
 # 操作を送った処理: apply (surface の操作)、neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)
@@ -38,7 +40,16 @@ def operation_row(t: float, event: OperationEvent) -> dict[str, object]:
     {"t": t, "source": event.source, "held": ..., "taps": ..., "sticks": ..., "ok": event.ok, "error": event.error}。
     held・taps・sticks は pad_action.action_to_json(event.action) の値。
     """
-    raise NotImplementedError
+    action = action_to_json(event.action)
+    return {
+        "t": t,
+        "source": event.source,
+        "held": action["held"],
+        "taps": action["taps"],
+        "sticks": action["sticks"],
+        "ok": event.ok,
+        "error": event.error,
+    }
 
 
 class OperationLog:
@@ -50,11 +61,14 @@ class OperationLog:
 
     def __init__(self, path: Path, clock: RunClock) -> None:
         """属性を持つ。ファイルはまだ作らない。"""
-        raise NotImplementedError
+        self.path = path
+        self.clock = clock
+        self._lock = threading.Lock()
 
     def write(self, event: OperationEvent) -> None:
         """operation_row(clock.now(), event) を 1 行追記する。複数のスレッドから呼んでよい。
 
         clock.now() を取ることと追記を 1 つのロックの中で行い、行が t の順 (同じ値を含む) に並ぶようにする。
         """
-        raise NotImplementedError
+        with self._lock:
+            append_json_line(self.path, operation_row(self.clock.now(), event))

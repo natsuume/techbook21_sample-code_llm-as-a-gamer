@@ -17,17 +17,50 @@ cli の run は実機の部品とフェイクの層を渡し、テストはフ�
     wait を呼んだスレッド (run ではメインスレッド) が、止まる条件を MONITOR_INTERVAL_S ごとに確かめる。
 """
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
+from switch2_layers.buttons import allowed_buttons
+from switch2_layers.deep.deep_scheduler import (
+    DeepScheduler,
+    DeepSchedulerParts,
+    DeepSchedulerSettings,
+)
 from switch2_layers.deep.deep_types import DeepRunner
-from switch2_layers.hardware.capture_source import LatestFrameReader
-from switch2_layers.hardware.pad_output import ReportSender
+from switch2_layers.frames.frame_buffer import FrameBuffer
+from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
+from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
+from switch2_layers.hardware.capture_watcher import CaptureWatcher
+from switch2_layers.hardware.pad_output import PadOutput, ReportSender
+from switch2_layers.middle.middle_loop import (
+    MiddleLoop,
+    MiddleLoopParts,
+    MiddleLoopSettings,
+)
 from switch2_layers.middle.middle_types import MiddleAnalyzer
-from switch2_layers.run_directory import RunPaths
-from switch2_layers.settings import RunSettings
+from switch2_layers.records.operation_log import OperationLog
+from switch2_layers.records.run_log import (
+    EVENT_FRAMES_DROPPED,
+    EVENT_START,
+    EVENT_STOP,
+    RunLog,
+)
+from switch2_layers.run_clock import RunClock
+from switch2_layers.run_directory import (
+    RunPaths,
+    create_run_directory,
+    write_initial_notes,
+)
+from switch2_layers.settings import RunSettings, run_settings_to_json
+from switch2_layers.surface.middle_state_reader import read_surface_context
+from switch2_layers.surface.surface_loop import (
+    SurfaceLoop,
+    SurfaceLoopParts,
+    SurfaceLoopSettings,
+)
 from switch2_layers.surface.surface_types import SurfaceDecider
 
 REASON_INTERRUPTED = "interrupted"
@@ -36,6 +69,7 @@ REASON_CLOSED = "closed"  # 止まる条件より前に close が呼ばれた
 MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
 # 終了時に surface と middle のループのスレッドの終わりを待つ上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
+BRIDGE_FAILED = "failed"  # bridge_state が返す、ブリッジの復旧が失敗した状態
 
 
 @dataclass(frozen=True)
@@ -62,6 +96,20 @@ class LayersParts:
     local_now: Callable[[], datetime] = datetime.now
 
 
+@dataclass(frozen=True)
+class _StartedParts:
+    """start で組み立てた部品 (close で後片付けするもの)。"""
+
+    paths: RunPaths
+    run_log: RunLog
+    pad_output: PadOutput
+    frame_store: FrameStore
+    capture_source: CaptureSource
+    capture_watcher: CaptureWatcher
+    deep_scheduler: DeepScheduler
+    loop_threads: tuple[threading.Thread, ...]
+
+
 class LayersApp:
     """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
@@ -77,7 +125,16 @@ class LayersApp:
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """属性を持つ。ディレクトリーとスレッドは start で作る。"""
-        raise NotImplementedError
+        self.settings = settings
+        self.parts = parts
+        self.sleep = sleep
+        self._lock = threading.Lock()
+        # ループの停止の合図 (surface と middle のループが見る)
+        self._stop_event = threading.Event()
+        self._stop_reason: str | None = None
+        self._start_called = False
+        self._closed = False
+        self._started: _StartedParts | None = None
 
     def start(self) -> RunPaths:
         """実行ディレクトリーを作り、部品を組み立ててスレッドを起動し、実行ディレクトリーの RunPaths を返す。
@@ -94,25 +151,145 @@ class LayersApp:
            それぞれのスレッドを起動する。on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._start_called:
+                raise RuntimeError("LayersApp.start can be called only once")
+            self._start_called = True
+        settings = self.settings
+        parts = self.parts
+        # 1〜3: 時計・実行ディレクトリー・run.jsonl
+        clock = RunClock(parts.monotonic)
+        paths = create_run_directory(settings.runs_dir, parts.local_now())
+        buttons = allowed_buttons(settings.allow_home)
+        write_initial_notes(paths, buttons)
+        run_log = RunLog(paths.run_log, clock)
+        run_log.write(
+            EVENT_START, run_dir=str(paths.root), args=run_settings_to_json(settings)
+        )
+        # 4: 操作の送信
+        operation_log = OperationLog(paths.operations_log, clock)
+        pad_output = PadOutput(
+            parts.report_sender,
+            buttons,
+            clock=parts.monotonic,
+            on_operation=operation_log.write,
+        )
+        # 5: キャプチャーのフレーム
+        frame_buffer = FrameBuffer()
+        frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
+        capture_source = CaptureSource(
+            parts.frame_reader, clock, frame_buffer, frame_store
+        )
+        capture_watcher = CaptureWatcher(
+            parts.frame_reader.is_ended, capture_source.latest_t, clock
+        )
+        # 6: deep
+        deep_scheduler = DeepScheduler(
+            DeepSchedulerParts(
+                paths=paths,
+                runner=parts.deep,
+                clock=clock,
+                run_log=run_log,
+                current_scene_id=lambda: (
+                    read_surface_context(paths.middle_state).scene_id
+                ),
+                latest_frame_t=lambda: latest_frame_t(paths),
+            ),
+            DeepSchedulerSettings(
+                min_start_interval_s=settings.deep_min_start_interval_s,
+                auto_seconds=settings.deep_auto_seconds,
+                timeout_s=settings.deep_timeout_s,
+            ),
+        )
+        deep_scheduler.start()
+        # 7: surface と middle のループ
+        surface_loop = SurfaceLoop(
+            SurfaceLoopParts(
+                paths=paths,
+                decider=parts.surface,
+                frame_buffer=frame_buffer,
+                frame_store=frame_store,
+                pad_output=pad_output,
+                deep_requests=deep_scheduler,
+                run_log=run_log,
+                clock=clock,
+                bridge_state=parts.bridge_state,
+                on_stop=self.request_stop,
+            ),
+            SurfaceLoopSettings(max_errors=settings.max_surface_errors),
+        )
+        middle_loop = MiddleLoop(
+            MiddleLoopParts(
+                paths=paths,
+                analyzer=parts.middle,
+                clock=clock,
+                run_log=run_log,
+                deep_requests=deep_scheduler,
+                on_stop=self.request_stop,
+            ),
+            MiddleLoopSettings(
+                interval_s=settings.middle_interval_s,
+                window_s=settings.middle_window_s,
+                max_errors=settings.max_middle_errors,
+            ),
+        )
+        loop_threads = (
+            threading.Thread(
+                target=surface_loop.run,
+                args=(self._stop_event,),
+                name="surface-loop",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=middle_loop.run,
+                args=(self._stop_event,),
+                name="middle-loop",
+                daemon=True,
+            ),
+        )
+        with self._lock:
+            self._started = _StartedParts(
+                paths=paths,
+                run_log=run_log,
+                pad_output=pad_output,
+                frame_store=frame_store,
+                capture_source=capture_source,
+                capture_watcher=capture_watcher,
+                deep_scheduler=deep_scheduler,
+                loop_threads=loop_threads,
+            )
+        for thread in loop_threads:
+            thread.start()
+        return paths
 
     @property
     def paths(self) -> RunPaths | None:
         """実行ディレクトリーの RunPaths。start の前は None。"""
-        raise NotImplementedError
+        with self._lock:
+            return None if self._started is None else self._started.paths
 
     @property
     def stop_reason(self) -> str | None:
         """止まった理由 (最初に request_stop に渡された理由)。まだ止まっていなければ None。"""
-        raise NotImplementedError
+        with self._lock:
+            return self._stop_reason
 
     def request_stop(self, reason: str) -> None:
         """全体を止めるよう求める。どのスレッドから呼んでもよい。
 
-        最初の呼び出しだけが理由を決める (2 回目以降の理由は無視する)。最初の呼び出しで、すぐに PadOutput.stop_output()
-        (操作を中立にし、以後の操作を送らない) を呼び、ループの停止の合図を立てる。後片付けは close で行う。
+        最初の呼び出しだけが理由を決める (2 回目以降の理由は無視する)。最初の呼び出しで、ループの停止の合図を立ててから、
+        すぐに PadOutput.stop_output() (操作を中立にし、以後の操作を送らない) を呼ぶ。後片付けは close で行う。
+        合図を先に立てるのは、出力を止めた後に surface が判断の応答を受け取ったとき、合図を見て記録を書かずに
+        抜けられるようにするため (surface_loop.SurfaceLoop.step)。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._stop_reason is not None:
+                return
+            self._stop_reason = reason
+            started = self._started
+        self._stop_event.set()
+        if started is not None:
+            started.pad_output.stop_output()
 
     def wait(self) -> str:
         """止まるまで待ち、止まった理由を返す。
@@ -121,8 +298,24 @@ class LayersApp:
             - CaptureWatcher.check_once() が理由を返したら request_stop(その理由)
             - bridge_state() が "failed" なら request_stop(REASON_BRIDGE_FAILED)
         待っている間の KeyboardInterrupt (Ctrl+C) は外に出さず、request_stop(REASON_INTERRUPTED) にする。
+        start の前に呼んだら RuntimeError にする。
         """
-        raise NotImplementedError
+        with self._lock:
+            started = self._started
+        if started is None:
+            raise RuntimeError("LayersApp.wait must be called after start")
+        try:
+            while not self._stop_event.is_set():
+                capture_reason = started.capture_watcher.check_once()
+                if capture_reason is not None:
+                    self.request_stop(capture_reason)
+                elif self.parts.bridge_state() == BRIDGE_FAILED:
+                    self.request_stop(REASON_BRIDGE_FAILED)
+                else:
+                    self.sleep(MONITOR_INTERVAL_S)
+        except KeyboardInterrupt:
+            self.request_stop(REASON_INTERRUPTED)
+        return self._current_reason()
 
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。
@@ -130,12 +323,45 @@ class LayersApp:
         1. ループの停止の合図を立て、surface と middle のループのスレッドの終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
         2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)
         3. CaptureSource.close()、FrameStore.close()
-        4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書く
+        4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書いて、
+           RunLog.close() で閉じる (止まり切らなかったスレッドが、stop の後ろに行を書かないようにする)
         5. PadOutput.close()
         実機の部品 (キャプチャー・ブリッジ) は閉じない (作った側が閉じる)。2 回目以降の呼び出しは何もしない。
+        start の前に呼んだら、理由を REASON_CLOSED にするだけで、後片付けするものは無い。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            started = self._started
+        self.request_stop(REASON_CLOSED)
+        if started is None:
+            return
+        # 1. ループの終わりを待つ
+        for thread in started.loop_threads:
+            thread.join(LOOP_JOIN_TIMEOUT_S)
+        # 2. deep
+        started.deep_scheduler.close()
+        # 3. キャプチャーと画像の保存
+        started.capture_source.close()
+        started.frame_store.close()
+        # 4. 記録を閉じる
+        started.run_log.write(EVENT_FRAMES_DROPPED, count=started.frame_store.dropped)
+        started.run_log.write(EVENT_STOP, reason=self._current_reason())
+        started.run_log.close()
+        # 5. 短押しのタイマー
+        started.pad_output.close()
 
     def run(self) -> str:
         """start → wait → close を行い、止まった理由を返す。wait の途中の例外でも close を呼ぶ。"""
-        raise NotImplementedError
+        try:
+            self.start()
+            self.wait()
+        finally:
+            self.close()
+        return self._current_reason()
+
+    def _current_reason(self) -> str:
+        """止まった理由を返す。まだ決まっていなければ REASON_CLOSED。"""
+        with self._lock:
+            return REASON_CLOSED if self._stop_reason is None else self._stop_reason

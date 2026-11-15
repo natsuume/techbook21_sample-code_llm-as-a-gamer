@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from switch2_layers import cli
 from switch2_layers.cli import build_parser, main
 from switch2_layers.notes.publish_note import EXIT_CONFLICT, EXIT_INVALID
 from switch2_layers.settings import (
@@ -99,6 +100,22 @@ def test_run_accepts_all_options():
     assert args.deep_auto_seconds == 30.0
     assert args.deep_timeout == 60.0
     assert args.allow_home is True
+
+
+def test_run_rejects_auto_seconds_shorter_than_min_interval_without_hardware(
+    monkeypatch, capsys
+):
+    def must_not_start_bridge(**kwargs):
+        raise AssertionError("the bridge must not be started")
+
+    # 範囲の誤りでは、実機 (ブリッジ) に触れずに終了する
+    monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
+    # 既定の --deep-min-start-interval は 15
+    code = main(["run", "--deep-auto-seconds", "5"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--deep-auto-seconds" in captured.err
 
 
 def test_deep_once_rejects_unknown_document_kind():

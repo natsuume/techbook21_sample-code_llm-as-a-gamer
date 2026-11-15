@@ -27,11 +27,21 @@ analyze か出力の書き込みが失敗して middle/state.json を書かな�
 次の入力にも含める。
 """
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from switch2_layers.frames.frame_store import FrameRecord
-from switch2_layers.middle.middle_types import MiddleInput, MiddleState
+from switch2_layers.file_io import read_json_lines_from, read_text_or_empty
+from switch2_layers.frames.frame_store import FrameRecord, read_frame_records
+from switch2_layers.frames.surface_frames import pick_evenly
+from switch2_layers.middle.middle_types import (
+    MiddleFrame,
+    MiddleInput,
+    MiddleState,
+    middle_state_from_json,
+)
+from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, scene_note
+from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.run_directory import RunPaths
 
 MIDDLE_MAX_FRAMES = 4  # middle に渡すフレームの最大の枚数
@@ -42,12 +52,16 @@ def read_middle_state(path: Path) -> MiddleState | None:
 
     無い・読めない・JSON として壊れている・middle_types.middle_state_from_json が ValueError のときは None。
     """
-    raise NotImplementedError
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return middle_state_from_json(value)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
 
 
 def has_recorded_frame(paths: RunPaths) -> bool:
     """frames.jsonl に 1 行以上の記録があれば True を返す (middle のループの最初の実行の条件)。"""
-    raise NotImplementedError
+    return bool(read_frame_records(paths))
 
 
 def select_interval_frames(
@@ -62,14 +76,23 @@ def select_interval_frames(
     max_count 枚以下ならすべて、多ければ frames.surface_frames.select_surface_frames と同じ添字の規則
     (最新と最も古いものを含め、添字で等間隔) で max_count 枚を選ぶ。
     """
-    raise NotImplementedError
+    in_window = sorted(
+        (
+            record
+            for record in records
+            if record.kind == "interval" and now_t - window_s <= record.t <= now_t
+        ),
+        key=lambda record: record.t,
+    )
+    return pick_evenly(in_window, max_count)
 
 
 def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> MiddleInput:
     """時刻 now_t の middle の入力を、実行ディレクトリー paths のファイルだけから作る (モジュールの docstring)。
 
     - frames: select_interval_frames(read_frame_records(paths), now_t, window_s) の各画像を読んだ MiddleFrame。
-      画像のファイルが読めないものは除く
+      画像のファイルが読めないものと、file がシンボリックリンクを解決した先で frames/interval/ の中を指さないものは除く
+      (frames.jsonl の行が書き換えられても、実行ディレクトリーの外のファイルを middle に送らないため)
     - previous_state: read_middle_state(paths.middle_state)
     - surface_rows と surface_rows_offset: file_io.read_json_lines_from(surface.jsonl, 前回の位置) の rows と end_offset。
       前回の位置は previous_state.surface_rows_offset (previous_state が None なら 0)。位置がファイルの大きさを超えていれば
@@ -81,4 +104,52 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - current_tasks: previous_state の scene_id の tasks.md (場面が無いか、文書が無ければ空文字列)
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0) にする。
     """
-    raise NotImplementedError
+    previous_state = read_middle_state(paths.middle_state)
+    surface_chunk = read_json_lines_from(
+        paths.surface_log,
+        0 if previous_state is None else previous_state.surface_rows_offset,
+    )
+    operations_chunk = read_json_lines_from(
+        paths.operations_log,
+        0 if previous_state is None else previous_state.operations_rows_offset,
+    )
+    current_tasks = ""
+    if previous_state is not None and previous_state.scene_id is not None:
+        current_tasks = read_text_or_empty(
+            paths.notes_dir / scene_note(previous_state.scene_id, "tasks")
+        )
+    return MiddleInput(
+        t=now_t,
+        frames=tuple(_read_frames(paths, now_t, window_s)),
+        surface_rows=tuple(surface_chunk.rows),
+        operation_rows=tuple(operations_chunk.rows),
+        scene_change_reported=any(
+            row.get("scene_changed") is True for row in surface_chunk.rows
+        ),
+        scene_labels=tuple(read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)),
+        previous_state=previous_state,
+        strategy=read_text_or_empty(paths.notes_dir / STRATEGY_NOTE),
+        current_tasks=current_tasks,
+        surface_rows_offset=surface_chunk.end_offset,
+        operations_rows_offset=operations_chunk.end_offset,
+    )
+
+
+def _read_frames(paths: RunPaths, now_t: float, window_s: float) -> list[MiddleFrame]:
+    """middle に渡すフレームを選んで画像を読む。
+
+    画像のファイルが読めないものと、file が frames/interval/ の中を指さないもの (シンボリックリンクを解決した先で
+    確かめる) は除く。frames.jsonl の行を書き換えられても、実行ディレクトリーの外のファイルを middle に送らないため。
+    """
+    interval_dir = paths.interval_frames_dir.resolve()
+    frames: list[MiddleFrame] = []
+    for record in select_interval_frames(read_frame_records(paths), now_t, window_s):
+        image_path = (paths.root / record.file).resolve()
+        if interval_dir not in image_path.parents:
+            continue
+        try:
+            jpeg = image_path.read_bytes()
+        except OSError:
+            continue
+        frames.append(MiddleFrame(t=record.t, file=record.file, jpeg=jpeg))
+    return frames

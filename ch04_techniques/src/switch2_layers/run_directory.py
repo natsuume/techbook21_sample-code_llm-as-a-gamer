@@ -18,6 +18,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from switch2_remote.controller_state import BUTTON_ORDER
+
+from switch2_layers.file_io import write_json_atomic, write_text_atomic
+from switch2_layers.notes.note_paths import (
+    ADVICE_NOTE,
+    COMMON_DIR,
+    MAP_DIR,
+    SCENE_LABELS_FILE,
+    SCENES_DIR,
+    STRATEGY_NOTE,
+)
+from switch2_layers.run_clock import t_to_milliseconds
+
 RUN_DIRECTORY_NAME_FORMAT = "%Y%m%d-%H%M%S"
 RUN_LOG_FILE = "run.jsonl"
 FRAMES_LOG_FILE = "frames.jsonl"
@@ -52,69 +65,69 @@ class RunPaths:
     @property
     def run_log(self) -> Path:
         """root / RUN_LOG_FILE"""
-        raise NotImplementedError
+        return self.root / RUN_LOG_FILE
 
     @property
     def frames_log(self) -> Path:
         """root / FRAMES_LOG_FILE"""
-        raise NotImplementedError
+        return self.root / FRAMES_LOG_FILE
 
     @property
     def interval_frames_dir(self) -> Path:
         """root / FRAMES_DIR / INTERVAL_FRAMES_DIR"""
-        raise NotImplementedError
+        return self.root / FRAMES_DIR / INTERVAL_FRAMES_DIR
 
     @property
     def surface_frames_dir(self) -> Path:
         """root / FRAMES_DIR / SURFACE_FRAMES_DIR"""
-        raise NotImplementedError
+        return self.root / FRAMES_DIR / SURFACE_FRAMES_DIR
 
     @property
     def surface_log(self) -> Path:
         """root / SURFACE_LOG_FILE"""
-        raise NotImplementedError
+        return self.root / SURFACE_LOG_FILE
 
     @property
     def operations_log(self) -> Path:
         """root / OPERATIONS_LOG_FILE"""
-        raise NotImplementedError
+        return self.root / OPERATIONS_LOG_FILE
 
     @property
     def notes_dir(self) -> Path:
         """root / NOTES_DIR"""
-        raise NotImplementedError
+        return self.root / NOTES_DIR
 
     @property
     def middle_dir(self) -> Path:
         """root / MIDDLE_DIR"""
-        raise NotImplementedError
+        return self.root / MIDDLE_DIR
 
     @property
     def middle_state(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_STATE_FILE"""
-        raise NotImplementedError
+        return self.root / MIDDLE_DIR / MIDDLE_STATE_FILE
 
     @property
     def middle_calls(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_CALLS_FILE"""
-        raise NotImplementedError
+        return self.root / MIDDLE_DIR / MIDDLE_CALLS_FILE
 
     @property
     def deep_dir(self) -> Path:
         """root / DEEP_DIR"""
-        raise NotImplementedError
+        return self.root / DEEP_DIR
 
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
-        raise NotImplementedError
+        return self.interval_frames_dir / frame_file_name(t)
 
     def surface_frame(self, t: float) -> Path:
         """時刻 t の surface に送った画像のパス surface_frames_dir / frame_file_name(t)。"""
-        raise NotImplementedError
+        return self.surface_frames_dir / frame_file_name(t)
 
     def relative(self, path: Path) -> str:
         """path の root からの相対パスを / 区切りの文字列で返す (記録の file に書く形)。root の外なら ValueError。"""
-        raise NotImplementedError
+        return path.relative_to(self.root).as_posix()
 
 
 def frame_file_name(t: float) -> str:
@@ -122,12 +135,14 @@ def frame_file_name(t: float) -> str:
 
     ミリ秒は run_clock.t_to_milliseconds(t)。9 桁に満たなければ先頭を 0 で埋める。t が負なら ValueError。
     """
-    raise NotImplementedError
+    if t < 0:
+        raise ValueError(f"frame time must not be negative: {t}")
+    return f"{t_to_milliseconds(t):0{FRAME_FILE_DIGITS}d}{FRAME_FILE_SUFFIX}"
 
 
 def run_directory_name(started_at: datetime) -> str:
     """実行を始めた時刻 started_at (ローカルの時刻) を RUN_DIRECTORY_NAME_FORMAT の名前にする (例: 20261115-142233)。"""
-    raise NotImplementedError
+    return started_at.strftime(RUN_DIRECTORY_NAME_FORMAT)
 
 
 def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
@@ -139,7 +154,28 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
     - 作るのは mkdir(exist_ok=False) で行い、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
     - 中に frames/interval/、frames/surface/、middle/、deep/ も作る。notes/ は write_initial_notes で作る
     """
-    raise NotImplementedError
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    base_name = run_directory_name(started_at)
+    number = 1
+    while True:
+        name = base_name if number == 1 else f"{base_name}-{number}"
+        root = runs_dir / name
+        try:
+            # exist_ok=False で作り、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
+            root.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        break
+    paths = RunPaths(root)
+    for directory in (
+        paths.interval_frames_dir,
+        paths.surface_frames_dir,
+        paths.middle_dir,
+        paths.deep_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    return paths
 
 
 def open_run_directory(run_dir: Path) -> RunPaths:
@@ -147,7 +183,9 @@ def open_run_directory(run_dir: Path) -> RunPaths:
 
     run_dir がディレクトリーでなければ FileNotFoundError にする。中のファイルは確かめない。
     """
-    raise NotImplementedError
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"run directory not found: {run_dir}")
+    return RunPaths(run_dir)
 
 
 def initial_common_controls(allowed_buttons: Collection[str]) -> str:
@@ -157,7 +195,13 @@ def initial_common_controls(allowed_buttons: Collection[str]) -> str:
     並びは switch2_remote.controller_state.BUTTON_ORDER の順で、allowed_buttons に無いボタンは書かない。末尾は改行。
     例 (A と B だけのとき): "# 操作説明 (共通)\\n\\n- A: unknown\\n- B: unknown\\n"
     """
-    raise NotImplementedError
+    lines = [COMMON_CONTROLS_HEADING, ""]
+    lines += [
+        f"- {button}: {UNKNOWN_BEHAVIOR}"
+        for button in BUTTON_ORDER
+        if button in allowed_buttons
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def write_initial_notes(paths: RunPaths, allowed_buttons: Collection[str]) -> None:
@@ -172,4 +216,14 @@ def write_initial_notes(paths: RunPaths, allowed_buttons: Collection[str]) -> No
         notes/scenes/              空のディレクトリー
     notes/ と notes/common/ は無ければ作る。既にあるファイルは置き換える。
     """
-    raise NotImplementedError
+    notes = paths.notes_dir
+    (notes / COMMON_DIR).mkdir(parents=True, exist_ok=True)
+    write_text_atomic(
+        notes / COMMON_DIR / "controls.md", initial_common_controls(allowed_buttons)
+    )
+    write_text_atomic(notes / COMMON_DIR / "tips.md", INITIAL_COMMON_TIPS)
+    write_text_atomic(notes / STRATEGY_NOTE, INITIAL_STRATEGY)
+    write_text_atomic(notes / ADVICE_NOTE, INITIAL_ADVICE)
+    write_json_atomic(notes / SCENE_LABELS_FILE, INITIAL_SCENE_LABELS)
+    (notes / MAP_DIR).mkdir(exist_ok=True)
+    (notes / SCENES_DIR).mkdir(exist_ok=True)

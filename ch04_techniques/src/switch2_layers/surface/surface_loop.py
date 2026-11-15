@@ -12,24 +12,61 @@
     7. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
 decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S 秒待つ。max_errors 回続けたら on_stop で全体を止める。
 ブリッジの復旧中は要求を送らず、操作を中立にして BRIDGE_WAIT_S 秒待つ。
+decide が戻った (例外を含む) ときに止める合図が立っていたら、操作を送らず、surface.jsonl・run.jsonl に書かず、
+deep も呼ばずにループを抜ける (止めた後に記録を増やさない)。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。
 """
 
+import logging
 import threading
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from switch2_layers.deep.deep_types import DeepRequestSink
-from switch2_layers.frames.frame_buffer import FrameBuffer
+from switch2_layers.buttons import filter_action
+from switch2_layers.deep.deep_types import (
+    DOCUMENT_KINDS,
+    DeepRequestSink,
+    DeepTrigger,
+    DocumentKind,
+)
+from switch2_layers.error_text import describe_exception
+from switch2_layers.file_io import append_json_line
+from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
-from switch2_layers.frames.surface_frames import SURFACE_IMAGE_WIDTH
-from switch2_layers.hardware.pad_output import PadOutput
-from switch2_layers.records.run_log import RunLog
+from switch2_layers.frames.surface_frames import (
+    SURFACE_IMAGE_WIDTH,
+    build_surface_image,
+    format_frame_label,
+    select_surface_frames,
+)
+from switch2_layers.hardware.pad_output import OutputStoppedError, PadOutput
+from switch2_layers.notes.surface_documents import read_surface_documents
+from switch2_layers.records.run_log import (
+    EVENT_DEEP_REQUEST_ERROR,
+    EVENT_SURFACE_ERROR,
+    RunLog,
+)
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
-from switch2_layers.surface.surface_types import SurfaceDecider
+from switch2_layers.surface.middle_state_reader import (
+    SurfaceContext,
+    read_surface_context,
+)
+from switch2_layers.surface.surface_record import SentFrame, SurfaceRecord, surface_row
+from switch2_layers.surface.surface_types import (
+    RecentAction,
+    SurfaceDecider,
+    SurfaceDocuments,
+    SurfaceFrame,
+    SurfaceInput,
+    SurfaceOutput,
+)
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 NO_FRAME_RETRY_S = 0.2  # 2 秒以内のフレームが無いときに、選び直すまで待つ秒数
 DECIDE_ERROR_WAIT_S = 1.0  # decide が例外を出した後に待つ秒数
@@ -53,6 +90,8 @@ class SurfaceStepOutcome(StrEnum):
     DECIDE_ERROR = (
         "decide_error"  # decide が例外を出した。surface.jsonl に error の行を書いた
     )
+    # decide が戻ったときに止める合図が立っていた。操作を送らず、行も書かない
+    STOPPED = "stopped"
 
 
 @dataclass(frozen=True)
@@ -113,7 +152,7 @@ class SurfaceLoopParts:
 
 def surface_failure_reason(count: int) -> str:
     """decide の失敗が count 回続いて止まるときの理由 `surface failed <count> times in a row` を返す。"""
-    raise NotImplementedError
+    return f"surface failed {count} times in a row"
 
 
 class SurfaceLoop:
@@ -121,15 +160,22 @@ class SurfaceLoop:
 
     def __init__(self, parts: SurfaceLoopParts, settings: SurfaceLoopSettings) -> None:
         """続けて失敗した回数 0、直近の操作の記録が空の状態で作る。"""
-        raise NotImplementedError
+        self.parts = parts
+        self.settings = settings
+        self._consecutive_errors = 0
+        self._recent_actions: deque[RecentAction] = deque(maxlen=RECENT_ACTIONS_COUNT)
+        # 直前の step でブリッジを使えていたか (最初の step の前は使えていたものとする)
+        self._bridge_was_ok = True
 
     @property
     def consecutive_errors(self) -> int:
         """decide の失敗が続いている回数 (成功で 0 に戻る)。"""
-        raise NotImplementedError
+        return self._consecutive_errors
 
-    def step(self) -> SurfaceStepResult:
+    def step(self, stop: threading.Event | None = None) -> SurfaceStepResult:
         """1 回の要求を処理し、結果を返す (待ちはしない)。
+
+        stop は止める合図 (run が渡す)。None なら合図を確かめない。
 
         1. bridge_state() が BRIDGE_OK でなければ、要求を送らず BRIDGE_NOT_READY (wait_s = BRIDGE_WAIT_S) を返す。
            直前の step でブリッジを使えていたなら (最初の step を含む)、このとき pad_output.neutral() を 1 回呼ぶ
@@ -159,12 +205,202 @@ class SurfaceLoop:
            {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、残りの種類の要求を続ける
            (decide の失敗の回数には数えず、ループも止めない)
         SENT (wait_s = SurfaceContext.wait_s) を返す。
+        decide が戻った (例外を含む) ときに stop が立っていたら、6〜9 をせずに STOPPED (wait_s = 0.0、row は None)
+        を返す: 操作を送らず (neutral も呼ばない)、surface.jsonl と run.jsonl に書かず、失敗の回数も変えず、
+        deep も呼ばない。7 の apply が OutputStoppedError を出し、そのとき stop が立っていた場合 (確かめた後に
+        全体が止められた) も同じく、行を書かず deep も呼ばずに STOPPED を返す。
         """
-        raise NotImplementedError
+        parts = self.parts
+        if parts.bridge_state() != BRIDGE_OK:
+            if self._bridge_was_ok:
+                parts.pad_output.neutral()
+            self._bridge_was_ok = False
+            return SurfaceStepResult(
+                SurfaceStepOutcome.BRIDGE_NOT_READY, BRIDGE_WAIT_S, None
+            )
+        self._bridge_was_ok = True
+        now_t = parts.clock.now()
+        selected = select_surface_frames(parts.frame_buffer.frames(), now_t)
+        if not selected:
+            return SurfaceStepResult(
+                SurfaceStepOutcome.NO_FRAMES, NO_FRAME_RETRY_S, None
+            )
+        frames, sent_frames = self._prepare_frames(selected)
+        context = read_surface_context(parts.paths.middle_state)
+        documents = read_surface_documents(parts.paths.notes_dir, context.scene_id)
+        surface_input = SurfaceInput(
+            t=now_t,
+            frames=frames,
+            documents=documents,
+            timeline=context.timeline,
+            timeline_generated_t=context.generated_t,
+            recent_actions=tuple(self._recent_actions),
+        )
+        t_sent = parts.clock.now()
+        try:
+            output = parts.decider.decide(surface_input)
+        except Exception as error:
+            t_received = parts.clock.now()
+            if stop is not None and stop.is_set():
+                return _stopped_result()
+            logger.debug("surface decide failed", exc_info=True)
+            return self._handle_decide_error(
+                error, t_sent, t_received, sent_frames, documents, context
+            )
+        t_received = parts.clock.now()
+        if stop is not None and stop.is_set():
+            return _stopped_result()
+        return self._handle_output(
+            output, t_sent, t_received, sent_frames, documents, context, stop
+        )
 
     def run(self, stop: threading.Event) -> None:
         """stop が立つまで step を繰り返し、各 step の後に stop.wait(wait_s) で待つ (スレッドの本体)。
 
         step の想定外の例外 (Exception) は外に出さず、on_stop(説明を含む理由) を呼んでから戻る。
+        step が STOPPED を返したら (decide の間に stop が立った)、待たずに戻る。
         """
-        raise NotImplementedError
+        while not stop.is_set():
+            try:
+                result = self.step(stop)
+            except Exception as error:
+                logger.warning("surface loop failed", exc_info=True)
+                self.parts.on_stop(f"surface loop failed: {describe_exception(error)}")
+                return
+            if result.outcome is SurfaceStepOutcome.STOPPED:
+                return
+            stop.wait(result.wait_s)
+
+    def _prepare_frames(
+        self, selected: Sequence[CapturedFrame]
+    ) -> tuple[tuple[SurfaceFrame, ...], tuple[SentFrame, ...]]:
+        """選んだフレームを JPEG にして保存を予約し、(送る画像, 記録に書く画像) を返す (step の 3)。"""
+        frames: list[SurfaceFrame] = []
+        sent_frames: list[SentFrame] = []
+        for frame in selected:
+            image = build_surface_image(
+                frame, self.settings.image_width, self.settings.jpeg_quality
+            )
+            file = self.parts.frame_store.save_surface(frame.t, image)
+            frames.append(
+                SurfaceFrame(frame.t, image.jpeg, format_frame_label(frame.t))
+            )
+            sent_frames.append(SentFrame(frame.t, file))
+        return tuple(frames), tuple(sent_frames)
+
+    def _handle_decide_error(
+        self,
+        error: Exception,
+        t_sent: float,
+        t_received: float,
+        sent_frames: Sequence[SentFrame],
+        documents: SurfaceDocuments,
+        context: SurfaceContext,
+    ) -> SurfaceStepResult:
+        """decide の例外を扱う (step の 6)。"""
+        parts = self.parts
+        parts.pad_output.neutral()
+        self._consecutive_errors += 1
+        description = describe_exception(error)
+        parts.run_log.write(
+            EVENT_SURFACE_ERROR, error=description, count=self._consecutive_errors
+        )
+        record = SurfaceRecord(
+            t_sent=t_sent,
+            t_received=t_received,
+            frames=sent_frames,
+            documents=documents,
+            middle_generated_t=context.generated_t,
+            action=None,
+            blocked_buttons=(),
+            deep_requests=(),
+            info_labels=(),
+            boxes=(),
+            scene_changed=False,
+            wait_s=DECIDE_ERROR_WAIT_S,
+            error=description,
+        )
+        row = surface_row(record)
+        append_json_line(parts.paths.surface_log, row)
+        if self._consecutive_errors >= self.settings.max_errors:
+            parts.on_stop(surface_failure_reason(self._consecutive_errors))
+        return SurfaceStepResult(
+            SurfaceStepOutcome.DECIDE_ERROR, DECIDE_ERROR_WAIT_S, row
+        )
+
+    def _handle_output(
+        self,
+        output: SurfaceOutput,
+        t_sent: float,
+        t_received: float,
+        sent_frames: Sequence[SentFrame],
+        documents: SurfaceDocuments,
+        context: SurfaceContext,
+        stop: threading.Event | None,
+    ) -> SurfaceStepResult:
+        """decide の出力を送り、記録して、deep を要求する (step の 7〜9)。
+
+        apply が OutputStoppedError を出したときに stop が立っていれば、何も書かずに STOPPED を返す。
+        """
+        parts = self.parts
+        error_text: str | None = None
+        try:
+            filtered = parts.pad_output.apply(output.action)
+        except OutputStoppedError as error:
+            if stop is not None and stop.is_set():
+                # stop を確かめた後に全体が止められた。止めた後に記録を増やさない
+                return _stopped_result()
+            logger.debug("the pad output was stopped", exc_info=True)
+            error_text = describe_exception(error)
+            filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
+        except Exception as error:
+            # 送信の失敗は行の error に書く (decide の失敗には数えない)
+            logger.debug("sending the surface action failed", exc_info=True)
+            error_text = describe_exception(error)
+            filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
+        else:
+            self._recent_actions.append(RecentAction(t_received, filtered.action))
+        self._consecutive_errors = 0
+        deep_kinds = [kind for kind in DOCUMENT_KINDS if kind in output.deep_kinds]
+        record = SurfaceRecord(
+            t_sent=t_sent,
+            t_received=t_received,
+            frames=sent_frames,
+            documents=documents,
+            middle_generated_t=context.generated_t,
+            action=filtered.action,
+            blocked_buttons=filtered.blocked_buttons,
+            deep_requests=deep_kinds,
+            info_labels=output.info_labels,
+            boxes=output.boxes,
+            scene_changed=output.scene_changed,
+            wait_s=context.wait_s,
+            error=error_text,
+        )
+        row = surface_row(record)
+        append_json_line(parts.paths.surface_log, row)
+        self._request_deep(deep_kinds, context.scene_id)
+        return SurfaceStepResult(SurfaceStepOutcome.SENT, context.wait_s, row)
+
+    def _request_deep(
+        self, kinds: Sequence[DocumentKind], scene_id: str | None
+    ) -> None:
+        """deep を要求する (step の 9)。受け口の例外は deep_request_error に書き、残りの種類を続ける。"""
+        for kind in kinds:
+            try:
+                self.parts.deep_requests.request(kind, DeepTrigger.SURFACE, scene_id)
+            except Exception as error:
+                logger.debug("surface deep request failed", exc_info=True)
+                self.parts.run_log.write(
+                    EVENT_DEEP_REQUEST_ERROR,
+                    source="surface",
+                    kind=kind.value,
+                    trigger=DeepTrigger.SURFACE.value,
+                    scene_id=scene_id,
+                    error=describe_exception(error),
+                )
+
+
+def _stopped_result() -> SurfaceStepResult:
+    """止める合図で抜けるときの結果を返す。"""
+    return SurfaceStepResult(SurfaceStepOutcome.STOPPED, 0.0, None)

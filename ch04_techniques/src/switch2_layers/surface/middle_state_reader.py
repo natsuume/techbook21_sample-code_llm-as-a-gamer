@@ -7,8 +7,12 @@
 middle はこのファイルを置き換えの書き込みで書くため、書きかけの内容を読むことはない。
 """
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
+
+from switch2_layers.notes.note_paths import is_scene_id
 
 SURFACE_WAIT_MIN_S = 0.2
 SURFACE_WAIT_MAX_S = 2.0
@@ -44,7 +48,12 @@ def clamp_surface_wait(value: object) -> float:
       (小さければ SURFACE_WAIT_MIN_S、大きければ SURFACE_WAIT_MAX_S。-inf と inf も収める)
     - nan、数でない値、None は DEFAULT_SURFACE_WAIT_S
     """
-    raise NotImplementedError
+    if not _is_number(value):
+        return DEFAULT_SURFACE_WAIT_S
+    number = float(value)
+    if math.isnan(number):
+        return DEFAULT_SURFACE_WAIT_S
+    return min(max(number, SURFACE_WAIT_MIN_S), SURFACE_WAIT_MAX_S)
 
 
 def read_surface_context(path: Path) -> SurfaceContext:
@@ -57,4 +66,25 @@ def read_surface_context(path: Path) -> SurfaceContext:
         generated_t   数 (bool を除く) ならその値、それ以外は None
         wait_s        clamp_surface_wait(surface_wait_s の値。無ければ None)
     """
-    raise NotImplementedError
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return EMPTY_SURFACE_CONTEXT
+    if not isinstance(value, dict):
+        return EMPTY_SURFACE_CONTEXT
+    scene_id = value.get("scene_id")
+    timeline = value.get("timeline")
+    generated_t = value.get("generated_t")
+    return SurfaceContext(
+        scene_id=scene_id
+        if isinstance(scene_id, str) and is_scene_id(scene_id)
+        else None,
+        timeline=timeline if isinstance(timeline, str) else "",
+        generated_t=float(generated_t) if _is_number(generated_t) else None,
+        wait_s=clamp_surface_wait(value.get("surface_wait_s")),
+    )
+
+
+def _is_number(value: object) -> bool:
+    """value が数 (int・float。bool を除く) なら True。"""
+    return isinstance(value, int | float) and not isinstance(value, bool)

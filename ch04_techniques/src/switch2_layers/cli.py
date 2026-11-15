@@ -16,11 +16,27 @@ SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブ�
 """
 
 import argparse
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from switch2_layers.deep.deep_types import DOCUMENT_KINDS
+from switch2_remote.bluetooth_radio import reset_bluetooth_radio
+from switch2_remote.bridge_supervisor import BridgeSupervisor
+from switch2_remote.capture import Capture
+from switch2_remote.controller_bridge import Bridge, BridgeStartError
+
+from switch2_layers.app import REASON_INTERRUPTED, LayersApp, LayersParts
+from switch2_layers.deep.deep_scheduler import DeepJobStatus, run_deep_once
+from switch2_layers.deep.deep_types import DOCUMENT_KINDS, DocumentKind
+from switch2_layers.deep.fake_deep import FakeDeepRunner
+from switch2_layers.file_io import format_json_line
+from switch2_layers.hardware.capture_source import SwitchCaptureReader
+from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.middle_loop import run_middle_once
+from switch2_layers.notes.publish_note import publish_note
 from switch2_layers.settings import (
+    CAPTURE_FFMPEG_FPS,
+    CAPTURE_PROCESS_FPS,
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_TIMEOUT_S,
@@ -40,7 +56,11 @@ from switch2_layers.settings import (
     MiddleOnceSettings,
     PublishNoteSettings,
     RunSettings,
+    deep_once_settings_errors,
+    middle_once_settings_errors,
+    run_settings_errors,
 )
+from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 
 PROG = "switch2-layers"
 # 範囲の誤りで返す終了コード (argparse の使い方の誤りと同じ)
@@ -144,7 +164,8 @@ def add_run_parser(
         default=DEFAULT_DEEP_AUTO_SECONDS,
         help=(
             "同じ文書の前回の deep の終了からこの秒数たったら自動で deep を呼ぶ "
-            f"(0 より大きい値。既定 {DEFAULT_DEEP_AUTO_SECONDS:g})"
+            "(0 より大きく、--deep-min-start-interval 以上の値。"
+            f"既定 {DEFAULT_DEEP_AUTO_SECONDS:g})"
         ),
     )
     parser.add_argument(
@@ -260,22 +281,41 @@ def add_publish_note_parser(
 
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。"""
-    raise NotImplementedError
+    return RunSettings(
+        runs_dir=args.runs_dir,
+        interval_fps=args.interval_fps,
+        interval_width=args.interval_width,
+        max_surface_errors=args.max_surface_errors,
+        middle_interval_s=args.middle_interval,
+        middle_window_s=args.middle_window,
+        max_middle_errors=args.max_middle_errors,
+        deep_min_start_interval_s=args.deep_min_start_interval,
+        deep_auto_seconds=args.deep_auto_seconds,
+        deep_timeout_s=args.deep_timeout,
+        allow_home=args.allow_home,
+    )
 
 
 def middle_once_settings_from_args(args: argparse.Namespace) -> MiddleOnceSettings:
     """middle-once の Namespace を MiddleOnceSettings にする (範囲は確かめない)。"""
-    raise NotImplementedError
+    return MiddleOnceSettings(run_dir=args.run_dir, middle_window_s=args.middle_window)
 
 
 def deep_once_settings_from_args(args: argparse.Namespace) -> DeepOnceSettings:
     """deep-once の Namespace を DeepOnceSettings にする (--doc は DocumentKind にする。範囲は確かめない)。"""
-    raise NotImplementedError
+    return DeepOnceSettings(
+        run_dir=args.run_dir, kind=DocumentKind(args.doc), scene_id=args.scene
+    )
 
 
 def publish_note_settings_from_args(args: argparse.Namespace) -> PublishNoteSettings:
     """publish-note の Namespace を PublishNoteSettings にする。"""
-    raise NotImplementedError
+    return PublishNoteSettings(
+        run_dir=args.run_dir,
+        note=args.note,
+        base_sha256=args.base_sha256,
+        source=args.source,
+    )
 
 
 def run_command(args: argparse.Namespace) -> int:
@@ -293,7 +333,36 @@ def run_command(args: argparse.Namespace) -> int:
     5. 止まったら、作れた部品を capture.close()、supervisor.close() の順に閉じる
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
-    raise NotImplementedError
+    settings = run_settings_from_args(args)
+    errors = run_settings_errors(settings)
+    if errors:
+        _print_errors(errors)
+        return EXIT_USAGE
+    try:
+        supervisor = BridgeSupervisor(
+            start_bridge=Bridge, reset_radio=reset_bluetooth_radio
+        )
+    except BridgeStartError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    capture: Capture | None = None
+    try:
+        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS)
+        parts = LayersParts(
+            frame_reader=SwitchCaptureReader(capture),
+            report_sender=supervisor,
+            bridge_state=lambda: supervisor.state,
+            surface=FakeSurfaceDecider(),
+            middle=FakeMiddleAnalyzer(),
+            deep=FakeDeepRunner(),
+        )
+        reason = LayersApp(settings, parts).run()
+    finally:
+        if capture is not None:
+            capture.close()
+        supervisor.close()
+    print(f"stopped: {reason}", file=sys.stderr)
+    return 0 if reason == REASON_INTERRUPTED else 1
 
 
 def middle_once_command(args: argparse.Namespace) -> int:
@@ -306,7 +375,27 @@ def middle_once_command(args: argparse.Namespace) -> int:
        "deep_requests": [種類...], "error": 説明か null} を書く
     成功なら 0、analyze か書き込みに失敗したら 1 を返す。
     """
-    raise NotImplementedError
+    settings = middle_once_settings_from_args(args)
+    errors = middle_once_settings_errors(settings)
+    if errors:
+        _print_errors(errors)
+        return EXIT_USAGE
+    if not settings.run_dir.is_dir():
+        _print_errors([f"--run-dir is not a directory: {settings.run_dir}"])
+        return EXIT_USAGE
+    result = run_middle_once(
+        settings.run_dir, FakeMiddleAnalyzer(), settings.middle_window_s
+    )
+    _print_json(
+        {
+            "status": "ok" if result.ok else "error",
+            "scene_id": None if result.state is None else result.state.scene_id,
+            "new_scene": result.new_scene is not None,
+            "deep_requests": [kind.value for kind in result.deep_requests],
+            "error": result.error,
+        }
+    )
+    return 0 if result.ok else 1
 
 
 def deep_once_command(args: argparse.Namespace) -> int:
@@ -319,7 +408,25 @@ def deep_once_command(args: argparse.Namespace) -> int:
        "message": 説明} を書く
     status が "ok" なら 0、それ以外なら 1 を返す。
     """
-    raise NotImplementedError
+    settings = deep_once_settings_from_args(args)
+    errors = deep_once_settings_errors(settings)
+    if errors:
+        _print_errors(errors)
+        return EXIT_USAGE
+    if not settings.run_dir.is_dir():
+        _print_errors([f"--run-dir is not a directory: {settings.run_dir}"])
+        return EXIT_USAGE
+    result = run_deep_once(
+        settings.run_dir, settings.kind, settings.scene_id, FakeDeepRunner()
+    )
+    _print_json(
+        {
+            "job": result.job,
+            "status": result.outcome.status.value,
+            "message": result.outcome.message,
+        }
+    )
+    return 0 if result.outcome.status is DeepJobStatus.OK else 1
 
 
 def publish_note_command(args: argparse.Namespace) -> int:
@@ -330,7 +437,16 @@ def publish_note_command(args: argparse.Namespace) -> int:
     引数の誤り (終了コード 2) のときは、標準出力に何も書かず、理由を標準エラー出力に 1 行で書く。
     終了コードは PublishResult.exit_code() (0 / 2 / 3)。
     """
-    raise NotImplementedError
+    settings = publish_note_settings_from_args(args)
+    result = publish_note(
+        settings.run_dir, settings.note, settings.base_sha256, settings.source
+    )
+    stdout_value = result.stdout_json()
+    if stdout_value is not None:
+        _print_json(stdout_value)
+    if result.message is not None:
+        print(result.message, file=sys.stderr)
+    return result.exit_code()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,3 +457,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.handler
     return handler(args)
+
+
+def _print_errors(errors: list[str]) -> None:
+    """誤りを 1 行ずつ標準エラー出力に書く。"""
+    for error in errors:
+        print(error, file=sys.stderr)
+
+
+def _print_json(value: dict[str, object] | dict[str, str]) -> None:
+    """value を JSON の 1 行にして標準出力に書く。"""
+    sys.stdout.write(format_json_line(value))

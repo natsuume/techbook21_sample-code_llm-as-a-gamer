@@ -1,4 +1,6 @@
+import dataclasses
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -575,3 +577,76 @@ def test_middle_once_requires_run_directory(tmp_path):
         run_middle_once(
             tmp_path / "missing", ScriptedAnalyzer(FakeMonotonic(0.0), output()), 10.0
         )
+
+
+# --- analyze の間に止められたとき ---
+
+
+class StoppingAnalyzer(ScriptedAnalyzer):
+    """analyze の中で止める合図を立てる MiddleAnalyzer の偽物 (analyze の応答を待つ間に全体が止められた場合)。"""
+
+    def __init__(
+        self,
+        stop: threading.Event,
+        monotonic: FakeMonotonic,
+        *results: MiddleOutput | Exception,
+    ):
+        super().__init__(monotonic, *results)
+        self.stop = stop
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        self.stop.set()
+        return super().analyze(middle_input)
+
+
+def test_stop_during_analyze_writes_nothing(tmp_path):
+    root = make_run(tmp_path)
+    stop = threading.Event()
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = StoppingAnalyzer(stop, monotonic, output("町"))
+    sink = FakeDeepSink()
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, sink, stop
+    )
+    assert result.stopped is True
+    assert result.ok is False
+    assert result.error is None
+    assert len(analyzer.inputs) == 1
+    # tasks.md・state.json・scene_labels.json・calls.jsonl に書かず、deep も呼ばない
+    assert not (root / "middle" / "state.json").exists()
+    assert not (root / "notes" / "scenes").exists()
+    assert json.loads(
+        (root / "notes" / "scene_labels.json").read_text(encoding="utf-8")
+    ) == {"scenes": []}
+    assert read_rows(root / "middle" / "calls.jsonl") == []
+    assert sink.requests == []
+
+
+def test_stop_during_failed_analyze_is_not_counted(tmp_path):
+    harness = make_loop(tmp_path, output(), max_errors=1)
+    stop = threading.Event()
+    harness.loop.parts = dataclasses.replace(
+        harness.loop.parts,
+        analyzer=StoppingAnalyzer(stop, harness.monotonic, RuntimeError("down")),
+    )
+    result = harness.loop.run_once(stop)
+    assert result.stopped is True
+    # 失敗に数えず、middle_error も calls.jsonl の行も書かない
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert read_rows(harness.root / "middle" / "calls.jsonl") == []
+
+
+def test_loop_run_returns_when_stopped_during_analyze(tmp_path):
+    harness = make_loop(tmp_path, output())
+    write_frames(harness.root, [9.0])
+    stop = threading.Event()
+    analyzer = StoppingAnalyzer(stop, harness.monotonic, output())
+    harness.loop.parts = dataclasses.replace(harness.loop.parts, analyzer=analyzer)
+    # 同じスレッドで呼ぶ。analyze の中で stop が立つので、1 回で戻る
+    harness.loop.run(stop)
+    assert len(analyzer.inputs) == 1
+    assert not (harness.root / "middle" / "state.json").exists()
+    assert read_rows(harness.root / "middle" / "calls.jsonl") == []
+    assert harness.stops == []

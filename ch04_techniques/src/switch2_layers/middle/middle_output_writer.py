@@ -19,8 +19,20 @@ middle/calls.jsonl の行は middle_loop.run_middle_step が書く。
 from dataclasses import dataclass
 
 from switch2_layers.deep.deep_types import DocumentKind
-from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput, MiddleState
-from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.file_io import write_json_atomic, write_text_atomic
+from switch2_layers.middle.middle_types import (
+    MiddleInput,
+    MiddleOutput,
+    MiddleState,
+    middle_state_to_json,
+)
+from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, scene_note
+from switch2_layers.notes.scene_labels import (
+    SceneLabel,
+    add_scene_label,
+    read_scene_labels,
+    resolve_scene,
+)
 from switch2_layers.run_directory import RunPaths
 
 # 初めての場面に名前が付いたときに deep を呼ぶ文書の種類 (その場面の操作説明と攻略情報)
@@ -61,4 +73,31 @@ def write_middle_output(
        足した場面が戻り値の new_scene
     書き込みの例外はそのまま出す (それより前に書いたファイルは戻さない。失敗したときの挙動はモジュールの docstring)。
     """
-    raise NotImplementedError
+    scene: SceneLabel | None = None
+    is_new = False
+    scene_name = (output.scene_name or "").strip()
+    if scene_name:
+        labels = read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)
+        scene, is_new = resolve_scene(labels, scene_name, first_seen_t=middle_input.t)
+    if scene is not None:
+        tasks_path = paths.notes_dir / scene_note(scene.id, "tasks")
+        tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(tasks_path, output.tasks)
+    state = MiddleState(
+        generated_t=generated_t,
+        based_on_t=middle_input.t,
+        scene_id=None if scene is None else scene.id,
+        scene_name=None if scene is None else scene.name,
+        is_stuck=output.is_stuck,
+        stuck_description=output.stuck_description,
+        surface_wait_s=output.surface_wait_s,
+        timeline=output.timeline,
+        surface_rows_offset=middle_input.surface_rows_offset,
+        operations_rows_offset=middle_input.operations_rows_offset,
+    )
+    write_json_atomic(paths.middle_state, middle_state_to_json(state))
+    new_scene: SceneLabel | None = None
+    if scene is not None and is_new:
+        add_scene_label(paths.notes_dir / SCENE_LABELS_FILE, scene)
+        new_scene = scene
+    return MiddleWriteResult(state=state, new_scene=new_scene)

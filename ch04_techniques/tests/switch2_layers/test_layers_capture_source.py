@@ -132,6 +132,35 @@ def test_poll_once_ignores_the_same_frame(tmp_path):
     assert [item.t for item in buffer.frames()] == [1.0, 1.1]
 
 
+def test_frames_before_origin_are_dropped(tmp_path):
+    root = make_run(tmp_path)
+    reader = FakeReader()
+    clock = RunClock(FakeMonotonic(ORIGIN))
+    buffer = FrameBuffer()
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    received: list[CapturedFrame] = []
+    source = CaptureSource(
+        reader, clock, buffer, store, on_frame=received.append, start_thread=False
+    )
+    # 実行の起点 (t = 0) より前にキャプチャーが残したフレーム
+    reader.latest = LatestCapture(monotonic_time=ORIGIN - 0.5, nv12=nv12())
+    assert source.poll_once() is None
+    assert source.poll_once() is None
+    assert buffer.frames() == []
+    assert received == []
+    assert source.latest_t() is None
+    assert store.write_queued() == 0
+    assert list((root / "frames" / "interval").iterdir()) == []
+    # 起点の後のフレームから渡す
+    reader.latest = LatestCapture(monotonic_time=ORIGIN + 0.1, nv12=nv12())
+    captured = source.poll_once()
+    assert captured is not None
+    assert captured.t == 0.1
+    assert [item.t for item in buffer.frames()] == [0.1]
+
+
 def test_close_without_thread(tmp_path):
     root = make_run(tmp_path)
     source = CaptureSource(

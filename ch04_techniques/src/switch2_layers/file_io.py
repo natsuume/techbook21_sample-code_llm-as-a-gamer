@@ -10,6 +10,11 @@
 文書の版の比較には SHA-256 (64 桁の小文字の 16 進) を使う。
 """
 
+import contextlib
+import hashlib
+import json
+import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +27,7 @@ TEMP_SUFFIX = ".tmp"
 
 def is_temporary_file_name(name: str) -> bool:
     """name (パスの要素 1 つ) が置き換えの一時ファイルの名前の規則 (先頭が `.` で末尾が `.tmp`) に当たれば True を返す。"""
-    raise NotImplementedError
+    return name.startswith(TEMP_PREFIX) and name.endswith(TEMP_SUFFIX)
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
@@ -33,12 +38,25 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
     親のディレクトリーは作らない (無ければ FileNotFoundError)。
     書き込みか置き換えに失敗したら、一時ファイルを消してから例外をそのまま出す (path は変わらない)。
     """
-    raise NotImplementedError
+    fd, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{TEMP_PREFIX}{path.name}.", suffix=TEMP_SUFFIX
+    )
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        # 置き換えられなかった一時ファイルを残さない (消せなくても元の例外を出す)
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name)
+        raise
 
 
 def write_text_atomic(path: Path, text: str) -> None:
     """text を UTF-8 にして write_bytes_atomic で path に置き換えて書く。"""
-    raise NotImplementedError
+    write_bytes_atomic(path, text.encode("utf-8"))
 
 
 def format_json(value: object) -> str:
@@ -47,12 +65,12 @@ def format_json(value: object) -> str:
     json.dumps(value, ensure_ascii=False, indent=2, default=str) の末尾に改行を足したもの。
     JSON にできない値 (Path など) は str() にする。
     """
-    raise NotImplementedError
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n"
 
 
 def write_json_atomic(path: Path, value: object) -> None:
     """format_json(value) を write_text_atomic で path に置き換えて書く。"""
-    raise NotImplementedError
+    write_text_atomic(path, format_json(value))
 
 
 def format_json_line(row: Mapping[str, object]) -> str:
@@ -60,7 +78,7 @@ def format_json_line(row: Mapping[str, object]) -> str:
 
     json.dumps(row, ensure_ascii=False, default=str) の末尾に改行を 1 つ足したもの (行の中に改行を含まない)。
     """
-    raise NotImplementedError
+    return json.dumps(row, ensure_ascii=False, default=str) + "\n"
 
 
 def append_json_line(path: Path, row: Mapping[str, object]) -> None:
@@ -69,7 +87,10 @@ def append_json_line(path: Path, row: Mapping[str, object]) -> None:
     ファイルが無ければ作る (親のディレクトリーは作らない)。1 行を 1 回の write で書く。
     複数のスレッドから同じファイルに書くときは、呼び出し側がロックで順番を守る。
     """
-    raise NotImplementedError
+    line = format_json_line(row)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(line)
+        file.flush()
 
 
 def read_json_lines(path: Path) -> list[dict[str, object]]:
@@ -79,7 +100,37 @@ def read_json_lines(path: Path) -> list[dict[str, object]]:
     - 改行で終わらない最後の行 (書いている途中の行) は読み飛ばす
     - 空白だけの行、UTF-8 として読めない行、JSON として読めない行、object でない行は読み飛ばす
     """
-    raise NotImplementedError
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return []
+    complete, _ = _split_complete_lines(data)
+    return _parse_lines(complete)
+
+
+def _split_complete_lines(data: bytes) -> tuple[bytes, int]:
+    """data のうち改行で終わる部分 (完全な行) と、その長さ (バイト) を返す。改行が無ければ (b"", 0)。"""
+    end = data.rfind(b"\n") + 1
+    return data[:end], end
+
+
+def _parse_lines(complete: bytes) -> list[dict[str, object]]:
+    """改行で終わる行の並び complete から、JSON の object の行を順に取り出す (読めない行は読み飛ばす)。"""
+    rows: list[dict[str, object]] = []
+    for raw in complete.split(b"\n")[:-1]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if not text.strip():
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
 
 
 @dataclass(frozen=True)
@@ -106,19 +157,41 @@ def read_json_lines_from(path: Path, offset: int) -> JsonLinesChunk:
     - 位置はバイトで数える (UTF-8 の多バイト文字を含む行でも、行の境目の位置になる)
     - 読み飛ばす行 (空白だけ・UTF-8 として読めない・JSON として読めない・object でない) も、完全な行なら end_offset を進める
     """
-    raise NotImplementedError
+    try:
+        file = path.open("rb")
+    except FileNotFoundError:
+        return JsonLinesChunk(rows=[], end_offset=0, restarted=offset > 0)
+    with file:
+        size = os.fstat(file.fileno()).st_size
+        restarted = offset < 0 or offset > size
+        start = 0 if restarted else offset
+        file.seek(start)
+        data = file.read()
+    complete, length = _split_complete_lines(data)
+    return JsonLinesChunk(
+        rows=_parse_lines(complete), end_offset=start + length, restarted=restarted
+    )
 
 
 def read_text_or_empty(path: Path) -> str:
     """path を UTF-8 で読んだ文字列を返す。無い・読めない (OSError、UnicodeDecodeError) ときは空文字列を返す。"""
-    raise NotImplementedError
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def sha256_bytes(data: bytes) -> str:
     """data の SHA-256 (hashlib.sha256) を 64 桁の小文字の 16 進で返す。"""
-    raise NotImplementedError
+    return hashlib.sha256(data).hexdigest()
 
 
 def sha256_file(path: Path) -> str | None:
     """path のファイルの中身の SHA-256 (sha256_bytes) を返す。path が通常のファイルでなければ (無い場合を含む) None を返す。"""
-    raise NotImplementedError
+    if not path.is_file():
+        return None
+    try:
+        return sha256_bytes(path.read_bytes())
+    except FileNotFoundError:
+        # 確かめた後に消えた
+        return None
