@@ -21,7 +21,19 @@ from collections.abc import Mapping
 
 import httpx
 
-from switch2_layers.middle.luna_client import LUNA_TIMEOUT_S
+from switch2_layers.middle.luna_client import (
+    LUNA_TIMEOUT_S,
+    LunaCallError,
+    post_responses,
+    read_output_text,
+)
+from switch2_layers.middle.luna_output_schema import parse_middle_output
+from switch2_layers.middle.luna_request import build_luna_payload
+from switch2_layers.middle.luna_usage import (
+    estimate_cost_usd,
+    read_usage,
+    usage_to_json,
+)
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 
 CALL_DETAIL_KEYS: tuple[str, ...] = ("usage", "cost_usd", "response", "error_body_head")
@@ -36,7 +48,13 @@ def build_call_details(
     cost_usd に estimate_cost_usd を入れる (読めなければ両方 None)。response には response_body を dict にしたもの
     (None なら None)、error_body_head にはそのままの値を入れる。
     """
-    raise NotImplementedError
+    usage = None if response_body is None else read_usage(response_body)
+    return {
+        "usage": None if usage is None else usage_to_json(usage),
+        "cost_usd": None if usage is None else estimate_cost_usd(usage),
+        "response": None if response_body is None else dict(response_body),
+        "error_body_head": error_body_head,
+    }
 
 
 class LunaMiddleAnalyzer:
@@ -58,7 +76,11 @@ class LunaMiddleAnalyzer:
         timeout_s: float = LUNA_TIMEOUT_S,
     ) -> None:
         """属性を入れる。client が None なら httpx.Client() を作る。ここでは要求を送らない。"""
-        raise NotImplementedError
+        self.api_key = api_key
+        self.client = httpx.Client() if client is None else client
+        self.timeout_s = timeout_s
+        # 直前の analyze の記録。analyze を呼んでいないか、渡した後なら空
+        self._call_details: dict[str, object] = {}
 
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
         """middle_input から gpt-6-luna の出力を得て MiddleOutput を返す (モジュールの docstring の 1〜4)。
@@ -67,11 +89,24 @@ class LunaMiddleAnalyzer:
         応答の本文を受け取ったら build_call_details(本文, None)、LunaCallError なら
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、例外を外に出す。
         """
-        raise NotImplementedError
+        self._call_details = build_call_details(None, None)
+        payload = build_luna_payload(middle_input)
+        try:
+            body = post_responses(self.client, self.api_key, payload, self.timeout_s)
+            # 出力を読めなくても (スキーマに合わない出力を含む)、費用のかかった応答を記録に残す
+            self._call_details = build_call_details(body, None)
+            text = read_output_text(body)
+        except LunaCallError as error:
+            self._call_details = build_call_details(
+                error.response_body, error.error_body_head
+            )
+            raise
+        return parse_middle_output(text)
 
     def take_call_details(self) -> dict[str, object]:
         """直前の analyze の記録 (モジュールの docstring の形) を返し、持っている記録を消す。
 
         analyze を呼んでいないか、記録を渡した後なら空の辞書を返す。
         """
-        raise NotImplementedError
+        details, self._call_details = self._call_details, {}
+        return details

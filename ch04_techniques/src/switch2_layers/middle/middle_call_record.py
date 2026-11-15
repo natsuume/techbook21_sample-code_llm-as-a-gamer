@@ -89,7 +89,9 @@ class MiddleCallDetailsSource(Protocol):
 
 def take_analyzer_call_details(analyzer: object) -> dict[str, object]:
     """analyzer が MiddleCallDetailsSource なら take_call_details() の値を返し、そうでなければ空の辞書を返す。"""
-    raise NotImplementedError
+    if isinstance(analyzer, MiddleCallDetailsSource):
+        return analyzer.take_call_details()
+    return {}
 
 
 def middle_call_row_with_details(
@@ -100,4 +102,9 @@ def middle_call_row_with_details(
     details のキーのうち middle_call_row のキーと同じ名前のものは足さない (骨組みの値を残す)。
     details が空なら middle_call_row(record) と同じ辞書になる。
     """
-    raise NotImplementedError
+    row = middle_call_row(record)
+    skeleton_keys = set(row)
+    for key, value in details.items():
+        if key not in skeleton_keys:
+            row[key] = value
+    return row

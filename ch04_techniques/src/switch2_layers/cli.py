@@ -23,6 +23,7 @@ fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -39,6 +40,7 @@ from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.file_io import format_json_line
 from switch2_layers.hardware.capture_source import SwitchCaptureReader
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.notes.publish_note import publish_note
@@ -61,6 +63,7 @@ from switch2_layers.settings import (
     INTERVAL_WIDTH_MIN,
     MIDDLE_INTERVAL_MAX_S,
     MIDDLE_INTERVAL_MIN_S,
+    OPENAI_API_KEY_ENV,
     DeepOnceSettings,
     MiddleKind,
     MiddleOnceSettings,
@@ -68,6 +71,7 @@ from switch2_layers.settings import (
     RunSettings,
     deep_once_settings_errors,
     middle_once_settings_errors,
+    openai_api_key_errors,
     run_settings_errors,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
@@ -365,7 +369,12 @@ def create_middle_analyzer(
     run_command と middle_once_command は、environ に os.environ を渡してこの関数で作る
     (テストはこの関数を差し替えて、MockTransport の Client を持つ LunaMiddleAnalyzer を渡せる)。
     """
-    raise NotImplementedError
+    if kind is MiddleKind.FAKE:
+        return FakeMiddleAnalyzer()
+    api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
+    return LunaMiddleAnalyzer(api_key=api_key)
 
 
 def run_command(args: argparse.Namespace) -> int:
@@ -391,6 +400,11 @@ def run_command(args: argparse.Namespace) -> int:
     if errors:
         _print_errors(errors)
         return EXIT_USAGE
+    key_errors = openai_api_key_errors(settings.middle, os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
+    middle = create_middle_analyzer(settings.middle, os.environ)
     try:
         supervisor = BridgeSupervisor(
             start_bridge=Bridge, reset_radio=reset_bluetooth_radio
@@ -406,7 +420,7 @@ def run_command(args: argparse.Namespace) -> int:
             report_sender=supervisor,
             bridge_state=lambda: supervisor.state,
             surface=FakeSurfaceDecider(),
-            middle=FakeMiddleAnalyzer(),
+            middle=middle,
             deep=FakeDeepRunner(),
         )
         reason = LayersApp(settings, parts).run()
@@ -439,8 +453,14 @@ def middle_once_command(args: argparse.Namespace) -> int:
     if not settings.run_dir.is_dir():
         _print_errors([f"--run-dir is not a directory: {settings.run_dir}"])
         return EXIT_USAGE
+    key_errors = openai_api_key_errors(settings.middle, os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
     result = run_middle_once(
-        settings.run_dir, FakeMiddleAnalyzer(), settings.middle_window_s
+        settings.run_dir,
+        create_middle_analyzer(settings.middle, os.environ),
+        settings.middle_window_s,
     )
     _print_json(
         {

@@ -242,7 +242,17 @@ def openai_api_key_errors(middle: MiddleKind, environ: Mapping[str, str]) -> lis
     メッセージに API キーの値は含めない。cli は実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば
     終了コード 2 で終わる。
     """
-    raise NotImplementedError
+    if middle is not MiddleKind.LUNA:
+        return []
+    if environ.get(OPENAI_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--middle {MiddleKind.LUNA.value} needs the environment variable "
+            f"{OPENAI_API_KEY_ENV}. Set it, or use --middle {MiddleKind.FAKE.value} "
+            "to run without an API key"
+        )
+    ]
 
 
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
@@ -252,4 +262,5 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
+    value["middle"] = settings.middle.value
     return value

@@ -9,6 +9,10 @@ tasks は Markdown の箇条書き。
 "strict": true} を入れる (build_text_format)。
 """
 
+import json
+import math
+from collections.abc import Mapping
+
 from switch2_layers.middle.middle_types import MiddleOutput
 from switch2_layers.surface.middle_state_reader import (
     SURFACE_WAIT_MAX_S,
@@ -60,13 +64,27 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
     ],
     "additionalProperties": False,
 }
+# 出力のキー。MIDDLE_OUTPUT_SCHEMA の properties (と required) と同じキーを同じ順に並べる
+_OUTPUT_KEYS: tuple[str, ...] = (
+    "scene_name",
+    "is_stuck",
+    "stuck_description",
+    "surface_wait_s",
+    "timeline",
+    "tasks",
+)
 
 
 def build_text_format() -> dict[str, object]:
     """要求の text.format の値
     {"type": "json_schema", "name": OUTPUT_FORMAT_NAME, "schema": MIDDLE_OUTPUT_SCHEMA, "strict": True} を返す。
     """
-    raise NotImplementedError
+    return {
+        "type": "json_schema",
+        "name": OUTPUT_FORMAT_NAME,
+        "schema": MIDDLE_OUTPUT_SCHEMA,
+        "strict": True,
+    }
 
 
 def parse_middle_output(text: str) -> MiddleOutput:
@@ -81,4 +99,71 @@ def parse_middle_output(text: str) -> MiddleOutput:
     scene_name が空 (前後の空白を除くと空) なら None、それ以外は文字列のまま。ほかの値はそのまま
     (surface_wait_s は float) にする。
     """
-    raise NotImplementedError
+    value = _json_object(text)
+    _check_keys(value)
+    scene_name = _string(value, "scene_name")
+    return MiddleOutput(
+        scene_name=scene_name if scene_name.strip() else None,
+        is_stuck=_boolean(value, "is_stuck"),
+        stuck_description=_string(value, "stuck_description"),
+        surface_wait_s=_surface_wait(value["surface_wait_s"]),
+        timeline=_string(value, "timeline"),
+        tasks=_string(value, "tasks"),
+    )
+
+
+# 以下の読み取りは、契約 (parse_middle_output) どおり型の誤りも ValueError にする。
+# 型が合えば値を返し、合わなければ if の後で ValueError を出す
+
+
+def _json_object(text: str) -> dict[str, object]:
+    """text を JSON として読み、object ならその値を返す。読めないか object でなければ ValueError。"""
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        raise ValueError(f"middle output is not JSON: {error}") from error
+    if isinstance(value, dict):
+        return value
+    raise ValueError(f"middle output must be a JSON object: {value!r}")
+
+
+def _check_keys(value: Mapping[str, object]) -> None:
+    """value のキーが出力のキー (_OUTPUT_KEYS。MIDDLE_OUTPUT_SCHEMA の properties と同じ) と一致しなければ ValueError。"""
+    expected = set(_OUTPUT_KEYS)
+    missing = sorted(expected - set(value))
+    extra = sorted(set(value) - expected)
+    if missing or extra:
+        raise ValueError(
+            f"middle output keys do not match the schema: missing {missing}, extra {extra}"
+        )
+
+
+def _string(value: Mapping[str, object], key: str) -> str:
+    """value[key] が文字列ならその値を返す。それ以外は ValueError。"""
+    item = value[key]
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"{key!r} in middle output must be a string: {item!r}")
+
+
+def _boolean(value: Mapping[str, object], key: str) -> bool:
+    """value[key] が真偽ならその値を返す。それ以外は ValueError。"""
+    item = value[key]
+    if isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} in middle output must be a boolean: {item!r}")
+
+
+def _surface_wait(item: object) -> float:
+    """surface_wait_s の値 item が有限の数 (bool を除く) で範囲の中なら float にして返す。それ以外は ValueError。"""
+    if (
+        isinstance(item, int | float)
+        and not isinstance(item, bool)
+        and math.isfinite(item)
+        and SURFACE_WAIT_MIN_S <= item <= SURFACE_WAIT_MAX_S
+    ):
+        return float(item)
+    raise ValueError(
+        "'surface_wait_s' in middle output must be a finite number from "
+        f"{SURFACE_WAIT_MIN_S} to {SURFACE_WAIT_MAX_S}: {item!r}"
+    )

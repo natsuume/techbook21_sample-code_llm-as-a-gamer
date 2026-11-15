@@ -19,7 +19,7 @@ middle/calls.jsonl・run.jsonl に書かず、deep も呼ばずにループを�
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +27,11 @@ from switch2_layers.deep.deep_types import DeepRequestSink, DeepTrigger, Documen
 from switch2_layers.error_text import describe_exception
 from switch2_layers.file_io import append_json_line
 from switch2_layers.frames.frame_store import latest_frame_t
-from switch2_layers.middle.middle_call_record import MiddleCallRecord, middle_call_row
+from switch2_layers.middle.middle_call_record import (
+    MiddleCallRecord,
+    middle_call_row_with_details,
+    take_analyzer_call_details,
+)
 from switch2_layers.middle.middle_input_builder import (
     build_middle_input,
     has_recorded_frame,
@@ -117,16 +121,24 @@ def run_middle_step(
     now_t = clock.now()
     t_sent = now_t
     middle_input: MiddleInput | None = None
+    # analyze の 1 回の記録 (usage など)。入力を作れずに analyze を呼ばなかった回は空のまま
+    call_details: dict[str, object] = {}
     try:
         middle_input = build_middle_input(paths, now_t, window_s)
         t_sent = clock.now()
-        output = analyzer.analyze(middle_input)
+        try:
+            output = analyzer.analyze(middle_input)
+        finally:
+            # analyze が戻った直後 (例外を含む) に、その回の記録を受け取る
+            call_details = take_analyzer_call_details(analyzer)
     except Exception as error:
         t_received = clock.now()
         if _is_stopped(stop):
             return STOPPED_STEP_RESULT
         logger.debug("middle analyze failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
+        return _record_failure(
+            paths, t_sent, t_received, middle_input, error, stop, call_details
+        )
     t_received = clock.now()
     if _is_stopped(stop):
         return STOPPED_STEP_RESULT
@@ -137,7 +149,9 @@ def run_middle_step(
         )
     except Exception as error:
         logger.debug("writing the middle output failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
+        return _record_failure(
+            paths, t_sent, t_received, middle_input, error, stop, call_details
+        )
     if write_result is None:
         return STOPPED_STEP_RESULT
     new_scene = write_result.new_scene
@@ -165,7 +179,9 @@ def run_middle_step(
     )
     if _is_stopped(stop):
         return STOPPED_STEP_RESULT
-    append_json_line(paths.middle_calls, middle_call_row(record))
+    append_json_line(
+        paths.middle_calls, middle_call_row_with_details(record, call_details)
+    )
     return MiddleStepResult(
         ok=True,
         state=write_result.state,
@@ -183,8 +199,9 @@ def _record_failure(
     middle_input: MiddleInput | None,
     error: Exception,
     stop: threading.Event | None,
+    call_details: Mapping[str, object],
 ) -> MiddleStepResult:
-    """失敗した回の行を calls.jsonl に書き、ok=False の結果を返す。
+    """失敗した回の行 (analyze の記録 call_details を足したもの) を calls.jsonl に書き、ok=False の結果を返す。
 
     書く直前に stop を確かめ、立っていれば書かずに STOPPED_STEP_RESULT を返す。
     """
@@ -200,7 +217,9 @@ def _record_failure(
         deep_requests_sent=False,
         error=description,
     )
-    append_json_line(paths.middle_calls, middle_call_row(record))
+    append_json_line(
+        paths.middle_calls, middle_call_row_with_details(record, call_details)
+    )
     return MiddleStepResult(
         ok=False, state=None, new_scene=None, deep_requests=(), error=description
     )

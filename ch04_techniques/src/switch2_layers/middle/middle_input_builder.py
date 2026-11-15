@@ -43,6 +43,7 @@ from switch2_layers.middle.middle_types import (
 )
 from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, scene_note
 from switch2_layers.notes.scene_labels import read_scene_labels
+from switch2_layers.notes.surface_documents import read_surface_documents
 from switch2_layers.run_directory import RunPaths
 
 MIDDLE_MAX_FRAMES = 4  # middle に渡すフレームの最大の枚数
@@ -123,6 +124,10 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         current_tasks = read_text_or_empty(
             paths.notes_dir / scene_note(previous_state.scene_id, "tasks")
         )
+    # 操作説明は、surface が読むものと同じ文書にする (surface と同じ関数で選ぶ)
+    current_controls = read_surface_documents(
+        paths.notes_dir, None if previous_state is None else previous_state.scene_id
+    ).controls
     return MiddleInput(
         t=now_t,
         frames=tuple(_read_frames(paths, now_t, window_s)),
@@ -137,6 +142,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         current_tasks=current_tasks,
         surface_rows_offset=surface_chunk.end_offset,
         operations_rows_offset=operations_chunk.end_offset,
+        current_controls=current_controls,
     )
 
 

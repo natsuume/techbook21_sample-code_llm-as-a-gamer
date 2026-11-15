@@ -48,7 +48,7 @@ class LunaCallError(Exception):
 
 def build_headers(api_key: str) -> dict[str, str]:
     """要求のヘッダー {"Authorization": "Bearer <api_key>", "Content-Type": "application/json"} を返す。"""
-    raise NotImplementedError
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
 def post_responses(
@@ -67,7 +67,37 @@ def post_responses(
     - 本文が JSON でないか、JSON の object でなければ、error_body_head に本文の先頭を入れた LunaCallError にする
     API キーは説明にも error_body_head にも入れない。
     """
-    raise NotImplementedError
+    try:
+        response = client.post(
+            RESPONSES_URL,
+            json=dict(payload),
+            headers=build_headers(api_key),
+            timeout=timeout_s,
+        )
+    except httpx.HTTPError as error:
+        # httpx の例外の説明には、要求のヘッダー (API キー) は入らない
+        raise LunaCallError(
+            f"gpt-6-luna request failed: {type(error).__name__}: {error}"
+        ) from error
+    body_head = response.text[:ERROR_BODY_HEAD_CHARS]
+    if not response.is_success:
+        raise LunaCallError(
+            f"gpt-6-luna returned HTTP {response.status_code}: {body_head}",
+            error_body_head=body_head,
+        )
+    try:
+        body = response.json()
+    except ValueError as error:
+        raise LunaCallError(
+            f"gpt-6-luna response is not JSON: {body_head}",
+            error_body_head=body_head,
+        ) from error
+    if not isinstance(body, dict):
+        raise LunaCallError(
+            f"gpt-6-luna response is not a JSON object: {body_head}",
+            error_body_head=body_head,
+        )
+    return body
 
 
 def read_output_text(body: Mapping[str, object]) -> str:
@@ -82,4 +112,45 @@ def read_output_text(body: Mapping[str, object]) -> str:
     (その結果 output_text が無ければ 3 の LunaCallError)。
     LunaCallError の response_body には body (dict にしたもの) を入れる。
     """
-    raise NotImplementedError
+    response_body = dict(body)
+    status = body.get("status")
+    if status != "completed":
+        message = f"gpt-6-luna response status is {status!r}"
+        details = body.get("incomplete_details")
+        if isinstance(details, Mapping):
+            message += f" (reason: {details.get('reason')!r})"
+        raise LunaCallError(message, response_body=response_body)
+    texts: list[str] = []
+    for content in _message_contents(body.get("output")):
+        if not isinstance(content, Mapping):
+            continue
+        if content.get("type") == "refusal":
+            raise LunaCallError(
+                f"gpt-6-luna refused: {content.get('refusal')}",
+                response_body=response_body,
+            )
+        text = content.get("text")
+        if content.get("type") == "output_text" and isinstance(text, str):
+            texts.append(text)
+    if not texts:
+        raise LunaCallError(
+            "gpt-6-luna response has no output_text", response_body=response_body
+        )
+    return "".join(texts)
+
+
+def _message_contents(output: object) -> list[object]:
+    """output のうち type が "message" の要素の content の要素を、output と content の順に並べて返す。
+
+    output がリストでないとき、要素が object でないとき、content がリストでないときは、その分を読み飛ばす。
+    """
+    if not isinstance(output, list):
+        return []
+    contents: list[object] = []
+    for item in output:
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if isinstance(content, list):
+            contents.extend(content)
+    return contents

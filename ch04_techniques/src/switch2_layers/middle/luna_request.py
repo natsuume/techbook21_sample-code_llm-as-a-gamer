@@ -41,9 +41,17 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
 画像の detail は指定しない (既定の auto)。
 """
 
+import base64
 from collections.abc import Sequence
 
+from switch2_layers.frames.surface_frames import format_frame_label
+from switch2_layers.middle.luna_instructions import LUNA_DEVELOPER_INSTRUCTIONS
+from switch2_layers.middle.luna_output_schema import build_text_format
 from switch2_layers.middle.middle_types import MiddleInput, MiddleState
+from switch2_layers.middle.record_summary import (
+    summarize_operation_rows,
+    summarize_surface_rows,
+)
 from switch2_layers.notes.scene_labels import SceneLabel
 
 LUNA_MODEL = "gpt-6-luna"
@@ -74,12 +82,12 @@ def jpeg_data_url(jpeg: bytes) -> str:
 
     base64 は標準のアルファベットで、= のパディングを付け、改行を入れない (base64.b64encode)。
     """
-    raise NotImplementedError
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
 
 def frame_label(t: float) -> str:
     """画像の直前に置く時刻のラベル「フレーム t=<t>」を返す (t の部分は frames.surface_frames.format_frame_label(t))。"""
-    raise NotImplementedError
+    return f"フレーム {format_frame_label(t)}"
 
 
 def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
@@ -87,7 +95,13 @@ def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
 
     t は format_frame_label の形。一覧が空なら EMPTY_TEXT を返す。
     """
-    raise NotImplementedError
+    if not labels:
+        return EMPTY_TEXT
+    return "\n".join(
+        f"- {label.name} ({label.id}。初めて名前を付けた時刻 "
+        f"{format_frame_label(label.first_seen_t)})"
+        for label in labels
+    )
 
 
 def describe_previous_state(state: MiddleState | None) -> str:
@@ -102,19 +116,77 @@ def describe_previous_state(state: MiddleState | None) -> str:
         <timeline>                             空なら EMPTY_TEXT
     t は format_frame_label の形。
     """
-    raise NotImplementedError
+    if state is None:
+        return EMPTY_TEXT
+    if state.scene_id is None or state.scene_name is None:
+        scene = "(決まっていない)"
+    else:
+        scene = f"{state.scene_name} ({state.scene_id})"
+    return "\n".join(
+        [
+            (
+                f"作成時刻: {format_frame_label(state.generated_t)} "
+                f"(入力の時刻 {format_frame_label(state.based_on_t)})"
+            ),
+            f"場面: {scene}",
+            f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
+            f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
+            f"surface の待ち時間: {state.surface_wait_s:g} 秒",
+            "系列情報:",
+            state.timeline or EMPTY_TEXT,
+        ]
+    )
 
 
 def build_user_sections(middle_input: MiddleInput) -> list[str]:
     """user メッセージの 10 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
-    raise NotImplementedError
+    frame_count = len(middle_input.frames)
+    if frame_count:
+        frames_text = (
+            f"一定間隔で保存したフレーム {frame_count} 枚 (古い順)。"
+            "各画像の直前に時刻のラベルがある"
+        )
+    else:
+        frames_text = NO_FRAMES_TEXT
+    bodies = [
+        format_frame_label(middle_input.t),
+        describe_scene_labels(middle_input.scene_labels),
+        describe_previous_state(middle_input.previous_state),
+        _stripped_or_empty_text(middle_input.strategy),
+        _stripped_or_empty_text(middle_input.current_tasks),
+        _stripped_or_empty_text(middle_input.current_controls),
+        summarize_surface_rows(middle_input.surface_rows),
+        summarize_operation_rows(middle_input.operation_rows),
+        SCENE_CHANGE_REPORTED_TEXT
+        if middle_input.scene_change_reported
+        else SCENE_CHANGE_NOT_REPORTED_TEXT,
+        frames_text,
+    ]
+    return [
+        f"## {title}\n{body}"
+        for title, body in zip(USER_SECTION_TITLES, bodies, strict=True)
+    ]
+
+
+def _stripped_or_empty_text(text: str) -> str:
+    """text の前後の空白を除いたものを返す。空になれば EMPTY_TEXT を返す。"""
+    return text.strip() or EMPTY_TEXT
 
 
 def build_developer_message() -> dict[str, object]:
     """developer メッセージ {"role": "developer", "content": [{"type": "input_text",
     "text": LUNA_DEVELOPER_INSTRUCTIONS, "prompt_cache_breakpoint": {"mode": "explicit"}}]} を返す。
     """
-    raise NotImplementedError
+    return {
+        "role": "developer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": LUNA_DEVELOPER_INSTRUCTIONS,
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }
+        ],
+    }
 
 
 def build_user_message(middle_input: MiddleInput) -> dict[str, object]:
@@ -123,9 +195,22 @@ def build_user_message(middle_input: MiddleInput) -> dict[str, object]:
     content は、build_user_sections の各節の input_text、続けてフレームごとに frame_label の input_text と
     jpeg_data_url の input_image (古い順)。prompt_cache_breakpoint は置かない。
     """
-    raise NotImplementedError
+    content: list[dict[str, object]] = [
+        {"type": "input_text", "text": text}
+        for text in build_user_sections(middle_input)
+    ]
+    for frame in middle_input.frames:
+        content.append({"type": "input_text", "text": frame_label(frame.t)})
+        content.append({"type": "input_image", "image_url": jpeg_data_url(frame.jpeg)})
+    return {"role": "user", "content": content}
 
 
 def build_luna_payload(middle_input: MiddleInput) -> dict[str, object]:
     """middle_input から、要求の本文 (モジュールの docstring の形) を作って返す。"""
-    raise NotImplementedError
+    return {
+        "model": LUNA_MODEL,
+        "reasoning": {"effort": REASONING_EFFORT},
+        "text": {"format": build_text_format()},
+        "prompt_cache_options": {"mode": "explicit"},
+        "input": [build_developer_message(), build_user_message(middle_input)],
+    }

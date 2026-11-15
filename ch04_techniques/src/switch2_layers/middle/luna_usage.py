@@ -55,7 +55,31 @@ def read_usage(body: Mapping[str, object]) -> LunaUsage | None:
     input_tokens_details・output_tokens_details が object でなければ、その中の値をすべて 0 にする。
     例外は出さない (usage は記録のためだけに読み、応答の読み取りの成否に関わらせない)。
     """
-    raise NotImplementedError
+    usage = body.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    input_details = _mapping_or_empty(usage.get("input_tokens_details"))
+    output_details = _mapping_or_empty(usage.get("output_tokens_details"))
+    return LunaUsage(
+        input_tokens=_token_count(usage, "input_tokens"),
+        cached_tokens=_token_count(input_details, "cached_tokens"),
+        cache_write_tokens=_token_count(input_details, "cache_write_tokens"),
+        output_tokens=_token_count(usage, "output_tokens"),
+        reasoning_tokens=_token_count(output_details, "reasoning_tokens"),
+    )
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, object]:
+    """value が object (Mapping) ならそのまま、そうでなければ空の辞書を返す。"""
+    return value if isinstance(value, Mapping) else {}
+
+
+def _token_count(values: Mapping[str, object], key: str) -> int:
+    """values[key] が 0 以上の整数 (bool を除く) ならその値、無いか型が合わなければ 0 を返す。"""
+    value = values.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
 
 
 def estimate_cost_usd(usage: LunaUsage) -> float:
@@ -63,11 +87,26 @@ def estimate_cost_usd(usage: LunaUsage) -> float:
 
     キャッシュに関わらない入力が負になる (usage の値どうしが食い違う) ときは、0 として数える。
     """
-    raise NotImplementedError
+    uncached_input = max(
+        usage.input_tokens - usage.cached_tokens - usage.cache_write_tokens, 0
+    )
+    cost = (
+        uncached_input * INPUT_USD_PER_MILLION
+        + usage.cached_tokens * CACHED_INPUT_USD_PER_MILLION
+        + usage.cache_write_tokens * CACHE_WRITE_30M_USD_PER_MILLION
+        + usage.output_tokens * OUTPUT_USD_PER_MILLION
+    ) / TOKENS_PER_MILLION
+    return round(cost, COST_DECIMALS)
 
 
 def usage_to_json(usage: LunaUsage) -> dict[str, int]:
     """usage を middle/calls.jsonl の行の usage の形
     {"input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"} (この順) にする。
     """
-    raise NotImplementedError
+    return {
+        "input_tokens": usage.input_tokens,
+        "cached_tokens": usage.cached_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+    }
