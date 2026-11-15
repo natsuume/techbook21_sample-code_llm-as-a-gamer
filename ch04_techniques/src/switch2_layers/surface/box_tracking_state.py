@@ -8,6 +8,9 @@ Jev が返した box は、問い合わせた画像のフレームで追跡を�
 Jev のタイムアウト (10 秒) と surface に送るフレームの範囲 (2 秒) の和 (DEFAULT_RETAIN_S) で、要求を送ってから
 応答が返るまでのフレームが残る。
 on_frame (キャプチャーのスレッド) とほかのメソッド (surface のスレッド) は、1 つのロックの中で状態を読み書きする。
+ただし start_from_jev の追いつきの追跡は、キャプチャーのスレッドを待たせないよう、ロックの外で行う。キャプチャーは
+最新の 1 枚だけを読むため、on_frame が待つとその間のフレームが飛ばされ、待ちが長いとキャプチャーの見張りが
+新しいフレームが無いとして実行を止める。
 
 問い直す対象 (select_requery_targets) は次のどれかに当たる対象:
     - まだ box が無い (追跡していない) 対象
@@ -36,6 +39,8 @@ from switch2_layers.surface.surface_types import Box, BoxSource
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETAIN_S = 12.0  # フレームと追跡の位置を持つ秒数 (Jev のタイムアウト 10 秒 + 送るフレームの範囲 2 秒)
+# start_from_jev で、ロックの外で追いつかせる回数の上限 (その後に届いたフレームはロックの中で追いつかせる)
+MAX_UNLOCKED_CATCH_UP_PASSES = 3
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,21 @@ class _TargetTrack:
         """フレーム t の結果を記録し、lost を更新する。"""
         self.results[t] = result
         self.lost = not result.found
+
+
+def _catch_up(name: str, track: _TargetTrack, frames: Sequence[TrackingFrame]) -> bool:
+    """frames を古い順に track.tracker で update し、位置を記録する。
+
+    update が例外 (Exception) を出したら、警告を書いて False を返す (残りのフレームは update しない)。
+    """
+    for frame in frames:
+        try:
+            result = track.tracker.update(frame)
+        except Exception:
+            logger.warning("catching up %s failed", name, exc_info=True)
+            return False
+        track.record(frame.t, result)
+    return True
 
 
 class BoxTrackingState:
@@ -176,11 +196,14 @@ class BoxTrackingState:
            name の追跡をやめて (forget と同じ) False を返す
         2. tracker_factory() で新しい追跡の部品を作って、そのフレームと box で start する (start の ValueError は
            外に出さず、1 と同じく追跡をやめて False を返す)
-        3. name の位置のうち t が frame_t 以降のもの (frame_t ちょうどの古い追跡の位置と、それより新しい位置) を
-           捨て、frame_t の位置を Jev の box (box) で置き換える。持っているフレームのうち t が frame_t より新しいものを
-           古い順に update して、位置を記録する (最新まで追いつかせる)。update が例外 (Exception) を出したら、
-           追跡をやめて False を返す
-        4. 前回問い直した要求の番号を request_index にする
+        3. 持っているフレームのうち t が frame_t より新しいものを、新しい追跡の部品で古い順に update して、位置を
+           記録する (最新まで追いつかせる)。これはロックの外で行い、その間に on_frame が足したフレームにも同じように
+           追いつかせる。ロックの外で追いつかせるのは最大 MAX_UNLOCKED_CATCH_UP_PASSES 回で、その後に届いた
+           フレームは 4 のロックの中で追いつかせる。update が例外 (Exception) を出したら、追跡をやめて False を返す
+        4. ロックの中で、name の今の追跡の位置のうち t が frame_t より古いものを残し (frame_t ちょうどの古い追跡の
+           位置は捨てる)、frame_t の位置を Jev の box (box) にして、新しい追跡に差し替える。前回問い直した要求の
+           番号は request_index にする
+        新しい追跡の部品は、差し替えるまで on_frame から見えない (surface のスレッドだけが使う)。
         frame_t のフレームの位置は Jev の答えで、追跡の結果としては記録しない (result_at(name, frame_t) は None)。
         boxes_at(frame_t) は、この対象を Jev の box (出どころ jev) で返す。
         """
@@ -189,34 +212,45 @@ class BoxTrackingState:
             if queried is None:
                 self._tracks.pop(name, None)
                 return False
-            tracker = self.tracker_factory()
-            try:
-                tracker.start(queried, box)
-            except ValueError:
-                logger.debug("could not start tracking %s", name, exc_info=True)
+            pending = [f for f in self._frames if f.t > frame_t]
+        tracker = self.tracker_factory()
+        try:
+            tracker.start(queried, box)
+        except ValueError:
+            logger.debug("could not start tracking %s", name, exc_info=True)
+            self.forget(name)
+            return False
+        track = _TargetTrack(tracker=tracker, last_requery_index=request_index)
+        caught_up_t = frame_t
+        for _ in range(MAX_UNLOCKED_CATCH_UP_PASSES):
+            if not pending:
+                break
+            if not _catch_up(name, track, pending):
+                self.forget(name)
+                return False
+            caught_up_t = pending[-1].t
+            with self._lock:
+                pending = [f for f in self._frames if f.t > caught_up_t]
+        with self._lock:
+            remaining = [f for f in self._frames if f.t > caught_up_t]
+            if not _catch_up(name, track, remaining):
                 self._tracks.pop(name, None)
                 return False
-            track = _TargetTrack(tracker=tracker, last_requery_index=request_index)
             previous = self._tracks.get(name)
-            if previous is not None:
-                # frame_t より古い位置だけを残す (frame_t ちょうどの古い追跡の位置は Jev の box で置き換える)
-                track.results = {
-                    t: result for t, result in previous.results.items() if t < frame_t
-                }
-                track.jev_boxes = {
-                    t: jev_box
-                    for t, jev_box in previous.jev_boxes.items()
-                    if t < frame_t
-                }
+            # 位置は t の古い順に並べる (_drop_older_than が前から捨てるため)。frame_t より古い位置だけを残す
+            results = (
+                {}
+                if previous is None
+                else {t: r for t, r in previous.results.items() if t < frame_t}
+            )
+            results.update(track.results)
+            track.results = results
+            track.jev_boxes = (
+                {}
+                if previous is None
+                else {t: b for t, b in previous.jev_boxes.items() if t < frame_t}
+            )
             track.jev_boxes[frame_t] = box
-            for later in (f for f in self._frames if f.t > frame_t):
-                try:
-                    result = tracker.update(later)
-                except Exception:
-                    logger.warning("catching up %s failed", name, exc_info=True)
-                    self._tracks.pop(name, None)
-                    return False
-                track.record(later.t, result)
             self._tracks[name] = track
             return True
 

@@ -77,7 +77,8 @@ class TrackResult:
 class BoxTracker(Protocol):
     """1 つの対象を追う部品。対象ごとに 1 つ作り、start の後に、時刻の古い順のフレームで update を呼ぶ。
 
-    1 つのスレッドから使う (surface.box_tracking_state.BoxTrackingState がロックの中で呼ぶ)。
+    同時に 2 つのスレッドから呼ばない (surface.box_tracking_state.BoxTrackingState は、追跡を始め直すときの追いつきでは
+    surface のスレッドだけが呼び、追跡を差し替えた後はロックの中で呼ぶ)。
     """
 
     def start(self, frame: TrackingFrame, box: NormalizedBox) -> None:

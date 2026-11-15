@@ -3,6 +3,8 @@
 合成の画像は test_layers_box_tracker.py と同じ作り方 (乱数の種を固定した背景と、模様のある四角い対象)。
 """
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -203,6 +205,48 @@ def test_uniform_target_is_lost_and_requeried():
     assert state.statuses() == {"自機": TargetStatus(lost=True, last_requery_index=1)}
     assert state.boxes_at(t_at(2)) == ()
     assert select_requery_targets(["自機"], state.statuses(), 2, 5) == ("自機",)
+
+
+def test_capture_is_not_blocked_while_catching_up():
+    # 追いつきの追跡はロックの外で行うため、その途中でもキャプチャーのスレッドはフレームを足せる。
+    # 追いつきの間に届いたフレームにも追いつかせてから、追跡を差し替える
+    entered = threading.Event()
+    release = threading.Event()
+    trackers: list[StillTracker] = []
+
+    class SlowTracker(StillTracker):
+        def update(self, frame: TrackingFrame) -> TrackResult:
+            if frame.t == t_at(2):
+                entered.set()
+                assert release.wait(5.0)
+            return super().update(frame)
+
+    def factory() -> StillTracker:
+        trackers.append(SlowTracker())
+        return trackers[-1]
+
+    state = BoxTrackingState(tracker_factory=factory)
+    state.set_targets(["自機"])
+    feed(state, range(3))
+    started: list[bool] = []
+    worker = threading.Thread(
+        target=lambda: started.append(
+            state.start_from_jev("自機", sprite_box(x_at(0)), t_at(0), 1)
+        )
+    )
+    worker.start()
+    try:
+        assert entered.wait(5.0)
+        feeder = threading.Thread(target=feed, args=(state, range(3, 5)))
+        feeder.start()
+        feeder.join(timeout=2.0)
+        assert not feeder.is_alive(), "on_frame waited for the catch-up"
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+    assert started == [True]
+    assert trackers[0].updated == [t_at(1), t_at(2), t_at(3), t_at(4)]
+    assert state.result_at("自機", t_at(4)) is not None
 
 
 def test_start_fails_when_queried_frame_is_not_retained():
