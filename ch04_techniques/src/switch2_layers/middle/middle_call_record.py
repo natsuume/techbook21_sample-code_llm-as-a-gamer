@@ -5,10 +5,13 @@
      "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "deep_requests": [種類...],
      "deep_requests_sent", "error"}
 失敗した回は scene_id・scene_name・surface_wait_s を null、new_scene を false、deep_requests を空にし、error に説明を書く。
+MiddleAnalyzer が MiddleCallDetailsSource でもあれば (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を
+上のキーの後ろに足す (middle_call_row_with_details)。フェイクの MiddleAnalyzer では上のキーだけにする。
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.middle.middle_output_writer import MiddleWriteResult
@@ -70,3 +73,31 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
         "deep_requests_sent": record.deep_requests_sent,
         "error": record.error,
     }
+
+
+@runtime_checkable
+class MiddleCallDetailsSource(Protocol):
+    """analyze の 1 回ごとに、middle/calls.jsonl の行に足す記録を持つ MiddleAnalyzer (gpt-6-luna の実装など)。
+
+    MiddleAnalyzer の Protocol とは別に、必要な実装だけが持つ。
+    """
+
+    def take_call_details(self) -> dict[str, object]:
+        """直前の analyze の記録 (行に足すキーと値) を返し、持っている記録を消す。無ければ空の辞書を返す。"""
+        ...
+
+
+def take_analyzer_call_details(analyzer: object) -> dict[str, object]:
+    """analyzer が MiddleCallDetailsSource なら take_call_details() の値を返し、そうでなければ空の辞書を返す。"""
+    raise NotImplementedError
+
+
+def middle_call_row_with_details(
+    record: MiddleCallRecord, details: Mapping[str, object]
+) -> dict[str, object]:
+    """middle_call_row(record) のキーの後ろに、details のキーと値を details の順で足した辞書を返す。
+
+    details のキーのうち middle_call_row のキーと同じ名前のものは足さない (骨組みの値を残す)。
+    details が空なら middle_call_row(record) と同じ辞書になる。
+    """
+    raise NotImplementedError

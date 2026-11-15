@@ -1,10 +1,22 @@
+import base64
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_layers import cli
-from switch2_layers.cli import build_parser, main
+from switch2_layers.app import REASON_INTERRUPTED
+from switch2_layers.cli import (
+    build_parser,
+    create_middle_analyzer,
+    main,
+    middle_once_settings_from_args,
+    run_settings_from_args,
+)
+from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.notes.publish_note import EXIT_CONFLICT, EXIT_INVALID
 from switch2_layers.settings import (
     DEFAULT_DEEP_AUTO_SECONDS,
@@ -16,9 +28,17 @@ from switch2_layers.settings import (
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_WINDOW_S,
+    MiddleKind,
 )
 
 COMMANDS = ["run", "middle-once", "deep-once", "publish-note"]
+API_KEY_ENV = "OPENAI_API_KEY"
+
+
+@pytest.fixture(autouse=True)
+def without_api_key(monkeypatch):
+    """どのテストも、開発者の環境の API キーで実際の API を呼ばないよう、OPENAI_API_KEY を消してから動かす。"""
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
 
 
 # --- 使い方の表示と引数の定義 ---
@@ -287,7 +307,8 @@ def test_publish_note_command_rejects_source_outside_job_work(tmp_path, capsys):
 
 def test_middle_once_command_writes_middle_outputs(tmp_path, capsys):
     run_dir = make_saved_run(tmp_path)
-    code = main(["middle-once", "--run-dir", str(run_dir)])
+    # フェイクの middle は API キーが無くても動く
+    code = main(["middle-once", "--run-dir", str(run_dir), "--middle", "fake"])
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "ok"
@@ -333,3 +354,271 @@ def test_deep_once_command_rejects_invalid_scene(tmp_path, capsys, extra):
     assert code == 2
     assert capsys.readouterr().out == ""
     assert list((run_dir / "deep").iterdir()) == []
+
+
+# --- --middle (middle の実装の選択) ---
+
+
+@pytest.mark.parametrize(
+    "argv", [["run"], ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
+)
+def test_middle_defaults_to_luna(argv):
+    args = build_parser().parse_args(argv)
+    assert args.middle == "luna"
+
+
+@pytest.mark.parametrize(
+    "argv", [["run"], ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
+)
+def test_middle_accepts_fake_and_rejects_unknown_values(argv):
+    assert build_parser().parse_args([*argv, "--middle", "fake"]).middle == "fake"
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*argv, "--middle", "gpt"])
+    assert exit_info.value.code == 2
+
+
+def test_settings_from_args_convert_middle_to_kind():
+    run_args = build_parser().parse_args(["run", "--middle", "fake"])
+    assert run_settings_from_args(run_args).middle is MiddleKind.FAKE
+    once_args = build_parser().parse_args(["middle-once", "--run-dir", "runs/x"])
+    assert middle_once_settings_from_args(once_args).middle is MiddleKind.LUNA
+
+
+def test_create_middle_analyzer_for_fake_does_not_need_api_key():
+    assert isinstance(create_middle_analyzer(MiddleKind.FAKE, {}), FakeMiddleAnalyzer)
+
+
+def test_create_middle_analyzer_for_luna_uses_api_key_from_environ():
+    analyzer = create_middle_analyzer(MiddleKind.LUNA, {API_KEY_ENV: " sk-test\n"})
+    assert isinstance(analyzer, LunaMiddleAnalyzer)
+    assert analyzer.api_key == "sk-test"
+
+
+@pytest.mark.parametrize("environ", [{}, {API_KEY_ENV: ""}, {API_KEY_ENV: "  "}])
+def test_create_middle_analyzer_for_luna_without_api_key_is_an_error(environ):
+    with pytest.raises(ValueError):
+        create_middle_analyzer(MiddleKind.LUNA, environ)
+
+
+def must_not_start_bridge(**kwargs):
+    raise AssertionError("the bridge must not be started")
+
+
+@pytest.mark.parametrize("value", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_run_without_api_key_exits_before_hardware(
+    tmp_path, monkeypatch, capsys, value
+):
+    if value is not None:
+        monkeypatch.setenv(API_KEY_ENV, value)
+    monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
+    runs_dir = tmp_path / "runs"
+    code = main(["run", "--runs-dir", str(runs_dir)])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert API_KEY_ENV in captured.err
+    assert "--middle fake" in captured.err
+    # 実行ディレクトリーも作らない
+    assert not runs_dir.exists()
+
+
+def test_run_range_errors_are_reported_before_api_key(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
+    code = main(["run", "--middle-interval", "0"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--middle-interval" in err
+    assert API_KEY_ENV not in err
+
+
+def test_run_with_fake_middle_does_not_need_api_key(monkeypatch, capsys):
+    def failing_bridge(**kwargs):
+        raise BridgeStartError("controller bridge failed: no bridge in test")
+
+    # API キーの確かめを通り、ブリッジの起動 (ここでは失敗させる) まで進む
+    monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
+    code = main(["run", "--middle", "fake"])
+    assert code == 1
+    assert "no bridge in test" in capsys.readouterr().err
+
+
+class StubSupervisor:
+    state = "ok"
+
+    def close(self) -> None:
+        pass
+
+
+class StubCapture:
+    def close(self) -> None:
+        pass
+
+
+def stub_hardware_and_app(monkeypatch) -> list:
+    """run の実機の部品と LayersApp を偽物にし、LayersApp に渡された (settings, parts) を記録するリストを返す。"""
+    created: list = []
+
+    class StubApp:
+        def __init__(self, settings, parts):
+            created.append((settings, parts))
+
+        def run(self) -> str:
+            return REASON_INTERRUPTED
+
+    monkeypatch.setattr(cli, "BridgeSupervisor", lambda **kwargs: StubSupervisor())
+    monkeypatch.setattr(cli, "Capture", lambda *args: StubCapture())
+    monkeypatch.setattr(cli, "SwitchCaptureReader", lambda capture: object())
+    monkeypatch.setattr(cli, "LayersApp", StubApp)
+    return created
+
+
+def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
+    monkeypatch.setenv(API_KEY_ENV, "sk-test")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run"]) == 0
+    [(settings, parts)] = created
+    assert settings.middle is MiddleKind.LUNA
+    assert isinstance(parts.middle, LunaMiddleAnalyzer)
+    assert parts.middle.api_key == "sk-test"
+
+
+def test_run_passes_fake_middle_to_app(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake"]) == 0
+    [(settings, parts)] = created
+    assert settings.middle is MiddleKind.FAKE
+    assert isinstance(parts.middle, FakeMiddleAnalyzer)
+
+
+@pytest.mark.parametrize("value", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_middle_once_without_api_key_exits_and_writes_nothing(
+    tmp_path, monkeypatch, capsys, value
+):
+    if value is not None:
+        monkeypatch.setenv(API_KEY_ENV, value)
+    run_dir = make_saved_run(tmp_path)
+    code = main(["middle-once", "--run-dir", str(run_dir)])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert API_KEY_ENV in captured.err
+    assert not (run_dir / "middle" / "state.json").exists()
+    assert not (run_dir / "middle" / "calls.jsonl").exists()
+    assert json.loads(
+        (run_dir / "notes" / "scene_labels.json").read_text(encoding="utf-8")
+    ) == {"scenes": []}
+
+
+LUNA_OUTPUT = {
+    "scene_name": "タイトル画面",
+    "is_stuck": False,
+    "stuck_description": "",
+    "surface_wait_s": 1.5,
+    "timeline": "## 操作のまとめ\n- まだ操作していない",
+    "tasks": "- A でゲームを始める\n",
+}
+LUNA_USAGE = {
+    "input_tokens": 3000,
+    "input_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 0},
+    "output_tokens": 400,
+    "output_tokens_details": {"reasoning_tokens": 0},
+    "total_tokens": 3400,
+}
+
+
+def luna_response_body() -> dict:
+    return {
+        "id": "resp_test",
+        "object": "response",
+        "status": "completed",
+        "incomplete_details": None,
+        "model": "gpt-6-luna",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_test",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": json.dumps(LUNA_OUTPUT, ensure_ascii=False),
+                        "annotations": [],
+                    }
+                ],
+            }
+        ],
+        "usage": LUNA_USAGE,
+    }
+
+
+def test_middle_once_with_luna_records_usage_and_cost(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(API_KEY_ENV, "sk-test")
+    run_dir = make_saved_run(tmp_path)
+    jpeg = b"\xff\xd8\xff\xe0saved-frame"
+    (run_dir / "frames" / "interval" / "000005000.jpg").write_bytes(jpeg)
+    (run_dir / "frames.jsonl").write_text(
+        json.dumps(
+            {
+                "t": 5.0,
+                "kind": "interval",
+                "file": "frames/interval/000005000.jpg",
+                "width": 640,
+                "height": 360,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=luna_response_body())
+
+    kinds: list[MiddleKind] = []
+
+    def create_with_mock_transport(kind, environ):
+        # 実際の API を呼ばないよう、MockTransport の Client を持つ LunaMiddleAnalyzer を渡す
+        kinds.append(kind)
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        return LunaMiddleAnalyzer(environ[API_KEY_ENV], client=client)
+
+    monkeypatch.setattr(cli, "create_middle_analyzer", create_with_mock_transport)
+    code = main(["middle-once", "--run-dir", str(run_dir)])
+    assert code == 0
+    assert kinds == [MiddleKind.LUNA]
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "ok"
+    assert out["scene_id"] == "scene-001"
+    assert out["new_scene"] is True
+    # 保存済みの画像を送る
+    [request] = requests
+    payload = json.loads(request.content)
+    images = [
+        part["image_url"]
+        for part in payload["input"][1]["content"]
+        if part["type"] == "input_image"
+    ]
+    assert images == ["data:image/jpeg;base64," + base64.b64encode(jpeg).decode()]
+    # calls.jsonl の行に usage と概算の費用と応答を足す
+    [row] = [
+        json.loads(line)
+        for line in (run_dir / "middle" / "calls.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert row["error"] is None
+    assert row["scene_name"] == "タイトル画面"
+    assert row["usage"] == {
+        "input_tokens": 3000,
+        "cached_tokens": 1024,
+        "cache_write_tokens": 0,
+        "output_tokens": 400,
+        "reasoning_tokens": 0,
+    }
+    assert row["cost_usd"] == pytest.approx(0.00040784)
+    assert row["response"] == luna_response_body()
+    assert row["error_body_head"] is None
+    state = json.loads((run_dir / "middle" / "state.json").read_text(encoding="utf-8"))
+    assert state["surface_wait_s"] == 1.5

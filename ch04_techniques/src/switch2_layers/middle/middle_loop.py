@@ -6,7 +6,8 @@
     3. 出力を書く (middle_output_writer.write_middle_output)
     4. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報の deep を、きっかけ new_scene でスケジューラーに渡す
        (middle-once では渡さず、記録だけする)
-    5. 1 行を middle/calls.jsonl に書く
+    5. 1 行を middle/calls.jsonl に書く。MiddleAnalyzer が middle_call_record.MiddleCallDetailsSource でもあれば
+       (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を行に足す (失敗した回も同じ)
 ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから最初の実行を始め、
 前回の応答 (失敗を含む) から interval_s 秒待って次を始める。analyze が例外を出したら、前回の出力を残したまま
 次の間隔で再び呼ぶ。max_errors 回続けたら on_stop で全体を止める。
@@ -101,10 +102,14 @@ def run_middle_step(
     4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に、request の直前に stop を確かめてから
        deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
        外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
-    5. middle/calls.jsonl に middle_call_record.middle_call_row の行を書く (書く直前に stop を確かめる)
-       (deep_requests_sent は deep_requests が None でなく、要求を渡したら True。要求が例外を出した場合も True)
+    5. middle/calls.jsonl に middle_call_record.middle_call_row_with_details(記録, analyze の記録) の行を書く
+       (書く直前に stop を確かめる。deep_requests_sent は deep_requests が None でなく、要求を渡したら True。
+       要求が例外を出した場合も True)
+    analyze の記録は、analyze が戻った直後 (例外を含む) に middle_call_record.take_analyzer_call_details(analyzer) で
+    受け取る (analyzer が MiddleCallDetailsSource でなければ空。空なら行は middle_call_row と同じ)。
     1〜3 の例外 (Exception) は外に出さず、error の行を calls.jsonl に書いて (書く直前に stop を確かめる)
-    ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。
+    ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。error の行にも analyze の記録を
+    足す (analyze の失敗と、analyze の後の 3 の失敗。1 で失敗して analyze を呼ばなかった回は、記録を受け取らずに空とする)。
     stop を確かめたときに立っていたら、そこで STOPPED_STEP_RESULT を返し、残りのファイル (tasks.md・middle/state.json・
     notes/scene_labels.json のうちまだ書いていないもの)・deep の要求・calls.jsonl の行を書かない。書く順は変えず、
     それまでに書いたファイルは戻さない。analyze が戻ったときに立っていたら、何も書かず deep も呼ばない。

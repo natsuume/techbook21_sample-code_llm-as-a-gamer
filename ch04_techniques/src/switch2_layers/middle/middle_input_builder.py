@@ -8,6 +8,7 @@ run の middle のループと middle-once は、同じ build_middle_input で�
     middle/state.json                    前回の middle の出力
     notes/strategy.md                    大方針
     notes/scenes/<場面ID>/tasks.md        現在の場面の短期タスクリスト
+    notes/scenes/<場面ID>/controls.md     現在の場面の操作説明 (無いか空なら notes/common/controls.md)
 
 「前回の middle の実行以降」の行の決め方 (surface.jsonl と operations.jsonl のそれぞれで同じ):
     - 行の時刻ではなく、ファイルのバイト位置で区切る。前回の middle/state.json の surface_rows_offset・
@@ -102,6 +103,10 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - scene_labels: notes.scene_labels.read_scene_labels(notes/scene_labels.json)
     - strategy: notes/strategy.md (無ければ空文字列)
     - current_tasks: previous_state の scene_id の tasks.md (場面が無いか、文書が無ければ空文字列)
+    - current_controls: previous_state の scene_id (previous_state が None なら None) の操作説明。
+      notes.surface_documents.read_surface_documents(notes_dir, scene_id).controls と同じ規則で、場面の controls.md が
+      あって空 (空白だけを含む) でなければその本文、そうでなければ notes/common/controls.md の本文 (どちらも読めなければ
+      空文字列)。本文は読んだまま (前後の空白も除かない) にする
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0) にする。
     """
     previous_state = read_middle_state(paths.middle_state)

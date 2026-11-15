@@ -77,6 +77,10 @@ class MiddleInput:
                              この入力で書いた middle/state.json に記録し、次の入力はこの位置から読む
     operations_rows_offset   operation_rows を読んだ後の、operations.jsonl の完全な行の末尾のバイト位置。使い方は
                              surface_rows_offset と同じ
+    current_controls         現在の場面 (previous_state の scene_id) の操作説明。surface と同じ規則
+                             (notes.surface_documents) で選ぶ: 場面が決まっていて、場面の controls.md があって空 (空白だけを
+                             含む) でなければ場面の文書、そうでなければ notes/common/controls.md。読めなければ空文字列。
+                             既定値の空文字列は、操作説明を渡さない入力 (テストなど) のため
     """
 
     t: float
@@ -90,6 +94,7 @@ class MiddleInput:
     current_tasks: str
     surface_rows_offset: int
     operations_rows_offset: int
+    current_controls: str = ""
 
 
 @dataclass(frozen=True)
