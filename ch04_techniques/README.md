@@ -239,3 +239,111 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 - `--record-dashboard` の記録 (`frames.jsonl` と `thumbs/`、`pad.jsonl`) は裏のスレッドで書き、書き終えていない記録を溜められる件数に上限があります (フレームは 600 件、レポートは 2000 件)。上限を超えた記録は捨て、捨てた件数を `run.jsonl` の `record_end` に書きます。フレームの記録は 1 件ごとに元の画像 (約 1.3MiB) を持つため、ディスクへの書き込みが止まると、最悪で約 790MiB のメモリーを使います
 - `--record-dashboard` を付けたときの `stream.jsonl` には、advisor が読んだファイルの中身 (ツールの結果) と、ゲームの情報のファイルに書いた内容がそのまま残ります。読んだ画像も、ツールの結果に入って残ると考えられます (確かめていません)。画面の文字で注入された指示に従って、advisor が `ch04_techniques` の中のほかのファイル (`.env` など) を読んだ場合は、そのファイルの中身も残ります
 - 利用によって生じたアカウントの制限、データの損失、機器の故障などの不利益は、利用者の自己責任となります
+
+## 3 層のエージェントの骨組み (switch2-layers)
+
+同じ uv プロジェクトに、surface・middle・deep の 3 層でゲームを遊ぶエージェントの骨組みのパッケージ [`switch2_layers`](./src/switch2_layers/) があります。コマンド `switch2-layers` で実行します。3 層は 1 つのプロセスの中で別々のスレッドとして動き、実行ディレクトリーのファイルで情報を受け渡します。
+
+| 層 | 動く間隔 | 受け持ち |
+|---|---|---|
+| surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、選んだフレーム、文書、middle の出力からコントローラーの操作を決めて送ります。必要なら deep に文書の更新を求めます |
+| middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
+| deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | 操作説明・攻略情報・大方針・助言・マップの文書を書き直します。ジョブごとに `deep/<種類>-<連番>/` を作り、文書のコピーを `work/` に置きます |
+
+この版の 3 層はすべてフェイクで、モデルの API は呼びません。surface は何も押さない中立の操作を返して deep を求めず、middle は固定の場面名 `fake scene` と待ち時間 0.2 秒を返し、deep は文書を変えずに成功を返します。フェイクのままでも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
+
+### サブコマンド
+
+| コマンド | 内容 |
+|---|---|
+| `switch2-layers run [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで 3 層を動かします。Ctrl+C で止まります |
+| `switch2-layers middle-once --run-dir DIR [--middle-window S]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです |
+| `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします |
+| `switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH\|none --from FILE` | deep が編集したファイル (`--from`) の内容で、`notes/` の文書 (`--note`) を置き換えます |
+
+middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。
+
+```bash
+uv run switch2-layers run
+uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
+uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
+```
+
+publish-note は、`notes/` の文書の今の SHA-256 (文書が無ければ `none`) が `--base-sha256` と一致したときだけ置き換え、終了コード 0 で終わります。一致しなければ置き換えずに、今の SHA-256 を標準出力に書いて終了コード 3 で終わります。`--note` は `notes/` の中のパス、`--from` は同じ実行の `deep/<種類>-<連番>/work/` の中のファイルに限ります。どちらもシンボリックリンクを解決した先で確かめ、範囲の外や通常のファイルでないものを指定すると、何も変えずに終了コード 2 で終わります。同じ実行の publish-note どうしは、`notes/.publish.lock` のロックを取り、比べてから置き換えるまでを 1 つずつ行います。
+
+### run の起動引数
+
+`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
+
+| 引数 | 内容 | 既定値 | 範囲 |
+|---|---|---|---|
+| `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
+| `--interval-fps N` | 一定間隔のフレームを `frames/interval/` に保存するフレームレート | 5 | 0 より大きく 10 以下 |
+| `--interval-width N` | 一定間隔のフレームを縮小する幅 | 640 | 64〜1280 の整数 |
+| `--max-surface-errors N` | surface の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |
+| `--middle-interval S` | middle の前回の応答から次を始めるまでの秒数 | 5 | 1〜10 |
+| `--middle-window S` | middle に渡す一定間隔のフレームの範囲 (直近の秒数) | 10 | 0 より大きい有限の値 |
+| `--max-middle-errors N` | middle の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |
+| `--deep-min-start-interval S` | 同じ文書の deep を、前回の起動からこの秒数たつまで起動しません | 15 | 0 以上の有限の値 |
+| `--deep-auto-seconds S` | 同じ文書の前回の deep の終了からこの秒数たったら、自動で deep を呼びます | 60 | 0 より大きい有限の値で、`--deep-min-start-interval` 以上 |
+| `--deep-timeout S` | deep のジョブの実行時間の上限 (秒) | 300 | 0 より大きい有限の値 |
+| `--allow-home` | 押せるボタンに HOME を足します | オフ | なし (付けるとオン) |
+
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+
+同じ文書の deep のジョブは、前のジョブが実行中でも、前回の起動から `--deep-min-start-interval` 秒たっていれば並行して起動します。間隔の中に来た要求は捨て、`run.jsonl` に `deep_skipped` を書きます。起動から `--deep-timeout` 秒たったジョブには停止を求め、5 秒たっても終わらなければ強制終了します。
+
+### 実行ディレクトリー
+
+run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名前があれば、末尾に `-2` などを付けます)。中に次のファイルを書きます。時刻は、実行を始めてからの経過秒 (t) を小数第 3 位 (ミリ秒) までに丸めた値です。
+
+| ファイル | 内容 |
+|---|---|
+| `run.jsonl` | 起動 (`start`。起動引数を含む)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、待ち時間、失敗の説明を書きます |
+| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作、成否を書きます |
+| `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
+| `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
+| `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を書き込んだもの)。複数の要求で送った同じフレームは 1 回だけ保存します |
+| `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置)。surface は要求ごとにこのファイルを読みます |
+| `middle/calls.jsonl` | middle の実行ごとの記録 |
+| `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書とその SHA-256) と、対象の文書のコピーを置く `work/` があります |
+| `notes/` | 文書 (次の表) |
+
+`surface.jsonl` に書く画像のファイル名は、保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
+
+`notes/` には、起動時に次の文書を作ります。
+
+| ファイル | 内容 |
+|---|---|
+| `notes/common/controls.md` | 共通の操作説明。押せるボタンを、まだ確かめていない印 `unknown` を付けて並べます |
+| `notes/common/tips.md` | 共通の攻略情報 (見出しだけ) |
+| `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)。起動時は空で、`tasks.md` は middle が書きます。場面の操作説明と攻略情報が無いか空なら、surface は共通の文書を使います |
+| `notes/strategy.md` | 大方針 (見出しだけ) |
+| `notes/advice.md` | 詰まったときの助言 (見出しだけ) |
+| `notes/map/` | マップの文書 (起動時は空) |
+| `notes/scene_labels.json` | 場面の名前と場面 ID (`scene-001` の形) の一覧。middle が初めての場面を足します |
+
+### 押せるボタン
+
+surface が決めた操作は、コントローラーに送る直前に、押せるボタンに制限します。既定では HOME を押せません。`--allow-home` を付けると押せます。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します。
+
+短押しは 120 ミリ秒押して離します。同じボタンを離してから 100 ミリ秒たつまでは、次の短押しを始めずに待ちます。
+
+### 止まる条件
+
+次のどれかが起きると、操作を中立に戻して以後の操作を送らないようにし、3 層を止めて、`run.jsonl` の `stop` に理由を書きます。
+
+| 条件 | `stop` の理由 |
+|---|---|
+| Ctrl+C を押した | `interrupted` |
+| キャプチャーの出力が終わった | `capture ended` |
+| 最後のフレームから 2 秒以上、新しいフレームが届かない | `no new frame for 2 seconds` |
+| 起動から 10 秒たっても、最初のフレームが届かない | `no first frame within 10 seconds` |
+| コントローラーのブリッジが復旧できない状態 (第2章の `failed`) になった | `bridge recovery failed` |
+| surface の失敗が `--max-surface-errors` 回続いた | `surface failed <回数> times in a row` |
+| middle の失敗が `--max-middle-errors` 回続いた | `middle failed <回数> times in a row` |
+
+ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
+
+止まるときは、surface と middle のループの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。
