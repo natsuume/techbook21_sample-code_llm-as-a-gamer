@@ -1,0 +1,486 @@
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+from switch2_remote.controller_state import BUTTON_ORDER, NEUTRAL_REPORT
+
+from switch2_layers.deep.deep_types import (
+    DeepRequestResult,
+    DeepTrigger,
+    DocumentKind,
+)
+from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
+from switch2_layers.frames.frame_store import FrameStore
+from switch2_layers.hardware.pad_output import PadOutput
+from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
+from switch2_layers.records.run_log import RunLog
+from switch2_layers.run_clock import RunClock
+from switch2_layers.run_directory import RunPaths
+from switch2_layers.surface.surface_loop import (
+    BRIDGE_WAIT_S,
+    DECIDE_ERROR_WAIT_S,
+    NO_FRAME_RETRY_S,
+    SurfaceLoop,
+    SurfaceLoopParts,
+    SurfaceLoopSettings,
+    SurfaceStepOutcome,
+    surface_failure_reason,
+)
+from switch2_layers.surface.surface_types import SurfaceInput, SurfaceOutput
+
+ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
+NOW = 10.0  # step を呼ぶときの t
+ALLOWED_WITHOUT_HOME = frozenset(BUTTON_ORDER) - {"HOME"}
+COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n"
+COMMON_TIPS = "# 攻略情報 (共通)\n"
+ADVICE = "# 助言\n"
+A_BIT = 0x04  # レポートの b1
+HOME_BIT = 0x10  # レポートの b2
+
+
+class FakeMonotonic:
+    def __init__(self, now: float):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeSender:
+    def __init__(self):
+        self.reports: list[bytes] = []
+        self.fail_with: Exception | None = None
+
+    def set_report(self, report: bytes) -> str:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.reports.append(bytes(report))
+        return "ack"
+
+
+class FakeDeepSink:
+    """DeepRequestSink の偽物。受け取った要求を記録する。"""
+
+    def __init__(self):
+        self.requests: list[tuple[DocumentKind, DeepTrigger, str | None]] = []
+
+    def request(
+        self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
+    ) -> DeepRequestResult:
+        self.requests.append((kind, trigger, scene_id))
+        return DeepRequestResult(started=True)
+
+
+class ScriptedDecider:
+    """SurfaceDecider の偽物。results を順に返す (例外なら出す)。最後の 1 つは繰り返す。受け取った入力を記録する。"""
+
+    def __init__(self, *results: SurfaceOutput | Exception):
+        self.results = list(results)
+        self.inputs: list[SurfaceInput] = []
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        self.inputs.append(surface_input)
+        result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+@dataclass
+class Harness:
+    root: Path
+    monotonic: FakeMonotonic
+    loop: SurfaceLoop
+    sender: FakeSender
+    deep_sink: FakeDeepSink
+    buffer: FrameBuffer
+    store: FrameStore
+    stops: list[str] = field(default_factory=list)
+    bridge: dict[str, str] = field(default_factory=lambda: {"state": "ok"})
+
+
+def make_run(tmp_path: Path) -> Path:
+    """共通の文書と助言だけを持つ実行ディレクトリーを作る (パッケージのコードは使わない)。"""
+    root = tmp_path / "run"
+    (root / "frames" / "interval").mkdir(parents=True)
+    (root / "frames" / "surface").mkdir()
+    (root / "middle").mkdir()
+    (root / "notes" / "common").mkdir(parents=True)
+    (root / "notes" / "common" / "controls.md").write_text(
+        COMMON_CONTROLS, encoding="utf-8"
+    )
+    (root / "notes" / "common" / "tips.md").write_text(COMMON_TIPS, encoding="utf-8")
+    (root / "notes" / "advice.md").write_text(ADVICE, encoding="utf-8")
+    return root
+
+
+def make_harness(
+    tmp_path: Path,
+    decider: ScriptedDecider,
+    max_errors: int = 5,
+    allowed: frozenset[str] = ALLOWED_WITHOUT_HOME,
+) -> Harness:
+    """surface のループと偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = NOW にしておく。"""
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + NOW)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    buffer = FrameBuffer()
+    store = FrameStore(paths, interval_fps=5.0, interval_width=64, start_thread=False)
+    sender = FakeSender()
+    output = PadOutput(sender, allowed, clock=monotonic, start_timer=False)
+    deep_sink = FakeDeepSink()
+    stops: list[str] = []
+    bridge = {"state": "ok"}
+    parts = SurfaceLoopParts(
+        paths=paths,
+        decider=decider,
+        frame_buffer=buffer,
+        frame_store=store,
+        pad_output=output,
+        deep_requests=deep_sink,
+        run_log=RunLog(paths.run_log, clock),
+        clock=clock,
+        bridge_state=lambda: bridge["state"],
+        on_stop=stops.append,
+    )
+    loop = SurfaceLoop(
+        parts, SurfaceLoopSettings(max_errors=max_errors, image_width=320)
+    )
+    return Harness(
+        root, monotonic, loop, sender, deep_sink, buffer, store, stops, bridge
+    )
+
+
+def add_frames(harness: Harness, times: list[float]) -> None:
+    for t in times:
+        nv12 = np.full((54, 64), 128, np.uint8)
+        harness.buffer.add(CapturedFrame(t=t, nv12=nv12))
+
+
+def read_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def write_state(root: Path, **values: object) -> None:
+    state = {
+        "generated_t": 8.5,
+        "based_on_t": 8.0,
+        "scene_id": None,
+        "scene_name": None,
+        "is_stuck": False,
+        "stuck_description": "",
+        "surface_wait_s": 0.2,
+        "timeline": "",
+        **values,
+    }
+    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def neutral_output() -> SurfaceOutput:
+    return SurfaceOutput(action=NEUTRAL_ACTION)
+
+
+def test_constants_follow_the_issue():
+    assert NO_FRAME_RETRY_S == 0.2
+    assert DECIDE_ERROR_WAIT_S == 1.0
+    assert BRIDGE_WAIT_S == 0.2
+
+
+# --- フレームが無いとき ---
+
+
+def test_no_frames_sends_no_request(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.NO_FRAMES
+    assert result.wait_s == NO_FRAME_RETRY_S
+    assert result.row is None
+    assert decider.inputs == []
+    assert read_rows(harness.root / "surface.jsonl") == []
+
+
+def test_only_stale_frames_send_no_request(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [7.0, 7.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.NO_FRAMES
+    assert decider.inputs == []
+
+
+# --- 1 回の要求の流れ ---
+
+
+def test_successful_step_sends_filtered_action_and_writes_row(tmp_path):
+    output = SurfaceOutput(
+        action=PadAction(held=frozenset({"A"}), taps=frozenset({"HOME"}))
+    )
+    decider = ScriptedDecider(output)
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [round(8.0 + i * 0.1, 3) for i in range(21)])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    # middle/state.json が無いので 0.2 秒待つ
+    assert result.wait_s == 0.2
+
+    surface_input = decider.inputs[0]
+    assert surface_input.t == NOW
+    assert [frame.t for frame in surface_input.frames] == [8.0, 8.5, 9.0, 9.5, 10.0]
+    assert surface_input.frames[-1].label == "t=10.000"
+    assert all(frame.jpeg.startswith(b"\xff\xd8") for frame in surface_input.frames)
+    assert surface_input.documents.controls == COMMON_CONTROLS
+    assert surface_input.documents.uses_common_controls is True
+    assert surface_input.timeline == ""
+    assert surface_input.timeline_generated_t is None
+    assert surface_input.recent_actions == ()
+
+    # HOME は送る直前に外す
+    report = harness.sender.reports[-1]
+    assert report[0] & A_BIT
+    assert report[1] & HOME_BIT == 0
+
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert rows == [result.row]
+    row = rows[0]
+    assert row["t_sent"] == NOW
+    assert row["t_received"] == NOW
+    assert [frame["t"] for frame in row["frames"]] == [8.0, 8.5, 9.0, 9.5, 10.0]
+    assert row["frames"][-1]["file"] == "frames/surface/000010000.jpg"
+    assert row["scene_id"] is None
+    assert row["uses_common"] == {"controls": True, "tips": True}
+    assert row["middle_generated_t"] is None
+    assert row["action"]["held"] == ["A"]
+    assert row["action"]["taps"] == []
+    assert row["blocked_buttons"] == ["HOME"]
+    assert row["deep_requests"] == []
+    assert row["scene_changed"] is False
+    assert row["wait_s"] == 0.2
+    assert row["error"] is None
+
+
+def test_home_is_sent_with_allow_home(tmp_path):
+    decider = ScriptedDecider(SurfaceOutput(action=PadAction(held=frozenset({"HOME"}))))
+    harness = make_harness(tmp_path, decider, allowed=frozenset(BUTTON_ORDER))
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert harness.sender.reports[-1][1] & HOME_BIT
+    assert result.row is not None
+    assert result.row["blocked_buttons"] == []
+
+
+def test_sent_images_are_saved_once_per_frame(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.0, 9.5])
+    harness.loop.step()
+    harness.monotonic.now = ORIGIN + NOW + 0.2
+    add_frames(harness, [10.1])
+    harness.loop.step()
+    harness.store.write_queued()
+    saved = sorted(p.name for p in (harness.root / "frames" / "surface").iterdir())
+    assert saved == ["000009000.jpg", "000009500.jpg", "000010100.jpg"]
+    frame_rows = read_rows(harness.root / "frames.jsonl")
+    assert sorted(row["t"] for row in frame_rows if row["kind"] == "surface") == [
+        9.0,
+        9.5,
+        10.1,
+    ]
+
+
+def test_scene_documents_timeline_and_wait_come_from_middle_state(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    write_state(
+        harness.root,
+        scene_id="scene-001",
+        scene_name="町",
+        surface_wait_s=1.5,
+        timeline="## 直近\n町",
+        generated_t=8.5,
+    )
+    scene_dir = harness.root / "notes" / "scenes" / "scene-001"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "controls.md").write_text("# 町の操作\n", encoding="utf-8")
+    (scene_dir / "tasks.md").write_text("- 宿屋に入る\n", encoding="utf-8")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.wait_s == 1.5
+    surface_input = decider.inputs[0]
+    assert surface_input.timeline == "## 直近\n町"
+    assert surface_input.timeline_generated_t == 8.5
+    assert surface_input.documents.scene_id == "scene-001"
+    assert surface_input.documents.controls == "# 町の操作\n"
+    assert surface_input.documents.tasks == "- 宿屋に入る\n"
+    assert surface_input.documents.tips == COMMON_TIPS
+    assert result.row is not None
+    assert result.row["scene_id"] == "scene-001"
+    assert result.row["uses_common"] == {"controls": False, "tips": True}
+    assert result.row["middle_generated_t"] == 8.5
+    assert result.row["wait_s"] == 1.5
+
+
+def test_wait_out_of_range_is_clamped(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    write_state(harness.root, surface_wait_s=5.0)
+    add_frames(harness, [9.9])
+    assert harness.loop.step().wait_s == 2.0
+
+
+def test_broken_middle_state_waits_default(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    (harness.root / "middle" / "state.json").write_text("{broken", encoding="utf-8")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert result.wait_s == 0.2
+
+
+def test_deep_requests_are_passed_to_scheduler_in_kind_order(tmp_path):
+    output = SurfaceOutput(
+        action=NEUTRAL_ACTION,
+        deep_kinds=frozenset({DocumentKind.STRATEGY, DocumentKind.TIPS}),
+        scene_changed=True,
+    )
+    decider = ScriptedDecider(output)
+    harness = make_harness(tmp_path, decider)
+    write_state(harness.root, scene_id="scene-002")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert harness.deep_sink.requests == [
+        (DocumentKind.TIPS, DeepTrigger.SURFACE, "scene-002"),
+        (DocumentKind.STRATEGY, DeepTrigger.SURFACE, "scene-002"),
+    ]
+    assert result.row is not None
+    assert result.row["deep_requests"] == ["tips", "strategy"]
+    assert result.row["scene_changed"] is True
+
+
+def test_recent_actions_are_passed_to_next_request(tmp_path):
+    first = SurfaceOutput(action=PadAction(held=frozenset({"B", "HOME"})))
+    decider = ScriptedDecider(first, neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    harness.monotonic.now = ORIGIN + NOW + 0.3
+    add_frames(harness, [10.2])
+    harness.loop.step()
+    recent = decider.inputs[1].recent_actions
+    assert len(recent) == 1
+    assert recent[0].t == NOW
+    # 記録するのは制限に通した後の操作
+    assert recent[0].action == PadAction(held=frozenset({"B"}))
+
+
+def test_send_failure_is_recorded_without_counting_as_decide_error(tmp_path):
+    decider = ScriptedDecider(SurfaceOutput(action=PadAction(held=frozenset({"A"}))))
+    harness = make_harness(tmp_path, decider)
+    harness.sender.fail_with = RuntimeError("bridge is reconnecting")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert harness.loop.consecutive_errors == 0
+    assert result.row is not None
+    assert "reconnecting" in result.row["error"]
+    # 送れなかったときも、制限に通した後の操作を記録する
+    assert result.row["action"]["held"] == ["A"]
+
+
+def test_conflicting_directions_are_removed_without_counting_as_error(tmp_path):
+    output = SurfaceOutput(
+        action=PadAction(held=frozenset({"UP", "DOWN", "A", "HOME"}))
+    )
+    decider = ScriptedDecider(output)
+    harness = make_harness(tmp_path, decider, max_errors=1)
+    add_frames(harness, [9.9])
+    for _ in range(3):
+        result = harness.loop.step()
+        assert result.outcome is SurfaceStepOutcome.SENT
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    assert result.row is not None
+    assert result.row["error"] is None
+    # 相反する方向は両方とも外して送り、blocked_buttons には制限で外したボタンだけを書く
+    assert result.row["action"]["held"] == ["A"]
+    assert result.row["blocked_buttons"] == ["HOME"]
+    assert harness.sender.reports[-1][2] == 15  # 十字キーを押していない hat の値
+
+
+# --- decide の失敗 ---
+
+
+def test_decide_error_neutralizes_and_waits_one_second(tmp_path):
+    decider = ScriptedDecider(RuntimeError("model failed"))
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.DECIDE_ERROR
+    assert result.wait_s == DECIDE_ERROR_WAIT_S
+    assert harness.sender.reports[-1] == NEUTRAL_REPORT
+    assert harness.loop.consecutive_errors == 1
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert len(rows) == 1
+    assert rows[0]["action"] is None
+    assert "model failed" in rows[0]["error"]
+    assert rows[0]["wait_s"] == DECIDE_ERROR_WAIT_S
+    run_rows = read_rows(harness.root / "run.jsonl")
+    assert [row["event"] for row in run_rows] == ["surface_error"]
+    assert run_rows[0]["count"] == 1
+    assert "model failed" in run_rows[0]["error"]
+    assert harness.stops == []
+
+
+def test_consecutive_decide_errors_stop_everything(tmp_path):
+    decider = ScriptedDecider(RuntimeError("model failed"))
+    harness = make_harness(tmp_path, decider, max_errors=5)
+    add_frames(harness, [9.9])
+    for _ in range(4):
+        harness.loop.step()
+    assert harness.stops == []
+    harness.loop.step()
+    assert harness.stops == [surface_failure_reason(5)]
+    assert surface_failure_reason(5) == "surface failed 5 times in a row"
+
+
+def test_success_resets_consecutive_errors(tmp_path):
+    error = RuntimeError("model failed")
+    decider = ScriptedDecider(
+        error, error, neutral_output(), error, error, error, error
+    )
+    harness = make_harness(tmp_path, decider, max_errors=5)
+    add_frames(harness, [9.9])
+    for _ in range(3):
+        harness.loop.step()
+    assert harness.loop.consecutive_errors == 0
+    for _ in range(4):
+        harness.loop.step()
+    assert harness.loop.consecutive_errors == 4
+    assert harness.stops == []
+
+
+# --- ブリッジの復旧中 ---
+
+
+def test_bridge_recovering_sends_no_request_and_neutralizes_once(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.bridge["state"] = "recovering"
+    first = harness.loop.step()
+    second = harness.loop.step()
+    assert first.outcome is SurfaceStepOutcome.BRIDGE_NOT_READY
+    assert first.wait_s == BRIDGE_WAIT_S
+    assert second.outcome is SurfaceStepOutcome.BRIDGE_NOT_READY
+    assert decider.inputs == []
+    assert harness.sender.reports == [NEUTRAL_REPORT]
+    assert read_rows(harness.root / "surface.jsonl") == []
+    # 復旧したら要求を再開する
+    harness.bridge["state"] = "ok"
+    assert harness.loop.step().outcome is SurfaceStepOutcome.SENT
+    assert len(decider.inputs) == 1

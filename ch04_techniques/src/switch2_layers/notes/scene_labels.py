@@ -1,0 +1,72 @@
+"""場面ラベルの一覧 notes/scene_labels.json の読み書きと、名前から場面 ID を引く・無ければ足す処理。
+
+形式: {"scenes": [{"id": "scene-001", "name": 場面名, "first_seen_t": 秒}]}
+ID は `scene-` と 3 桁の連番 (1000 番目からは 4 桁)。一覧に足すのは middle のスレッド (と middle-once) だけ。
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+SCENE_ID_PREFIX = "scene-"
+
+
+@dataclass(frozen=True)
+class SceneLabel:
+    """場面ラベル 1 件。
+
+    id             場面 ID (scene-001 の形)
+    name           場面名
+    first_seen_t   初めてその場面に名前を付けた middle の入力の時刻 (実行の経過秒)
+    """
+
+    id: str
+    name: str
+    first_seen_t: float
+
+
+def read_scene_labels(path: Path) -> list[SceneLabel]:
+    """path の一覧を読み、書かれた順の SceneLabel のリストを返す。
+
+    ファイルが無い・読めない・JSON として壊れている・"scenes" がリストでないときは空のリストを返す。
+    要素のうち、id が場面 ID の形の文字列、name が文字列、first_seen_t が数 (bool を除く) でないものは読み飛ばす。
+    """
+    raise NotImplementedError
+
+
+def scene_labels_to_json(labels: Sequence[SceneLabel]) -> dict[str, object]:
+    """一覧を {"scenes": [{"id", "name", "first_seen_t"}, ...]} の形にする (並びは labels の順)。"""
+    raise NotImplementedError
+
+
+def write_scene_labels(path: Path, labels: Sequence[SceneLabel]) -> None:
+    """scene_labels_to_json(labels) を path に置き換えて書く (file_io.write_json_atomic)。"""
+    raise NotImplementedError
+
+
+def normalize_scene_name(name: str) -> str:
+    """場面名の比較と記録に使う形 (前後の空白を除いたもの) を返す。"""
+    raise NotImplementedError
+
+
+def find_scene_id(labels: Sequence[SceneLabel], name: str) -> str | None:
+    """normalize_scene_name で比べて name と同じ名前の場面の ID を返す。無ければ None。"""
+    raise NotImplementedError
+
+
+def next_scene_id(labels: Sequence[SceneLabel]) -> str:
+    """次の場面 ID を返す。一覧の ID の番号の最大 + 1 を 3 桁 (足りなければ 0 で埋める) で書く。一覧が空なら scene-001。"""
+    raise NotImplementedError
+
+
+def find_or_add_scene(
+    path: Path, name: str, first_seen_t: float
+) -> tuple[SceneLabel, bool]:
+    """path の一覧から name の場面を引く。無ければ足して書く。(場面ラベル, 足したら True) を返す。
+
+    - 一覧にあれば、その SceneLabel と False を返す (ファイルは変えない)
+    - 無ければ SceneLabel(next_scene_id(一覧), normalize_scene_name(name), first_seen_t) を末尾に足して
+      write_scene_labels で書き、それと True を返す
+    name が空か空白だけなら ValueError にする (ファイルは変えない)。
+    """
+    raise NotImplementedError
