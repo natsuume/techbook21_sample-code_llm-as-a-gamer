@@ -56,8 +56,8 @@ class BoxDrawingPlan:
     hidden_on_latest: frozenset[str] = frozenset()
 
 
-# 画像に書き込んだ box の内容 (対象の名前と座標の組の並び)。frames/surface/ の保存の重複を除くキーに使う
-DrawnBoxesKey = tuple[tuple[str, float, float, float, float], ...]
+# 画像に書き込んだ box の内容 (対象の名前・色を決める番号・座標の組の並び)。frames/surface/ の保存の重複を除くキーに使う
+DrawnBoxesKey = tuple[tuple[str, int, float, float, float, float], ...]
 
 
 def pick_evenly[Item](items: Sequence[Item], max_count: int) -> list[Item]:
@@ -167,13 +167,19 @@ def select_boxes_to_draw(
     )
 
 
-def drawn_boxes_key(boxes: Sequence[Box]) -> DrawnBoxesKey:
-    """画像に書き込んだ box の内容 (名前と座標 x_min・y_min・x_max・y_max の組を boxes の順に並べたもの) を返す。
+def drawn_boxes_key(
+    boxes: Sequence[Box], target_numbers: Mapping[str, int] | None = None
+) -> DrawnBoxesKey:
+    """draw_boxes(bgr, boxes, target_numbers) が画像に書き込む box の内容を返す。
 
-    確信度と出どころは画像に書かないため含めない。box を書き込まなければ空のタプル。
+    内容は、書き込む box ごとの (名前, 色を決める番号, x_min, y_min, x_max, y_max) を boxes の順に並べたもの。
+    番号と、書き込む box の選び方は draw_boxes と同じ (target_numbers[名前]。target_numbers に無い名前の box は
+    含めない。target_numbers が None なら boxes の中の位置 (1 始まり))。同じ名前と座標でも、番号 (枠の色) が違えば
+    違う内容になる。確信度と出どころは画像に書かないため含めない。box を書き込まなければ空のタプル。
     """
     return tuple(
-        (box.label, box.x_min, box.y_min, box.x_max, box.y_max) for box in boxes
+        (box.label, number, box.x_min, box.y_min, box.x_max, box.y_max)
+        for box, number in _numbered_boxes(boxes, target_numbers)
     )
 
 

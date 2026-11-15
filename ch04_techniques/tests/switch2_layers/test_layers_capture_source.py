@@ -2,6 +2,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 from switch2_remote.frame_buffer import LatestFrame
 
 from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
@@ -112,6 +113,63 @@ def test_poll_once_passes_new_frames_to_buffer_store_and_callback(tmp_path):
     # 一定間隔の保存にも渡している
     assert store.write_queued() == 1
     assert (root / "frames" / "interval" / "000001235.jpg").is_file()
+
+
+def test_on_frame_is_called_before_the_frame_reaches_the_buffer(tmp_path):
+    root = make_run(tmp_path)
+    reader = FakeReader()
+    clock = RunClock(FakeMonotonic(ORIGIN))
+    buffer = FrameBuffer()
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    seen_in_buffer: list[list[float]] = []
+    seen_latest_t: list[float | None] = []
+    source: CaptureSource | None = None
+
+    def on_frame(frame: CapturedFrame) -> None:
+        # 追跡の更新の間、まだ surface からはこのフレームが見えない
+        seen_in_buffer.append([item.t for item in buffer.frames()])
+        assert source is not None
+        seen_latest_t.append(source.latest_t())
+
+    source = CaptureSource(
+        reader, clock, buffer, store, on_frame=on_frame, start_thread=False
+    )
+    reader.latest = LatestCapture(monotonic_time=ORIGIN + 1.0, nv12=nv12())
+    source.poll_once()
+    reader.latest = LatestCapture(monotonic_time=ORIGIN + 1.1, nv12=nv12())
+    source.poll_once()
+    assert seen_in_buffer == [[], [1.0]]
+    assert seen_latest_t == [None, 1.0]
+    # on_frame の後にはフレームを渡している
+    assert [item.t for item in buffer.frames()] == [1.0, 1.1]
+    assert source.latest_t() == 1.1
+    assert store.write_queued() == 1
+
+
+def test_frame_reaches_the_buffer_even_when_on_frame_fails(tmp_path):
+    root = make_run(tmp_path)
+    reader = FakeReader()
+    clock = RunClock(FakeMonotonic(ORIGIN))
+    buffer = FrameBuffer()
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+
+    def broken_on_frame(frame: CapturedFrame) -> None:
+        raise RuntimeError("tracking failed")
+
+    source = CaptureSource(
+        reader, clock, buffer, store, on_frame=broken_on_frame, start_thread=False
+    )
+    reader.latest = LatestCapture(monotonic_time=ORIGIN + 2.0, nv12=nv12())
+    # on_frame の例外は外に出す (ポーリングのスレッドが警告を書く)。フレームは渡してある
+    with pytest.raises(RuntimeError, match="tracking failed"):
+        source.poll_once()
+    assert [item.t for item in buffer.frames()] == [2.0]
+    assert source.latest_t() == 2.0
+    assert store.write_queued() == 1
 
 
 def test_poll_once_ignores_the_same_frame(tmp_path):

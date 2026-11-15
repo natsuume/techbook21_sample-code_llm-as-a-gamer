@@ -21,8 +21,9 @@ recent_actions と frames は古い順。画像 (SurfaceInput.frames の JPEG) �
     5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)
     6. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
        Jev の box を出す (出どころ jev)。Jev の box が使えない (座標か確信度が 0〜1 の外、幅か高さが 0 以下で
-       None) なら、追跡をやめ、box を出さない。ほかの対象は、要求の最新のフレームで追跡が見えていれば、その位置を
-       出す (出どころ tracker)
+       None) なら、追跡をやめ、box を出さない。ほかの対象は、要求の最新のフレームの位置があれば出す (送る画像に描く
+       box と同じ BoxTrackingState.boxes_at の規則。そのフレームで Jev の box から追跡を始め直していればその Jev の
+       box で出どころ jev、そうでなければ追跡の位置で出どころ tracker)
 ask の例外 (JevError など) はそのまま外に出す (surface のループが surface の失敗として数える)。
 
 送る画像への box の書き込み (plan_boxes):
@@ -267,10 +268,12 @@ class JevSurfaceDecider:
         notes_dir がまだ無ければ (use_run_directory の前)、Jev を呼ばずに RuntimeError。
         box を問う画像と、出力の boxes が指すフレームは、要求の最新のフレーム (surface_input.frames の最後)。
         出力の boxes は対象の一覧の順で、Box の label は対象の名前。
-        - 出どころ jev: 座標は Jev の box (x_min = left、y_min = top、x_max = right、y_max = bottom)、
-          confidence は Jev の確信度 (null なら None)
-        - 出どころ tracker: 座標は BoxTrackingState.result_at(名前, 最新のフレームの t) の位置、
-          confidence は min(max(score, 0.0), 1.0)。その位置が無いか見失っていれば出さない
+        - 問い直した対象 (出どころ jev): 座標は Jev の box (x_min = left、y_min = top、x_max = right、
+          y_max = bottom)、confidence は Jev の確信度 (null なら None)
+        - 問い直さない対象: BoxTrackingState.boxes_at(最新のフレームの t) のその対象の box (送る画像に描く box と
+          同じ規則)。そのフレームで Jev の box から追跡を始め直していれば、その Jev の box (出どころ jev、
+          confidence None)。そうでなければ追跡の位置 (出どころ tracker、confidence は min(max(score, 0.0), 1.0))。
+          その位置が無いか見失っていれば出さない
         Jev の box で追跡を始められなかったとき (問い合わせたフレームを捨てた後など) も、Jev の box は出す
         (その対象は追跡していないため、次の要求で問い直す)。Jev の box が None (使える box が無い) の対象は、
         存在の確率に依らず追跡をやめ (BoxTrackingState.forget)、box を出さない (次の要求で問い直す)。
@@ -340,6 +343,7 @@ class JevSurfaceDecider:
         """答えと追跡から、要求の最新のフレーム (時刻 latest_t) の box を対象の一覧の順で返す (decide の流れの 6)。"""
         visible = visible_target_names(answers.nouls, planned.targets)
         requery = set(planned.requery_names)
+        tracked_boxes = {box.label: box for box in self.tracking.boxes_at(latest_t)}
         boxes: list[Box] = []
         for number, target in enumerate(planned.targets, start=1):
             name = target.name
@@ -375,18 +379,8 @@ class JevSurfaceDecider:
             if name not in visible:
                 self.tracking.forget(name)
                 continue
-            result = self.tracking.result_at(name, latest_t)
-            if result is None or not result.found:
-                continue
-            boxes.append(
-                Box(
-                    label=name,
-                    x_min=result.box.left,
-                    y_min=result.box.top,
-                    x_max=result.box.right,
-                    y_max=result.box.bottom,
-                    confidence=min(max(result.score, 0.0), 1.0),
-                    source=BoxSource.TRACKER,
-                )
-            )
+            # 送る画像に描く box と同じ規則 (BoxTrackingState.boxes_at) で、最新のフレームの位置を求める
+            tracked = tracked_boxes.get(name)
+            if tracked is not None:
+                boxes.append(tracked)
         return tuple(boxes)

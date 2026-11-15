@@ -290,12 +290,31 @@ def test_boxes_of_targets_outside_the_list_are_not_drawn():
     )
 
 
-def test_drawn_boxes_key_is_names_and_coordinates():
+def test_drawn_boxes_key_is_names_color_numbers_and_coordinates():
     assert drawn_boxes_key([]) == ()
+    assert drawn_boxes_key([], {"自機": 1}) == ()
+    # 番号は draw_boxes と同じ: 対応が無ければ並びの位置、あれば一覧の中の番号
     assert drawn_boxes_key([PLAYER, ENEMY]) == (
-        ("自機", 0.1, 0.1, 0.2, 0.2),
-        ("敵", 0.5, 0.5, 0.6, 0.6),
+        ("自機", 1, 0.1, 0.1, 0.2, 0.2),
+        ("敵", 2, 0.5, 0.5, 0.6, 0.6),
+    )
+    assert drawn_boxes_key([PLAYER, ENEMY], {"自機": 3, "敵": 1}) == (
+        ("自機", 3, 0.1, 0.1, 0.2, 0.2),
+        ("敵", 1, 0.5, 0.5, 0.6, 0.6),
     )
     # 確信度と出どころは画像に書かないので、キーに入れない
     same_place = Box("自機", 0.1, 0.1, 0.2, 0.2, None, BoxSource.JEV)
     assert drawn_boxes_key([same_place]) == drawn_boxes_key([PLAYER])
+
+
+def test_drawn_boxes_key_differs_when_only_the_color_number_differs():
+    first = drawn_boxes_key([PLAYER], {"自機": 1, "敵": 2})
+    reordered = drawn_boxes_key([PLAYER], {"敵": 1, "自機": 2})
+    assert first != reordered
+
+
+def test_drawn_boxes_key_skips_boxes_that_are_not_drawn():
+    # 番号の無い名前の box は draw_boxes が書き込まないので、キーにも入れない
+    assert drawn_boxes_key([PLAYER, DOOR], {"自機": 1}) == (
+        ("自機", 1, 0.1, 0.1, 0.2, 0.2),
+    )

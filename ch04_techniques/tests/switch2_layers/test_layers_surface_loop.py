@@ -891,6 +891,31 @@ def test_same_t_with_different_boxes_is_saved_to_another_file(tmp_path):
     assert first_sent != second_sent
 
 
+def test_same_boxes_with_different_colors_are_saved_to_another_file(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    # 対象の一覧の並びが変わり、同じ名前と座標の box の色の番号だけが変わる
+    plan = RecordingPlan(
+        BoxDrawingPlan({"自機": 1, "敵": 2}), BoxDrawingPlan({"自機": 2, "敵": 1})
+    )
+    with_plan(harness, plan)
+    add_frames(harness, [10.0])
+    harness.loop.step()
+    harness.loop.step()
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert [row["frames"][0]["file"] for row in rows] == [
+        "frames/surface/000010000.jpg",
+        "frames/surface/000010000-2.jpg",
+    ]
+    harness.store.write_queued()
+    surface_dir = harness.root / "frames" / "surface"
+    first_sent = decider.inputs[0].frames[0].jpeg
+    second_sent = decider.inputs[1].frames[0].jpeg
+    assert first_sent != second_sent
+    assert (surface_dir / "000010000.jpg").read_bytes() == first_sent
+    assert (surface_dir / "000010000-2.jpg").read_bytes() == second_sent
+
+
 def test_plan_error_draws_no_boxes_without_counting_as_failure(tmp_path):
     decider = ScriptedDecider(neutral_output())
     harness = make_harness(tmp_path, decider)

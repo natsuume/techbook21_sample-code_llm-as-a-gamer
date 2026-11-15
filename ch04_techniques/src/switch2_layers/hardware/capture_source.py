@@ -81,7 +81,8 @@ class CaptureSource:
     clock           フレームの時刻 (monotonic) を t に直す時計 (RunClock.t_of)
     frame_buffer    surface 用に直近のフレームを持つバッファー
     frame_store     一定間隔の保存 (FrameStore.offer_interval)
-    on_frame        新しいフレームを渡し終えた後に、そのフレームを受け取る関数。None (既定) なら呼ばない
+    on_frame        新しいフレームを frame_buffer と frame_store に渡す前に、そのフレームを受け取る関数 (box の追跡)。
+                    None (既定) なら呼ばない
     poll_interval_s ポーリングの間隔 (秒)
     start_thread    True (既定) なら poll_interval_s ごとに poll_once を呼ぶスレッド (daemon) を起動する。
                     False ならテストから poll_once を直接呼ぶ
@@ -118,8 +119,11 @@ class CaptureSource:
     def poll_once(self) -> CapturedFrame | None:
         """reader.read_latest() を 1 回読み、前回渡したフレームより monotonic_time が新しければ渡す。
 
-        新しいフレームは CapturedFrame(t=clock.t_of(monotonic_time), nv12) にし、frame_buffer.add →
-        frame_store.offer_interval → on_frame の順に渡して、その CapturedFrame を返す。
+        新しいフレームは CapturedFrame(t=clock.t_of(monotonic_time), nv12) にし、on_frame → frame_buffer.add →
+        frame_store.offer_interval の順に渡して (latest_t もこのフレームの t にして)、その CapturedFrame を返す。
+        on_frame (box の追跡の更新) を先に済ませるのは、surface が frame_buffer からこのフレームを選んで画像を作る
+        ときに、その t の追跡の位置があるようにするため。on_frame が例外を出しても、frame_buffer と frame_store には
+        渡し、latest_t も更新してから、その例外を外に出す (ポーリングのスレッドが警告を書く)。
         新しいフレームが無ければ (まだ無い・同じ時刻のまま) 何もせず None を返す。
         t が負のフレーム (実行の起点より前にキャプチャーが残したフレーム) は捨てる: frame_buffer・frame_store・
         on_frame に渡さず、latest_t も変えずに None を返す (同じフレームを次の呼び出しで読み直しても捨てる)。
@@ -140,12 +144,15 @@ class CaptureSource:
         )
         if frame.t < 0:
             return None
-        self.frame_buffer.add(frame)
-        self.frame_store.offer_interval(frame)
-        with self._lock:
-            self._latest_t = frame.t
-        if self.on_frame is not None:
-            self.on_frame(frame)
+        try:
+            if self.on_frame is not None:
+                self.on_frame(frame)
+        finally:
+            # on_frame が例外を出しても、フレームは渡す
+            self.frame_buffer.add(frame)
+            self.frame_store.offer_interval(frame)
+            with self._lock:
+                self._latest_t = frame.t
         return frame
 
     def latest_t(self) -> float | None:

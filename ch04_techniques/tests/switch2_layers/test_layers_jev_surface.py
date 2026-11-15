@@ -543,6 +543,23 @@ def test_failed_request_does_not_count_as_requery(tmp_path):
     assert len(names_of(asker.questions_of(1), QuestionKind.BOX)) == 4
 
 
+def test_box_at_frame_where_tracking_restarted_follows_drawn_box(tmp_path):
+    asker = FakeAsker(all_visible())
+    decider, tracking = make_decider(tmp_path, asker)
+    feed(tracking, FRAME_TIMES)
+    decider.decide(surface_input())
+    # 新しいフレームが届かず、次の要求の最新のフレームも t = 10.0 (前の要求で Jev の box から追跡を始め直したフレーム)
+    second = decider.decide(surface_input(request_t=10.3))
+    assert names_of(asker.questions_of(1), QuestionKind.BOX) == []
+    # 出力の box は、送る画像に描く box (boxes_at) と同じ: そのフレームの Jev の box
+    expected = tuple(
+        Box(target.name, 0.1, 0.2, 0.3, 0.4, None, BoxSource.JEV)
+        for target in DEFAULT_BOX_TARGETS
+    )
+    assert second.boxes == expected
+    assert tracking.boxes_at(10.0) == expected
+
+
 # --- 送る画像への書き込み方 (plan_boxes) ---
 
 

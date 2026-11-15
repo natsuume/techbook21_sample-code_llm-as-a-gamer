@@ -204,7 +204,7 @@ class SurfaceLoop:
            選んだフレームごとに、boxes_at(frame.t) (boxes_at が None なら空) から
            frames.surface_frames.select_boxes_to_draw(boxes, plan, 最新のフレームか) で書き込む box を選び、
            build_surface_image(frame, image_width, jpeg_quality, その box, plan.target_numbers (plan が None なら None))
-           で JPEG にする。frame_store.save_surface(t, 画像, drawn_boxes_key(その box)) で保存して、
+           で JPEG にする。frame_store.save_surface(t, 画像, drawn_boxes_key(その box, 同じ target_numbers)) で保存して、
            SurfaceFrame(t, jpeg, format_frame_label(t)) にする。boxes_at が例外 (Exception) を出したら、logging で
            警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。保存する画像と送る画像は同じもの
         5. t_sent = clock.now() で SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t,
@@ -351,7 +351,7 @@ class SurfaceLoop:
                 target_numbers,
             )
             file = self.parts.frame_store.save_surface(
-                frame.t, image, drawn_boxes_key(boxes)
+                frame.t, image, drawn_boxes_key(boxes, target_numbers)
             )
             frames.append(
                 SurfaceFrame(frame.t, image.jpeg, format_frame_label(frame.t))
