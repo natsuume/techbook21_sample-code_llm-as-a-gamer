@@ -74,10 +74,11 @@ def advance_interval_schedule(
     period = 1 / interval_fps として:
         - next_due_t が None (最初のフレーム): 対象。次の予定時刻は t + period
         - t < next_due_t - INTERVAL_TIME_TOLERANCE_S (予定時刻の前): 対象でない。次の予定時刻は next_due_t のまま
-        - 予定時刻に達していて、遅れ (t - next_due_t) が period 未満: 対象。次の予定時刻は next_due_t + period
-          (保存したフレームの t からではなく、前回の予定時刻から進める)
-        - 遅れが period 以上 (フレームが途切れて 1 周期以上遅れた): 対象。次の予定時刻は t + period に置き直す
-          (途切れた分をまとめて何枚も保存しない)
+        - 予定時刻に達していて、遅れ (t - next_due_t) が 2 * period 未満: 対象。次の予定時刻は next_due_t + period
+          (保存したフレームの t からではなく、前回の予定時刻から進める。フレームの到着時刻のゆらぎで予定時刻の
+          直前のフレームを逃しても、次のフレームを 1 周期分の遅れで保存し、予定時刻は置き直さない)
+        - 遅れが 2 * period 以上 (フレームが途切れて予定時刻を 1 回以上丸ごと逃した): 対象。次の予定時刻は
+          t + period に置き直す (途切れた分を後のフレームで取り戻そうとして、続けて保存しない)
     """
     raise NotImplementedError
 

@@ -1,4 +1,5 @@
 import json
+import random
 from pathlib import Path
 
 import cv2
@@ -95,6 +96,26 @@ def test_saved_rate_matches_interval_fps(interval_fps):
     saved = saved_times(times, interval_fps)
     assert abs(len(saved) - DURATION_S * interval_fps) <= 1
     assert saved[0] == 0.0
+
+
+@pytest.mark.parametrize("interval_fps", [5, 9, 10])
+def test_saved_rate_matches_interval_fps_with_arrival_jitter(interval_fps):
+    # キャプチャーの時刻は受信した時刻なので、0.1 秒の格子から前後に最大 10 ミリ秒ずれる
+    jitter = random.Random(0)
+    times = [
+        round(i / CAPTURE_FPS + jitter.uniform(-0.01, 0.01), 3)
+        for i in range(1, DURATION_S * CAPTURE_FPS + 1)
+    ]
+    saved = saved_times(times, interval_fps)
+    assert abs(len(saved) - DURATION_S * interval_fps) <= 2
+
+
+def test_frame_just_before_due_time_is_followed_by_next_frame_without_reset():
+    # 予定時刻 1.0 の直前 (0.995) のフレームを逃しても、次の 1.098 を保存し、次の予定時刻は 1.1 のまま進む
+    assert advance_interval_schedule(1.0, 0.995, 10.0) == (False, 1.0)
+    due, next_due = advance_interval_schedule(1.0, 1.098, 10.0)
+    assert due is True
+    assert next_due == pytest.approx(1.1)
 
 
 def test_no_burst_after_frames_stop_and_resume():
