@@ -67,17 +67,28 @@ def is_json_scalar(value: object) -> bool:
     return not isinstance(value, list | dict)
 
 
-def read_complete_lines(path: Path, offset: int = 0) -> LineChunk:
+def read_complete_lines(
+    path: Path, offset: int = 0, end: int | None = None
+) -> LineChunk:
     """path をバイナリで開き、バイトの位置 offset から最後の \\n までにある行を読む。
 
     最後の \\n より後 (改行で終わっていない行) は読まず、next_offset はその手前 (最後の \\n の次のバイト) にする。
     offset から後に \\n が無ければ、lines は空のリスト、next_offset は offset。
     各行は末尾の \\n を除き、さらにその直前に \\r があれば除く (\\r\\n の行も読める)。空の行もそのまま入れる。
-    ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す。
+    end は読む範囲の終わりのバイトの位置:
+        - None なら、offset からファイルの終わりまでを読む
+        - 数なら、位置 end の手前まで (offset から end - offset バイト) を読み、その中の最後の \\n までの行を返す。
+          end が行の途中なら、その行は含めない (next_offset は、その範囲の最後の \\n の次のバイト)
+        - end <= offset なら、読まずに LineChunk(lines=[], next_offset=offset) を返す
+        - end がファイルの大きさより大きければ、None と同じ
+    ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す (end <= offset のときは
+    ファイルを開かない)。
     """
+    if end is not None and end <= offset:
+        return LineChunk(lines=[], next_offset=offset)
     with path.open("rb") as file:
         file.seek(offset)
-        data = file.read()
+        data = file.read() if end is None else file.read(end - offset)
     last_newline = data.rfind(b"\n")
     if last_newline < 0:
         return LineChunk(lines=[], next_offset=offset)
@@ -132,9 +143,9 @@ def _load_json(text: str) -> object:
     return value
 
 
-def read_json_lines(path: Path, offset: int = 0) -> ParsedLines:
-    """parse_lines(read_complete_lines(path, offset)) を返す。
+def read_json_lines(path: Path, offset: int = 0, end: int | None = None) -> ParsedLines:
+    """parse_lines(read_complete_lines(path, offset, end)) を返す。
 
     ファイルが無ければ FileNotFoundError を、読めなければその OSError を、そのまま出す。
     """
-    return parse_lines(read_complete_lines(path, offset))
+    return parse_lines(read_complete_lines(path, offset, end))

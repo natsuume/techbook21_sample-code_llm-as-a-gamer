@@ -56,3 +56,16 @@
 .selected:hover {
   background: var(--accent);
 }
+
+/*
+ * 応答待ちの区間 (最後の要求の受信から今まで)。通常の要求の棒と同じ高さの、muted の破線の枠 (地なし)。
+ * 失敗の棒 (danger の破線の枠・高い棒) と、色と高さで見分ける。押せない
+ */
+.pending {
+  position: absolute;
+  top: 0.4375rem;
+  height: 0.75rem;
+  min-width: 2px;
+  border: 1px dashed var(--muted);
+  background: transparent;
+}

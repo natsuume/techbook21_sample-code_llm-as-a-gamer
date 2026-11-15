@@ -1,6 +1,6 @@
-// viewWindow のテスト。表示する幅ごとの区間と、区間の中の位置の比を確かめる
+// viewWindow のテスト。表示する幅ごとの区間 (再生とライブ) と、区間の中の位置の比を確かめる
 import { describe, expect, it } from "vitest";
-import { computeViewWindow, ratioInRange } from "./viewWindow.ts";
+import { computeLiveWindow, computeViewWindow, ratioInRange } from "./viewWindow.ts";
 
 describe("computeViewWindow", () => {
   describe('幅が "all"', () => {
@@ -48,6 +48,37 @@ describe("computeViewWindow", () => {
 
     it("再生位置が実行の終わりより後でも、区間は実行の終わりまでに収める", () => {
       expect(computeViewWindow(500, 10, 100)).toEqual({ from: 90, to: 100 });
+    });
+  });
+});
+
+describe("computeLiveWindow", () => {
+  describe("数の幅", () => {
+    it("右端を実行の終わりにした幅 w の区間を返す", () => {
+      expect(computeLiveWindow(30, 300)).toEqual({ from: 270, to: 300 });
+      expect(computeLiveWindow(10, 12.5)).toEqual({ from: 2.5, to: 12.5 });
+    });
+
+    it("実行の長さが幅より短ければ、from は負になる", () => {
+      expect(computeLiveWindow(30, 12)).toEqual({ from: -18, to: 12 });
+      expect(computeLiveWindow(120, 0)).toEqual({ from: -120, to: 0 });
+    });
+
+    it("tEnd が null か負なら end を 0 とみなす", () => {
+      expect(computeLiveWindow(10, null)).toEqual({ from: -10, to: 0 });
+      expect(computeLiveWindow(10, -5)).toEqual({ from: -10, to: 0 });
+    });
+  });
+
+  describe('幅が "all"', () => {
+    it("0 から実行の終わりまでを返す", () => {
+      expect(computeLiveWindow("all", 300)).toEqual({ from: 0, to: 300 });
+    });
+
+    it("end が 0 なら { from: 0, to: 1 } を返す (tEnd が 0・null・負)", () => {
+      expect(computeLiveWindow("all", 0)).toEqual({ from: 0, to: 1 });
+      expect(computeLiveWindow("all", null)).toEqual({ from: 0, to: 1 });
+      expect(computeLiveWindow("all", -5)).toEqual({ from: 0, to: 1 });
     });
   });
 });

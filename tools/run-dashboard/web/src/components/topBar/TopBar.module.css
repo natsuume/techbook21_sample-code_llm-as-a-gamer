@@ -1,13 +1,21 @@
 .bar {
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-4);
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-2) var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--surface);
+}
+
+/* バーの 1 行。幅が足りなければ折り返す */
+.row {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
 }
 
 .appName {
@@ -22,16 +30,53 @@
   max-width: 22rem;
 }
 
+/*
+ * ライブの操作。1 行目の残りの幅を埋める。幅は行の幅で決め、中の文言では変えない (flex-basis を決まった長さにし、
+ * 文言が替わっても折り返しの位置が変わらないようにする)
+ */
+.live {
+  flex: 1 1 24rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+
+/*
+ * 接続の状態の文言。ライブの操作の残りの幅を、最も長い文言 (記録が止まって終わった実行として表示したとき) の幅
+ * (28rem) まで使い、空のときも場所を空けておく。幅が足りなければ末尾を省略し、全文は title で読める。
+ * 状態は文言で示す (色は muted だけ)
+ */
+.liveStatus {
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+  max-inline-size: 28rem;
+  min-block-size: 1.5em;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .position {
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+/*
+ * 実行の値。2 行目の再生位置の右に残りの幅が 20rem 以上あれば、その幅を使って右に寄せて並べ、足りない分はその幅の
+ * 中で折り返す (再生位置の下に回り込まないため、バーの行を増やさない)。20rem より狭ければ、再生位置の下の行に置く
+ */
 .stats {
+  flex: 1 1 20rem;
   margin-left: auto;
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: var(--space-1) var(--space-4);
   min-width: 0;

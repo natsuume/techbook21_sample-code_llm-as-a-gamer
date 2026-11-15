@@ -40,12 +40,12 @@ export const RunStats = ({ view }: RunStatsProps) => {
           <>
             <AdvisorChips
               view={view}
-              onOpen={(name) => dispatch({ type: "selectAdvisor", name })}
+              onOpen={(name) => dispatch({ type: "selectAdvisor", name, via: "open" })}
             />
             <RewriteChip
               view={view}
               onOpen={(kind, version) =>
-                dispatch({ type: "selectFile", file: { type: "note", kind, version } })
+                dispatch({ type: "selectFile", file: { type: "note", kind, version }, via: "open" })
               }
             />
           </>

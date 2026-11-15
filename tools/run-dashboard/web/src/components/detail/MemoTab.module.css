@@ -59,6 +59,10 @@
   border: 1px dashed var(--danger);
 }
 
+.requestPending {
+  border: 1px dashed var(--muted);
+}
+
 /* 操作に採った数の帯 */
 .adoptedZero {
   border: 1px solid var(--line);

@@ -25,13 +25,14 @@ const TAB_ITEMS: readonly TabItem<DetailTab>[] = [
 ];
 
 /**
- * タブの中身の先頭に戻すかを決める文字列。タブと、タブで開いているもの (要求・フレーム・advisor の実行・ファイル) が
- * 変わったら変わる (問いの件数の切り替えや差分と全文の切り替えでは変わらない)
+ * タブの中身の先頭に戻すかを決める文字列。タブと、タブで開いているもの (詳細ペインで開いた要求・フレーム・advisor の
+ * 実行・ファイル) が変わったら変わる (問いの件数の切り替えや差分と全文の切り替え、ライブで再生位置の要求が最新に
+ * 替わることでは変わらない)
  */
 const contentKeyOf = (state: ViewState): string =>
   [
     state.tab,
-    state.selectedN,
+    state.detailN,
     state.frameIndex,
     state.advisorName,
     fileSelectionKey(state.file),

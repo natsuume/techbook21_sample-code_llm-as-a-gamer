@@ -1,4 +1,4 @@
-// 詳細ペインの要求のタブ。選んでいる要求の時刻・決めた操作・載せた画像・問いの答え・所要時間の内訳・ゲームの情報の版・
+// 詳細ペインの要求のタブ。開いている要求の時刻・決めた操作・載せた画像・問いの答え・所要時間の内訳・ゲームの情報の版・
 // 直近の応答と送った操作・前回の操作を出し、前後の要求へ移るボタンを置く。
 import { useMemo, useRef } from "react";
 import { filePath } from "../../api/apiPaths.ts";
@@ -14,6 +14,7 @@ import { formatMilliseconds, timingBreakdown } from "../../detail/timingBreakdow
 import { formatProbability, ratioToPercent } from "../../format/formatProbability.ts";
 import { formatBytes } from "../../format/formatValues.ts";
 import { frameIndexOfImage } from "../../frames/frameMetrics.ts";
+import { requestShownWithDetail } from "../../requests/shownRequest.ts";
 import type { RunView } from "../../state/useRunView.ts";
 import { useViewState } from "../../state/ViewStateContext.tsx";
 import { joinClassNames } from "../../styles/joinClassNames.ts";
@@ -35,9 +36,12 @@ import { useScrollIntoView } from "./useScrollIntoView.ts";
 /** 問いの答えの件数の切り替え。top は上位 TOP_ANSWER_COUNT 件、all はすべて */
 type AnswerScope = "top" | "all";
 
-/** 要求のタブ。要求を選べない実行では、理由の文言だけを出す */
+/**
+ * 要求のタブ。詳細ペインで開いた要求 (detailRequest) を出し、開いていなければ表示中の選択の要求 (ライブで最新を
+ * 追っている間は最新の要求) を出す。要求を選べない実行では、理由の文言だけを出す
+ */
 export const RequestTab = ({ view }: { view: RunView }) => {
-  const request = view.selectedRequest;
+  const request = view.detailRequest ?? view.selectedRequest;
   const notice = requestTabNotice(view.summary.old_format, view.requests, request !== null);
   if (notice !== null || request === null) {
     return (
@@ -52,16 +56,27 @@ export const RequestTab = ({ view }: { view: RunView }) => {
 
 type RequestContentProps = { view: RunView; request: RequestItem };
 
-/** 選んでいる要求の中身。要求の詳細 (画像・問いの答え・所要時間・文脈) は要求の詳細の API から読む */
-const RequestContent = ({ view, request }: RequestContentProps) => {
+/**
+ * 要求の中身。要求の詳細 (画像・問いの答え・所要時間・文脈) は要求の詳細の API から読む。新しい要求の詳細が届くまでは
+ * 前の要求の詳細を出し続け、見出しの番号・時刻・決めた操作も、その前の要求のものにする
+ * (骨組みに戻すのは、出す詳細が 1 つも無いときだけ)
+ */
+const RequestContent = ({ view, request: target }: RequestContentProps) => {
   const { dispatch } = useViewState();
-  const detailView = toQueryView(useRequestDetail(view.run, request.n));
-  const previous = requestStep(view.requests, request.n, -1);
-  const next = requestStep(view.requests, request.n, 1);
+  const detailView = toQueryView(useRequestDetail(view.run, target.n));
+  const request = requestShownWithDetail(
+    target,
+    detailView.state === "ready" && !isOldFormatRequestDetail(detailView.data)
+      ? detailView.data
+      : null,
+  );
+  // 前後の要求は、開こうとしている要求から数える (続けて押したときに、読み込み中の前の要求から数え直さない)
+  const previous = requestStep(view.requests, target.n, -1);
+  const next = requestStep(view.requests, target.n, 1);
 
   return (
     <>
-      <div className={content.headRow}>
+      <div className={content.headRow} aria-busy={request !== target || undefined}>
         <h3 className={content.heading}>要求 #{request.n}</h3>
         <Chip>{request.result}</Chip>
         <div className={content.headActions}>
@@ -71,7 +86,7 @@ const RequestContent = ({ view, request }: RequestContentProps) => {
             disabledReason={previous.reason}
             onClick={() => {
               if (previous.n !== null) {
-                dispatch({ type: "selectRequest", n: previous.n });
+                dispatch({ type: "selectRequest", n: previous.n, via: "navigate" });
               }
             }}
           />
@@ -81,7 +96,7 @@ const RequestContent = ({ view, request }: RequestContentProps) => {
             disabledReason={next.reason}
             onClick={() => {
               if (next.n !== null) {
-                dispatch({ type: "selectRequest", n: next.n });
+                dispatch({ type: "selectRequest", n: next.n, via: "navigate" });
               }
             }}
           />
@@ -149,6 +164,7 @@ const RequestDetailBlocks = ({ view, detail }: RequestDetailBlocksProps) => {
                 dispatch({
                   type: "selectFile",
                   file: noteSelectionForVersion(noteVersions, noteVersion),
+                  via: "open",
                 })
               }
             >
@@ -198,7 +214,7 @@ const RequestImages = ({ view, images }: RequestImagesProps) => {
                   type="button"
                   className={styles.thumbButton}
                   aria-label={`${image.label} をフレームのタブで開く`}
-                  onClick={() => dispatch({ type: "selectFrame", index })}
+                  onClick={() => dispatch({ type: "selectFrame", index, via: "open" })}
                 >
                   {picture}
                 </button>

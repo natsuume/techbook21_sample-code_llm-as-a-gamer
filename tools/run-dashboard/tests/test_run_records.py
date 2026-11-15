@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from switch2_agent.action_decision import Thresholds, decide_action
@@ -8,7 +9,9 @@ from switch2_agent.request_log import RequestLogEntry, build_request_record
 from synthetic_runs import (
     CONTROLS_RUN_NAME,
     FIRST_NOTES,
+    STALE_RUN_LOG_MTIME,
     STRATEGY_RUN_NAME,
+    UNTERMINATED_FRAME_LINE,
     encode_frame,
     make_decision,
     make_frame,
@@ -19,12 +22,17 @@ from run_dashboard.run_directory import AdvisorRunDir, list_run_names
 from run_dashboard.run_records import (
     LOAD_PARTS,
     RECORD_KINDS,
+    RunLogClock,
+    add_received_time,
+    advance_run_log_clock,
+    elapsed_before_start,
     lighten_request_lines,
     list_run_overviews,
     load_run,
     load_run_overview,
     read_advisor_stream,
     read_result_json,
+    start_run_log_clock,
 )
 
 NO_SKIPPED_LINES = {"run": 0, "requests": 0, "frames": 0, "pad": 0, "advisor_steps": 0}
@@ -681,3 +689,289 @@ def test_read_result_json_is_none_for_unreadable_content(tmp_path, content):
 
 def test_read_result_json_is_none_for_missing_file(tmp_path):
     assert read_result_json(tmp_path / "result.json") is None
+
+
+# --- next_offsets (区間 API の cursor) ---
+
+
+def file_sizes(run_dir) -> dict[str, int]:
+    """4 つの JSON Lines の種類 → ファイルの大きさ (無ければ 0) を返す。"""
+    names = {
+        "run": "run.jsonl",
+        "requests": "requests.jsonl",
+        "frames": "frames.jsonl",
+        "pad": "pad.jsonl",
+    }
+    return {
+        kind: (run_dir / name).stat().st_size if (run_dir / name).exists() else 0
+        for kind, name in names.items()
+    }
+
+
+@pytest.mark.parametrize("cache", [None, JsonLinesCache()])
+def test_next_offsets_of_dashboard_run_are_file_sizes(runs, cache):
+    # どのファイルも改行で終わるので、読んだ最後の完全な行の次はファイルの大きさ
+    run = runs.dashboard
+    records = load_run(runs.runs_dir, run.name, cache=cache)
+    assert records is not None
+    assert records.next_offsets == file_sizes(run.run_dir)
+    assert all(offset > 0 for offset in records.next_offsets.values())
+
+
+def test_next_offset_of_broken_frames_stops_before_unterminated_line(runs):
+    # 改行で終わっていない最後の行の手前
+    run = runs.broken
+    records = load_run(runs.runs_dir, run.name)
+    assert records is not None
+    sizes = file_sizes(run.run_dir)
+    assert records.next_offsets == {
+        **sizes,
+        "frames": sizes["frames"] - len(UNTERMINATED_FRAME_LINE.encode("utf-8")),
+    }
+
+
+def test_next_offsets_of_missing_files_and_unread_parts_are_zero(runs):
+    # 無いファイルと、parts で読まなかった種類は 0
+    no_dashboard = runs.no_dashboard
+    records = load_run(runs.runs_dir, no_dashboard.name)
+    assert records is not None
+    assert records.next_offsets == {
+        "run": file_sizes(no_dashboard.run_dir)["run"],
+        "requests": 0,
+        "frames": 0,
+        "pad": 0,
+    }
+    dashboard = runs.dashboard
+    sizes = file_sizes(dashboard.run_dir)
+    only_frames = load_run(runs.runs_dir, dashboard.name, ("frames",))
+    assert only_frames is not None
+    assert only_frames.next_offsets == {
+        "run": sizes["run"],
+        "requests": 0,
+        "frames": sizes["frames"],
+        "pad": 0,
+    }
+    run_log_only = load_run(runs.runs_dir, dashboard.name, ())
+    assert run_log_only is not None
+    assert run_log_only.next_offsets == {
+        "run": sizes["run"],
+        "requests": 0,
+        "frames": 0,
+        "pad": 0,
+    }
+
+
+# --- run_log_mtime と has_record_end (実行中の判定に使う値) ---
+
+
+@pytest.mark.parametrize("attribute", SYNTHETIC_RUN_ATTRIBUTES)
+def test_run_log_mtime_is_mtime_of_run_log(runs, attribute):
+    # write_all_runs は run.jsonl の更新時刻を STALE_RUN_LOG_MTIME にする
+    run = getattr(runs, attribute)
+    records = load_run(runs.runs_dir, run.name)
+    overview = load_run_overview(runs.runs_dir, run.name, JsonLinesCache())
+    assert records is not None
+    assert overview is not None
+    mtime = os.stat(run.run_dir / "run.jsonl").st_mtime
+    assert mtime == STALE_RUN_LOG_MTIME
+    assert records.run_log_mtime == mtime
+    assert records.overview.run_log_mtime == mtime
+    assert overview.run_log_mtime == mtime
+
+
+def test_run_log_mtime_is_none_without_run_log_or_for_symlink(tmp_path):
+    # run.jsonl が無い実行と、run.jsonl がシンボリックリンクの実行は None
+    runs_dir = tmp_path / "runs"
+    (runs_dir / "20261101-000000").mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text('{"time": "10:00:00.000", "event": "start"}\n', encoding="utf-8")
+    linked = runs_dir / "20261102-000000"
+    linked.mkdir()
+    (linked / "run.jsonl").symlink_to(outside)
+    for name in ("20261101-000000", "20261102-000000"):
+        records = load_run(runs_dir, name)
+        overview = load_run_overview(runs_dir, name)
+        assert records is not None
+        assert overview is not None
+        assert records.run_log_mtime is None
+        assert overview.run_log_mtime is None
+        assert overview.has_record_end is False
+
+
+@pytest.mark.parametrize(
+    "attribute, expected",
+    [
+        ("dashboard", True),
+        ("broken", True),
+        ("no_dashboard", False),
+        ("save_requests", False),
+        ("no_answer_type", False),
+        ("single_advisor_question", False),
+    ],
+)
+def test_has_record_end(runs, attribute, expected):
+    # run.jsonl に record_end の行がある実行だけ True。3 つの読み方で同じ値
+    run = getattr(runs, attribute)
+    records = load_run(runs.runs_dir, run.name)
+    overview = load_run_overview(runs.runs_dir, run.name)
+    assert records is not None
+    assert overview is not None
+    listed = {item.name: item for item in list_run_overviews(runs.runs_dir)}
+    assert records.has_record_end is expected
+    assert records.overview.has_record_end is expected
+    assert overview.has_record_end is expected
+    assert listed[run.name].has_record_end is expected
+
+
+# --- RunLogClock (run.jsonl の行の経過秒を 1 行ずつ求める) ---
+
+
+def times_by_clock(records) -> list[float | None]:
+    """records の run.jsonl の行に、RunLogClock の関数を 1 行ずつ当てて求めた経過秒のリストを返す。"""
+    received: dict[object, float] = {}
+    for request in records.requests:
+        add_received_time(received, request)
+    lines = [event.record for event in records.run_events]
+    start_index = next(
+        (index for index, line in enumerate(lines) if line.get("event") == "start"),
+        None,
+    )
+    clock = start_run_log_clock(lines[start_index]) if start_index is not None else None
+    if start_index is None or clock is None:
+        return [None] * len(lines)
+    times: list[float | None] = []
+    for index, line in enumerate(lines):
+        if index < start_index:
+            times.append(elapsed_before_start(clock, line))
+        elif index == start_index:
+            times.append(0.0)
+        else:
+            t, clock = advance_run_log_clock(clock, line, received)
+            times.append(t)
+    return times
+
+
+@pytest.mark.parametrize("attribute", SYNTHETIC_RUN_ATTRIBUTES)
+def test_run_log_clock_gives_same_times_as_load_run(runs, attribute):
+    # start より前の行・日付をまたぐ行・起点の切り替えを含む (dashboard と broken)
+    records = load_run(runs.runs_dir, getattr(runs, attribute).name)
+    assert records is not None
+    assert times_by_clock(records) == [event.t for event in records.run_events]
+
+
+@pytest.mark.parametrize("with_requests", [True, False])
+def test_run_log_clock_gives_same_times_as_load_run_for_skewed_run(
+    tmp_path, with_requests
+):
+    # 壁時計が monotonic の時計からずれた実行 (起点の decision の行で時間軸を直す)
+    runs_dir = tmp_path / "runs"
+    write_skewed_run(runs_dir, with_requests)
+    records = load_run(runs_dir, SKEWED_RUN_NAME)
+    assert records is not None
+    assert times_by_clock(records) == [event.t for event in records.run_events]
+
+
+def test_start_run_log_clock():
+    # start の行の time が読めなければ None
+    assert start_run_log_clock(
+        {"time": "10:00:01.500", "event": "start"}
+    ) == RunLogClock(start_time=36001.5, origin_t=0.0, origin_time=36001.5)
+    assert start_run_log_clock({"time": "25:00:00.000", "event": "start"}) is None
+    assert start_run_log_clock({"event": "start"}) is None
+
+
+def test_elapsed_before_start():
+    clock = RunLogClock(start_time=36000.0, origin_t=0.0, origin_time=36000.0)
+    assert elapsed_before_start(clock, {"time": "09:59:59.500"}) == pytest.approx(-0.5)
+    assert elapsed_before_start(clock, {"time": "bad"}) is None
+    assert elapsed_before_start(clock, {}) is None
+
+
+def test_advance_run_log_clock_with_unreadable_anchor_time():
+    # 起点にする decision の行の time が読めなければ、その行の t は受信時刻のまま、次の起点まで t は None
+    clock = start_run_log_clock({"time": "10:00:00.000", "event": "start"})
+    assert clock is not None
+    received = {1: 1.25, 2: 5.0}
+    t, clock = advance_run_log_clock(
+        clock, {"time": "10:00:00.500", "event": "bridge_wait"}, received
+    )
+    assert t == pytest.approx(0.5)
+    t, clock = advance_run_log_clock(
+        clock, {"time": "bad", "event": "decision", "number": 1}, received
+    )
+    assert t == 1.25
+    assert clock.origin_t == 1.25
+    assert clock.origin_time is None
+    t, clock = advance_run_log_clock(
+        clock, {"time": "10:00:02.000", "event": "decision_error"}, received
+    )
+    assert t is None
+    # requests.jsonl に無い number の decision の行は起点にしない
+    t, clock = advance_run_log_clock(
+        clock, {"time": "10:00:03.000", "event": "decision", "number": 9}, received
+    )
+    assert t is None
+    t, clock = advance_run_log_clock(
+        clock, {"time": "10:00:05.500", "event": "decision", "number": 2}, received
+    )
+    assert t == 5.0
+    t, clock = advance_run_log_clock(
+        clock, {"time": "10:00:06.000", "event": "bridge_wait"}, received
+    )
+    assert t == pytest.approx(5.5)
+
+
+def test_advance_run_log_clock_does_not_anchor_on_unhashable_number():
+    clock = RunLogClock(start_time=36000.0, origin_t=0.0, origin_time=36000.0)
+    line = {"time": "10:00:02.000", "event": "decision", "number": [1]}
+    t, next_clock = advance_run_log_clock(clock, line, {1: 1.25})
+    assert t == pytest.approx(2.0)
+    assert next_clock == clock
+
+
+def test_add_received_time():
+    # 同じ number は最初の値。number がキーにできない行と、t_received が数でない行は足さない
+    received: dict[object, float] = {}
+    add_received_time(received, {"number": 1, "t_received": 1.25})
+    add_received_time(received, {"number": 1, "t_received": 2.0})
+    add_received_time(received, {"number": [2], "t_received": 3.0})
+    add_received_time(received, {"number": {"n": 3}, "t_received": 3.5})
+    add_received_time(received, {"number": 4, "t_received": "4.0"})
+    add_received_time(received, {"number": 5, "t_received": True})
+    add_received_time(received, {"number": 6, "t_received": None})
+    add_received_time(received, {"number": 7, "t_received": 7})
+    assert received == {1: 1.25, 7: 7.0}
+    assert isinstance(received[7], float)
+
+
+def test_lighten_request_lines_with_previous_line_shares_texts():
+    # 後半を、前半の最後の要求の行を previous にして軽くすると、全体を 1 回で軽くした後半と同じ値で、
+    # 同じ文字列のオブジェクトを共有する
+    state_text = "## ゲームの操作方法\n" + "あ" * 100
+    records = [
+        {"event": "header", "questions": []},
+        {"event": "request", "number": 1, "state_text": state_text, "refusals": 0},
+        {
+            "event": "request",
+            "number": 2,
+            "state_text": state_text[:10] + state_text[10:],
+            "raw_response": None,
+        },
+        {"event": "note", "text": "要求でない行"},
+        {
+            "event": "request",
+            "number": 3,
+            "state_text": state_text[:5] + state_text[5:],
+        },
+    ]
+    whole = lighten_request_lines(records)
+    first = lighten_request_lines(records[:2])
+    second = lighten_request_lines(records[2:], previous=first[-1])
+    assert second == whole[2:]
+    assert second[0]["state_text"] is first[-1]["state_text"]
+    assert second[2]["state_text"] is first[-1]["state_text"]
+    # previous が無ければ、後半の最初の要求の行は何とも共有しない
+    alone = lighten_request_lines(records[2:])
+    assert alone == whole[2:]
+    assert alone[0]["state_text"] is records[2]["state_text"]
+    assert alone[0]["state_text"] is not first[-1]["state_text"]

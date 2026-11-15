@@ -7,7 +7,8 @@
     write_broken_run                   write_dashboard_run と同じ記録に、JSON として読めない行を足した実行 (DashboardRun)
     write_no_answer_type_run           header の問いに answer_type が無い形の実行 (OldFormatRun)
     write_single_advisor_question_run  advisor の問いが name `advisor` の 1 問の形の実行 (OldFormatRun)
-write_all_runs は 6 つをまとめて書く。
+write_all_runs は 6 つをまとめて書き、どの実行の run.jsonl の更新時刻も過去の固定の時刻 STALE_RUN_LOG_MTIME にする
+(実行中でない実行にする)。
 
 第4章の関数で作れる記録は第4章の関数で作る: requests.jsonl の header と要求の行 (request_log)、frames.jsonl
 (実際の SharpnessValleyDetector に合成のフレームを入れて dashboard_records で作る)、pad.jsonl、run.jsonl の
@@ -17,6 +18,7 @@ result.json。手で書くのは、run.jsonl の行の time と、start・decisi
 """
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -899,7 +901,8 @@ def write_dashboard_run(runs_dir: Path, name: str = DASHBOARD_RUN_NAME) -> Dashb
     run_dir = runs_dir / name
     run_dir.mkdir(parents=True)
     origin_mono = DASHBOARD_ORIGIN_MONO
-    args = dict(vars(parse_agent_args(DASHBOARD_AGENT_ARGV)))
+    # run.jsonl から読んだ args と比べられるよう、JSON を通した値にする (起動引数の tuple はリストになる)
+    args = json.loads(json.dumps(vars(parse_agent_args(DASHBOARD_AGENT_ARGV))))
     frames = write_dashboard_frames(run_dir, origin_mono)
     write_dashboard_pad(run_dir, origin_mono)
     events: list[tuple[float, dict]] = [
@@ -1530,6 +1533,11 @@ def write_single_advisor_question_run(runs_dir: Path) -> OldFormatRun:
 # =====================================================================
 
 
+# write_all_runs が 6 つの実行の run.jsonl に付ける更新時刻 (過去の固定の時刻。time.time() と同じ時計の秒)。
+# どの実行も、ずっと前に書き終えた (実行中でない) 実行にする
+STALE_RUN_LOG_MTIME = 1_763_000_000.0
+
+
 @dataclass(frozen=True)
 class SyntheticRuns:
     """write_all_runs が書いた 6 つの実行。"""
@@ -1544,9 +1552,12 @@ class SyntheticRuns:
 
 
 def write_all_runs(runs_dir: Path) -> SyntheticRuns:
-    """runs_dir (無ければ作る) に 6 つの合成の実行を書き、SyntheticRuns を返す。"""
+    """runs_dir (無ければ作る) に 6 つの合成の実行を書き、SyntheticRuns を返す。
+
+    書き終えた後に、6 つの実行の run.jsonl の更新時刻 (と最終アクセス時刻) を STALE_RUN_LOG_MTIME にする。
+    """
     runs_dir.mkdir(parents=True, exist_ok=True)
-    return SyntheticRuns(
+    runs = SyntheticRuns(
         runs_dir=runs_dir,
         dashboard=write_dashboard_run(runs_dir),
         no_dashboard=write_no_dashboard_run(runs_dir),
@@ -1555,3 +1566,15 @@ def write_all_runs(runs_dir: Path) -> SyntheticRuns:
         no_answer_type=write_no_answer_type_run(runs_dir),
         single_advisor_question=write_single_advisor_question_run(runs_dir),
     )
+    for run in (
+        runs.dashboard,
+        runs.no_dashboard,
+        runs.save_requests,
+        runs.broken,
+        runs.no_answer_type,
+        runs.single_advisor_question,
+    ):
+        os.utime(
+            run.run_dir / RUN_LOG_FILE_NAME, (STALE_RUN_LOG_MTIME, STALE_RUN_LOG_MTIME)
+        )
+    return runs

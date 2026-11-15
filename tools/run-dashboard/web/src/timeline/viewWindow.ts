@@ -1,4 +1,4 @@
-// タイムラインに表示する区間 (経過秒) を、再生位置と表示する幅から求める純粋な関数。
+// タイムラインに表示する区間 (経過秒) を、再生位置 (ライブでは今) と表示する幅から求める純粋な関数。
 
 /** 経過秒の区間。from と to を含む */
 export type TimeRange = { from: number; to: number };
@@ -30,6 +30,19 @@ export const computeViewWindow = (
   }
   const from = clamp(position - width / 2, 0, end - width);
   return { from, to: from + width };
+};
+
+/**
+ * ライブの表示の区間を返す。右端をいつも今 (実行の終わり) にする。end = max(tEnd ?? 0, 0) とする。
+ * - "all": computeViewWindow と同じ ({ from: 0, to: end }。ただし end が 0 なら { from: 0, to: 1 })
+ * - 数の幅 w: { from: end - w, to: end } (end < w なら from は負になり、始まったばかりの実行は左に空きができる)
+ */
+export const computeLiveWindow = (width: ViewWidth, tEnd: number | null): TimeRange => {
+  const end = Math.max(tEnd ?? 0, 0);
+  if (width === "all") {
+    return computeViewWindow(end, width, end);
+  }
+  return { from: end - width, to: end };
 };
 
 /** 時刻 t の区間の中の位置 (t - from) / (to - from) を、0〜1 に切り詰めて返す */

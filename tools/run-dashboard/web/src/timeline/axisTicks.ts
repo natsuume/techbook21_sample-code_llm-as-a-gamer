@@ -30,15 +30,16 @@ const chooseStep = (width: number): number => {
   return LARGE_STEP_UNIT * multiple;
 };
 
-/** 浮動小数の誤差を、小数 6 桁でそろえる */
-const roundTick = (t: number): number => Math.round(t * 1e6) / 1e6;
+/** 浮動小数の誤差を、小数 6 桁でそろえる。-0 は 0 にする (ラベルが "-0" にならないため) */
+const roundTick = (t: number): number => Math.round(t * 1e6) / 1e6 || 0;
 
 /**
  * 区間の目盛りの時刻を昇順で返す。
  * - 刻みは TICK_STEPS のうち (to - from) / 刻み <= 10 + 1e-9 を満たす最小の値。どれも満たさなければ、
  *   3600 の倍数で条件を満たす最小の値。1e-9 は、表示の区間を from + 幅 で作るときの丸めで (to - from) が
  *   幅をわずかに超えても、同じ幅なら同じ刻みを選ぶための許容誤差
- * - 目盛りは刻みの整数倍のうち from <= t <= to のもの。値は Math.round(t * 1e6) / 1e6 でそろえる
+ * - 目盛りは刻みの整数倍のうち from <= t <= to のもの。値は Math.round(t * 1e6) / 1e6 でそろえ、-0 は 0 にする
+ *   (ライブの区間は from が負になる)
  * - 区間の端が有限の数でなければ [] を返す (刻みを選べないため)
  */
 export const computeAxisTicks = (range: TimeRange): number[] => {

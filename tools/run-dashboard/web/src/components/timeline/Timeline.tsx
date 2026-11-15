@@ -77,20 +77,21 @@ const TimelineContent = ({ view, className }: TimelineContentProps) => {
     readoutRef.current?.show(text);
   }, []);
   const selectRequest = useCallback(
-    (n: number, question?: string) => dispatch({ type: "selectRequest", n, question }),
+    (n: number, question?: string) =>
+      dispatch({ type: "selectRequest", n, question, via: "navigate" }),
     [dispatch],
   );
   const selectFrame = useCallback(
-    (index: number) => dispatch({ type: "selectFrame", index }),
+    (index: number) => dispatch({ type: "selectFrame", index, via: "navigate" }),
     [dispatch],
   );
   const selectAdvisor = useCallback(
-    (name: string) => dispatch({ type: "selectAdvisor", name }),
+    (name: string) => dispatch({ type: "selectAdvisor", name, via: "navigate" }),
     [dispatch],
   );
   const selectRewrite = useCallback(
     (kind: NoteKind, version: number) =>
-      dispatch({ type: "selectFile", file: { type: "note", kind, version } }),
+      dispatch({ type: "selectFile", file: { type: "note", kind, version }, via: "navigate" }),
     [dispatch],
   );
   const setWidth = useCallback(
@@ -132,6 +133,8 @@ const TimelineContent = ({ view, className }: TimelineContentProps) => {
             range={range}
             selectedN={selectedN}
             onSelect={selectRequest}
+            pending={view.pending}
+            onHover={showReadout}
           />
           <AdoptedCountLane
             oldFormat={summary.old_format}

@@ -1,4 +1,5 @@
-// runView のテスト。フレームの並べ方、選択によらない値、選んでいる要求からの再生位置と区間を確かめる
+// runView のテスト。フレームの並べ方、選択によらない値、選んでいる要求からの再生位置と区間、
+// ライブで最新を追うときの選択を確かめる
 import { describe, expect, it } from "vitest";
 import type {
   EventItem,
@@ -8,7 +9,15 @@ import type {
   RequestItem,
   RunSummary,
 } from "../api/apiTypes.ts";
-import { buildRunData, type RunResponses, selectPlayback, timedFramesOf } from "./runView.ts";
+import {
+  buildRunData,
+  findRequest,
+  latestRequestN,
+  type RunResponses,
+  selectLivePlayback,
+  selectPlayback,
+  timedFramesOf,
+} from "./runView.ts";
 
 // テスト用のフレーム。指定しないキーは、判定の出来事の無い rising のフレームの値にする
 const frame = (t: number | null, thumb: string): FrameItem => ({
@@ -46,6 +55,7 @@ const summary = (fields: Partial<RunSummary> = {}): RunSummary => ({
   game: "g",
   model: "m",
   started: null,
+  in_progress: false,
   args: null,
   thresholds: { advisor: 0.5 },
   thresholds_assumed: false,
@@ -64,7 +74,11 @@ const summary = (fields: Partial<RunSummary> = {}): RunSummary => ({
   ...fields,
 });
 
-const range = <T>(items: T[], available = true): RangeResponse<T> => ({ available, items });
+const range = <T>(items: T[], available = true): RangeResponse<T> => ({
+  available,
+  items,
+  cursor: 0,
+});
 
 const responses = (fields: Partial<RunResponses> = {}): RunResponses => ({
   summary: summary(),
@@ -172,5 +186,81 @@ describe("selectPlayback", () => {
   it("表示の区間は再生位置を中心にする", () => {
     const data = buildRunData(responses({ requests: range([request(1, 30)]) }));
     expect(selectPlayback(data, 1, 10).range).toEqual({ from: 25.5, to: 35.5 });
+  });
+});
+
+describe("latestRequestN", () => {
+  it("配列の最後の要求の n を返す", () => {
+    expect(latestRequestN({ requests: range([request(4, 1), request(9, 2), request(7, 3)]) })).toBe(
+      7,
+    );
+  });
+
+  it("要求の記録が無いか、要求が無ければ null", () => {
+    expect(latestRequestN({ requests: range([request(1, 1)], false) })).toBeNull();
+    expect(latestRequestN({ requests: range<RequestItem>([]) })).toBeNull();
+  });
+});
+
+describe("findRequest", () => {
+  const requests = range([request(1, 1), request(2, 2, null), request(3, 3)]);
+
+  it("番号 n の要求を返す", () => {
+    const data = buildRunData(responses({ requests }));
+    expect(findRequest(data, 2)).toBe(requests.items[1]);
+  });
+
+  it("n が null か、n の要求が無ければ null", () => {
+    const data = buildRunData(responses({ requests }));
+    expect(findRequest(data, null)).toBeNull();
+    expect(findRequest(data, 99)).toBeNull();
+  });
+
+  it("要求の記録が無ければ、n の要求が配列にあっても null", () => {
+    const data = buildRunData(responses({ requests: range([request(1, 1)], false) }));
+    expect(findRequest(data, 1)).toBeNull();
+  });
+});
+
+describe("selectLivePlayback", () => {
+  it("最後の要求を選び、再生位置をその要求の時刻、区間の右端を実行の終わりにする", () => {
+    const requests = range([request(1, 1), request(2, 2, null), request(3, 3)]);
+    const data = buildRunData(responses({ requests }));
+    expect(selectLivePlayback(data, 30)).toEqual({
+      selectedRequest: requests.items[2],
+      nextRequestPosition: null,
+      position: 3.5,
+      range: { from: 30, to: 60 },
+    });
+  });
+
+  it("最後の要求が失敗した要求なら、再生位置は送信時刻", () => {
+    const data = buildRunData(responses({ requests: range([request(1, 1), request(2, 2, null)]) }));
+    const selection = selectLivePlayback(data, "all");
+    expect(selection.selectedRequest?.n).toBe(2);
+    expect(selection.position).toBe(2);
+    expect(selection.range).toEqual({ from: 0, to: 60 });
+  });
+
+  it("要求の記録が無ければ、選んでいる要求は null で再生位置は t_end", () => {
+    const data = buildRunData(responses({ requests: range([request(1, 1)], false) }));
+    expect(selectLivePlayback(data, 10)).toEqual({
+      selectedRequest: null,
+      nextRequestPosition: null,
+      position: 60,
+      range: { from: 50, to: 60 },
+    });
+  });
+
+  it("要求が無ければ、選んでいる要求は null で再生位置は t_end ?? 0", () => {
+    const data = buildRunData(
+      responses({ requests: range<RequestItem>([]), summary: summary({ t_end: null }) }),
+    );
+    expect(selectLivePlayback(data, 10)).toEqual({
+      selectedRequest: null,
+      nextRequestPosition: null,
+      position: 0,
+      range: { from: -10, to: 0 },
+    });
   });
 });

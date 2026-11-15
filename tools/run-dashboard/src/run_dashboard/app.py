@@ -1,34 +1,47 @@
 """実行の記録を読む読み取り専用の API サーバー (FastAPI のアプリ) と、画面 (web/dist/) の配信。
 
 ルート:
-    GET /api/runs                              実行の一覧 (名前の新しい順)
-    GET /api/runs/{run}                        summary
-    GET /api/runs/{run}/requests?from=&to=     要求の区間
-    GET /api/runs/{run}/requests/{n}           要求の詳細
-    GET /api/runs/{run}/frames?from=&to=       フレームの判定の区間
-    GET /api/runs/{run}/pad?from=&to=          送ったレポートの区間
-    GET /api/runs/{run}/events?from=&to=       run.jsonl の出来事の区間
-    GET /api/runs/{run}/notes/{version}        ゲームの情報の版
-    GET /api/runs/{run}/advisor/{name}         advisor の実行
-    GET /api/runs/{run}/files/{path}           実行のディレクトリーの thumbs/・frames/・advisor-*/ の下のファイル
-    GET /                                      画面 (web/dist/ があれば配信し、無ければ画面のビルドの手順の文)
+    GET /api/runs                                     実行の一覧 (名前の新しい順。各実行の in_progress を含む)
+    GET /api/runs/{run}                               summary (in_progress を含む)
+    GET /api/runs/{run}/requests?from=&to=            要求の区間 (cursor を含む)
+    GET /api/runs/{run}/requests/{n}                  要求の詳細
+    GET /api/runs/{run}/frames?from=&to=              フレームの判定の区間 (cursor を含む)
+    GET /api/runs/{run}/pad?from=&to=                 送ったレポートの区間 (cursor を含む)
+    GET /api/runs/{run}/events?from=&to=              run.jsonl の出来事の区間 (cursor を含む)
+    GET /api/runs/{run}/live?run=&requests=&frames=&pad=
+                                                      実行中の記録を追うサーバー送信イベント (SSE。live_reader)
+    GET /api/runs/{run}/notes/{version}               ゲームの情報の版
+    GET /api/runs/{run}/advisor/{name}                advisor の実行
+    GET /api/runs/{run}/files/{path}                  実行のディレクトリーの thumbs/・frames/・advisor-*/ の下のファイル
+    GET /                                             画面 (web/dist/ があれば配信し、無ければ画面のビルドの手順の文)
 Host の名前 (ポートを除く) が ALLOWED_HOSTS 以外の要求は、どのルートも 400。
 知らない実行、許していないパス、読めないファイル、無い番号・版・名前は 404。from・to が数でない、
-有限でない (nan・inf) ときと、from が to より大きいときは 422。リクエストごとに記録を読み直し (キャッシュしない)、
+有限でない (nan・inf) ときと、from が to より大きいときは 422。/live のクエリーの位置が負の数か、整数として
+読めないときも 422。
+実行中の判定 (in_progress) は run_activity.is_in_progress (run.jsonl に record_end の行が無く、run.jsonl が
+IN_PROGRESS_WINDOW_S 秒以内に更新された実行)。区間 API の cursor は、その API が読んだファイルの、読んだ最後の
+完全な行の次のバイトの位置 (/live のクエリーに渡す。使えない区間は 0)。
+記録の JSON Lines は、アプリごとに 1 つのキャッシュ (record_cache.JsonLinesCache) で読み、変わっていないファイルは
+読み直さず、追記で伸びたファイルは追記の分だけ読み足す。/live は接続ごとにファイルを読む (キャッシュを使わない)。
 runs/ には何も書かない。
 """
 
 import json
-from collections.abc import Collection
+import time
+from collections.abc import AsyncIterable, Callable, Collection
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Response
+import anyio
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
 from run_dashboard.advisor_runs import AdvisorRun, build_advisor_runs
+from run_dashboard.live_events import encode_live_event_data
+from run_dashboard.live_reader import LIVE_POLL_INTERVAL_S, LiveCursors, stream_live
 from run_dashboard.record_cache import JsonLinesCache
 from run_dashboard.run_directory import (
     find_run_dir,
@@ -139,7 +152,13 @@ def load_advisor_runs(records: RunRecords) -> list[AdvisorRun]:
     )
 
 
-def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
+def create_app(
+    runs_dir: Path,
+    web_dist_dir: Path | None,
+    *,
+    clock: Callable[[], float] = time.time,
+    live_interval_s: float = LIVE_POLL_INTERVAL_S,
+) -> FastAPI:
     """runs_dir の実行の記録を返す API のルートを登録した FastAPI のアプリを返す。
 
     Starlette の TrustedHostMiddleware(allowed_hosts=ALLOWED_HOSTS) を足し、Host の名前が ALLOWED_HOSTS 以外の
@@ -153,24 +172,44 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
     ファイルの終わりまで読むため、送る間に伸びるファイル (書いている途中の stream.jsonl など) では、
     宣言した長さと本文の長さがずれる。読めなければ (OSError) 404。
     記録の JSON Lines は、アプリごとに 1 つの record_cache.JsonLinesCache で読み、署名 (大きさ・更新時刻・inode) の
-    変わっていないファイルは読み直さない。API ごとに、応答に使う種類のファイルだけを読む (REQUEST_PARTS など)。
+    変わっていないファイルは読み直さず、inode が同じで大きくなったファイルは追記の分だけ読み足す。API ごとに、
+    応答に使う種類のファイルだけを読む (REQUEST_PARTS など)。
+    clock は今の時刻を返す関数 (time.time() と同じ時計の秒。monotonic ではない)。/api/runs と summary の
+    in_progress の判定に、要求ごとに 1 回呼ぶ。/live では読み取りのたびに呼ぶ。
+    /api/runs/{run}/live は live_reader.stream_live のイベントを、event にイベントの種類、data に
+    live_events.encode_live_event_data の JSON を入れた SSE (fastapi.sse.EventSourceResponse) で送る。
+    ディレクトリーを読む間隔は live_interval_s 秒 (テストで小さくする)。知らない実行は、応答を始める前に依存
+    (find_run_dir_or_404) で 404 にする。イベントが 15 秒無ければ、FastAPI がコメントの行 (: ping) を送る。
+    クライアントが接続を切ると、待っている間に取り消され、それ以上は読まない。
     """
     app = FastAPI(title="run-dashboard", default_response_class=RecordJSONResponse)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     cache = JsonLinesCache()
 
+    def find_run_dir_or_404(run: str) -> Path:
+        """パスの実行の名前 run を run_directory.find_run_dir で照合した実行のディレクトリーを返す (/live の依存)。
+
+        一致しなければ HTTPException(404) を出す。SSE の応答が始まった後に出した例外は 404 にできないため、
+        ルートの本体 (ジェネレーター) の前に、依存で照合する。
+        """
+        run_dir = find_run_dir(runs_dir, run)
+        if run_dir is None:
+            raise HTTPException(status_code=404, detail=f"unknown run: {run}")
+        return run_dir
+
     @app.get("/api/runs")
     def get_runs() -> list[dict]:
         # 一覧では実行ごとに run.jsonl だけを読む (requests.jsonl・frames.jsonl などの大きなファイルは読まない)
+        now = clock()
         return [
-            build_run_list_item(overview)
+            build_run_list_item(overview, now)
             for overview in list_run_overviews(runs_dir, cache)
         ]
 
     @app.get("/api/runs/{run}")
     def get_summary(run: str) -> dict:
         records = load_run_or_404(runs_dir, run, LOAD_PARTS, cache)
-        return build_summary(records, load_advisor_runs(records))
+        return build_summary(records, load_advisor_runs(records), clock())
 
     @app.get("/api/runs/{run}/requests")
     def get_requests(run: str, t_from: TimeFrom = None, to: TimeTo = None) -> dict:
@@ -230,6 +269,28 @@ def create_app(runs_dir: Path, web_dist_dir: Path | None) -> FastAPI:
         if detail is None:
             raise HTTPException(status_code=404, detail=f"unknown advisor run: {name}")
         return detail
+
+    @app.get("/api/runs/{run}/live", response_class=EventSourceResponse)
+    async def get_live(
+        run_dir: Annotated[Path, Depends(find_run_dir_or_404)],
+        # パスの run と別の引数名で、クエリーの run (run.jsonl の位置) を受け取る
+        run_cursor: Annotated[int | None, Query(alias="run", ge=0)] = None,
+        requests: Annotated[int | None, Query(ge=0)] = None,
+        frames: Annotated[int | None, Query(ge=0)] = None,
+        pad: Annotated[int | None, Query(ge=0)] = None,
+    ) -> AsyncIterable[ServerSentEvent]:
+        # ファイルの読み取りは stream_live がスレッドで行う (非同期のジェネレーターなので、クライアントが接続を
+        # 切ると、待っている sleep かスレッドの待ちで取り消され、それ以上は読まない)
+        async for event in stream_live(
+            run_dir,
+            LiveCursors(run=run_cursor, requests=requests, frames=frames, pad=pad),
+            clock=clock,
+            sleep=anyio.sleep,
+            interval_s=live_interval_s,
+        ):
+            yield ServerSentEvent(
+                event=event.kind, raw_data=encode_live_event_data(event.data)
+            )
 
     @app.get("/api/runs/{run}/files/{path:path}")
     def get_run_file(run: str, path: str) -> Response:

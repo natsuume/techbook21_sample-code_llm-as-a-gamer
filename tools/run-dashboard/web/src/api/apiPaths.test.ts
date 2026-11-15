@@ -1,8 +1,9 @@
-// apiPaths のテスト。パスの形と、実行の名前・advisor の名前・ファイルのパスの符号化を確かめる
+// apiPaths のテスト。パスの形と、実行の名前・advisor の名前・ファイルのパスの符号化、ライブの位置のクエリーを確かめる
 import { describe, expect, it } from "vitest";
 import {
   advisorPath,
   filePath,
+  livePath,
   notePath,
   rangePath,
   requestDetailPath,
@@ -70,6 +71,32 @@ describe("advisorPath", () => {
 
   it("実行の名前と advisor の実行の名前を encodeURIComponent で符号化する", () => {
     expect(advisorPath("a b", "x/y z")).toBe("/api/runs/a%20b/advisor/x%2Fy%20z");
+  });
+});
+
+describe("livePath", () => {
+  it("4 つの位置を run・requests・frames・pad の順でクエリーに付ける", () => {
+    expect(livePath("20260101-120000", { pad: 4, frames: 3, requests: 2, run: 1 })).toBe(
+      "/api/runs/20260101-120000/live?run=1&requests=2&frames=3&pad=4",
+    );
+  });
+
+  it("null の位置を省き、0 は付ける", () => {
+    expect(livePath("r", { run: 0, requests: null, frames: 120, pad: null })).toBe(
+      "/api/runs/r/live?run=0&frames=120",
+    );
+  });
+
+  it("すべて null なら ? を付けない", () => {
+    expect(livePath("r", { run: null, requests: null, frames: null, pad: null })).toBe(
+      "/api/runs/r/live",
+    );
+  });
+
+  it("実行の名前を encodeURIComponent で符号化する", () => {
+    expect(livePath("a b/c", { run: 5, requests: null, frames: null, pad: null })).toBe(
+      "/api/runs/a%20b%2Fc/live?run=5",
+    );
   });
 });
 

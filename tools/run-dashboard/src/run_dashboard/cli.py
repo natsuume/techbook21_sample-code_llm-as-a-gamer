@@ -22,6 +22,8 @@ DEFAULT_PORT = 8765
 # tools/run-dashboard で実行したときの、第4章のサンプルの実行の記録のディレクトリー
 DEFAULT_RUNS_DIR = "../../ch04_techniques/runs"
 PORT_MIN, PORT_MAX = 1, 65535
+# 止めるときに、開いている接続が閉じるのを待つ秒数の上限 (uvicorn.run の timeout_graceful_shutdown)
+GRACEFUL_SHUTDOWN_TIMEOUT_S = 1
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -72,7 +74,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     --runs-dir がディレクトリーでなければ、そのパスと、--runs-dir で記録のディレクトリーを指定する旨を書いた説明で
     SystemExit を出す。ディレクトリーなら、uvicorn のモジュールの run を呼ぶ (import uvicorn して uvicorn.run(...)
     の形で呼ぶ。テストは uvicorn.run を差し替えて確かめる):
-        uvicorn.run(app.create_app(runs_dir, app.DEFAULT_WEB_DIST_DIR), host=HOST, port=port)
+        uvicorn.run(app.create_app(runs_dir, app.DEFAULT_WEB_DIST_DIR), host=HOST, port=port,
+                    timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_S)
+    開いている接続 (ライブの /live の SSE は、クライアントが閉じるまで続く) があっても、止めるときに接続が閉じるのを
+    待つ終了の猶予を GRACEFUL_SHUTDOWN_TIMEOUT_S 秒で打ち切る。打ち切ると uvicorn が接続の処理を取り消して止まるため、
+    接続を開いたままでも 1 回の Ctrl+C で止まる (取り消したことを uvicorn が ERROR のログに出す)。
     """
     args = parse_args(argv)
     runs_dir: Path = args.runs_dir
@@ -81,4 +87,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"{runs_dir} ({runs_dir.resolve()}) is not a directory. "
             "Specify the directory of the run records with --runs-dir"
         )
-    uvicorn.run(create_app(runs_dir, DEFAULT_WEB_DIST_DIR), host=HOST, port=args.port)
+    uvicorn.run(
+        create_app(runs_dir, DEFAULT_WEB_DIST_DIR),
+        host=HOST,
+        port=args.port,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_S,
+    )

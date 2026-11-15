@@ -1,5 +1,5 @@
 // 選んでいる実行の summary と区間 API の結果から、画面全体で使う値 (フレームの時刻・中立に戻した時刻・
-// 書き換えの一覧・選んでいる要求・再生位置・表示の区間) を求める純粋な関数。
+// 書き換えの一覧・選んでいる要求・再生位置・表示の区間) を求める純粋な関数。ライブで最新を追うときの選択も求める。
 import type {
   EventItem,
   FrameItem,
@@ -11,7 +11,12 @@ import type {
 import { neutralTimesFromEvents } from "../controller/controllerTimeline.ts";
 import { listRewrites, type NoteRewrite } from "../notes/noteHistory.ts";
 import { playbackPosition, requestPosition } from "../requests/requestNavigation.ts";
-import { computeViewWindow, type TimeRange, type ViewWidth } from "../timeline/viewWindow.ts";
+import {
+  computeLiveWindow,
+  computeViewWindow,
+  type TimeRange,
+  type ViewWidth,
+} from "../timeline/viewWindow.ts";
 
 /** t が null でないフレーム */
 export type TimedFrame = FrameItem & { t: number };
@@ -111,5 +116,35 @@ export const selectPlayback = (
     nextRequestPosition: nextRequest === undefined ? null : requestPosition(nextRequest),
     position,
     range: computeViewWindow(position, width, data.summary.t_end),
+  };
+};
+
+/** 最後の要求 (requests.items の最後) の n を返す。要求の記録が無い (available が false) か、要求が無ければ null */
+export const latestRequestN = (data: Pick<RunData, "requests">): number | null =>
+  data.requests.available ? (data.requests.items.at(-1)?.n ?? null) : null;
+
+/**
+ * 番号 n の要求を返す (requestIndexByN で引く)。要求の記録が無い (available が false)、n が null、
+ * n の要求が無いときは null
+ */
+export const findRequest = (data: RunData, n: number | null): RequestItem | null => {
+  const index = data.requests.available && n !== null ? data.requestIndexByN.get(n) : undefined;
+  return index === undefined ? null : (data.requests.items[index] ?? null);
+};
+
+/**
+ * ライブで最新を追うときの選択を返す。
+ * - selectedRequest: 最後の要求 (requests.items の最後)。要求の記録が無い (available が false) か、要求が無ければ null
+ * - nextRequestPosition: null
+ * - position: playbackPosition(selectedRequest, summary.t_end)
+ * - range: computeLiveWindow(width, summary.t_end) (右端を今にする)
+ */
+export const selectLivePlayback = (data: RunData, width: ViewWidth): PlaybackSelection => {
+  const selectedRequest = data.requests.available ? (data.requests.items.at(-1) ?? null) : null;
+  return {
+    selectedRequest,
+    nextRequestPosition: null,
+    position: playbackPosition(selectedRequest, data.summary.t_end),
+    range: computeLiveWindow(width, data.summary.t_end),
   };
 };

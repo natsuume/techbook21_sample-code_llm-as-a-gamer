@@ -146,6 +146,7 @@ const NoteFileList = ({ view, stats, selection }: NoteFileListProps) => {
                     dispatch({
                       type: "selectFile",
                       file: { type: "note", kind: row.kind, version: lastVersion },
+                      via: "open",
                     });
                   }
                 }}
@@ -223,7 +224,11 @@ const AdvisorFileGroup = ({ view, card, selection }: AdvisorFileGroupProps) => {
                 }
                 aria-label={`${file.path} を開く`}
                 onClick={() =>
-                  dispatch({ type: "selectFile", file: { type: "advisorFile", path: file.path } })
+                  dispatch({
+                    type: "selectFile",
+                    file: { type: "advisorFile", path: file.path },
+                    via: "open",
+                  })
                 }
               >
                 <span className={styles.fileName}>{fileNameOf(file.path)}</span>

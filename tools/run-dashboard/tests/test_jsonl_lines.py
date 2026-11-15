@@ -113,3 +113,76 @@ def test_read_json_lines_from_offset(tmp_path):
     assert read_json_lines(path, 9) == ParsedLines(
         records=[{"b": 2}], skipped=0, next_offset=18
     )
+
+
+# --- 読む範囲の終わり (end) ---
+
+# 9 バイトの行が 3 つ (行の境目は 9・18・27) と、改行で終わっていない最後の行
+THREE_LINES = b'{"a": 1}\n{"b": 2}\n{"c": 3}\n{"d"'
+
+
+def write_three_lines(tmp_path):
+    path = tmp_path / "a.jsonl"
+    path.write_bytes(THREE_LINES)
+    return path
+
+
+@pytest.mark.parametrize(
+    "offset, end, expected",
+    [
+        (0, 9, LineChunk(lines=[b'{"a": 1}'], next_offset=9)),
+        (0, 18, LineChunk(lines=[b'{"a": 1}', b'{"b": 2}'], next_offset=18)),
+        (9, 18, LineChunk(lines=[b'{"b": 2}'], next_offset=18)),
+    ],
+)
+def test_end_at_line_boundary_reads_lines_before_end(tmp_path, offset, end, expected):
+    # end が行の境目なら、その手前までの行を読み、next_offset は end
+    assert read_complete_lines(write_three_lines(tmp_path), offset, end) == expected
+
+
+@pytest.mark.parametrize(
+    "offset, end, expected",
+    [
+        # 2 行目の途中 (12) まで: 2 行目は含めず、next_offset は 1 行目の \n の次
+        (0, 12, LineChunk(lines=[b'{"a": 1}'], next_offset=9)),
+        # 2 行目の \n の直前 (17) まで: 2 行目は改行で終わっていない
+        (0, 17, LineChunk(lines=[b'{"a": 1}'], next_offset=9)),
+        # offset から end までに \n が無い
+        (9, 12, LineChunk(lines=[], next_offset=9)),
+    ],
+)
+def test_end_in_middle_of_line_excludes_that_line(tmp_path, offset, end, expected):
+    assert read_complete_lines(write_three_lines(tmp_path), offset, end) == expected
+
+
+@pytest.mark.parametrize("offset, end", [(9, 9), (18, 9), (0, 0)])
+def test_end_not_after_offset_reads_nothing(tmp_path, offset, end):
+    # end <= offset なら読まず、next_offset は offset
+    assert read_complete_lines(write_three_lines(tmp_path), offset, end) == LineChunk(
+        lines=[], next_offset=offset
+    )
+
+
+@pytest.mark.parametrize("offset", [0, 9])
+def test_end_beyond_file_size_is_same_as_none(tmp_path, offset):
+    # end がファイルの大きさより大きければ、end=None と同じ
+    path = write_three_lines(tmp_path)
+    beyond = len(THREE_LINES) + 100
+    assert read_complete_lines(path, offset, beyond) == read_complete_lines(
+        path, offset
+    )
+    assert read_complete_lines(path, offset, beyond).next_offset == 27
+
+
+def test_read_json_lines_with_end_parses_complete_lines_before_end(tmp_path):
+    # read_json_lines(path, offset, end) は parse_lines(read_complete_lines(path, offset, end))
+    path = tmp_path / "a.jsonl"
+    path.write_bytes(b'{"a": 1}\nnot json\n{"b": 2}\n{"c": 3}\n')
+    # 3 行目 (位置 18〜26) の途中まで
+    assert read_json_lines(path, 0, 22) == parse_lines(read_complete_lines(path, 0, 22))
+    assert read_json_lines(path, 0, 22) == ParsedLines(
+        records=[{"a": 1}], skipped=1, next_offset=18
+    )
+    assert read_json_lines(path, 9, 27) == ParsedLines(
+        records=[{"b": 2}], skipped=1, next_offset=27
+    )
