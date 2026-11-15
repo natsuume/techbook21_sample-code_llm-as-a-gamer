@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from switch2_layers.deep.deep_job_directory import create_job_directory
 from switch2_layers.deep.deep_types import (
     DeepJob,
     DeepRequestResult,
@@ -59,7 +60,7 @@ class DeepJobStatus(StrEnum):
 
     OK = "ok"  # DeepRunner.run が ok=True の結果を返した
     FAILED = "failed"  # DeepRunner.run が ok=False で stopped=False の結果を返した
-    ERROR = "error"  # DeepRunner.run が例外を出した
+    ERROR = "error"  # DeepRunner.run が例外を出した、またはジョブのスレッドを起動できなかった
     STOPPED = "stopped"  # DeepRunner.run が stopped=True の結果を返した (stop で止められて戻った)
     KILLED = "killed"  # stop の後 stop_grace_s 秒たっても run が戻らず、kill を呼んだ
 
@@ -113,13 +114,16 @@ class DeepSchedulerParts:
     paths              実行ディレクトリー
     runner             ジョブを実行する DeepRunner
     clock              実行の経過秒の時計。起動・終了・タイムアウト・stop からの秒数は、すべてこの時計で測る
-    run_log            run.jsonl (deep_start・deep_stop・deep_end・deep_skipped を書く)
+    run_log            run.jsonl (deep_start・deep_stop・deep_end・deep_skipped・deep_request_error を書く)
     current_scene_id   現在の場面 ID を返す関数 (run では middle/state.json の scene_id)。自動の呼び出しの判定に使う
     latest_frame_t     最新のフレームの時刻を返す関数 (run では frames.jsonl の最後の t)。DeepJob.latest_frame_t に使う
     start_job_thread   ジョブの本体 (引数なしの関数) を受け取って別スレッドで起動する関数。既定は start_daemon_thread。
                        テストでは本体を溜めておき、好きな時点で呼ぶ関数を渡す
     sleep              close が止めたジョブの終わりを待つ間に、秒数を受け取って待つ関数 (既定 time.sleep)。
                        テストでは偽の時計を進める関数を渡す
+    prepare_job_directory
+                       ジョブのディレクトリーを用意する関数 (既定 deep_job_directory.create_job_directory)。
+                       テストでは、ある種類の用意に失敗する関数を渡す
     """
 
     paths: RunPaths
@@ -130,6 +134,7 @@ class DeepSchedulerParts:
     latest_frame_t: Callable[[], float | None]
     start_job_thread: Callable[[Callable[[], None]], None] = start_daemon_thread
     sleep: Callable[[float], None] = time.sleep
+    prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
 
 
 class DeepScheduler:
@@ -160,28 +165,40 @@ class DeepScheduler:
            "since_last_start_s": 前回の起動からの秒数} を書き、started=False の結果を返す
         4. 起動する: DeepJob(kind, key.scene_id, trigger, requested_t=now, previous_latest_frame_t=
            deep_job_directory.find_previous_latest_frame_t(paths, key), latest_frame_t=latest_frame_t()) を作り、
-           create_job_directory でディレクトリーを用意し、key の前回の起動の t を now にし、実行中に数え、
+           prepare_job_directory(paths, job) でディレクトリーを用意し、key の前回の起動の t を now にし、実行中に数え、
            run_log に deep_start {"kind", "scene_id", "trigger", "job": 実行ディレクトリーからの相対パス} を書いてから、
            start_job_thread(ジョブの本体) を呼ぶ。DeepRequestResult(started=True, job_dir=ディレクトリー) を返す
         ジョブの本体: execute_deep_job(runner, job, job_dir) を呼ぶ。戻ったときに、そのジョブがまだ kill されていなければ、
         実行中から外し、key の前回の終了の t を戻った時刻にして、run_log に deep_end {"kind", "scene_id", "trigger",
         "job", "status", "message", "stop_reason": 止めた理由 (DeepStopReason の値。止めていなければ null)} を書く。
         既に kill したジョブなら、戻り値を使わず何も書かない (deep_end は kill のときに書いてある)。
-        now は clock.now()。ディレクトリーの用意に失敗したら (OSError) 例外をそのまま出す (起動の記録は変えない)。
+        now は clock.now()。
+        失敗の扱い (どちらも、失敗を「key の前回のジョブの終了」と同じに扱い、key の前回の終了の t を now にする。
+        そのため自動の呼び出しは、失敗した時刻から auto_seconds の間、この文書を対象にしない):
+            - prepare_job_directory が例外 (Exception) を出したら (作りかけのディレクトリーは
+              deep_job_directory.create_job_directory が消す)、前回の終了の t を now にしてから、例外をそのまま出す。
+              前回の起動の t は変えず (最小間隔の判定に数えない)、run_log にも書かない (呼んだ側が記録する)
+            - start_job_thread が例外を出したら、key を実行中から外し、前回の終了の t を now にし、run_log に
+              deep_end {..., "status": "error", "message": 説明, "stop_reason": null} を書いてから、例外をそのまま出す
+              (deep_start と対応させるため、ジョブのディレクトリーは残す)
         """
         raise NotImplementedError
 
     def check_auto(self) -> list[DeepRequestResult]:
         """自動の呼び出しを 1 回判定し、request を呼んだ結果 (起動したものと、最小間隔で捨てたもの) を
-        DOCUMENT_KINDS の順に返す。request を呼ばなければ空のリスト。
+        DOCUMENT_KINDS の順に返す。request を呼ばなければ空のリスト。request が例外を出した種類は結果に含めない。
 
         scene_id = current_scene_id() として、DOCUMENT_KINDS の種類ごとに:
             1. 対象の文書 key = document_key(種類, scene_id)
             2. 種類ごとに前回の check_auto で見た対象と key が違えば、key が対象になった時刻を今の t にする
                (最初の check_auto で見た対象は、スケジューラーを作ったときの t に対象になったものとする)
             3. key のジョブが実行中なら起動しない
-            4. 基準の時刻 = key の前回のジョブの終了の t (このスケジューラーで終わったものが無ければ、key が対象になった時刻)。
-               now - 基準の時刻 >= auto_seconds なら request(種類, DeepTrigger.AUTO, scene_id) を呼ぶ
+            4. 基準の時刻 = key の前回のジョブの終了の t (このスケジューラーで終わったもの、または request の失敗。
+               無ければ、key が対象になった時刻)。now - 基準の時刻 >= auto_seconds なら request(種類, DeepTrigger.AUTO,
+               scene_id) を呼ぶ
+            5. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "auto",
+               "kind", "trigger": "auto", "scene_id", "error": 説明} を書き、残りの種類の判定を続ける。
+               request が失敗を前回の終了として記録するため、その文書は失敗した時刻から auto_seconds の間、再び要求しない
         close の後は何もせず空のリストを返す。
         """
         raise NotImplementedError

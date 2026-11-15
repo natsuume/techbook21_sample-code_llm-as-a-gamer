@@ -52,8 +52,11 @@ def create_job_directory(
        ファイルでない。列挙した後に消えた文書を含む)、無い文書として扱う: コピーせず、sha256 を NO_DOCUMENT_SHA256 にする
     3. work/ を作る (コピーが無くても)。map なら work/map/ も作る
     4. job.json を置き換えの書き込みで書く (モジュールの docstring の形。documents は 2 の順)
-    無い文書以外の失敗 (OSError) は、そのまま外に出す (呼び出し側の DeepScheduler.request から外に出て、
-    surface と middle のループが deep_request_error として記録する)。
+    1 でディレクトリーを作った後に失敗したら (無い文書以外の OSError、list_documents の例外など。Exception)、
+    作りかけのジョブのディレクトリーを中身ごと消してから、元の例外をそのまま出す。消すのに失敗しても、
+    消すときの例外ではなく元の例外を出す。消したディレクトリーの連番は、次のジョブがもう一度使う。
+    例外は呼び出し側の DeepScheduler.request から外に出て、surface・middle・自動の呼び出しが deep_request_error として
+    記録する。
     """
     raise NotImplementedError
 

@@ -201,6 +201,23 @@ def test_listed_path_that_is_not_a_regular_file_is_treated_as_missing(tmp_path):
     ]
 
 
+def test_failed_preparation_removes_partial_job_directory(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+
+    def failing_listing(notes_dir: Path, key: DocumentKey) -> list[str]:
+        raise OSError("listing failed")
+
+    with pytest.raises(OSError, match="listing failed"):
+        create_job_directory(paths, job(DocumentKind.CONTROLS), failing_listing)
+    # 作りかけのディレクトリーを残さない
+    assert list((root / "deep").iterdir()) == []
+    # 消したディレクトリーの連番は、次のジョブがもう一度使う
+    assert create_job_directory(paths, job(DocumentKind.CONTROLS)).name == (
+        "controls-001"
+    )
+
+
 def test_map_job_does_not_copy_temporary_files(tmp_path):
     root = make_run(tmp_path)
     (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")

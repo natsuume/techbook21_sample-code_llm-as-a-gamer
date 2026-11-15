@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from switch2_layers.deep.deep_job_directory import create_job_directory
 from switch2_layers.deep.deep_scheduler import (
     SKIP_CLOSED,
     SKIP_MIN_START_INTERVAL,
@@ -127,17 +128,36 @@ def make_run(tmp_path: Path) -> Path:
     return root
 
 
+class FailingPreparation:
+    """prepare_job_directory の偽物。fail_kinds の種類では例外を出し、それ以外は create_job_directory を呼ぶ。
+
+    呼ばれた種類を calls に記録する。
+    """
+
+    def __init__(self, *fail_kinds: DocumentKind):
+        self.fail_kinds = set(fail_kinds)
+        self.calls: list[DocumentKind] = []
+
+    def __call__(self, paths: RunPaths, job: DeepJob) -> Path:
+        self.calls.append(job.kind)
+        if job.kind in self.fail_kinds:
+            raise OSError(f"cannot prepare {job.kind}")
+        return create_job_directory(paths, job)
+
+
 def make_scheduler(
     tmp_path: Path,
     runner: FakeRunner | None = None,
     min_start_interval_s: float = 15.0,
     auto_seconds: float = 60.0,
     timeout_s: float = 300.0,
+    prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory,
+    start_job_thread: Callable[[Callable[[], None]], None] | None = None,
 ) -> Harness:
     """DeepScheduler と偽の部品を組み立てる (テストの本体から呼ぶ)。スケジューラーは t = 0 に作る。
 
-    ジョブの本体は DeferredThreads に溜め、close の待ちは Harness.sleep (偽の時計を進める) にする。
-    stop_grace_s は既定の 5 秒のまま。
+    ジョブの本体は DeferredThreads に溜め (start_job_thread を渡せば、それを使う)、close の待ちは
+    Harness.sleep (偽の時計を進める) にする。stop_grace_s は既定の 5 秒のまま。
     """
     root = make_run(tmp_path)
     paths = RunPaths(root)
@@ -157,8 +177,9 @@ def make_scheduler(
         run_log=RunLog(paths.run_log, clock),
         current_scene_id=lambda: scene["id"],
         latest_frame_t=lambda: latest["t"],
-        start_job_thread=threads,
+        start_job_thread=start_job_thread or threads,
         sleep=lambda seconds: holder[0].sleep(seconds),
+        prepare_job_directory=prepare_job_directory,
     )
     settings = DeepSchedulerSettings(
         min_start_interval_s=min_start_interval_s,
@@ -473,6 +494,97 @@ def test_auto_respects_min_interval(tmp_path):
     advice = [r for r in results if r.reason == SKIP_MIN_START_INTERVAL]
     assert len(advice) == 1
     assert not (harness.root / "deep" / "advice-002").exists()
+
+
+# --- 起動の失敗 ---
+
+
+def test_request_failure_is_raised_without_starting(tmp_path):
+    harness = make_scheduler(
+        tmp_path, prepare_job_directory=FailingPreparation(DocumentKind.TIPS)
+    )
+    with pytest.raises(OSError, match="cannot prepare tips"):
+        harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    assert not harness.scheduler.is_running(DocumentKey(DocumentKind.TIPS, None))
+    assert run_rows(harness.root, "deep_start") == []
+    assert harness.threads.bodies == []
+
+
+def test_failed_preparation_does_not_count_for_min_interval(tmp_path):
+    preparation = FailingPreparation(DocumentKind.TIPS)
+    harness = make_scheduler(tmp_path, prepare_job_directory=preparation)
+    harness.at(1.0)
+    with pytest.raises(OSError):
+        harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    preparation.fail_kinds.clear()
+    harness.at(2.0)
+    # 起動できなかった要求は、最小間隔の起点にしない
+    result = harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    assert result.started is True
+
+
+def test_auto_continues_with_later_kinds_after_a_kind_fails(tmp_path):
+    harness = make_scheduler(
+        tmp_path, prepare_job_directory=FailingPreparation(DocumentKind.TIPS)
+    )
+    harness.at(60.0)
+    results = harness.scheduler.check_auto()
+    # tips の後ろの種類 (strategy・advice・map) も判定して起動する
+    assert started_kinds(results) == ["controls", "strategy", "advice", "map"]
+    errors = run_rows(harness.root, "deep_request_error")
+    assert len(errors) == 1
+    assert errors[0]["t"] == 60.0
+    assert errors[0]["source"] == "auto"
+    assert errors[0]["kind"] == "tips"
+    assert errors[0]["trigger"] == "auto"
+    assert errors[0]["scene_id"] is None
+    assert "cannot prepare tips" in errors[0]["error"]
+    assert not (harness.root / "deep" / "tips-001").exists()
+
+
+def test_failed_document_is_not_retried_until_auto_seconds_after_failure(tmp_path):
+    preparation = FailingPreparation(DocumentKind.TIPS)
+    harness = make_scheduler(tmp_path, prepare_job_directory=preparation)
+    harness.at(60.0)
+    harness.scheduler.check_auto()
+    assert preparation.calls.count(DocumentKind.TIPS) == 1
+    preparation.fail_kinds.clear()
+    # 失敗した時刻 (60.0) から auto_seconds の間は、判定の周期ごとに同じ失敗を繰り返さない
+    for t in [60.5, 90.0, 119.9]:
+        harness.at(t)
+        assert harness.scheduler.check_auto() == []
+    assert preparation.calls.count(DocumentKind.TIPS) == 1
+    assert len(run_rows(harness.root, "deep_request_error")) == 1
+    harness.at(120.0)
+    assert started_kinds(harness.scheduler.check_auto()) == ["tips"]
+    assert (harness.root / "deep" / "tips-001").is_dir()
+
+
+def test_thread_start_failure_is_recorded_and_not_retried_too_soon(tmp_path):
+    started: list[Callable[[], None]] = []
+
+    def failing_start(body: Callable[[], None]) -> None:
+        started.append(body)
+        raise RuntimeError("cannot start thread")
+
+    harness = make_scheduler(tmp_path, start_job_thread=failing_start)
+    harness.at(60.0)
+    assert harness.scheduler.check_auto() == []
+    assert len(started) == len(DOCUMENT_KINDS)
+    # deep_start と対応する deep_end を status error で書き、実行中に数えない
+    ends = run_rows(harness.root, "deep_end")
+    assert [row["status"] for row in ends] == ["error"] * len(DOCUMENT_KINDS)
+    assert all("cannot start thread" in row["message"] for row in ends)
+    assert len(run_rows(harness.root, "deep_start")) == len(DOCUMENT_KINDS)
+    assert len(run_rows(harness.root, "deep_request_error")) == len(DOCUMENT_KINDS)
+    for kind in DOCUMENT_KINDS:
+        assert not harness.scheduler.is_running(DocumentKey(kind, None))
+    harness.at(119.9)
+    harness.scheduler.check_auto()
+    assert len(started) == len(DOCUMENT_KINDS)
+    harness.at(120.0)
+    harness.scheduler.check_auto()
+    assert len(started) == 2 * len(DOCUMENT_KINDS)
 
 
 # --- 終了 ---

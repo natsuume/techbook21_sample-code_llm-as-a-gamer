@@ -4,6 +4,7 @@ from switch2_remote.controller_state import BUTTON_ORDER, NEUTRAL_REPORT
 from switch2_layers.buttons import FilteredAction
 from switch2_layers.hardware.pad_output import (
     TAP_PRESS_S,
+    TAP_RELEASE_GAP_S,
     OutputStoppedError,
     PadOutput,
 )
@@ -123,6 +124,131 @@ def test_tap_of_held_button_is_ignored():
     # 押し続けているボタンは短押しにしないため、離すレポートも送らない
     assert len(sender.reports) == 1
     assert sender.reports[-1][0] & A_BIT
+
+
+# --- 押されていたボタンの短押し (いったん離してから押す) ---
+
+
+def test_tap_press_and_release_gap_constants():
+    assert TAP_RELEASE_GAP_S == 0.1
+
+
+def test_tap_of_button_not_pressed_before_starts_immediately():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"B"})))
+    clock.now = 1.0
+    output.apply(PadAction(held=frozenset({"B"}), taps=frozenset({"A"})))
+    # 直前のレポートで押されていなかった A は、この apply のレポートですぐ押す
+    assert sender.reports[-1][0] & A_BIT
+    assert sender.reports[-1][0] & B_BIT
+    count = len(sender.reports)
+    clock.now = 2.0
+    output.start_due_taps()
+    assert len(sender.reports) == count
+
+
+def test_held_to_tap_releases_first_then_taps_after_gap():
+    output, sender, clock, events = make_output()
+    output.apply(PadAction(held=frozenset({"A", "B"})))
+    assert sender.reports[-1][0] & A_BIT
+    clock.now = 1.0
+    output.apply(
+        PadAction(held=frozenset({"B"}), taps=frozenset({"A"}), left_stick=(1.0, 0.0))
+    )
+    # 1. まず A を離したレポートを送る (B とスティックは、この apply の値)
+    release = sender.reports[-1]
+    assert release[0] & A_BIT == 0
+    assert release[0] & B_BIT
+    assert release[3] == 255
+    count = len(sender.reports)
+    # 2. 離す間隔 (0.1 秒) の前は押さない
+    clock.now = 1.0 + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # 3. 離す間隔の後に A を押したレポートを送る
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    press = sender.reports[-1]
+    assert press[0] & A_BIT
+    assert press[0] & B_BIT
+    assert press[3] == 255
+    # 4. 押してから TAP_PRESS_S 後に離す
+    pressed_at = clock.now
+    clock.now = pressed_at + TAP_PRESS_S - 0.01
+    output.release_due_taps()
+    assert len(sender.reports) == count + 1
+    clock.now = pressed_at + TAP_PRESS_S
+    output.release_due_taps()
+    assert sender.reports[-1][0] & A_BIT == 0
+    assert sender.reports[-1][0] & B_BIT
+    # タイマースレッドが送るレポートでは on_operation を呼ばない
+    assert [event.source for event in events] == ["apply", "apply"]
+
+
+def test_tap_again_during_tap_releases_then_taps_again():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert sender.reports[-1][0] & A_BIT
+    # 短押しの最中に、同じボタンの短押しをもう一度求める
+    clock.now = 0.05
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    count = len(sender.reports)
+    # 前の短押しの離す時刻 (0.12) になっても、もう離してあるので送らない
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    assert len(sender.reports) == count
+    clock.now = 0.05 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert sender.reports[-1][0] & A_BIT
+    clock.now = 0.05 + TAP_RELEASE_GAP_S + TAP_PRESS_S
+    output.release_due_taps()
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_waiting_tap_is_cancelled_when_button_is_held_again():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"A"})))
+    clock.now = 1.05
+    output.apply(PadAction(held=frozenset({"A"})))
+    assert sender.reports[-1][0] & A_BIT
+    count = len(sender.reports)
+    clock.now = 2.0
+    output.start_due_taps()
+    output.release_due_taps()
+    # 押し続けに戻ったので、待っていた短押しは始めない
+    assert len(sender.reports) == count
+
+
+def test_waiting_tap_is_not_rescheduled_by_later_apply():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"A"})))
+    clock.now = 1.05
+    output.apply(PadAction(taps=frozenset({"A"})))
+    # 始める時刻は 1.0 + 0.1 のまま (1.05 + 0.1 に延ばさない)
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert sender.reports[-1][0] & A_BIT
+
+
+@pytest.mark.parametrize("stop", ["neutral", "stop_output"])
+def test_neutral_and_stop_cancel_waiting_taps(stop):
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"A"})))
+    getattr(output, stop)()
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    count = len(sender.reports)
+    clock.now = 2.0
+    output.start_due_taps()
+    output.release_due_taps()
+    assert len(sender.reports) == count
 
 
 def test_conflicting_directions_in_held_are_both_removed():

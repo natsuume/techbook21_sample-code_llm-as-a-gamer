@@ -18,8 +18,8 @@ EVENT_DEEP_START = "deep_start"  # deep のジョブの開始
 EVENT_DEEP_STOP = "deep_stop"
 EVENT_DEEP_END = "deep_end"  # deep のジョブの終了 (kill を含む)
 EVENT_DEEP_SKIPPED = "deep_skipped"  # deep を呼ぶ要求を捨てた
-# surface か middle が deep を要求したときに、要求の受け口 (DeepScheduler.request) が例外を出した。
-# source ("surface" / "middle")・kind・trigger・scene_id・error を含む。ループは止めない
+# surface・middle・自動の呼び出しが deep を要求したときに、要求の受け口 (DeepScheduler.request) が例外を出した。
+# source ("surface" / "middle" / "auto")・kind・trigger・scene_id・error を含む。ループは止めない
 EVENT_DEEP_REQUEST_ERROR = "deep_request_error"
 EVENT_FRAMES_DROPPED = "frames_dropped"  # 画像の保存を捨てた件数 (終了時)
 
