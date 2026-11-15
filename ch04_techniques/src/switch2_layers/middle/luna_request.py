@@ -52,6 +52,7 @@ from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
 )
+from switch2_layers.notes.map_document import MapDocument
 from switch2_layers.notes.scene_labels import SceneLabel
 
 LUNA_MODEL = "gpt-6-luna"
@@ -75,6 +76,8 @@ SCENE_CHANGE_NOT_REPORTED_TEXT = (
     "surface は、前回の middle の実行以降に場面転換を検知していない"
 )
 NO_FRAMES_TEXT = "フレームは無い"
+# マップ (notes/map/map.json) が無い・読めない・形に合わないときに、マップの節に書く文字列
+NO_MAP_TEXT = "マップなし"
 
 
 def jpeg_data_url(jpeg: bytes) -> str:
@@ -102,6 +105,23 @@ def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
         f"{format_frame_label(label.first_seen_t)})"
         for label in labels
     )
+
+
+def describe_place_names(names: Sequence[str]) -> str:
+    """場所の名前の一覧を、1 件 1 行「- <名前>」の文にする (names の順。行は改行 1 つでつなぎ、末尾に改行を付けない)。
+
+    一覧が空なら EMPTY_TEXT を返す。
+    """
+    raise NotImplementedError
+
+
+def describe_map_document(document: MapDocument | None) -> str:
+    """マップの節の中身を返す。
+
+    document が None (マップなし) なら NO_MAP_TEXT。そうでなければ、マップの全体
+    notes.map_document.map_document_to_json(document) を json.dumps(..., ensure_ascii=False) で JSON にした文字列。
+    """
+    raise NotImplementedError
 
 
 def describe_previous_state(state: MiddleState | None) -> str:

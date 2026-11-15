@@ -18,7 +18,6 @@ from switch2_layers.deep.claude_code_command import (
 )
 from switch2_layers.deep.claude_code_runner import (
     KILLED_MESSAGE,
-    MAP_SKIPPED_MESSAGE,
     STOPPED_MESSAGE,
     ClaudeCodeDeepRunner,
     symlink_refusal_message,
@@ -323,19 +322,36 @@ def read_jsonl(path: Path) -> list[dict]:
 # --- map ---
 
 
-def test_map_job_does_not_start_claude(tmp_path):
-    fake = FakeClaude(start_error=AssertionError("claude must not be started"))
-    job, job_dir = prepare(make_run(tmp_path), DocumentKind.MAP)
-    result = fake.runner().run(job, job_dir)
-    assert result == DeepResult(ok=True, message=MAP_SKIPPED_MESSAGE)
-    assert fake.processes == []
-    assert not (job_dir / "stream.jsonl").exists()
-    assert not (job_dir / "result.json").exists()
-
-
-def test_map_job_is_recorded_as_success_in_run_log(tmp_path):
+def test_map_job_starts_claude_for_map_json_and_places_md(tmp_path):
     root = make_run(tmp_path)
-    fake = FakeClaude(start_error=AssertionError("claude must not be started"))
+    job, job_dir = prepare(root, DocumentKind.MAP)
+    fake = FakeClaude(lines=[line(INIT), line(RESULT)])
+    result = fake.runner().run(job, job_dir)
+    assert result == DeepResult(ok=True, message="大方針を更新した")
+    assert len(fake.processes) == 1
+    process = fake.processes[0]
+    run_abs = root.resolve()
+    context = read_prompt_context(job_dir)
+    assert context.notes == ("map/map.json", "map/places.md")
+    assert process.args == build_claude_command(
+        build_deep_prompt(context), run_abs, context.notes, ClaudeCodeOptions()
+    )
+    # 書いてよいのは、まだ無い 2 つの文書だけ (deep が Write で作る)
+    allowed = process.args[process.args.index("--allowedTools") + 1].split(",")
+    notes = (run_abs / "notes").as_posix()
+    assert allowed == [
+        f"Read(/{run_abs.as_posix()}/**)",
+        f"Edit(/{notes}/map/map.json)",
+        f"Edit(/{notes}/map/places.md)",
+    ]
+    assert process.kwargs["cwd"] == run_abs
+    assert (job_dir / "stream.jsonl").exists()
+    assert read_json(job_dir / "result.json")["returncode"] == 0
+
+
+def test_map_job_end_is_recorded_from_the_claude_result(tmp_path):
+    root = make_run(tmp_path)
+    fake = FakeClaude(lines=[line(RESULT)])
     scheduler, bodies = make_scheduler_with_manual_threads(root, fake.runner())
     assert scheduler.request(DocumentKind.MAP, DeepTrigger.AUTO, None).started
     for body in bodies:
@@ -344,8 +360,40 @@ def test_map_job_is_recorded_as_success_in_run_log(tmp_path):
     assert len(ends) == 1
     assert ends[0]["kind"] == "map"
     assert ends[0]["status"] == "ok"
-    assert ends[0]["message"] == MAP_SKIPPED_MESSAGE
+    assert ends[0]["message"] == "大方針を更新した"
+    assert len(fake.processes) == 1
+
+
+def link_map_json(root: Path, tmp_path: Path) -> Path:
+    """notes/map/map.json を、実行ディレクトリーの外のファイルへのシンボリックリンクにする。"""
+    secret = write_outside_file(tmp_path)
+    os.symlink(secret, root / "notes" / "map" / "map.json")
+    return root / "notes" / "map" / "map.json"
+
+
+def link_map_directory(root: Path, tmp_path: Path) -> Path:
+    """notes/map/ を、実行ディレクトリーの外へのシンボリックリンクにする。"""
+    write_outside_file(tmp_path)
+    (root / "notes" / "map").rmdir()
+    os.symlink(tmp_path / "outside", root / "notes" / "map")
+    return root / "notes" / "map"
+
+
+@pytest.mark.parametrize("make_link", [link_map_json, link_map_directory])
+def test_map_job_with_a_symlink_on_its_documents_does_not_start_claude(
+    tmp_path, make_link
+):
+    root = make_run(tmp_path)
+    job, job_dir = prepare(root, DocumentKind.MAP)
+    link = make_link(root, tmp_path)
+    fake = FakeClaude(start_error=AssertionError("claude must not be started"))
+    result = fake.runner().run(job, job_dir)
+    expected_link = root.resolve() / link.relative_to(root)
+    assert result == DeepResult(
+        ok=False, message=symlink_refusal_message(expected_link)
+    )
     assert fake.processes == []
+    assert read_json(job_dir / "result.json")["error"] == result.message
 
 
 # --- 起動の引数・作業ディレクトリー・環境変数 ---

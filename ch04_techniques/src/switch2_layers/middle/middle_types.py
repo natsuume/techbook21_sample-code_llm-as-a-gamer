@@ -1,5 +1,8 @@
 """middle 層の型: MiddleAnalyzer の入力 (MiddleInput) と出力 (MiddleOutput)、middle/state.json (MiddleState)、Protocol。
 
+出力のマップの観察 (MapObservation と ObservationKind) もここに置く。つながり (MapConnection) は、map.json と同じ型
+(notes.map_document) を使う。
+
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
      "surface_rows_offset", "operations_rows_offset"}
@@ -10,10 +13,34 @@ docstring)。
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
+from switch2_layers.notes.map_document import MapConnection, MapDocument
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
+
+
+class ObservationKind(StrEnum):
+    """middle が記録する観察の種類 (gpt-6-luna の出力の new_observations の kind の値)。"""
+
+    EXIT = "exit"  # 出口
+    LANDMARK = "landmark"  # 目印
+    BLOCKED = "blocked"  # 通れなかった位置
+
+
+@dataclass(frozen=True)
+class MapObservation:
+    """middle の出力の new_observations の要素 1 つ (新しく分かった、出口・目印・通れなかった位置)。
+
+    kind          観察の種類
+    place         観察した場所の名前
+    description   画面上の位置などの説明
+    """
+
+    kind: ObservationKind
+    place: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +108,11 @@ class MiddleInput:
                              (notes.surface_documents) で選ぶ: 場面が決まっていて、場面の controls.md があって空 (空白だけを
                              含む) でなければ場面の文書、そうでなければ notes/common/controls.md。読めなければ空文字列。
                              既定値の空文字列は、操作説明を渡さない入力 (テストなど) のため
+    place_names              場所の名前の一覧 (middle.place_names.collect_place_names)。notes/map/map.json の places の
+                             name と aliases、middle/map_records.jsonl の place_name を合わせ、重複を除いて最初に現れた順に
+                             並べたもの。既定値の空のタプルは、マップを渡さない入力 (テストなど) のため
+    map_document             notes/map/map.json の全体 (notes.map_document.read_map_document)。無い・読めない・形に
+                             合わないときは None (マップなし)。既定値の None は、マップを渡さない入力 (テストなど) のため
     """
 
     t: float
@@ -95,6 +127,8 @@ class MiddleInput:
     surface_rows_offset: int
     operations_rows_offset: int
     current_controls: str = ""
+    place_names: tuple[str, ...] = ()
+    map_document: MapDocument | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +141,11 @@ class MiddleOutput:
     surface_wait_s      surface の待ち秒 (0.2〜2.0 の範囲を想定する。範囲外でも surface が収める)
     timeline            系列情報
     tasks               現在の場面の短期タスクリスト (Markdown)
+    place_name          現在地の場所の名前。場所の名前の一覧から選び、当てはまるものが無いときだけ新しい名前にする。
+                        ゲームの世界の中の場所が映っていない (メニュー・タイトル・戦闘など) か、決められなければ None
+    new_connections     前回の実行より後に新しく分かった、場所から場所への移動 (無ければ空)
+    new_observations    新しく分かった、出口・目印・通れなかった位置 (無ければ空)
+    place_name・new_connections・new_observations の既定値は、マップを記録しない出力 (フェイクやテストなど) のため。
     """
 
     scene_name: str | None
@@ -115,6 +154,9 @@ class MiddleOutput:
     surface_wait_s: float
     timeline: str
     tasks: str
+    place_name: str | None = None
+    new_connections: tuple[MapConnection, ...] = ()
+    new_observations: tuple[MapObservation, ...] = ()
 
 
 class MiddleAnalyzer(Protocol):

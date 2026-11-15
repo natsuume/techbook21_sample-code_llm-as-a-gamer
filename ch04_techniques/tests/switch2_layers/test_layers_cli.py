@@ -16,10 +16,7 @@ from switch2_layers.cli import (
     middle_once_settings_from_args,
     run_settings_from_args,
 )
-from switch2_layers.deep.claude_code_runner import (
-    MAP_SKIPPED_MESSAGE,
-    ClaudeCodeDeepRunner,
-)
+from switch2_layers.deep.claude_code_runner import ClaudeCodeDeepRunner
 from switch2_layers.deep.deep_scheduler import (
     DeepJobOutcome,
     DeepJobStatus,
@@ -592,6 +589,10 @@ def test_middle_once_without_api_key_exits_and_writes_nothing(
 
 LUNA_OUTPUT = {
     "scene_name": "タイトル画面",
+    # タイトル画面にはゲームの世界の中の場所が映っていない
+    "place_name": "",
+    "new_connections": [],
+    "new_observations": [],
     "is_stuck": False,
     "stuck_description": "",
     "surface_wait_s": 1.5,
@@ -703,6 +704,100 @@ def test_middle_once_with_luna_records_usage_and_cost(tmp_path, monkeypatch, cap
     assert row["error_body_head"] is None
     state = json.loads((run_dir / "middle" / "state.json").read_text(encoding="utf-8"))
     assert state["surface_wait_s"] == 1.5
+    # 場所が無く、新しいつながりも観察も無い回は、マップの記録を書かない
+    assert not (run_dir / "middle" / "map_records.jsonl").exists()
+
+
+def test_middle_once_with_luna_reads_and_records_the_map(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(API_KEY_ENV, "sk-test")
+    run_dir = make_saved_run(tmp_path)
+    (run_dir / "frames" / "interval" / "000005000.jpg").write_bytes(b"jpeg")
+    (run_dir / "frames.jsonl").write_text(
+        json.dumps(
+            {
+                "t": 5.0,
+                "kind": "interval",
+                "file": "frames/interval/000005000.jpg",
+                "width": 640,
+                "height": 360,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    map_json = {
+        "places": [
+            {
+                "name": "家の 1 階",
+                "aliases": ["1 階の部屋"],
+                "description": "",
+                "exits": [],
+                "blocked": [],
+                "state": "",
+                "changes_on_entry": False,
+            }
+        ],
+        "connections": [],
+    }
+    (run_dir / "notes" / "map" / "map.json").write_text(
+        json.dumps(map_json, ensure_ascii=False), encoding="utf-8"
+    )
+    (run_dir / "middle" / "map_records.jsonl").write_text(
+        json.dumps({"t": 1.0, "scene_id": None, "place_name": "自分の部屋"}) + "\n",
+        encoding="utf-8",
+    )
+    output = {
+        **LUNA_OUTPUT,
+        "scene_name": "フィールド",
+        "place_name": "家の 1 階",
+        "new_connections": [{"from": "自分の部屋", "to": "家の 1 階", "how": "階段"}],
+    }
+    body = luna_response_body()
+    body["output"][0]["content"][0]["text"] = json.dumps(output, ensure_ascii=False)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=body)
+
+    def create_with_mock_transport(kind, environ):
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        return LunaMiddleAnalyzer(environ[API_KEY_ENV], client=client)
+
+    monkeypatch.setattr(cli, "create_middle_analyzer", create_with_mock_transport)
+    assert main(["middle-once", "--run-dir", str(run_dir)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    # 場所の名前の一覧 (map.json の name と aliases、記録の place_name) と、マップの全体を送る
+    [request] = requests
+    texts = [
+        part["text"]
+        for part in json.loads(request.content)["input"][1]["content"]
+        if part["type"] == "input_text"
+    ]
+    [places_section] = [
+        text for text in texts if text.startswith("## 場所の名前の一覧\n")
+    ]
+    assert (
+        places_section == "## 場所の名前の一覧\n- 家の 1 階\n- 1 階の部屋\n- 自分の部屋"
+    )
+    [map_section] = [text for text in texts if text.startswith("## マップ\n")]
+    assert json.loads(map_section.split("\n", 1)[1]) == map_json
+    # 送った画像の時刻で、マップの記録を 1 行足す
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "middle" / "map_records.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert rows[1:] == [
+        {
+            "t": 5.0,
+            "scene_id": "scene-001",
+            "place_name": "家の 1 階",
+            "connections": [{"from": "自分の部屋", "to": "家の 1 階", "how": "階段"}],
+            "observations": [],
+        }
+    ]
 
 
 # --- --deep (deep のジョブを実行するもの) ---
@@ -773,18 +868,43 @@ def must_not_start_process(*args, **kwargs):
     raise AssertionError("claude must not be started")
 
 
-def test_deep_once_map_with_claude_does_not_start_claude(tmp_path, monkeypatch, capsys):
-    # map のジョブは Claude Code を起動せず、成功として何もしない
-    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+class RefusingPopen:
+    """subprocess.Popen の偽物。渡された引数を記録し、OSError を出す (実際の claude は起動しない)。"""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(list(args))
+        raise OSError("claude is not started in tests")
+
+
+def test_deep_once_map_with_claude_starts_claude_for_the_map_documents(
+    tmp_path, monkeypatch, capsys
+):
+    # map のジョブも Claude Code を起動する。対象の文書は map/map.json と map/places.md (まだ無くてよい)
+    popen = RefusingPopen()
+    monkeypatch.setattr(subprocess, "Popen", popen)
     run_dir = make_saved_run(tmp_path)
     code = main(["deep-once", "--run-dir", str(run_dir), "--doc", "map"])
-    assert code == 0
     out = json.loads(capsys.readouterr().out)
-    assert out == {
-        "job": "deep/map-001",
-        "status": "ok",
-        "message": MAP_SKIPPED_MESSAGE,
-    }
+    assert out["job"] == "deep/map-001"
+    assert len(popen.calls) == 1
+    # 起動できなかった (偽物の OSError) ので失敗として終わる
+    assert out["status"] == "failed"
+    assert "claude is not started in tests" in out["message"]
+    assert code == 1
+    job = json.loads(
+        (run_dir / "deep" / "map-001" / "job.json").read_text(encoding="utf-8")
+    )
+    assert job["documents"] == ["map/map.json", "map/places.md"]
+    args = popen.calls[0]
+    notes = (run_dir.resolve() / "notes").as_posix()
+    allowed = args[args.index("--allowedTools") + 1].split(",")
+    assert allowed[1:] == [
+        f"Edit(/{notes}/map/map.json)",
+        f"Edit(/{notes}/map/places.md)",
+    ]
 
 
 class FakeBridgeSupervisor:

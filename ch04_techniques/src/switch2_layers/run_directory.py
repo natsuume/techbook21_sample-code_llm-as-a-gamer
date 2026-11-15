@@ -50,6 +50,8 @@ NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
 MIDDLE_CALLS_FILE = "calls.jsonl"
+# middle のマップの記録 (middle.map_records)
+MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
 DEEP_DIR = "deep"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
@@ -119,6 +121,11 @@ class RunPaths:
     def middle_calls(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_CALLS_FILE"""
         return self.root / MIDDLE_DIR / MIDDLE_CALLS_FILE
+
+    @property
+    def middle_map_records(self) -> Path:
+        """root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE"""
+        raise NotImplementedError
 
     @property
     def deep_dir(self) -> Path:

@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -17,7 +18,13 @@ from switch2_layers.middle.middle_loop import (
     run_middle_once,
     run_middle_step,
 )
-from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
+from switch2_layers.middle.middle_types import (
+    MapObservation,
+    MiddleInput,
+    MiddleOutput,
+    ObservationKind,
+)
+from switch2_layers.notes.map_document import MapConnection
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
@@ -910,3 +917,195 @@ def test_stop_during_analyze_discards_details(tmp_path):
     )
     assert result.stopped is True
     assert read_rows(root / "middle" / "calls.jsonl") == []
+
+
+# --- マップの記録 (middle/map_records.jsonl) ---
+
+MAP_CONNECTIONS = (
+    MapConnection(
+        from_place="自分の部屋 (2 階)", to_place="家の 1 階", how="右上の階段を下に"
+    ),
+)
+MAP_OBSERVATIONS = (
+    MapObservation(
+        kind=ObservationKind.EXIT, place="家の 1 階", description="左下の赤いマット"
+    ),
+)
+MAP_ROW_ITEMS = {
+    "connections": [
+        {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "右上の階段を下に"}
+    ],
+    "observations": [
+        {"kind": "exit", "place": "家の 1 階", "description": "左下の赤いマット"}
+    ],
+}
+
+
+def map_output(
+    scene_name: str | None = "町", place_name: str | None = "家の 1 階"
+) -> MiddleOutput:
+    return dataclasses.replace(
+        output(scene_name),
+        place_name=place_name,
+        new_connections=MAP_CONNECTIONS,
+        new_observations=MAP_OBSERVATIONS,
+    )
+
+
+def map_rows(root: Path) -> list[dict]:
+    return read_rows(root / "middle" / "map_records.jsonl")
+
+
+def test_step_appends_map_record_with_latest_sent_frame_time(tmp_path):
+    root = make_run(tmp_path)
+    # t=10.0 の入力で送るのは 9.5 まで (12.0 は範囲の外で、送らない)
+    write_frames(root, [4.0, 8.0, 9.5, 12.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = ScriptedAnalyzer(monotonic, map_output())
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, None
+    )
+    assert result.ok is True
+    assert [frame.t for frame in analyzer.inputs[0].frames] == [4.0, 8.0, 9.5]
+    assert map_rows(root) == [
+        {
+            "t": 9.5,
+            "scene_id": "scene-001",
+            "place_name": "家の 1 階",
+            **MAP_ROW_ITEMS,
+        }
+    ]
+
+
+def test_map_record_without_scene_has_null_scene_id(tmp_path):
+    root = make_run(tmp_path)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    result = run_middle_step(
+        RunPaths(root),
+        ScriptedAnalyzer(monotonic, map_output(scene_name=None, place_name="")),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+    )
+    assert result.ok is True
+    assert map_rows(root) == [
+        {"t": 9.0, "scene_id": None, "place_name": None, **MAP_ROW_ITEMS}
+    ]
+
+
+def test_recorded_place_name_is_offered_in_the_next_input(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, map_output(), elapsed=0.0)
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert analyzer.inputs[0].place_names == ()
+    assert analyzer.inputs[1].place_names == ("家の 1 階",)
+
+
+def test_call_without_sent_frames_writes_no_map_record(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, map_output(), elapsed=0.0)
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert len(map_rows(root)) == 1
+    # t=100.0 の入力では、直近 10 秒にフレームが無く、画像を送らない
+    monotonic.now = ORIGIN + 100.0
+    result = run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert result.ok is True
+    assert analyzer.inputs[1].frames == ()
+    assert len(map_rows(root)) == 1
+
+
+def test_call_with_nothing_new_writes_no_map_record(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    # 2 回目は場所を決められず、新しいつながりも観察も無い。3 回目はマップの項目を持たない出力
+    nothing_new = dataclasses.replace(output("町"), place_name="")
+    analyzer = ScriptedAnalyzer(
+        monotonic, map_output(), nothing_new, output("町"), elapsed=0.0
+    )
+    for _ in range(3):
+        assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is True
+    assert len(map_rows(root)) == 1
+
+
+def test_failed_analyze_writes_no_map_record(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(
+        monotonic, map_output(), RuntimeError("luna failed"), elapsed=0.0
+    )
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is False
+    assert len(map_rows(root)) == 1
+
+
+def test_failed_map_record_append_is_not_a_middle_failure(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    harness = make_loop(tmp_path, map_output(), max_errors=1)
+    write_frames(harness.root, [9.0])
+    # middle/map_records.jsonl をディレクトリーにして、記録の追記を失敗させる
+    (harness.root / "middle" / "map_records.jsonl").mkdir()
+    result = harness.loop.run_once()
+    # 失敗に数えず、止めず、ほかの出力は書く
+    assert result.ok is True
+    assert result.error is None
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert read_state(harness.root)["scene_id"] == "scene-001"
+    [row] = read_rows(harness.root / "middle" / "calls.jsonl")
+    assert row["error"] is None
+    # 警告を書く
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+def test_stop_before_map_record_leaves_it_unwritten(tmp_path, monkeypatch):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, map_output(), elapsed=0.0)
+    # 1 回目は止めずに動かし、場面「町」を一覧に足して、記録を 1 行書く
+    assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is True
+    assert len(map_rows(root)) == 1
+    # 2 回目は既知の場面なので一覧を書かず、middle/state.json を置き換えた直後に止める合図が立つ
+    stop = threading.Event()
+    monkeypatch.setattr(os, "replace", StopAfterReplace(os.replace, "state.json", stop))
+    result = run_middle_step(paths, analyzer, clock, 10.0, None, stop)
+    assert result.stopped is True
+    # 止める合図の後は、マップの記録も calls.jsonl の行も書かない
+    assert len(map_rows(root)) == 1
+    assert len(read_rows(root / "middle" / "calls.jsonl")) == 1
+
+
+def test_middle_once_appends_map_record(tmp_path):
+    root = make_run(tmp_path)
+    write_frames(root, [4.0, 8.0, 12.5])
+    result = run_middle_once(
+        root, ScriptedAnalyzer(FakeMonotonic(0.0), map_output(), elapsed=0.0), 10.0
+    )
+    assert result.ok is True
+    assert map_rows(root) == [
+        {
+            "t": 12.5,
+            "scene_id": "scene-001",
+            "place_name": "家の 1 階",
+            **MAP_ROW_ITEMS,
+        }
+    ]

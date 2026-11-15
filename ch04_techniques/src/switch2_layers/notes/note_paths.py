@@ -32,6 +32,9 @@ ADVICE_NOTE = "advice.md"
 COMMON_DIR = "common"
 SCENES_DIR = "scenes"
 MAP_DIR = "map"
+# マップの文書。場所とつながりの一覧 (形は notes.map_document) と、場所ごとの文章
+MAP_JSON_NOTE = f"{MAP_DIR}/map.json"
+MAP_PLACES_NOTE = f"{MAP_DIR}/places.md"
 SCENE_LABELS_FILE = "scene_labels.json"
 BOX_TARGETS_FILE = "box_targets.md"
 
