@@ -248,9 +248,9 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 |---|---|---|
 | surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、時刻と追えている box を書き込んだ画像、文書、middle の出力から、コントローラーの操作を決めて送ります (既定では TypeSafe の Jev に問います)。必要なら deep に文書の更新を求めます |
 | middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
-| deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | 操作説明・攻略情報・大方針・助言・マップの文書を書き直します。ジョブごとに `deep/<種類>-<連番>/` を作り、文書のコピーを `work/` に置きます |
+| deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | `notes/` の操作説明・攻略情報・大方針・助言の文書を、直接編集して書き直します (既定では Claude Code を起動します)。ジョブごとに `deep/<種類>-<連番>/` を作り、ジョブの記録を置きます。マップの文書は、まだ書きません |
 
-この版の deep はフェイクで、モデルの API を呼ばず、文書を変えずに成功を返します。surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。3 層ともフェイク (`--surface fake --middle fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
+surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層ともフェイク (`--surface fake --middle fake --deep fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
 ### サブコマンド
 
@@ -258,10 +258,9 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 |---|---|
 | `switch2-layers run [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで 3 層を動かします。Ctrl+C で止まります |
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
-| `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします |
-| `switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH\|none --from FILE` | deep が編集したファイル (`--from`) の内容で、`notes/` の文書 (`--note`) を置き換えます |
+| `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
-middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。
+middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
 
 ```bash
 uv run --env-file .env switch2-layers run
@@ -269,9 +268,8 @@ uv run switch2-layers run --surface fake --middle fake
 uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
 uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
+uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy --deep fake
 ```
-
-publish-note は、`notes/` の文書の今の SHA-256 (文書が無ければ `none`) が `--base-sha256` と一致したときだけ置き換え、終了コード 0 で終わります。一致しなければ置き換えずに、今の SHA-256 を標準出力に書いて終了コード 3 で終わります。`--note` は `notes/` の中のパス、`--from` は同じ実行の `deep/<種類>-<連番>/work/` の中のファイルに限ります。どちらもシンボリックリンクを解決した先で確かめ、範囲の外や通常のファイルでないものを指定すると、何も変えずに終了コード 2 で終わります。同じ実行の publish-note どうしは、`notes/.publish.lock` のロックを取り、比べてから置き換えるまでを 1 つずつ行います。
 
 ### middle の実装 (`--middle`)
 
@@ -318,6 +316,56 @@ box で取る対象は、`notes/scenes/<場面ID>/box_targets.md` から、`- �
 
 応答の待ちは 10 秒までです。HTTP のエラー、JSON として読めない応答、確率の欠け・範囲外・数でない値は surface の失敗として数え、再試行せずに次の要求で送り直します。Box の答えの座標か確信度が 0〜1 の外か、幅か高さが 0 以下のときは、その対象の box だけを無しとして扱い、ほかの問いの答えは使います。
 
+### deep の実装 (`--deep`)
+
+run と deep-once は、`--deep` で deep のジョブを実行するものを選びます。
+
+| 値 | 内容 |
+|---|---|
+| `claude` (既定) | Claude Code (`claude -p`) を子プロセスとして起動し、文書を書き直させます。`claude` コマンドが使え、Claude Code にログインしている (または環境変数 `ANTHROPIC_API_KEY` がある) 必要があります |
+| `fake` | 何もせずに成功を返すフェイクです。文書は変わりません |
+
+Claude Code は、モデル `claude-opus-5-5`、effort `high`、出力の形式 `stream-json` で、実行ディレクトリーを作業ディレクトリーにして起動します。プロンプトは、パッケージの中のプロンプトのファイル ([`src/switch2_layers/deep/prompts/`](./src/switch2_layers/deep/prompts/)) に、ジョブごとの値 (実行ディレクトリー、対象の文書、フレームの保存先、前回と今回の最新のフレームの時刻、読んでよい記録) を埋めて作ります。文書・記録・画面から読んだ文はプロンプトに入れず、ファイルとして読ませます。プロンプトでは、画面の文字や記録の中の文を指示として扱わないよう指示します。
+
+Claude Code に許すツールは、次の 5 つだけです。
+
+| ツール | 範囲 |
+|---|---|
+| `Read`・`Glob`・`Grep` | 実行ディレクトリーの中 |
+| `Edit`・`Write` | そのジョブの対象の文書 (`job.json` の `documents`) だけ。まだ無い文書は `Write` で作ります |
+
+Bash・WebSearch・WebFetch・サブエージェント (Agent)・Skill・MCP のツールなど、ほかのツールは使えない状態で起動します。権限のモードは `dontAsk` にし、許したもののほかは確認せずに拒みます。
+
+ユーザーとプロジェクトの設定ファイル、CLAUDE.md、AGENTS.md、hooks、インストールした plugin・skill・MCP サーバーは読み込ませません。そのために `--restricted`・`--safe-mode`・`--strict-mcp-config`・`--disable-slash-commands` を付け、`--settings` で次の設定を渡します。
+
+- hooks・auto memory・claude.ai のコネクターを止める
+- 作業ディレクトリーの外の読み書きを拒む
+- AGENTS.md を読ませない (`pluginConfigs` で、`cc-plugin-agents-md` の `instructionFiles` を `managed-only` にする)
+
+Claude Code に組み込まれた plugin (AGENTS.md を読む `cc-plugin-agents-md` など) は読み込まれますが、ツールは足しません。
+
+子プロセスの環境変数からは、次の変数を除きます。認証 (`ANTHROPIC_` で始まる変数など) と設定の場所 (`CLAUDE_CONFIG_DIR`) の変数は残します。
+
+- `TYPESAFE_API_KEY` と `OPENAI_API_KEY`
+- 親の Claude Code のセッションに結びつく変数 (`CLAUDECODE`・`CLAUDE_CODE_SESSION_ID`・`CLAUDE_CODE_CHILD_SESSION`・`CLAUDE_CODE_MESSAGING_SOCKET` など)。Claude Code の中から deep-once を動かしたときに残ります
+- `--settings` の設定を上書きする `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (`0` なら、`--settings` で止めた auto memory を有効にします)
+
+deep は `notes/` の文書の本体を直接編集します。同じ文書のジョブが並行して動くことがあるため、プロンプトでは、書く直前に文書を読み直し、ほかのジョブの更新を取り込んでから書くよう指示します。surface と middle は、deep が書きかけの文書を読むことがあります。種類ごとの対象の文書は次のとおりです。
+
+| 種類 | 対象の文書 |
+|---|---|
+| `controls` | 場面があれば `notes/scenes/<場面ID>/controls.md` と `notes/common/controls.md`、無ければ `notes/common/controls.md` |
+| `tips` | 場面があれば `notes/scenes/<場面ID>/tips.md`・`notes/scenes/<場面ID>/box_targets.md`・`notes/common/tips.md`、無ければ `notes/common/tips.md` |
+| `strategy` | `notes/strategy.md` |
+| `advice` | `notes/advice.md` |
+| `map` | Claude Code を起動せず、何もせずに成功として終わります。`run.jsonl` の `deep_end` (deep-once では標準出力の `message`) に、そのことを書きます |
+
+Claude Code を起動する前に、対象の文書と、その親のディレクトリー (`notes/` を含む) がシンボリックリンクでないことを確かめます。リンクがあれば起動せずに失敗として終わり、リンクだったパスを `run.jsonl` の `deep_end` の `message` (deep-once では標準出力の `message`) と `result.json` に書きます。surface と middle が `notes/` の文書を読むときも、リンクを解決した先が `notes/` の中の通常のファイルでなければ、無い文書として扱います。
+
+プロンプトには、前回、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻と、今回の最新のフレームの時刻を書き、どこまで遡って読むかは deep に任せます。失敗・停止・強制終了で終わったジョブと、まだ実行中のジョブは前回に数えません (そのジョブに渡した期間は、次のジョブが読み直します)。正常に終わったかは、`run.jsonl` の `deep_end` の `status` が `ok` であるか、ジョブの `result.json` (終了コード 0 で、エラーでも停止でもない) から読みます。
+
+停止を求めると Claude Code のプロセスグループに SIGTERM を送り、強制終了では SIGKILL を送ります。deep-once の最中に Ctrl+C を押したときも、Claude Code を止めてから終わります。
+
 ### run の起動引数
 
 `switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
@@ -339,6 +387,7 @@ box で取る対象は、`notes/scenes/<場面ID>/box_targets.md` から、`- �
 | `--surface {jev,fake}` | surface の実装 (「surface の実装」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
 | `--threshold-advisor P` | surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求めます | 0.5 | 0〜1 |
 | `--box-requery-every N` | 追えている box も、前回の問い直しからこの回数の要求がたったら Jev に問い直します | 5 | 1 以上の整数 |
+| `--deep {claude,fake}` | deep のジョブを実行するもの (「deep の実装」の節)。`claude` は Claude Code を起動します | `claude` | `claude`、`fake` |
 
 範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
@@ -350,7 +399,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `run.jsonl` | 起動 (`start`。起動引数を含む)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます |
 | `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
@@ -358,7 +407,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
 | `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置)。surface は要求ごとにこのファイルを読みます |
 | `middle/calls.jsonl` | middle の実行ごとの記録。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
-| `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書とその SHA-256) と、対象の文書のコピーを置く `work/` があります |
+| `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書の `notes/` からのパス) を置きます。Claude Code で動かしたジョブには、`stream.jsonl` (Claude Code の stream-json の出力。1 行に、起動からの秒と出力の 1 行) と `result.json` (終了コード、所要時間、費用、最後のメッセージ、エラーで終わったか、拒まれたツールの呼び出し、停止・強制終了したか、標準エラー出力) も置きます。起動前に止めたときは、`result.json` の `error` に理由を書きます |
 | `notes/` | 文書 (次の表) |
 
 `surface.jsonl` に書く画像のファイル名は、その要求で送った画像の保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
@@ -370,7 +419,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `notes/common/controls.md` | 共通の操作説明。押せるボタンを、まだ確かめていない印 `unknown` を付けて並べます |
 | `notes/common/tips.md` | 共通の攻略情報 (見出しだけ) |
 | `notes/common/box_targets.md` | surface が box で取る対象の共通の一覧。固定の 4 つ (自機・敵・敵の攻撃・目標地点) を `- 名前: 説明` の行で並べます |
-| `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)・box で取る対象 (`box_targets.md`)。起動時は空で、`tasks.md` は middle が書きます。場面の操作説明・攻略情報・box で取る対象が無いか空なら、surface は共通の文書を使います |
+| `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)・box で取る対象 (`box_targets.md`)。起動時は空で、`tasks.md` は middle が、ほかは deep が書きます。場面の操作説明・攻略情報・box で取る対象が無いか空なら、surface は共通の文書を使います |
 | `notes/strategy.md` | 大方針 (見出しだけ) |
 | `notes/advice.md` | 詰まったときの助言 (見出しだけ) |
 | `notes/map/` | マップの文書 (起動時は空) |

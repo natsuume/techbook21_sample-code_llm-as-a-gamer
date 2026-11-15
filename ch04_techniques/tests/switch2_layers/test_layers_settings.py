@@ -8,12 +8,14 @@ import pytest
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
+    DEFAULT_DEEP_RUNNER,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_SURFACE,
     DEFAULT_THRESHOLD_ADVISOR,
     OPENAI_API_KEY_ENV,
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
+    DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
     RunSettings,
@@ -209,6 +211,21 @@ def test_run_settings_to_json_contains_all_arguments():
     assert value["middle_interval_s"] == 5.0
     # そのまま JSON にできる
     assert json.loads(json.dumps(value)) == value
+
+
+def test_deep_runner_defaults_to_claude_code():
+    assert [choice.value for choice in DeepRunnerChoice] == ["claude", "fake"]
+    assert DEFAULT_DEEP_RUNNER is DeepRunnerChoice.CLAUDE
+
+
+def test_run_settings_keep_the_deep_runner_choice():
+    assert RunSettings().deep is DeepRunnerChoice.CLAUDE
+    # run.jsonl の start の args に、値の文字列で書く (Claude Code とフェイクのどちらで動かしたかを残す)
+    assert run_settings_to_json(RunSettings())["deep"] == "claude"
+    fake = run_settings_to_json(RunSettings(deep=DeepRunnerChoice.FAKE))
+    assert fake["deep"] == "fake"
+    assert type(fake["deep"]) is str
+    assert json.loads(json.dumps(fake))["deep"] == "fake"
 
 
 # --- --middle と API キー ---

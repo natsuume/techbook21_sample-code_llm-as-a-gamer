@@ -324,6 +324,8 @@ def test_previous_latest_frame_time_comes_from_previous_job_of_same_document(tmp
     harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
     harness.latest["t"] = 3.0
     harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    # 1 つ目のジョブが正常に終わる (run.jsonl に deep_end の status ok を書く)
+    harness.threads.run_all()
     harness.latest["t"] = 8.0
     second = harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
     other = harness.scheduler.request(
@@ -334,6 +336,69 @@ def test_previous_latest_frame_time_comes_from_previous_job_of_same_document(tmp
     assert job_json(second.job_dir)["latest_frame_t"] == 8.0
     # 別の文書 (場面の文書) の前回は無い
     assert job_json(other.job_dir)["previous_latest_frame_t"] is None
+
+
+def test_previous_latest_frame_time_skips_running_jobs(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    harness.latest["t"] = 3.0
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.threads.run_all()
+    harness.latest["t"] = 8.0
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    # 2 つ目はまだ実行中なので、3 つ目の前回は、正常に終わった 1 つ目の時刻
+    harness.latest["t"] = 12.0
+    third = harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    assert third.job_dir is not None
+    assert job_json(third.job_dir)["previous_latest_frame_t"] == 3.0
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        DeepResult(ok=False, message="could not update"),
+        RuntimeError("claude crashed"),
+        STOPPED,
+    ],
+    ids=["failed", "error", "stopped"],
+)
+def test_previous_latest_frame_time_skips_jobs_that_did_not_end_normally(
+    tmp_path, result
+):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    harness.latest["t"] = 3.0
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, None)
+    harness.threads.run_all()
+    harness.runner.result = result
+    harness.latest["t"] = 8.0
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, None)
+    harness.threads.run_all()
+    harness.latest["t"] = 12.0
+    third = harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, None)
+    assert third.job_dir is not None
+    # 正常に終わらなかった 2 つ目に渡した期間 (3.0 から 8.0) は、3 つ目が読み直す
+    assert job_json(third.job_dir)["previous_latest_frame_t"] == 3.0
+
+
+def test_previous_latest_frame_time_skips_killed_jobs(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0, timeout_s=10.0)
+    harness.latest["t"] = 3.0
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.threads.run_all()
+    harness.latest["t"] = 8.0
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    # 2 つ目はタイムアウトで止め、戻らないまま kill する
+    harness.at(10.0)
+    harness.scheduler.check_timeouts()
+    harness.at(15.0)
+    harness.scheduler.check_timeouts()
+    assert [row["status"] for row in run_rows(harness.root, "deep_end")] == [
+        "ok",
+        "killed",
+    ]
+    harness.latest["t"] = 12.0
+    third = harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    assert third.job_dir is not None
+    assert job_json(third.job_dir)["previous_latest_frame_t"] == 3.0
 
 
 # --- 並行の起動と最小間隔 ---
@@ -813,9 +878,7 @@ def test_run_deep_once_without_scene_uses_common_document(tmp_path):
     root = make_run(tmp_path)
     result = run_deep_once(root, DocumentKind.TIPS, None, FakeRunner())
     assert job_json(result.job_dir)["scene_id"] is None
-    assert job_json(result.job_dir)["documents"] == [
-        {"note": "common/tips.md", "sha256": "none"}
-    ]
+    assert job_json(result.job_dir)["documents"] == ["common/tips.md"]
 
 
 def test_run_deep_once_errors(tmp_path):

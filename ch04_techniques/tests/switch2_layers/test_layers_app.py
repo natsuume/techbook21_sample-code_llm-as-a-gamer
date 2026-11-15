@@ -33,7 +33,7 @@ from switch2_layers.middle.middle_loop import middle_failure_reason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 from switch2_layers.pad_action import PadAction
 from switch2_layers.run_directory import RunPaths
-from switch2_layers.settings import RunSettings
+from switch2_layers.settings import DeepRunnerChoice, RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.surface_assembly import build_surface_assembly
@@ -218,7 +218,6 @@ def test_run_with_fake_layers_for_a_few_seconds(tmp_path):
         job = read_json(root / "deep" / f"{kind}-001" / "job.json")
         assert job["trigger"] == "new_scene"
         assert job["scene_id"] == "scene-001"
-        assert (root / "deep" / f"{kind}-001" / "work").is_dir()
 
     # 記録: start (起動引数を含む) で始まり、frames_dropped の後に stop (理由を含む) で終わる
     run_rows = read_rows(root / "run.jsonl")
@@ -247,6 +246,16 @@ def test_run_with_fake_layers_for_a_few_seconds(tmp_path):
     controls = (root / "notes" / "common" / "controls.md").read_text(encoding="utf-8")
     assert "- A: unknown" in controls
     assert "HOME" not in controls
+
+
+def test_start_record_has_the_deep_runner_choice(tmp_path):
+    # Claude Code とフェイクのどちらで deep を動かしたかを、run.jsonl の start の args に値の文字列で残す
+    app = LayersApp(settings(tmp_path, deep=DeepRunnerChoice.FAKE), parts(FakeSender()))
+    reason, root = run_app(app, stop_after=0.5)
+    assert reason == REASON_INTERRUPTED
+    start = read_rows(root / "run.jsonl")[0]
+    assert start["event"] == "start"
+    assert start["args"]["deep"] == "fake"
 
 
 def test_home_is_never_sent_to_the_controller(tmp_path):

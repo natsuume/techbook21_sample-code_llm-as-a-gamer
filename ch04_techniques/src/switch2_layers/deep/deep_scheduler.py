@@ -8,7 +8,7 @@
 - 自動の呼び出し (check_auto) は、種類ごとに現在の対象の文書について判定し、次の 2 つを満たしたら、きっかけ auto で起動する
     - その文書のジョブが実行中でない
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
-- ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json・work/ を用意し (deep_job_directory)、
+- ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
   DeepRunner.stop を呼び (run.jsonl に deep_stop)、stop_grace_s 秒 (既定 5 秒) たっても run が戻らなければ
@@ -239,7 +239,8 @@ class DeepScheduler:
            捨てる: deep_skipped {"kind", "scene_id", "trigger", "reason": SKIP_MIN_START_INTERVAL,
            "since_last_start_s": 前回の起動からの秒数} を書き、started=False の結果を返す
         4. 起動する: DeepJob(kind, key.scene_id, trigger, requested_t=now, previous_latest_frame_t=
-           deep_job_directory.find_previous_latest_frame_t(paths, key), latest_frame_t=latest_frame_t()) を作り、
+           deep_job_directory.find_previous_latest_frame_t(paths, key) (同じ文書の、前回の正常に終わったジョブの
+           latest_frame_t。実行中・失敗・stop・kill のジョブは飛ばす), latest_frame_t=latest_frame_t()) を作り、
            prepare_job_directory(paths, job) でディレクトリーを用意し、key の前回の起動の t を now にし、実行中に数え、
            run_log に deep_start {"kind", "scene_id", "trigger", "job": 実行ディレクトリーからの相対パス} を書いてから、
            start_job_thread(ジョブの本体) を呼ぶ。DeepRequestResult(started=True, job_dir=ディレクトリー) を返す
@@ -574,8 +575,9 @@ def run_deep_once(
        (surface.middle_state_reader.read_surface_context の scene_id。無ければ None = 共通の文書) を使う
     2. 時刻 now は frames.jsonl の最新の t (frame_store.latest_frame_t。無ければ 0.0)
     3. DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL, requested_t=now,
-       previous_latest_frame_t=find_previous_latest_frame_t, latest_frame_t=frames.jsonl の最新の t (無ければ None)) で
-       create_job_directory → execute_deep_job を呼び、結果を返す
+       previous_latest_frame_t=find_previous_latest_frame_t (同じ文書の、前回の正常に終わったジョブの latest_frame_t),
+       latest_frame_t=frames.jsonl の最新の t (無ければ None)) で create_job_directory → execute_deep_job を呼び、
+       結果を返す
     最小の起動間隔とタイムアウトは確かめない (run が戻るまで待つ)。run.jsonl には書かない。
     run_dir がディレクトリーでなければ FileNotFoundError、scene_id が場面 ID の形でなければ ValueError にする。
     """
