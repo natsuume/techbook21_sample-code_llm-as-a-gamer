@@ -1,7 +1,7 @@
-// サーバー送信イベント (/live) で届いた記録を、TanStack Query のキャッシュ (summary・区間 API・advisor の実行の
-// 詳細) の値に足す純粋な関数。渡した値は変えず、変わった値だけを新しいオブジェクトにして返す。
+// サーバー送信イベント (/live) で届いた記録を、TanStack Query のキャッシュ (summary・区間 API) の値に足す純粋な関数と、
+// advisor の実行の詳細の途中経過に、届いた途中経過を重なりを除いてつなぐ純粋な関数。渡した値は変えず、変わった値だけを
+// 新しいオブジェクトにして返す。
 import {
-  type AdvisorDetail,
   type AdvisorStep,
   type EventItem,
   type FrameItem,
@@ -302,30 +302,49 @@ export const applyLiveEvents = (
   };
 };
 
-/** step が同じかを比べる文字列 (t・tool・summary。kind は比べない) */
-const stepKey = (step: AdvisorStep): string => JSON.stringify([step.t, step.tool, step.summary]);
+/** 2 つの step が、t・tool・summary で同じか (kind は比べない) */
+const isSameStep = (left: AdvisorStep, right: AdvisorStep): boolean =>
+  left.t === right.t && left.tool === right.tool && left.summary === right.summary;
 
-/**
- * advisor の実行の詳細 detail の steps の末尾に、steps を順に足す。
- * - detail.steps (と、この呼び出しで足したもの) に t・tool・summary が同じ step があれば足さない
- *   (kind は比べない。詳細を接続した後に読むと、届く step と重なるため)
- * - 1 件以上足したら steps_available を true にした新しいオブジェクトを返す。足さなければ detail をそのまま返す
- * - 渡した detail は変えない
- */
-export const appendAdvisorSteps = (
-  detail: AdvisorDetail,
-  steps: readonly AdvisorStep[],
-): AdvisorDetail => {
-  const known = new Set(detail.steps.map(stepKey));
-  const fresh: AdvisorStep[] = [];
-  for (const step of steps) {
-    const key = stepKey(step);
-    if (!known.has(key)) {
-      known.add(key);
-      fresh.push(step);
+/** fetched の末尾 k 件と streamed の先頭 k 件が、要素ごとに同じ step か */
+const overlapsBy = (
+  fetched: readonly AdvisorStep[],
+  streamed: readonly AdvisorStep[],
+  k: number,
+): boolean => {
+  const offset = fetched.length - k;
+  for (let index = 0; index < k; index += 1) {
+    const fetchedStep = fetched[offset + index];
+    const streamedStep = streamed[index];
+    if (
+      fetchedStep === undefined ||
+      streamedStep === undefined ||
+      !isSameStep(fetchedStep, streamedStep)
+    ) {
+      return false;
     }
   }
-  return fresh.length === 0
-    ? detail
-    : { ...detail, steps_available: true, steps: [...detail.steps, ...fresh] };
+  return true;
+};
+
+/**
+ * advisor の実行の詳細の API の steps (fetched) と、ライブで届いた step を届いた順に並べたもの (streamed) を、
+ * 重なりを除いてつないだ列を返す。
+ * - 重なりは、fetched の末尾 k 件と streamed の先頭 k 件が、要素ごとに t・tool・summary で一致する最大の k
+ *   (0 ≤ k ≤ min(両方の長さ))。詳細はつないだ後に読み直すため、詳細の末尾と、届いた step の先頭が重なる
+ * - 返す列は、fetched の後に streamed の k 件目より後を続けたもの。重なった step は fetched のものを使う
+ *   (kind は一致の判定に使わない。advisor が終わると、詳細の kind が permission_denied に変わりうるため)
+ * - 同じ値の step が続いても、その数を保つ (同じ値の step をまとめない)
+ * - 渡した配列は変えない
+ */
+export const mergeAdvisorSteps = (
+  fetched: readonly AdvisorStep[],
+  streamed: readonly AdvisorStep[],
+): AdvisorStep[] => {
+  for (let k = Math.min(fetched.length, streamed.length); k > 0; k -= 1) {
+    if (overlapsBy(fetched, streamed, k)) {
+      return [...fetched, ...streamed.slice(k)];
+    }
+  }
+  return [...fetched, ...streamed];
 };

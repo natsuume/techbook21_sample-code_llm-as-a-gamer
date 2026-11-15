@@ -1,6 +1,7 @@
 // run-dashboard のサーバーの API を読む TanStack Query のフックと、その queryKey を作る関数。読んだ値は古くならない
 // ものとして使い続け、実行中の実行の記録は、ライブのイベントをキャッシュに足すか、無効にして読み直して最新にする。
 // 実行の一覧だけは、新しく始まった実行と実行中かどうかを知るため、一定の間隔で読み直す。
+// ライブで届いた advisor の途中経過は、API を読まない置き場 (キャッシュの別の queryKey) に置き、そこから読む。
 import {
   keepPreviousData,
   QueryClient,
@@ -20,6 +21,7 @@ import {
 } from "./apiPaths.ts";
 import type {
   AdvisorDetail,
+  AdvisorStep,
   EventItem,
   FrameItem,
   NoteDetail,
@@ -76,17 +78,44 @@ export const advisorQueryKeyPrefix = (run: string): readonly ["advisor", string]
   "advisor",
   run,
 ];
+/** 実行 run の、すべての要求の詳細に当たる queryKey の前半 ["request", run] */
+export const requestQueryKeyPrefix = (run: string): readonly ["request", string] => [
+  "request",
+  run,
+];
+
+/** ライブで届いた advisor の途中経過の置き場の queryKey の先頭 */
+const STREAMED_STEPS_KEY = "liveAdvisorSteps";
+/**
+ * ライブで届いた advisor の途中経過 (AdvisorStep の配列、届いた順) の置き場の queryKey ["liveAdvisorSteps", run, name]。
+ * API を読む query ではなく、キャッシュに置くだけ (advisor の実行の詳細の query とは別のため、詳細の無効化と読み直しで
+ * 変わらない)
+ */
+export const streamedStepsQueryKey = (
+  run: string | null,
+  name: string | null,
+): readonly ["liveAdvisorSteps", string | null, string | null] => [STREAMED_STEPS_KEY, run, name];
+/** 実行 run の、すべての advisor の途中経過の置き場に当たる queryKey の前半 ["liveAdvisorSteps", run] */
+export const streamedStepsQueryKeyPrefix = (run: string): readonly ["liveAdvisorSteps", string] => [
+  STREAMED_STEPS_KEY,
+  run,
+];
 
 /**
  * 画面の QueryClient を作る。すべての query を staleTime: Infinity (読み直さない)、
- * refetchOnWindowFocus: false、retry: 1 (失敗したら 1 回だけ読み直す) にする
+ * refetchOnWindowFocus: false、retry: 1 (失敗したら 1 回だけ読み直す) にする。
+ * ライブで届いた advisor の途中経過の置き場は、使っている画面が無い間も捨てない (gcTime: Infinity。読み直して
+ * 戻せないため)
  */
-export const createQueryClient = (): QueryClient =>
-  new QueryClient({
+export const createQueryClient = (): QueryClient => {
+  const client = new QueryClient({
     defaultOptions: {
       queries: { staleTime: Number.POSITIVE_INFINITY, refetchOnWindowFocus: false, retry: 1 },
     },
   });
+  client.setQueryDefaults([STREAMED_STEPS_KEY], { gcTime: Number.POSITIVE_INFINITY });
+  return client;
+};
 
 /**
  * 実行の一覧 (/api/runs) を読む。queryKey は ["runs"]。RUN_LIST_REFRESH_MS ごとに読み直す
@@ -168,3 +197,17 @@ export const useAdvisorDetail = (
         ? skipToken
         : ({ signal }) => fetchJson<AdvisorDetail>(advisorPath(run, name), signal),
   });
+
+/** 届いた途中経過が無いときに返す、変わらない空の配列 */
+const NO_STEPS: readonly AdvisorStep[] = [];
+
+/**
+ * ライブで届いた advisor の実行 name の途中経過 (届いた順) を、置き場 ["liveAdvisorSteps", run, name] から読む
+ * (API は読まない。置き場はライブの接続が書く)。置き場が無ければ空の配列
+ */
+export const useStreamedAdvisorSteps = (
+  run: string | null,
+  name: string | null,
+): readonly AdvisorStep[] =>
+  useQuery<AdvisorStep[]>({ queryKey: streamedStepsQueryKey(run, name), queryFn: skipToken })
+    .data ?? NO_STEPS;

@@ -1,10 +1,10 @@
-// ライブで使う、TanStack Query のキャッシュの読み書き。届いたイベントを summary・区間 API・advisor の実行の詳細の
-// キャッシュに足し、読み直すキャッシュを無効にする。/live につなぐ位置 (cursor) を区間 API のキャッシュから読み、
+// ライブで使う、TanStack Query のキャッシュの読み書き。届いたイベントを summary・区間 API のキャッシュと、advisor の
+// 途中経過の置き場に足し、読み直すキャッシュを無効にする。/live につなぐ位置 (cursor) を区間 API のキャッシュから読み、
 // 区間 API と summary を読み直す。
 import type { QueryClient } from "@tanstack/react-query";
 import type { RangeKind } from "../api/apiPaths.ts";
 import type {
-  AdvisorDetail,
+  AdvisorStep,
   LiveCursors,
   LiveEvent,
   RangeResponse,
@@ -17,10 +17,12 @@ import {
   type RangeItemOf,
   rangeQueryKey,
   requestQueryKey,
+  requestQueryKeyPrefix,
+  streamedStepsQueryKey,
+  streamedStepsQueryKeyPrefix,
   summaryQueryKey,
 } from "../api/queries.ts";
 import {
-  appendAdvisorSteps,
   applyLiveEvents,
   type LiveCaches,
   type LiveInvalidation,
@@ -90,7 +92,8 @@ const invalidationQueryKey = (run: string, invalidation: LiveInvalidation) => {
 /**
  * 届いた順のイベントを実行 run のキャッシュに足し、applyLiveEvents の結果を返す。
  * - summary と 4 つの区間 API は、変わったものだけを setQueryData で書き換える
- * - advisor_step は、キャッシュにある advisor の実行の詳細に appendAdvisorSteps で足す (無ければ何もしない)
+ * - advisor_step は、advisor の実行ごとの途中経過の置き場 (streamedStepsQueryKey) の末尾に、届いた順に足す
+ *   (advisor の実行の詳細がキャッシュに無くても足す。詳細の表示は mergeAdvisorSteps で詳細の steps とつなぐ)
  * - 読み直すキャッシュ (invalidations) を invalidateQueries で無効にする (使っている query は読み直される)
  */
 export const writeLiveEvents = (
@@ -109,15 +112,10 @@ export const writeLiveEvents = (
   writeRange(queryClient, run, "pad", before.pad, after.pad);
   writeRange(queryClient, run, "events", before.events, after.events);
   for (const [name, steps] of result.advisorSteps) {
-    const queryKey = advisorQueryKey(run, name);
-    const detail = queryClient.getQueryData<AdvisorDetail>(queryKey);
-    if (detail === undefined) {
-      continue;
-    }
-    const appended = appendAdvisorSteps(detail, steps);
-    if (appended !== detail) {
-      queryClient.setQueryData(queryKey, appended);
-    }
+    queryClient.setQueryData<AdvisorStep[]>(streamedStepsQueryKey(run, name), (streamed) => [
+      ...(streamed ?? []),
+      ...steps,
+    ]);
   }
   for (const invalidation of result.invalidations) {
     void queryClient.invalidateQueries({
@@ -126,6 +124,29 @@ export const writeLiveEvents = (
     });
   }
   return result;
+};
+
+/**
+ * 実行 run の advisor の途中経過の置き場を、すべて空にする (/live を開くたびに使う。サーバーは接続した後に追記された
+ * 行の途中経過だけを送り、画面はつないで最初のイベントで advisor の実行の詳細をすべて読み直すため)
+ */
+export const clearStreamedSteps = (queryClient: QueryClient, run: string): void => {
+  queryClient.setQueriesData<AdvisorStep[]>({ queryKey: streamedStepsQueryKeyPrefix(run) }, []);
+};
+
+/** 実行 run の advisor の途中経過の置き場を捨てる (実行を選び直したときに使う) */
+export const discardStreamedSteps = (queryClient: QueryClient, run: string): void => {
+  queryClient.removeQueries({ queryKey: streamedStepsQueryKeyPrefix(run) });
+};
+
+/**
+ * end を受け取った後に、実行 run の summary とすべての要求の詳細を無効にする (使っている query は読み直される)。
+ * summary は記録の有無・読み飛ばした行の数・実行中かを最新にするため。要求の詳細は、要求の行が書かれて decision の
+ * 行がまだ書かれていない間に読んだ詳細 (所要時間などが無い) が、次の要求が来ないまま残らないようにするため
+ */
+export const invalidateAfterEnd = (queryClient: QueryClient, run: string): void => {
+  void queryClient.invalidateQueries({ queryKey: summaryQueryKey(run), exact: true });
+  void queryClient.invalidateQueries({ queryKey: requestQueryKeyPrefix(run) });
 };
 
 /**

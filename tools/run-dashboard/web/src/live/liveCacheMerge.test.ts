@@ -1,8 +1,7 @@
 // liveCacheMerge のテスト。届いたイベントをキャッシュに足す規則 (足す位置・置き換え・読み直し・渡した値を変えない) と、
-// advisor の実行の詳細に step を足す規則を確かめる
+// advisor の実行の詳細の steps に、届いた step を重なりを除いてつなぐ規則を確かめる
 import { describe, expect, it } from "vitest";
 import type {
-  AdvisorDetail,
   AdvisorStep,
   EventItem,
   FrameItem,
@@ -14,7 +13,7 @@ import type {
   SummaryAdvisorRun,
   SummaryNoteVersion,
 } from "../api/apiTypes.ts";
-import { appendAdvisorSteps, applyLiveEvents, type LiveCaches } from "./liveCacheMerge.ts";
+import { applyLiveEvents, type LiveCaches, mergeAdvisorSteps } from "./liveCacheMerge.ts";
 
 // テスト用の要求。受信時刻は送信時刻の 0.5 秒後
 const request = (n: number, tSent: number): RequestItem => ({
@@ -126,20 +125,6 @@ const step = (
   kind: AdvisorStep["kind"] = "tool_use",
   text = "notes/tips.md",
 ): AdvisorStep => ({ t, kind, tool, summary: text });
-
-// テスト用の advisor の実行の詳細
-const detail = (steps: AdvisorStep[], stepsAvailable = steps.length > 0): AdvisorDetail => ({
-  name: "advisor-tips-001",
-  role: "tips",
-  request: 1,
-  t_start: 1,
-  t_end: null,
-  status: "running",
-  result_json: null,
-  steps_available: stepsAvailable,
-  steps,
-  files: [],
-});
 
 /** 5 つのキャッシュが、渡したものと同じオブジェクトであることを確かめる */
 const expectSameCaches = (actual: LiveCaches, expected: LiveCaches): void => {
@@ -528,49 +513,58 @@ describe("applyLiveEvents の読めていないキャッシュと読み直しの
   });
 });
 
-describe("appendAdvisorSteps", () => {
-  it("steps を末尾に足し、steps_available を true にする", () => {
-    const before = detail([], false);
-    const result = appendAdvisorSteps(before, [step(1, "Read"), step(2, "Write")]);
-    expect(result).toEqual({
-      ...before,
-      steps_available: true,
-      steps: [step(1, "Read"), step(2, "Write")],
-    });
-    expect(before.steps).toEqual([]);
-    expect(before.steps_available).toBe(false);
+describe("mergeAdvisorSteps", () => {
+  const a = step(1, "Read");
+  const b = step(2, "Grep");
+  const c = step(3, "Write");
+  const d = step(4, "Bash");
+
+  it("重なりが無ければ、詳細の steps の後に届いた step をすべて続ける", () => {
+    expect(mergeAdvisorSteps([a, b], [c, d])).toEqual([a, b, c, d]);
   });
 
-  it("前からある step の後ろに足し、前からある step は同じオブジェクトのまま", () => {
-    const existing = step(0.5, "Glob");
-    const result = appendAdvisorSteps(detail([existing]), [step(1, "Read")]);
-    expect(result.steps).toEqual([existing, step(1, "Read")]);
-    expect(result.steps[0]).toBe(existing);
+  it("詳細の末尾と届いた step の先頭が重なれば、重なった分を 1 回だけにする", () => {
+    expect(mergeAdvisorSteps([a, b, c], [b, c, d])).toEqual([a, b, c, d]);
   });
 
-  it("t・tool・summary が同じ step は、kind が違っても足さない", () => {
-    const existing = step(1, "Read", "tool_result");
-    const result = appendAdvisorSteps(detail([existing]), [
-      step(1, "Read", "permission_denied"),
-      step(2, "Write"),
-    ]);
-    expect(result.steps).toEqual([existing, step(2, "Write")]);
+  it("届いた step がすべて詳細の末尾に含まれていれば、詳細の steps のまま", () => {
+    expect(mergeAdvisorSteps([a, b, c], [b, c])).toEqual([a, b, c]);
   });
 
-  it("この呼び出しの中で重なる step も 1 つだけ足す", () => {
-    const result = appendAdvisorSteps(detail([], false), [
-      step(1, "Read"),
-      step(1, "Read", "tool_result"),
-      step(1, "Read", "tool_use", "other.md"),
-    ]);
-    expect(result.steps).toEqual([step(1, "Read"), step(1, "Read", "tool_use", "other.md")]);
+  it("詳細の steps が空なら、届いた step のまま", () => {
+    expect(mergeAdvisorSteps([], [a, b])).toEqual([a, b]);
   });
 
-  it("足すものが無ければ同じオブジェクトを返す", () => {
-    const before = detail([step(1, "Read")]);
-    expect(appendAdvisorSteps(before, [])).toBe(before);
-    expect(appendAdvisorSteps(before, [step(1, "Read", "tool_result")])).toBe(before);
-    const empty = detail([], false);
-    expect(appendAdvisorSteps(empty, [])).toBe(empty);
+  it("届いた step が空なら、詳細の steps のまま", () => {
+    expect(mergeAdvisorSteps([a, b], [])).toEqual([a, b]);
+  });
+
+  it("届いた step の中の同じ値の step は、まとめずに両方残す", () => {
+    const readAgain = step(5, "Read", "tool_use", "notes/tips.md");
+    expect(mergeAdvisorSteps([a], [readAgain, readAgain])).toEqual([a, readAgain, readAgain]);
+  });
+
+  it("重なった step は詳細のものを使う (kind は一致の判定に使わない)", () => {
+    const denied = step(1, "Read", "permission_denied");
+    const streamedResult = step(1, "Read", "tool_result");
+    const merged = mergeAdvisorSteps([denied], [streamedResult, b]);
+    expect(merged).toEqual([denied, b]);
+    expect(merged[0]).toBe(denied);
+  });
+
+  it("詳細が [A] で届いた step が [A, A] なら、重なりは 1 件で [A, A]", () => {
+    expect(mergeAdvisorSteps([a], [a, a])).toEqual([a, a]);
+  });
+
+  it("重なりは、一致する最も長い末尾と先頭にする", () => {
+    expect(mergeAdvisorSteps([a, a], [a, a, b])).toEqual([a, a, b]);
+  });
+
+  it("渡した配列は変えない", () => {
+    const fetched = [a, b];
+    const streamed = [b, c];
+    mergeAdvisorSteps(fetched, streamed);
+    expect(fetched).toEqual([a, b]);
+    expect(streamed).toEqual([b, c]);
   });
 });

@@ -1,9 +1,10 @@
 // liveQueryCache のテスト。本物の QueryClient のキャッシュに、届いたイベントを足すこと・イベントで足した記録の有無・
-// つなぐ位置・advisor の実行の詳細への step の足し方・読み直すキャッシュの無効化を確かめる
+// つなぐ位置・advisor の途中経過の置き場への足し方と空にする・捨てる動き・読み直すキャッシュの無効化を確かめる
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import type {
   AdvisorDetail,
+  AdvisorStep,
   EventItem,
   FrameItem,
   PadItem,
@@ -13,19 +14,26 @@ import type {
 } from "../api/apiTypes.ts";
 import {
   advisorQueryKey,
+  advisorQueryKeyPrefix,
+  createQueryClient,
   rangeQueryKey,
   requestQueryKey,
+  streamedStepsQueryKey,
   summaryQueryKey,
 } from "../api/queries.ts";
 import {
+  clearStreamedSteps,
+  discardStreamedSteps,
   hasAppendedRecords,
   hasStaleRecords,
+  invalidateAfterEnd,
   liveCursorsOf,
   markRunRecordsStale,
   writeLiveEvents,
 } from "./liveQueryCache.ts";
 
 const RUN = "20260101-120000";
+const OTHER_RUN = "20260102-090000";
 
 const request = (n: number): RequestItem => ({
   n,
@@ -160,40 +168,106 @@ describe("markRunRecordsStale と hasStaleRecords", () => {
   });
 });
 
-describe("writeLiveEvents の advisor_step と読み直し", () => {
+describe("writeLiveEvents の advisor_step と、途中経過の置き場", () => {
+  const NAME = "advisor-tips-001";
   const detail: AdvisorDetail = {
-    name: "advisor-tips-001",
+    name: NAME,
     role: "tips",
     request: 1,
     t_start: 1,
     t_end: null,
     status: "running",
     result_json: null,
-    steps_available: false,
-    steps: [],
+    steps_available: true,
+    steps: [{ t: 1, kind: "tool_use", tool: "Glob", summary: "notes/*" }],
     files: [],
   };
-  const step = { t: 2, kind: "tool_use", tool: "Read", summary: "notes/tips.md" } as const;
-
-  it("キャッシュにある advisor の実行の詳細に step を足す", () => {
-    const queryClient = seededClient();
-    queryClient.setQueryData(advisorQueryKey(RUN, detail.name), detail);
-    writeLiveEvents(queryClient, RUN, [
-      { kind: "advisor_step", data: { ...step, name: detail.name } },
-    ]);
-    const stored = queryClient.getQueryData<AdvisorDetail>(advisorQueryKey(RUN, detail.name));
-    expect(stored?.steps).toEqual([step]);
-    expect(stored?.steps_available).toBe(true);
+  const step = (t: number, summary = "notes/tips.md"): AdvisorStep => ({
+    t,
+    kind: "tool_use",
+    tool: "Read",
+    summary,
   });
+  const streamedOf = (queryClient: QueryClient, name: string, run = RUN) =>
+    queryClient.getQueryData<AdvisorStep[]>(streamedStepsQueryKey(run, name));
 
-  it("キャッシュに無い advisor の実行の詳細は作らない", () => {
+  it("届いた step を、詳細のキャッシュが無くても、実行ごとの置き場に届いた順に足す", () => {
     const queryClient = seededClient();
     writeLiveEvents(queryClient, RUN, [
-      { kind: "advisor_step", data: { ...step, name: "advisor-tips-002" } },
+      { kind: "advisor_step", data: { ...step(2), name: NAME } },
+      { kind: "advisor_step", data: { ...step(3), name: "advisor-strategy-001" } },
     ]);
-    expect(queryClient.getQueryData(advisorQueryKey(RUN, "advisor-tips-002"))).toBeUndefined();
+    writeLiveEvents(queryClient, RUN, [
+      { kind: "advisor_step", data: { ...step(4), name: NAME } },
+      { kind: "advisor_step", data: { ...step(4), name: NAME } },
+    ]);
+    expect(streamedOf(queryClient, NAME)).toEqual([step(2), step(4), step(4)]);
+    expect(streamedOf(queryClient, "advisor-strategy-001")).toEqual([step(3)]);
+    expect(queryClient.getQueryData(advisorQueryKey(RUN, NAME))).toBeUndefined();
   });
 
+  it("詳細のキャッシュは変えず、詳細の無効化と読み直し (書き換え) でも置き場は変わらない", () => {
+    const queryClient = seededClient();
+    queryClient.setQueryData(advisorQueryKey(RUN, NAME), detail);
+    writeLiveEvents(queryClient, RUN, [{ kind: "advisor_step", data: { ...step(2), name: NAME } }]);
+    expect(queryClient.getQueryData(advisorQueryKey(RUN, NAME))).toEqual(detail);
+    void queryClient.invalidateQueries({ queryKey: advisorQueryKeyPrefix(RUN) });
+    queryClient.setQueryData(advisorQueryKey(RUN, NAME), { ...detail, steps: [] });
+    expect(streamedOf(queryClient, NAME)).toEqual([step(2)]);
+  });
+
+  it("clearStreamedSteps は、その実行の置き場をすべて空にし、ほかの実行の置き場は残す", () => {
+    const queryClient = seededClient();
+    writeLiveEvents(queryClient, RUN, [
+      { kind: "advisor_step", data: { ...step(2), name: NAME } },
+      { kind: "advisor_step", data: { ...step(3), name: "advisor-strategy-001" } },
+    ]);
+    writeLiveEvents(queryClient, OTHER_RUN, [
+      { kind: "advisor_step", data: { ...step(5), name: NAME } },
+    ]);
+    clearStreamedSteps(queryClient, RUN);
+    expect(streamedOf(queryClient, NAME)).toEqual([]);
+    expect(streamedOf(queryClient, "advisor-strategy-001")).toEqual([]);
+    expect(streamedOf(queryClient, NAME, OTHER_RUN)).toEqual([step(5)]);
+    writeLiveEvents(queryClient, RUN, [{ kind: "advisor_step", data: { ...step(6), name: NAME } }]);
+    expect(streamedOf(queryClient, NAME)).toEqual([step(6)]);
+  });
+
+  it("discardStreamedSteps は、その実行の置き場を捨て、ほかの実行の置き場は残す", () => {
+    const queryClient = seededClient();
+    writeLiveEvents(queryClient, RUN, [{ kind: "advisor_step", data: { ...step(2), name: NAME } }]);
+    writeLiveEvents(queryClient, OTHER_RUN, [
+      { kind: "advisor_step", data: { ...step(5), name: NAME } },
+    ]);
+    discardStreamedSteps(queryClient, RUN);
+    expect(streamedOf(queryClient, NAME)).toBeUndefined();
+    expect(streamedOf(queryClient, NAME, OTHER_RUN)).toEqual([step(5)]);
+  });
+
+  it("画面の QueryClient では、置き場を使う画面が無い間も捨てない (gcTime が Infinity)", () => {
+    const queryClient = createQueryClient();
+    writeLiveEvents(queryClient, RUN, [{ kind: "advisor_step", data: { ...step(2), name: NAME } }]);
+    const query = queryClient.getQueryCache().find({ queryKey: streamedStepsQueryKey(RUN, NAME) });
+    expect(query?.options.gcTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("invalidateAfterEnd", () => {
+  it("その実行の summary とすべての要求の詳細を無効にし、ほかの実行と区間 API は変えない", () => {
+    const queryClient = seededClient();
+    queryClient.setQueryData(requestQueryKey(RUN, 1), { ...request(1) });
+    queryClient.setQueryData(requestQueryKey(RUN, 2), { ...request(2) });
+    queryClient.setQueryData(requestQueryKey(OTHER_RUN, 1), { ...request(1) });
+    invalidateAfterEnd(queryClient, RUN);
+    expect(queryClient.getQueryState(summaryQueryKey(RUN))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(requestQueryKey(RUN, 1))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(requestQueryKey(RUN, 2))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(requestQueryKey(OTHER_RUN, 1))?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(rangeQueryKey(RUN, "requests"))?.isInvalidated).toBe(false);
+  });
+});
+
+describe("writeLiveEvents の読み直し", () => {
   it("読み直すキャッシュ (summary・足す前の最後の要求の詳細) を無効にする", () => {
     const queryClient = seededClient();
     queryClient.setQueryData(requestQueryKey(RUN, 1), { ...request(1) });

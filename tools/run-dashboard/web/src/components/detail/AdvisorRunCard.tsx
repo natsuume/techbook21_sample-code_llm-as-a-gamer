@@ -1,8 +1,8 @@
 // advisor のタブの、advisor の実行 1 回のカード。名前・状態・時刻・呼んだ要求・終了コード・拒否された操作の数・
 // advisor の答え・途中のツール呼び出し・その実行の間の書き換え・入出力のファイルを出す。
-import { type Ref, useId } from "react";
+import { type Ref, useId, useMemo } from "react";
 import type { AdvisorDetail, AdvisorStep } from "../../api/apiTypes.ts";
-import { useAdvisorDetail } from "../../api/queries.ts";
+import { useAdvisorDetail, useStreamedAdvisorSteps } from "../../api/queries.ts";
 import { toQueryView } from "../../api/queryView.ts";
 import {
   ADVISOR_STEP_KIND_TEXT,
@@ -12,6 +12,7 @@ import {
 } from "../../detail/advisorRuns.ts";
 import { fileNameOf } from "../../detail/requestFacts.ts";
 import { formatBytes, formatSeconds } from "../../format/formatValues.ts";
+import { mergeAdvisorSteps } from "../../live/liveCacheMerge.ts";
 import type { RunView } from "../../state/useRunView.ts";
 import { useViewState } from "../../state/ViewStateContext.tsx";
 import { joinClassNames } from "../../styles/joinClassNames.ts";
@@ -33,12 +34,16 @@ export type AdvisorRunCardProps = {
   cardRef?: Ref<HTMLElement>;
 };
 
-/** advisor の実行のカード (article)。途中のツール呼び出しと入出力のファイルは advisor の実行の API から読む */
+/**
+ * advisor の実行のカード (article)。途中のツール呼び出しと入出力のファイルは advisor の実行の API から読み、途中の
+ * ツール呼び出しには、ライブで届いた途中経過の置き場の分をつなぐ
+ */
 export const AdvisorRunCard = ({ view, card, selected, cardRef }: AdvisorRunCardProps) => {
   const { dispatch } = useViewState();
   const nameId = useId();
   const { run, rewrites } = card;
   const detailView = toQueryView(useAdvisorDetail(view.run, run.name));
+  const streamed = useStreamedAdvisorSteps(view.run, run.name);
   const detail = detailView.state === "ready" ? detailView.data : null;
   const running = detail === null ? card.running : detail.status === "running";
   const requestN = run.request;
@@ -98,7 +103,7 @@ export const AdvisorRunCard = ({ view, card, selected, cardRef }: AdvisorRunCard
         {detailView.state === "error" ? (
           <ErrorState error={detailView.error} onRetry={detailView.retry} />
         ) : null}
-        {detail === null ? null : <AdvisorSteps detail={detail} />}
+        {detail === null ? null : <AdvisorSteps detail={detail} streamed={streamed} />}
       </section>
       <section className={content.block}>
         <h6 className={content.subheading}>
@@ -140,17 +145,27 @@ export const AdvisorRunCard = ({ view, card, selected, cardRef }: AdvisorRunCard
   );
 };
 
-/** 途中のツール呼び出しの一覧。記録が無ければ「記録なし」 */
-const AdvisorSteps = ({ detail }: { detail: AdvisorDetail }) => {
-  if (!detail.steps_available) {
+type AdvisorStepsProps = {
+  detail: AdvisorDetail;
+  /** ライブで届いた途中経過 (届いた順) */
+  streamed: readonly AdvisorStep[];
+};
+
+/**
+ * 途中のツール呼び出しの一覧。詳細の steps に、ライブで届いた途中経過を mergeAdvisorSteps でつないで出す。
+ * 詳細に記録が無く、届いた途中経過も無ければ「記録なし」
+ */
+const AdvisorSteps = ({ detail, streamed }: AdvisorStepsProps) => {
+  const steps = useMemo(() => mergeAdvisorSteps(detail.steps, streamed), [detail.steps, streamed]);
+  if (!detail.steps_available && streamed.length === 0) {
     return <EmptyState>{NO_RECORD_NOTICE}</EmptyState>;
   }
-  if (detail.steps.length === 0) {
+  if (steps.length === 0) {
     return <EmptyState>ツール呼び出しなし</EmptyState>;
   }
   return (
     <ol className={styles.steps}>
-      {detail.steps.map((step, position) => (
+      {steps.map((step, position) => (
         <AdvisorStepRow key={stepKey(step, position)} step={step} />
       ))}
     </ol>

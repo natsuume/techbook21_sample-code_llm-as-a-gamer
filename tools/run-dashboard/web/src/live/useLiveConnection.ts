@@ -14,7 +14,6 @@ import {
 import {
   advisorQueryKeyPrefix,
   rangeQueryKey,
-  summaryQueryKey,
   useRangeItems,
   useRunSummary,
 } from "../api/queries.ts";
@@ -23,8 +22,11 @@ import { useViewState } from "../state/ViewStateContext.tsx";
 import type { LiveEndReason, LiveSession } from "../state/viewState.ts";
 import { parseLiveEvent } from "./liveEvents.ts";
 import {
+  clearStreamedSteps,
+  discardStreamedSteps,
   hasAppendedRecords,
   hasStaleRecords,
+  invalidateAfterEnd,
   liveCursorsOf,
   markRunRecordsStale,
   refetchRunRecords,
@@ -49,9 +51,10 @@ type LiveSessionCallbacks = {
  *   印 (markRunRecordsStale) が付いていれば、先に読み直してからつなぐ (読み直しとつないだ後の足し込みを重ねない)
  * - イベントの種類ごとに受け取り、parseLiveEvent で読めたものをためる。ためた分は nextFlushDelayMs (間隔は
  *   callbacks.flushIntervalMs()) の時刻に 1 回で writeLiveEvents で足す
- * - つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に読んだ詳細に、つなぐまでの
- *   間の step が欠けないようにするため)
- * - end: ためた分をすぐ足して閉じ、summary を無効にして onEnded
+ * - つなぐたびに (つなぎ直しを含む)、advisor の途中経過の置き場を空にする (サーバーは接続した後に追記された行の
+ *   途中経過だけを送るため)。つないで最初のイベントで open にし、advisor の実行の詳細をすべて無効にする (つなぐ前に
+ *   読んだ詳細に、つなぐまでの間の step が欠けないようにするため)
+ * - end: ためた分をすぐ足して閉じ、summary とすべての要求の詳細を無効にして (invalidateAfterEnd) onEnded
  * - error: すぐ閉じ (自動のつなぎ直しを使わない)、ためた分を足して reconnecting にする。reconnectDelayMs(失敗の
  *   回数) 待って summary と区間 API を読み直し、読めたら新しい cursor でつなぐ。読めないか、つないで最初の
  *   イベントの前に切れたら、失敗の回数を足して繰り返す
@@ -126,12 +129,13 @@ const openLiveSession = (
     const requests = queryClient.getQueryData<RangeResponse<RequestItem>>(
       rangeQueryKey(run, "requests"),
     );
-    void queryClient.invalidateQueries({ queryKey: summaryQueryKey(run), exact: true });
+    invalidateAfterEnd(queryClient, run);
     callbacks.onEnded(recordEnd, requests === undefined ? null : latestRequestN({ requests }));
   };
 
   const connect = (): void => {
     closeSource();
+    clearStreamedSteps(queryClient, run);
     const id = connectionId;
     const eventSource = new EventSource(livePath(run, liveCursorsOf(queryClient, run)));
     source = eventSource;
@@ -220,7 +224,7 @@ const liveConnectionOf = (
  * 届いた記録はキャッシュに足し続ける。足す間隔は、表示する幅の今の値で flushIntervalMs が決める (幅を変えても
  * つなぎ直さない)。end を受け取ったら liveEnded を送る。
  * 閉じたら、その実行の summary と区間 API のキャッシュに古いものとしての印を付ける (閉じた後も記録は書き足されうるため。
- * 次にその実行を選ぶと、TanStack Query が読み直す)
+ * 次にその実行を選ぶと、TanStack Query が読み直す)。実行を選び直したら、前の実行の advisor の途中経過の置き場を捨てる
  */
 export const useLiveConnection = (): LiveConnection => {
   const { state, dispatch } = useViewState();
@@ -256,6 +260,14 @@ export const useLiveConnection = (): LiveConnection => {
       setSession(CONNECTING);
     };
   }, [run, active, loaded, queryClient, dispatch]);
+
+  // 実行を選び直したら、前の実行の advisor の途中経過の置き場を捨てる
+  useEffect(() => {
+    if (run === null) {
+      return;
+    }
+    return () => discardStreamedSteps(queryClient, run);
+  }, [run, queryClient]);
 
   return useMemo(
     () => liveConnectionOf(state.liveSession, state.endReason, session),
