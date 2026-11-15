@@ -7,11 +7,15 @@ import pytest
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.settings import (
+    DEFAULT_MIDDLE_KIND,
+    OPENAI_API_KEY_ENV,
     DeepOnceSettings,
+    MiddleKind,
     MiddleOnceSettings,
     RunSettings,
     deep_once_settings_errors,
     middle_once_settings_errors,
+    openai_api_key_errors,
     run_settings_errors,
     run_settings_to_json,
 )
@@ -153,3 +157,59 @@ def test_run_settings_to_json_contains_all_arguments():
     assert value["middle_interval_s"] == 5.0
     # そのまま JSON にできる
     assert json.loads(json.dumps(value)) == value
+
+
+# --- --middle と API キー ---
+
+
+def test_middle_kinds_and_default():
+    assert [kind.value for kind in MiddleKind] == ["fake", "luna"]
+    assert DEFAULT_MIDDLE_KIND is MiddleKind.LUNA
+    assert RunSettings().middle is MiddleKind.LUNA
+    assert MiddleOnceSettings(Path("runs/x")).middle is MiddleKind.LUNA
+    assert OPENAI_API_KEY_ENV == "OPENAI_API_KEY"
+
+
+@pytest.mark.parametrize("middle", list(MiddleKind))
+def test_middle_kind_does_not_affect_range_errors(middle):
+    assert run_settings_errors(RunSettings(middle=middle)) == []
+    assert (
+        middle_once_settings_errors(MiddleOnceSettings(Path("runs/x"), middle=middle))
+        == []
+    )
+
+
+def test_run_settings_to_json_writes_middle_as_string():
+    value = run_settings_to_json(RunSettings(middle=MiddleKind.FAKE))
+    assert value["middle"] == "fake"
+    assert json.loads(json.dumps(value))["middle"] == "fake"
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [{}, {"OPENAI_API_KEY": ""}, {"OPENAI_API_KEY": " \n"}, {"OTHER": "sk-test"}],
+)
+def test_luna_without_api_key_is_an_error(environ):
+    errors = openai_api_key_errors(MiddleKind.LUNA, environ)
+    assert len(errors) == 1
+    assert "OPENAI_API_KEY" in errors[0]
+    # キーなしで動かす方法を示す
+    assert "--middle fake" in errors[0]
+
+
+def test_luna_with_api_key_has_no_error():
+    assert openai_api_key_errors(MiddleKind.LUNA, {"OPENAI_API_KEY": "sk-test"}) == []
+
+
+def test_api_key_is_not_in_the_message():
+    errors = openai_api_key_errors(MiddleKind.LUNA, {"OPENAI_API_KEY": "   "})
+    assert errors
+    errors_with_key = openai_api_key_errors(
+        MiddleKind.LUNA, {"OPENAI_API_KEY": "sk-secret"}
+    )
+    assert all("sk-secret" not in error for error in errors_with_key)
+
+
+@pytest.mark.parametrize("environ", [{}, {"OPENAI_API_KEY": "sk-test"}])
+def test_fake_never_needs_api_key(environ):
+    assert openai_api_key_errors(MiddleKind.FAKE, environ) == []

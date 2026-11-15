@@ -247,29 +247,45 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 | 層 | 動く間隔 | 受け持ち |
 |---|---|---|
 | surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、選んだフレーム、文書、middle の出力からコントローラーの操作を決めて送ります。必要なら deep に文書の更新を求めます |
-| middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
+| middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
 | deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | 操作説明・攻略情報・大方針・助言・マップの文書を書き直します。ジョブごとに `deep/<種類>-<連番>/` を作り、文書のコピーを `work/` に置きます |
 
-この版の 3 層はすべてフェイクで、モデルの API は呼びません。surface は何も押さない中立の操作を返して deep を求めず、middle は固定の場面名 `fake scene` と待ち時間 0.2 秒を返し、deep は文書を変えずに成功を返します。フェイクのままでも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
+この版の surface と deep はフェイクで、モデルの API を呼びません。surface は何も押さない中立の操作を返して deep を求めず、deep は文書を変えずに成功を返します。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。3 層ともフェイク (`--middle fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
 ### サブコマンド
 
 | コマンド | 内容 |
 |---|---|
 | `switch2-layers run [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで 3 層を動かします。Ctrl+C で止まります |
-| `switch2-layers middle-once --run-dir DIR [--middle-window S]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです |
+| `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします |
 | `switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH\|none --from FILE` | deep が編集したファイル (`--from`) の内容で、`notes/` の文書 (`--note`) を置き換えます |
 
-middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。
+middle-once・deep-once・publish-note は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。
 
 ```bash
-uv run switch2-layers run
-uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
+uv run --env-file .env switch2-layers run
+uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
+uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
 ```
 
 publish-note は、`notes/` の文書の今の SHA-256 (文書が無ければ `none`) が `--base-sha256` と一致したときだけ置き換え、終了コード 0 で終わります。一致しなければ置き換えずに、今の SHA-256 を標準出力に書いて終了コード 3 で終わります。`--note` は `notes/` の中のパス、`--from` は同じ実行の `deep/<種類>-<連番>/work/` の中のファイルに限ります。どちらもシンボリックリンクを解決した先で確かめ、範囲の外や通常のファイルでないものを指定すると、何も変えずに終了コード 2 で終わります。同じ実行の publish-note どうしは、`notes/.publish.lock` のロックを取り、比べてから置き換えるまでを 1 つずつ行います。
+
+### middle の実装 (`--middle`)
+
+run と middle-once は、`--middle` で middle の実装を選びます。
+
+| 値 | 内容 |
+|---|---|
+| `luna` (既定) | OpenAI の gpt-6-luna を Responses API で呼びます。環境変数 `OPENAI_API_KEY` に API キーが要ります |
+| `fake` | 固定の場面名 `fake scene` と待ち時間 0.2 秒を返すフェイクです。API キーは要りません |
+
+`--middle luna` で `OPENAI_API_KEY` が無いとき (値が空か空白だけのときを含む) は、実機に触れず、実行ディレクトリーにも何も書かずに、エラーを表示して終了します (終了コード 2)。API キーは、`switch2-agent` と同じく `.env` に書き、`uv run --env-file .env` で読み込ませることもできます。
+
+gpt-6-luna には、変わらない指示 (developer メッセージ) と、場面の一覧、前回の middle の出力、大方針、現在の場面の短期のタスクリストと操作説明、前回以降の surface と操作の記録の要約、場面転換の印、直近 `--middle-window` 秒の一定間隔のフレームから最大 4 枚 (時刻のラベル付き) を送ります。reasoning effort は `none` にし、出力は Structured Outputs の JSON Schema で受け取ります。変わらない指示の直後にキャッシュの区切りを置き、指示をプロンプトキャッシュから読ませます。応答の待ちは 30 秒までです。HTTP のエラー、完了しなかった応答、拒否、形の合わない出力は middle の失敗として数え、再試行せずに次の間隔で呼び直します。
+
+`middle/calls.jsonl` の各行には、トークン数 (`usage`。入力・キャッシュから読んだ入力・キャッシュに書いた入力・出力・推論)、公式の単価から計算した概算の費用 (`cost_usd`。USD)、デバッグ用の応答の本文 (`response`。エラーの応答では本文の先頭を `error_body_head`) も書きます。
 
 ### run の起動引数
 
@@ -288,8 +304,9 @@ publish-note は、`notes/` の文書の今の SHA-256 (文書が無ければ `n
 | `--deep-auto-seconds S` | 同じ文書の前回の deep の終了からこの秒数たったら、自動で deep を呼びます | 60 | 0 より大きい有限の値で、`--deep-min-start-interval` 以上 |
 | `--deep-timeout S` | deep のジョブの実行時間の上限 (秒) | 300 | 0 より大きい有限の値 |
 | `--allow-home` | 押せるボタンに HOME を足します | オフ | なし (付けるとオン) |
+| `--middle {fake,luna}` | middle の実装 (「middle の実装」の節)。`luna` は gpt-6-luna を呼び、環境変数 `OPENAI_API_KEY` が要ります | `luna` | `fake`、`luna` |
 
-範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
 同じ文書の deep のジョブは、前のジョブが実行中でも、前回の起動から `--deep-min-start-interval` 秒たっていれば並行して起動します。間隔の中に来た要求は捨て、`run.jsonl` に `deep_skipped` を書きます。起動から `--deep-timeout` 秒たったジョブには停止を求め、5 秒たっても終わらなければ強制終了します。
 
@@ -306,7 +323,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を書き込んだもの)。複数の要求で送った同じフレームは 1 回だけ保存します |
 | `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置)。surface は要求ごとにこのファイルを読みます |
-| `middle/calls.jsonl` | middle の実行ごとの記録 |
+| `middle/calls.jsonl` | middle の実行ごとの記録。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書とその SHA-256) と、対象の文書のコピーを置く `work/` があります |
 | `notes/` | 文書 (次の表) |
 

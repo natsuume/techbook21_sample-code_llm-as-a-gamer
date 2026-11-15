@@ -3,15 +3,35 @@
 サブコマンドごとに 1 つの dataclass を持つ。cli がコマンドラインの引数をこれに直し、
 *_settings_errors で範囲を確かめてから使う。範囲の誤りのメッセージには、起動引数の名前 (--middle-interval 等) を含める。
 キャプチャーのフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に固定する。
+middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
+読む (openai_api_key_errors で有無を確かめる)。API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 """
 
 import dataclasses
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
+
+
+class MiddleKind(StrEnum):
+    """--middle の値 (middle の分析の実装)。
+
+    FAKE   骨組みのフェイク (middle.fake_middle.FakeMiddleAnalyzer)。API を呼ばない
+    LUNA   gpt-6-luna を Responses API で呼ぶ (middle.luna_middle.LunaMiddleAnalyzer)。環境変数 OPENAI_API_KEY が要る
+    """
+
+    FAKE = "fake"
+    LUNA = "luna"
+
+
+DEFAULT_MIDDLE_KIND = MiddleKind.LUNA
+# --middle luna の API キーを読む環境変数の名前
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 
 # switch2_remote.capture.Capture に渡すフレームレート。process_fps は一定間隔の保存のフレームレートの上限でもある
 CAPTURE_FFMPEG_FPS = 30
@@ -52,6 +72,8 @@ class RunSettings:
                                 最小間隔より短いと、自動の呼び出しが判定の周期ごとに最小間隔で捨てられ続けるため)
     deep_timeout_s              deep のジョブの実行時間の上限 (--deep-timeout、既定 300。0 より大きい有限の値)
     allow_home                  押せるボタンに HOME を足す (--allow-home、既定 False)
+    middle                      middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
+                                OPENAI_API_KEY が要る (openai_api_key_errors)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -65,6 +87,7 @@ class RunSettings:
     deep_auto_seconds: float = DEFAULT_DEEP_AUTO_SECONDS
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
     allow_home: bool = False
+    middle: MiddleKind = DEFAULT_MIDDLE_KIND
 
 
 @dataclass(frozen=True)
@@ -73,10 +96,13 @@ class MiddleOnceSettings:
 
     run_dir           保存済みの実行ディレクトリー (--run-dir)
     middle_window_s   middle に渡す一定間隔のフレームの範囲 (--middle-window、既定 10。0 より大きい有限の値)
+    middle            middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
+                      OPENAI_API_KEY が要る (openai_api_key_errors)
     """
 
     run_dir: Path
     middle_window_s: float = DEFAULT_MIDDLE_WINDOW_S
+    middle: MiddleKind = DEFAULT_MIDDLE_KIND
 
 
 @dataclass(frozen=True)
@@ -208,11 +234,33 @@ def deep_once_settings_errors(settings: DeepOnceSettings) -> list[str]:
     return []
 
 
+def openai_api_key_errors(middle: MiddleKind, environ: Mapping[str, str]) -> list[str]:
+    """--middle の実装に要る API キーが環境変数 environ にあるかを確かめ、無ければメッセージのリストを返す。
+
+    middle が LUNA で、environ の OPENAI_API_KEY_ENV が無いか、空か空白だけなら、OPENAI_API_KEY と
+    --middle fake (API キーなしで動かす方法) を含むメッセージを 1 つ返す。それ以外 (キーがある、FAKE) は空のリスト。
+    メッセージに API キーの値は含めない。cli は実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば
+    終了コード 2 で終わる。
+    """
+    if middle is not MiddleKind.LUNA:
+        return []
+    if environ.get(OPENAI_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--middle {MiddleKind.LUNA.value} needs the environment variable "
+            f"{OPENAI_API_KEY_ENV}. Set it, or use --middle {MiddleKind.FAKE.value} "
+            "to run without an API key"
+        )
+    ]
+
+
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列) にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle は値の文字列 "fake" / "luna") にする。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
+    value["middle"] = settings.middle.value
     return value

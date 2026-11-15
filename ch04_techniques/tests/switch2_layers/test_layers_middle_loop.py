@@ -742,3 +742,171 @@ def test_stop_during_new_scene_deep_request_skips_the_rest(tmp_path):
     assert read_rows(harness.root / "run.jsonl") == []
     assert harness.loop.consecutive_errors == 0
     assert harness.stops == []
+
+
+# --- MiddleAnalyzer の記録 (gpt-6-luna の usage など) を calls.jsonl の行に足す ---
+
+# 骨組みの行のキー (middle_call_record.middle_call_row)
+SKELETON_CALL_KEYS = [
+    "t_sent",
+    "t_received",
+    "based_on_t",
+    "frames",
+    "surface_rows",
+    "operation_rows",
+    "scene_change_reported",
+    "scene_id",
+    "scene_name",
+    "new_scene",
+    "surface_wait_s",
+    "deep_requests",
+    "deep_requests_sent",
+    "error",
+]
+
+
+class DetailsScriptedAnalyzer(ScriptedAnalyzer):
+    """ScriptedAnalyzer に、analyze の 1 回ごとの記録 (take_call_details) を足した偽物。
+
+    analyze の n 回目の記録は {"usage": {"input_tokens": n}, "cost_usd": n / 1000}。
+    """
+
+    def __init__(self, monotonic: FakeMonotonic, *results, elapsed: float = 0.5):
+        super().__init__(monotonic, *results, elapsed=elapsed)
+        self.calls = 0
+        self.taken = 0
+        self.details: dict[str, object] = {}
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        self.calls += 1
+        self.details = {
+            "usage": {"input_tokens": self.calls},
+            "cost_usd": self.calls / 1000,
+        }
+        return super().analyze(middle_input)
+
+    def take_call_details(self) -> dict[str, object]:
+        self.taken += 1
+        details, self.details = self.details, {}
+        return details
+
+
+def test_successful_row_has_analyzer_details_after_skeleton_keys(tmp_path):
+    root = make_run(tmp_path)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = DetailsScriptedAnalyzer(monotonic, output("町"))
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, None
+    )
+    assert result.ok is True
+    row = read_rows(root / "middle" / "calls.jsonl")[0]
+    assert list(row) == SKELETON_CALL_KEYS + ["usage", "cost_usd"]
+    assert row["usage"] == {"input_tokens": 1}
+    assert row["cost_usd"] == 0.001
+    assert row["error"] is None
+    assert analyzer.taken == 1
+
+
+def test_failed_analyze_row_has_analyzer_details(tmp_path):
+    root = make_run(tmp_path)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = DetailsScriptedAnalyzer(monotonic, RuntimeError("luna failed"))
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, None
+    )
+    assert result.ok is False
+    row = read_rows(root / "middle" / "calls.jsonl")[0]
+    assert "luna failed" in row["error"]
+    assert row["usage"] == {"input_tokens": 1}
+    assert row["cost_usd"] == 0.001
+    assert list(row) == SKELETON_CALL_KEYS + ["usage", "cost_usd"]
+
+
+def test_failed_write_row_has_analyzer_details(tmp_path):
+    root = make_run(tmp_path)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = DetailsScriptedAnalyzer(monotonic, output("町"))
+    # tasks.md の書き込みを失敗させる (notes/scenes をファイルにする)
+    (root / "notes" / "scenes").write_text("not a directory", encoding="utf-8")
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, None
+    )
+    assert result.ok is False
+    row = read_rows(root / "middle" / "calls.jsonl")[0]
+    assert row["error"] is not None
+    # analyze は成功して費用がかかったため、記録を残す
+    assert row["usage"] == {"input_tokens": 1}
+
+
+def test_failed_input_build_does_not_take_stale_details(tmp_path):
+    root = make_run(tmp_path)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    analyzer = DetailsScriptedAnalyzer(monotonic, output("町"))
+    # 前の回の記録が残っている
+    analyzer.details = {"usage": {"input_tokens": 999}}
+    # surface.jsonl をディレクトリーにして、入力の作成を失敗させる
+    (root / "surface.jsonl").mkdir()
+    result = run_middle_step(
+        RunPaths(root), analyzer, RunClock(monotonic, origin=ORIGIN), 10.0, None
+    )
+    assert result.ok is False
+    assert analyzer.calls == 0
+    assert analyzer.taken == 0
+    row = read_rows(root / "middle" / "calls.jsonl")[0]
+    assert list(row) == SKELETON_CALL_KEYS
+
+
+def test_each_row_has_the_details_of_its_own_call(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = DetailsScriptedAnalyzer(
+        monotonic, output("町"), RuntimeError("down"), output("町")
+    )
+    for _ in range(3):
+        run_middle_step(paths, analyzer, clock, 10.0, None)
+    rows = read_rows(root / "middle" / "calls.jsonl")
+    assert [row["usage"] for row in rows] == [
+        {"input_tokens": 1},
+        {"input_tokens": 2},
+        {"input_tokens": 3},
+    ]
+
+
+def test_fake_analyzer_rows_have_only_skeleton_keys(tmp_path):
+    root = make_run(tmp_path)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    run_middle_step(
+        RunPaths(root),
+        ScriptedAnalyzer(monotonic, output("町")),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+    )
+    row = read_rows(root / "middle" / "calls.jsonl")[0]
+    assert list(row) == SKELETON_CALL_KEYS
+
+
+def test_stop_during_analyze_discards_details(tmp_path):
+    root = make_run(tmp_path)
+    stop = threading.Event()
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+
+    class StoppingDetailsAnalyzer(DetailsScriptedAnalyzer):
+        def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+            result = super().analyze(middle_input)
+            stop.set()
+            return result
+
+    analyzer = StoppingDetailsAnalyzer(monotonic, output("町"))
+    result = run_middle_step(
+        RunPaths(root),
+        analyzer,
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        stop,
+    )
+    assert result.stopped is True
+    assert read_rows(root / "middle" / "calls.jsonl") == []

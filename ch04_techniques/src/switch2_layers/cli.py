@@ -3,21 +3,29 @@
     switch2-layers run [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--max-surface-errors N]
                        [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
-        実機で 3 層を動かす。各層はフェイク (surface.fake_surface・middle.fake_middle・deep.fake_deep) を使う
-    switch2-layers middle-once --run-dir DIR [--middle-window S]
+                       [--middle fake|luna]
+        実機で 3 層を動かす。surface と deep はフェイク (surface.fake_surface・deep.fake_deep)、middle は --middle で
+        選んだ実装を使う
+    switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]
         保存済みの実行に対して deep を 1 回動かす (きっかけ manual)
     switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH|none --from FILE
         deep が編集した文書を本体と入れ替える (notes.publish_note)
 
-引数の形の誤り (知らない引数、数として読めない値、--doc の知らない種類など) は argparse が使い方とともに表示し、
-SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブコマンドの処理が標準エラー出力に書いて終了コード 2 を返す。
+--middle (run と middle-once) は middle の実装を選ぶ。既定の luna は gpt-6-luna を呼び (middle.luna_middle)、
+fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境変数 OPENAI_API_KEY が無い (空を含む) ときは、
+実機 (ブリッジ・キャプチャー) と実行ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
+
+引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値など) は argparse が使い方とともに
+表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブコマンドの処理が標準エラー出力に書いて
+終了コード 2 を返す。
 """
 
 import argparse
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
@@ -32,7 +40,9 @@ from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.file_io import format_json_line
 from switch2_layers.hardware.capture_source import SwitchCaptureReader
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
+from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.notes.publish_note import publish_note
 from switch2_layers.settings import (
     CAPTURE_FFMPEG_FPS,
@@ -45,6 +55,7 @@ from switch2_layers.settings import (
     DEFAULT_MAX_MIDDLE_ERRORS,
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
+    DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
     DEFAULT_RUNS_DIR,
     INTERVAL_FPS_MAX,
@@ -52,12 +63,15 @@ from switch2_layers.settings import (
     INTERVAL_WIDTH_MIN,
     MIDDLE_INTERVAL_MAX_S,
     MIDDLE_INTERVAL_MIN_S,
+    OPENAI_API_KEY_ENV,
     DeepOnceSettings,
+    MiddleKind,
     MiddleOnceSettings,
     PublishNoteSettings,
     RunSettings,
     deep_once_settings_errors,
     middle_once_settings_errors,
+    openai_api_key_errors,
     run_settings_errors,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
@@ -93,8 +107,10 @@ def add_run_parser(
     """サブコマンド run の引数を定義する。既定値は settings の DEFAULT_* と同じ。"""
     parser = commands.add_parser(
         "run",
-        help="実機で 3 層を動かす (各層はフェイク)",
-        description="実機で 3 層を動かす。各層はフェイクで動く。Ctrl+C で止まる",
+        help="実機で 3 層を動かす (surface と deep はフェイク)",
+        description=(
+            "実機で 3 層を動かす。surface と deep はフェイクで、middle は --middle で選ぶ。Ctrl+C で止まる"
+        ),
     )
     parser.add_argument(
         "--runs-dir",
@@ -182,7 +198,25 @@ def add_run_parser(
         action="store_true",
         help="押せるボタンに HOME を足す (既定では HOME を押さない)",
     )
+    add_middle_kind_argument(parser)
     parser.set_defaults(handler=run_command)
+
+
+def add_middle_kind_argument(parser: argparse.ArgumentParser) -> None:
+    """--middle の引数を parser に足す (run と middle-once で共通)。
+
+    値は MiddleKind の値 ("fake" / "luna") から選び、既定は DEFAULT_MIDDLE_KIND の値 ("luna")。
+    Namespace の middle には文字列のまま入る (*_settings_from_args が MiddleKind にする)。
+    """
+    parser.add_argument(
+        "--middle",
+        choices=[kind.value for kind in MiddleKind],
+        default=DEFAULT_MIDDLE_KIND.value,
+        help=(
+            "middle の実装。luna は gpt-6-luna を呼び、環境変数 OPENAI_API_KEY が要る。"
+            f"fake は固定の出力を返すフェイク (既定 {DEFAULT_MIDDLE_KIND.value})"
+        ),
+    )
 
 
 def add_middle_window_argument(parser: argparse.ArgumentParser) -> None:
@@ -211,6 +245,7 @@ def add_middle_once_parser(
         "--run-dir", type=Path, required=True, help="保存済みの実行ディレクトリー"
     )
     add_middle_window_argument(parser)
+    add_middle_kind_argument(parser)
     parser.set_defaults(handler=middle_once_command)
 
 
@@ -293,12 +328,17 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         deep_auto_seconds=args.deep_auto_seconds,
         deep_timeout_s=args.deep_timeout,
         allow_home=args.allow_home,
+        middle=MiddleKind(args.middle),
     )
 
 
 def middle_once_settings_from_args(args: argparse.Namespace) -> MiddleOnceSettings:
-    """middle-once の Namespace を MiddleOnceSettings にする (範囲は確かめない)。"""
-    return MiddleOnceSettings(run_dir=args.run_dir, middle_window_s=args.middle_window)
+    """middle-once の Namespace を MiddleOnceSettings にする (--middle は MiddleKind にする。範囲は確かめない)。"""
+    return MiddleOnceSettings(
+        run_dir=args.run_dir,
+        middle_window_s=args.middle_window,
+        middle=MiddleKind(args.middle),
+    )
 
 
 def deep_once_settings_from_args(args: argparse.Namespace) -> DeepOnceSettings:
@@ -318,19 +358,41 @@ def publish_note_settings_from_args(args: argparse.Namespace) -> PublishNoteSett
     )
 
 
+def create_middle_analyzer(
+    kind: MiddleKind, environ: Mapping[str, str]
+) -> MiddleAnalyzer:
+    """--middle の値 kind の MiddleAnalyzer を作って返す。要求はまだ送らない。
+
+    - MiddleKind.FAKE: middle.fake_middle.FakeMiddleAnalyzer() (environ を見ない)
+    - MiddleKind.LUNA: middle.luna_middle.LunaMiddleAnalyzer(api_key=environ[OPENAI_API_KEY_ENV] の前後の空白を
+      除いたもの)。キーが無いか空なら ValueError (呼ぶ前に settings.openai_api_key_errors で確かめておく)
+    run_command と middle_once_command は、environ に os.environ を渡してこの関数で作る
+    (テストはこの関数を差し替えて、MockTransport の Client を持つ LunaMiddleAnalyzer を渡せる)。
+    """
+    if kind is MiddleKind.FAKE:
+        return FakeMiddleAnalyzer()
+    api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
+    return LunaMiddleAnalyzer(api_key=api_key)
+
+
 def run_command(args: argparse.Namespace) -> int:
     """run の処理。終了コードを返す。
 
     1. run_settings_from_args → settings.run_settings_errors。誤りがあれば 1 行ずつ標準エラー出力に書き、EXIT_USAGE を返す
        (実機には触れない)
-    2. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
+    2. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
+       (実機にも実行ディレクトリーにも触れない)
+    3. middle = create_middle_analyzer(settings.middle, os.environ)
+    4. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    3. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
-    4. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
-       bridge_state=supervisor の state を返す関数, surface=FakeSurfaceDecider(), middle=FakeMiddleAnalyzer(),
+    5. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
+    6. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
+       bridge_state=supervisor の state を返す関数, surface=FakeSurfaceDecider(), middle=3 の middle,
        deep=FakeDeepRunner())).run() で動かし、止まるまで待つ
-    5. 止まったら、作れた部品を capture.close()、supervisor.close() の順に閉じる
+    7. 止まったら、作れた部品を capture.close()、supervisor.close() の順に閉じる
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
     settings = run_settings_from_args(args)
@@ -338,6 +400,11 @@ def run_command(args: argparse.Namespace) -> int:
     if errors:
         _print_errors(errors)
         return EXIT_USAGE
+    key_errors = openai_api_key_errors(settings.middle, os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
+    middle = create_middle_analyzer(settings.middle, os.environ)
     try:
         supervisor = BridgeSupervisor(
             start_bridge=Bridge, reset_radio=reset_bluetooth_radio
@@ -353,7 +420,7 @@ def run_command(args: argparse.Namespace) -> int:
             report_sender=supervisor,
             bridge_state=lambda: supervisor.state,
             surface=FakeSurfaceDecider(),
-            middle=FakeMiddleAnalyzer(),
+            middle=middle,
             deep=FakeDeepRunner(),
         )
         reason = LayersApp(settings, parts).run()
@@ -370,10 +437,13 @@ def middle_once_command(args: argparse.Namespace) -> int:
 
     1. middle_once_settings_from_args → settings.middle_once_settings_errors。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
     2. --run-dir がディレクトリーでなければ、標準エラー出力に書いて EXIT_USAGE を返す
-    3. middle.middle_loop.run_middle_once(run_dir, FakeMiddleAnalyzer(), middle_window_s) を呼ぶ
-    4. 標準出力に結果の JSON 1 行 {"status": "ok" | "error", "scene_id": 場面 ID か null, "new_scene": 真偽,
+    3. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
+       (実行ディレクトリーに何も書かない)
+    4. middle.middle_loop.run_middle_once(run_dir, create_middle_analyzer(settings.middle, os.environ), middle_window_s)
+       を呼ぶ
+    5. 標準出力に結果の JSON 1 行 {"status": "ok" | "error", "scene_id": 場面 ID か null, "new_scene": 真偽,
        "deep_requests": [種類...], "error": 説明か null} を書く
-    成功なら 0、analyze か書き込みに失敗したら 1 を返す。
+    成功なら 0、analyze か書き込みに失敗したら 1 を返す (1〜3 の誤りでは標準出力に何も書かない)。
     """
     settings = middle_once_settings_from_args(args)
     errors = middle_once_settings_errors(settings)
@@ -383,8 +453,14 @@ def middle_once_command(args: argparse.Namespace) -> int:
     if not settings.run_dir.is_dir():
         _print_errors([f"--run-dir is not a directory: {settings.run_dir}"])
         return EXIT_USAGE
+    key_errors = openai_api_key_errors(settings.middle, os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
     result = run_middle_once(
-        settings.run_dir, FakeMiddleAnalyzer(), settings.middle_window_s
+        settings.run_dir,
+        create_middle_analyzer(settings.middle, os.environ),
+        settings.middle_window_s,
     )
     _print_json(
         {

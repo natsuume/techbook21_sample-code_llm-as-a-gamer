@@ -353,3 +353,70 @@ def test_current_tasks_without_scene_is_empty(tmp_path):
     )
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert middle_input.current_tasks == ""
+
+
+# --- 現在の場面の操作説明 (surface の文書と同じ選び方) ---
+
+COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n- B: unknown\n"
+SCENE_CONTROLS = "# 操作説明\n\n- A: 決定\n- B: ignored\n"
+
+
+def write_controls(root: Path, common: str | None, scene: str | None) -> None:
+    """notes/common/controls.md と scene-001 の controls.md を書く (None なら書かない)。"""
+    if common is not None:
+        (root / "notes" / "common" / "controls.md").write_text(common, encoding="utf-8")
+    if scene is not None:
+        scene_dir = root / "notes" / "scenes" / "scene-001"
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        (scene_dir / "controls.md").write_text(scene, encoding="utf-8")
+
+
+def test_current_controls_of_the_scene(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    write_controls(root, COMMON_CONTROLS, SCENE_CONTROLS)
+    # 別の場面の操作説明は読まない
+    other_dir = root / "notes" / "scenes" / "scene-002"
+    other_dir.mkdir(parents=True)
+    (other_dir / "controls.md").write_text("- X: 別の場面\n", encoding="utf-8")
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.current_controls == SCENE_CONTROLS
+
+
+def test_current_controls_falls_back_to_common_when_scene_note_is_missing(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    write_controls(root, COMMON_CONTROLS, None)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.current_controls == COMMON_CONTROLS
+
+
+def test_current_controls_falls_back_to_common_when_scene_note_is_blank(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    write_controls(root, COMMON_CONTROLS, " \n\n")
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.current_controls == COMMON_CONTROLS
+
+
+def test_current_controls_without_scene_is_common(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root, scene_id=None, scene_name=None)
+    write_controls(root, COMMON_CONTROLS, SCENE_CONTROLS)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.current_controls == COMMON_CONTROLS
+
+
+def test_current_controls_without_previous_state_is_common(tmp_path):
+    root = make_run(tmp_path)
+    write_controls(root, COMMON_CONTROLS, SCENE_CONTROLS)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.previous_state is None
+    assert middle_input.current_controls == COMMON_CONTROLS
+
+
+def test_current_controls_without_any_note_is_empty(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.current_controls == ""
