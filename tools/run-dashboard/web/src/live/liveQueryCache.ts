@@ -249,13 +249,17 @@ export const hasStaleRecords = (queryClient: QueryClient, run: string): boolean 
 
 /**
  * 実行 run の summary と 4 つの区間 API を読み直す (読み込み中の古い要求は取り消す)。すべて読めたら true、
- * どれかが読めなければ false (読めなかった query は、前に読めた値を data に残す)
+ * どれかが読めなければ false (読めなかった query は、前に読めた値を data に残す)。
+ * あわせて、その実行のすべての要求の詳細を無効にする (使っている query は読み直される。結果は戻り値に含めない)。
+ * 追っていない間に届いた要求はイベントにならず、decision の行が書かれる前に読んだ要求の詳細 (所要時間などが無い) が
+ * 読み直されないまま残るため
  */
 export const refetchRunRecords = async (
   queryClient: QueryClient,
   run: string,
 ): Promise<boolean> => {
   const queryKeys = runRecordQueryKeys(run);
+  void queryClient.invalidateQueries({ queryKey: requestQueryKeyPrefix(run) });
   try {
     await Promise.all(
       queryKeys.map((queryKey) =>

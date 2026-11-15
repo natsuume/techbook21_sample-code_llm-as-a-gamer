@@ -295,6 +295,17 @@ describe("refetchRunRecords", () => {
     failing.key = summaryQueryKey(RUN);
     expect(await refetchRunRecords(queryClient, RUN)).toBe(false);
   });
+
+  it("その実行のすべての要求の詳細を無効にし、ほかの実行の要求の詳細は変えない", async () => {
+    const queryClient = await loadedClient({ key: null });
+    queryClient.setQueryData(requestQueryKey(RUN, 1), { ...request(1) });
+    queryClient.setQueryData(requestQueryKey(RUN, 2), { ...request(2) });
+    queryClient.setQueryData(requestQueryKey(OTHER_RUN, 1), { ...request(1) });
+    await refetchRunRecords(queryClient, RUN);
+    expect(queryClient.getQueryState(requestQueryKey(RUN, 1))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(requestQueryKey(RUN, 2))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(requestQueryKey(OTHER_RUN, 1))?.isInvalidated).toBe(false);
+  });
 });
 
 describe("invalidateAfterEnd", () => {
