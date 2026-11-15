@@ -7,7 +7,7 @@
     frames/surface/<tミリ秒9桁>.jpg           surface に送った画像
     surface.jsonl                           surface の 1 回ごとの記録
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
-    notes/                                  文書 (notes.note_paths)
+    notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
     deep/<種類>-<連番3桁>/job.json・work/      deep のジョブ (deep.deep_job_directory)
@@ -47,7 +47,8 @@ DEEP_DIR = "deep"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
 
-# 起動時の notes/ の初期ファイルの中身。common/controls.md は initial_common_controls で作る
+# 起動時の notes/ の初期ファイルの中身。common/controls.md は initial_common_controls で、
+# common/box_targets.md は surface.box_targets.initial_box_targets_text で作る
 COMMON_CONTROLS_HEADING = "# 操作説明 (共通)"
 UNKNOWN_BEHAVIOR = "unknown"  # 挙動をまだ確かめていない単ボタンの印
 INITIAL_COMMON_TIPS = "# 攻略情報 (共通)\n"
@@ -207,13 +208,14 @@ def initial_common_controls(allowed_buttons: Collection[str]) -> str:
 def write_initial_notes(paths: RunPaths, allowed_buttons: Collection[str]) -> None:
     """起動時の notes/ の初期ファイルを書く (どれも置き換えの書き込み)。
 
-        notes/common/controls.md   initial_common_controls(allowed_buttons)
-        notes/common/tips.md       INITIAL_COMMON_TIPS (見出しだけ)
-        notes/strategy.md          INITIAL_STRATEGY (見出しだけ)
-        notes/advice.md            INITIAL_ADVICE (見出しだけ)
-        notes/scene_labels.json    INITIAL_SCENE_LABELS ({"scenes": []})
-        notes/map/                 空のディレクトリー
-        notes/scenes/              空のディレクトリー
+        notes/common/controls.md      initial_common_controls(allowed_buttons)
+        notes/common/tips.md          INITIAL_COMMON_TIPS (見出しだけ)
+        notes/common/box_targets.md   surface.box_targets.initial_box_targets_text() (固定の 4 つの対象)
+        notes/strategy.md             INITIAL_STRATEGY (見出しだけ)
+        notes/advice.md               INITIAL_ADVICE (見出しだけ)
+        notes/scene_labels.json       INITIAL_SCENE_LABELS ({"scenes": []})
+        notes/map/                    空のディレクトリー
+        notes/scenes/                 空のディレクトリー
     notes/ と notes/common/ は無ければ作る。既にあるファイルは置き換える。
     """
     notes = paths.notes_dir

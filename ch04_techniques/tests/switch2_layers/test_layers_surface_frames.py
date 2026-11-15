@@ -3,14 +3,18 @@ import numpy as np
 import pytest
 
 from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.frames.image_encoding import nv12_to_bgr, shrink_to_width
 from switch2_layers.frames.surface_frames import (
+    BOX_COLORS,
     SURFACE_MAX_FRAMES,
     SURFACE_WINDOW_S,
     build_surface_image,
+    draw_boxes,
     draw_frame_time,
     format_frame_label,
     select_surface_frames,
 )
+from switch2_layers.surface.surface_types import Box, BoxSource
 
 NOW = 10.0
 
@@ -145,3 +149,66 @@ def test_build_surface_image_differs_by_time():
     first = build_surface_image(CapturedFrame(t=1.0, nv12=nv12))
     second = build_surface_image(CapturedFrame(t=2.0, nv12=nv12))
     assert first.jpeg != second.jpeg
+
+
+# --- box の書き込み ---
+
+# 右下の 4 分の 1 にある box (時刻の文字と重ならない)。画像 640x360 では (384, 216)〜(512, 288)
+BOX = Box("自機", 0.6, 0.6, 0.8, 0.8, 0.9, BoxSource.TRACKER)
+
+
+def test_draw_boxes_draws_frame_and_name_and_keeps_original():
+    original = np.full((360, 640, 3), 128, np.uint8)
+    before = original.copy()
+    drawn = draw_boxes(original, [BOX])
+    assert np.array_equal(original, before)
+    changed = np.any(drawn != original, axis=2)
+    # 枠の 4 辺
+    assert changed[216:289, 384].any()
+    assert changed[216:289, 512].any()
+    assert changed[216, 384:513].any()
+    assert changed[288, 384:513].any()
+    # 名前は枠の左上の上側
+    assert changed[190:216, 384:450].any()
+    # 枠の中央と、枠から離れた場所は変えない
+    assert not changed[240:264, 430:470].any()
+    assert not changed[:150, :].any()
+    assert not changed[:, :350].any()
+
+
+def test_draw_boxes_uses_box_colors_in_order():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    first = Box("a", 0.1, 0.6, 0.2, 0.8, 0.9, BoxSource.TRACKER)
+    second = Box("b", 0.6, 0.6, 0.8, 0.8, None, BoxSource.JEV)
+    drawn = draw_boxes(image, [first, second])
+    # 左の枠の左辺 (x = 64) は 1 つ目の色、右の枠の左辺 (x = 384) は 2 つ目の色
+    assert tuple(int(v) for v in drawn[250, 64]) == BOX_COLORS[0]
+    assert tuple(int(v) for v in drawn[250, 384]) == BOX_COLORS[1]
+
+
+def test_draw_boxes_writes_name_inside_when_box_touches_top():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    top_box = Box("敵", 0.6, 0.0, 0.8, 0.3, 0.9, BoxSource.TRACKER)
+    changed = np.any(draw_boxes(image, [top_box]) != image, axis=2)
+    # 枠 (x = 384〜512、y = 0〜108) の内側の左上に名前がある
+    assert changed[4:40, 390:460].any()
+
+
+def test_draw_boxes_without_boxes_returns_a_copy():
+    image = np.full((360, 640, 3), 128, np.uint8)
+    drawn = draw_boxes(image, [])
+    assert np.array_equal(drawn, image)
+    assert drawn is not image
+
+
+def test_build_surface_image_draws_boxes_and_time():
+    frame = CapturedFrame(t=3.25, nv12=gray_nv12(1280, 720))
+    plain = build_surface_image(frame, width=640)
+    with_box = build_surface_image(frame, width=640, boxes=[BOX])
+    assert plain.jpeg != with_box.jpeg
+    decoded = cv2.imdecode(np.frombuffer(with_box.jpeg, np.uint8), cv2.IMREAD_COLOR)
+    shrunk = shrink_to_width(nv12_to_bgr(frame.nv12), 640)
+    expected_bgr = draw_frame_time(draw_boxes(shrunk, [BOX]), 3.25)
+    # JPEG の誤差の範囲で、box を描いてから時刻を書いた画像と同じ
+    difference = np.abs(decoded.astype(int) - expected_bgr.astype(int))
+    assert float(difference.mean()) < 2.0

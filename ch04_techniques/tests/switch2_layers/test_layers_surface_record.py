@@ -9,7 +9,12 @@ from switch2_layers.surface.surface_record import (
     info_label_to_json,
     surface_row,
 )
-from switch2_layers.surface.surface_types import Box, InfoLabel, SurfaceDocuments
+from switch2_layers.surface.surface_types import (
+    Box,
+    BoxSource,
+    InfoLabel,
+    SurfaceDocuments,
+)
 
 DOCUMENTS = SurfaceDocuments(
     tasks="- 宿屋に入る",
@@ -50,7 +55,25 @@ def test_info_label_and_box_to_json():
         "x_max": 0.3,
         "y_max": 0.4,
         "confidence": 0.9,
+        "source": None,
     }
+
+
+def test_box_to_json_writes_source_and_null_confidence():
+    jev_box = Box("自機", 0.1, 0.2, 0.3, 0.4, None, BoxSource.JEV)
+    assert box_to_json(jev_box)["confidence"] is None
+    assert box_to_json(jev_box)["source"] == "jev"
+    tracker_box = Box("敵", 0.5, 0.5, 0.6, 0.7, 0.82, BoxSource.TRACKER)
+    assert box_to_json(tracker_box)["source"] == "tracker"
+    assert list(box_to_json(tracker_box)) == [
+        "label",
+        "x_min",
+        "y_min",
+        "x_max",
+        "y_max",
+        "confidence",
+        "source",
+    ]
 
 
 def test_surface_row_has_the_keys_of_the_issue():
@@ -100,6 +123,7 @@ def test_surface_row_has_the_keys_of_the_issue():
                 "x_max": 0.3,
                 "y_max": 0.4,
                 "confidence": 0.9,
+                "source": None,
             }
         ],
         "scene_changed": True,

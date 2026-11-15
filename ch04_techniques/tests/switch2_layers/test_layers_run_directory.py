@@ -18,6 +18,11 @@ from switch2_layers.run_directory import (
     run_directory_name,
     write_initial_notes,
 )
+from switch2_layers.surface.box_targets import (
+    DEFAULT_BOX_TARGETS,
+    initial_box_targets_text,
+    parse_box_targets,
+)
 
 STARTED_AT = datetime(2026, 11, 15, 14, 22, 33)
 BUTTONS_WITHOUT_HOME = frozenset(BUTTON_ORDER) - {"HOME"}
@@ -162,6 +167,15 @@ def test_write_initial_notes(tmp_path):
     assert (notes / "map").is_dir()
     assert list((notes / "map").iterdir()) == []
     assert (notes / "scenes").is_dir()
+
+
+def test_write_initial_notes_writes_default_box_targets(tmp_path):
+    root = tmp_path / "run"
+    root.mkdir()
+    write_initial_notes(RunPaths(root), BUTTONS_WITHOUT_HOME)
+    text = (root / "notes" / "common" / "box_targets.md").read_text(encoding="utf-8")
+    assert text == initial_box_targets_text()
+    assert parse_box_targets(text) == DEFAULT_BOX_TARGETS
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,9 @@
 """3 層をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
 
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep) は LayersParts で受け取る。
-cli の run は実機の部品とフェイクの層を渡し、テストはフェイクのキャプチャー・ブリッジ・層を渡して数秒動かす。
+cli の run は実機の部品と各層 (surface は --surface で選ぶ。middle と deep はフェイク) を渡し、テストはフェイクの
+キャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点 (on_frame・surface_boxes_at・
+on_run_directory) も LayersParts で受け取る。
 
 止まる条件 (どれも、操作を中立にして出力を止め、全体を止めて、run.jsonl の stop に理由を書く):
     - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED
@@ -23,7 +25,7 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -35,7 +37,7 @@ from switch2_layers.deep.deep_scheduler import (
 )
 from switch2_layers.deep.deep_types import DeepRunner
 from switch2_layers.error_text import describe_exception
-from switch2_layers.frames.frame_buffer import FrameBuffer
+from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
 from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
 from switch2_layers.hardware.capture_watcher import CaptureWatcher
@@ -66,7 +68,7 @@ from switch2_layers.surface.surface_loop import (
     SurfaceLoopParts,
     SurfaceLoopSettings,
 )
-from switch2_layers.surface.surface_types import SurfaceDecider
+from switch2_layers.surface.surface_types import Box, SurfaceDecider
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -92,6 +94,13 @@ class LayersParts:
     deep            deep のジョブの実行
     monotonic       単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
     local_now       実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
+    on_frame        キャプチャーの新しいフレームを受け取る関数 (CaptureSource の on_frame。キャプチャーのスレッドから
+                    呼ばれる)。run の surface が jev なら box の追跡。None (既定) なら渡さない
+    surface_boxes_at
+                    surface に送る画像に書き込む box を返す関数 (SurfaceLoopParts.boxes_at)。None (既定) なら書き込まない
+    on_run_directory
+                    実行ディレクトリーを作った後に 1 回呼ぶ関数 (RunPaths を受け取る)。run の surface が jev なら、
+                    対象の一覧を読む notes/ を surface に渡す。None (既定) なら呼ばない
     """
 
     frame_reader: LatestFrameReader
@@ -102,6 +111,9 @@ class LayersParts:
     deep: DeepRunner
     monotonic: Callable[[], float] = time.monotonic
     local_now: Callable[[], datetime] = datetime.now
+    on_frame: Callable[[CapturedFrame], None] | None = None
+    surface_boxes_at: Callable[[float], Sequence[Box]] | None = None
+    on_run_directory: Callable[[RunPaths], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -195,13 +207,17 @@ class LayersApp:
         1. RunClock(parts.monotonic) を作る (ここが t = 0)
         2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
            write_initial_notes(paths, buttons.allowed_buttons(settings.allow_home))
-        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く
+        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く。
+           続けて、parts.on_run_directory があれば on_run_directory(paths) を 1 回呼ぶ (スレッドを起動する前。
+           notes/ の初期ファイルは書いた後)
         4. OperationLog と PadOutput(report_sender, 押せるボタン, on_operation=OperationLog.write) を作る
-        5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …)、CaptureWatcher を作る
+        5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …,
+           on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            timeout_s は deep_timeout_s) を作って start する (タイムアウトと自動の呼び出しの判定のスレッド)
-        7. SurfaceLoop (max_errors = max_surface_errors) と MiddleLoop (interval_s・window_s・max_errors) を作り、
-           それぞれのスレッドを start_thread で起動する。on_stop には request_stop を渡す
+        7. SurfaceLoop (max_errors = max_surface_errors、boxes_at = parts.surface_boxes_at) と
+           MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
+           on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
 
         途中で例外 (KeyboardInterrupt などの BaseException を含む) が出たら、次の後片付けをしてから、その例外を

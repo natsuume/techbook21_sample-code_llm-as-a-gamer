@@ -52,6 +52,18 @@ DEFAULT_MAX_MIDDLE_ERRORS = 5
 DEFAULT_DEEP_MIN_START_INTERVAL_S = 15.0
 DEFAULT_DEEP_AUTO_SECONDS = 60.0
 DEFAULT_DEEP_TIMEOUT_S = 300.0
+DEFAULT_THRESHOLD_ADVISOR = 0.5
+DEFAULT_BOX_REQUERY_EVERY = 5
+
+
+class SurfaceKind(StrEnum):
+    """run の surface の実装 (--surface の値)。"""
+
+    JEV = "jev"  # TypeSafe Jev を呼ぶ (surface.jev_surface.JevSurfaceDecider)
+    FAKE = "fake"  # 骨組みのフェイク (surface.fake_surface.FakeSurfaceDecider)
+
+
+DEFAULT_SURFACE = SurfaceKind.JEV
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,11 @@ class RunSettings:
     allow_home                  押せるボタンに HOME を足す (--allow-home、既定 False)
     middle                      middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
                                 OPENAI_API_KEY が要る (openai_api_key_errors)
+    surface                     surface の実装 (--surface、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
+    threshold_advisor           advisor 判定のしきい値。確率がこれを超えた種類の deep を呼ぶ
+                                (--threshold-advisor、既定 0.5。0 以上 1 以下)
+    box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
+                                (--box-requery-every、既定 5。1 以上)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -88,6 +105,9 @@ class RunSettings:
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
     allow_home: bool = False
     middle: MiddleKind = DEFAULT_MIDDLE_KIND
+    surface: SurfaceKind = DEFAULT_SURFACE
+    threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
+    box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
 
 
 @dataclass(frozen=True)
@@ -142,6 +162,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     範囲は RunSettings の docstring のとおり。nan はどの範囲にも入らないものとして扱い、
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
+    メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
+    --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -258,7 +280,7 @@ def openai_api_key_errors(middle: MiddleKind, environ: Mapping[str, str]) -> lis
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle は値の文字列 "fake" / "luna") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle と surface は値の文字列 "fake" / "luna"・"jev" / "fake") にする。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)

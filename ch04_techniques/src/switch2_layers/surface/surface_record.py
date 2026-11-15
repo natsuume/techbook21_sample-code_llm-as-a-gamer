@@ -69,7 +69,10 @@ def info_label_to_json(label: InfoLabel) -> dict[str, object]:
 
 
 def box_to_json(box: Box) -> dict[str, object]:
-    """box を {"label", "x_min", "y_min", "x_max", "y_max", "confidence"} にする。"""
+    """box を {"label", "x_min", "y_min", "x_max", "y_max", "confidence", "source"} にする。
+
+    confidence は None なら null。source は出どころの値 ("jev" / "tracker") で、None (不明) なら null。
+    """
     return {
         "label": box.label,
         "x_min": box.x_min,
@@ -77,6 +80,7 @@ def box_to_json(box: Box) -> dict[str, object]:
         "x_max": box.x_max,
         "y_max": box.y_max,
         "confidence": box.confidence,
+        "source": None if box.source is None else box.source.value,
     }
 
 

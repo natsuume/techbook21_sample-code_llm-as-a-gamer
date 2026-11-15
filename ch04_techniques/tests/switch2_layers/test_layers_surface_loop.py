@@ -1,7 +1,7 @@
 import dataclasses
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +16,8 @@ from switch2_layers.deep.deep_types import (
 )
 from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore
+from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
+from switch2_layers.frames.surface_frames import build_surface_image
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
 from switch2_layers.records.run_log import RunLog
@@ -31,7 +33,12 @@ from switch2_layers.surface.surface_loop import (
     SurfaceStepOutcome,
     surface_failure_reason,
 )
-from switch2_layers.surface.surface_types import SurfaceInput, SurfaceOutput
+from switch2_layers.surface.surface_types import (
+    Box,
+    BoxSource,
+    SurfaceInput,
+    SurfaceOutput,
+)
 
 ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
 NOW = 10.0  # step を呼ぶときの t
@@ -136,6 +143,7 @@ def make_harness(
     decider: ScriptedDecider,
     max_errors: int = 5,
     allowed: frozenset[str] = ALLOWED_WITHOUT_HOME,
+    boxes_at: Callable[[float], Sequence[Box]] | None = None,
 ) -> Harness:
     """surface のループと偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = NOW にしておく。"""
     root = make_run(tmp_path)
@@ -160,6 +168,7 @@ def make_harness(
         clock=clock,
         bridge_state=lambda: bridge["state"],
         on_stop=stops.append,
+        boxes_at=boxes_at,
     )
     loop = SurfaceLoop(
         parts, SurfaceLoopSettings(max_errors=max_errors, image_width=320)
@@ -736,3 +745,62 @@ def test_stop_just_before_error_row_writes_no_surface_row(tmp_path):
     ]
     assert read_rows(harness.root / "surface.jsonl") == []
     assert harness.stops == []
+
+
+# --- 送る画像への box の書き込み ---
+
+BOX = Box("自機", 0.25, 0.25, 0.75, 0.75, 0.9, BoxSource.TRACKER)
+
+
+class RecordingBoxes:
+    """boxes_at の偽物。呼ばれた t を記録し、t が boxed_t のフレームにだけ BOX を返す。"""
+
+    def __init__(self, boxed_t: float, error: Exception | None = None):
+        self.boxed_t = boxed_t
+        self.error = error
+        self.calls: list[float] = []
+
+    def __call__(self, t: float) -> Sequence[Box]:
+        self.calls.append(t)
+        if self.error is not None:
+            raise self.error
+        return [BOX] if t == self.boxed_t else []
+
+
+def test_boxes_are_drawn_on_sent_and_saved_images(tmp_path):
+    boxes = RecordingBoxes(boxed_t=10.0)
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider, boxes_at=boxes)
+    add_frames(harness, [9.0, 10.0])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert boxes.calls == [9.0, 10.0]
+    frames = {frame.t: frame for frame in harness.buffer.frames()}
+    sent = decider.inputs[0].frames
+    assert (
+        sent[0].jpeg == build_surface_image(frames[9.0], 320, DEFAULT_JPEG_QUALITY).jpeg
+    )
+    assert (
+        sent[1].jpeg
+        == build_surface_image(frames[10.0], 320, DEFAULT_JPEG_QUALITY, [BOX]).jpeg
+    )
+    # 保存する画像は、送った画像と同じ
+    harness.store.write_queued()
+    saved = (harness.root / "frames" / "surface" / "000010000.jpg").read_bytes()
+    assert saved == sent[1].jpeg
+
+
+def test_boxes_error_draws_no_boxes_without_counting_as_failure(tmp_path):
+    boxes = RecordingBoxes(boxed_t=10.0, error=RuntimeError("tracking failed"))
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider, boxes_at=boxes)
+    add_frames(harness, [10.0])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert boxes.calls == [10.0]
+    frame = harness.buffer.frames()[0]
+    assert (
+        decider.inputs[0].frames[0].jpeg
+        == build_surface_image(frame, 320, DEFAULT_JPEG_QUALITY).jpeg
+    )
+    assert harness.loop.consecutive_errors == 0

@@ -1,7 +1,8 @@
 """surface のループ。1 回の要求の処理 (SurfaceLoop.step) と、それを繰り返すスレッドの本体 (SurfaceLoop.run)。
 
 1 回の要求の流れ (step):
-    1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選び、各画像の左上に t を書き込んで JPEG にする。
+    1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選び、各画像の左上に t を書き込み、追えている box の
+       枠と名前も書き込んで JPEG にする。
        送る画像は frames/surface/ に保存する (同じ t は 1 回だけ)。2 秒以内のフレームが無ければ要求を送らず、
        NO_FRAME_RETRY_S 秒待って選び直す
     2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書を読む
@@ -58,6 +59,7 @@ from switch2_layers.surface.middle_state_reader import (
 )
 from switch2_layers.surface.surface_record import SentFrame, SurfaceRecord, surface_row
 from switch2_layers.surface.surface_types import (
+    Box,
     RecentAction,
     SurfaceDecider,
     SurfaceDocuments,
@@ -137,6 +139,8 @@ class SurfaceLoopParts:
     clock           実行の経過秒の時計
     bridge_state    ブリッジの状態 ("ok" / "recovering" / "failed") を返す関数
     on_stop         全体を止める関数 (理由の文字列を受け取る)
+    boxes_at        フレームの時刻 t を受け取り、その画像に書き込む box を返す関数 (run の surface が jev なら
+                    surface.box_tracking_state.BoxTrackingState.boxes_at)。None (既定) なら box を書き込まない
     """
 
     paths: RunPaths
@@ -149,6 +153,7 @@ class SurfaceLoopParts:
     clock: RunClock
     bridge_state: Callable[[], str]
     on_stop: Callable[[str], None]
+    boxes_at: Callable[[float], Sequence[Box]] | None = None
 
 
 def surface_failure_reason(count: int) -> str:
@@ -183,8 +188,10 @@ class SurfaceLoop:
            (使えない間は毎回は呼ばない)
         2. now_t = clock.now()。frames.surface_frames.select_surface_frames(frame_buffer.frames(), now_t) が空なら
            NO_FRAMES (wait_s = NO_FRAME_RETRY_S) を返す
-        3. 選んだフレームを build_surface_image(frame, image_width, jpeg_quality) で JPEG にし、
-           frame_store.save_surface(t, 画像) で保存して、SurfaceFrame(t, jpeg, format_frame_label(t)) にする
+        3. 選んだフレームを build_surface_image(frame, image_width, jpeg_quality, boxes) で JPEG にし、
+           frame_store.save_surface(t, 画像) で保存して、SurfaceFrame(t, jpeg, format_frame_label(t)) にする。
+           boxes は boxes_at(frame.t) (boxes_at が None なら空)。boxes_at が例外 (Exception) を出したら、logging で
+           警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。保存する画像と送る画像は同じもの
         4. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) を読む
         5. t_sent = clock.now() で SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t,
            直近の操作) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる

@@ -7,12 +7,16 @@ import pytest
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.settings import (
+    DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_MIDDLE_KIND,
+    DEFAULT_SURFACE,
+    DEFAULT_THRESHOLD_ADVISOR,
     OPENAI_API_KEY_ENV,
     DeepOnceSettings,
     MiddleKind,
     MiddleOnceSettings,
     RunSettings,
+    SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
@@ -97,6 +101,52 @@ def test_auto_seconds_shorter_than_min_start_interval_is_an_error(
     assert len(errors) == 1
     assert "--deep-auto-seconds" in errors[0]
     assert "--deep-min-start-interval" in errors[0]
+
+
+def test_surface_settings_defaults_follow_the_issue():
+    settings = RunSettings()
+    assert settings.surface is SurfaceKind.JEV
+    assert DEFAULT_SURFACE is SurfaceKind.JEV
+    assert settings.threshold_advisor == DEFAULT_THRESHOLD_ADVISOR == 0.5
+    assert settings.box_requery_every == DEFAULT_BOX_REQUERY_EVERY == 5
+    assert [kind.value for kind in SurfaceKind] == ["jev", "fake"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"threshold_advisor": 0.0},
+        {"threshold_advisor": 1.0},
+        {"box_requery_every": 1},
+        {"surface": SurfaceKind.FAKE},
+    ],
+)
+def test_surface_boundary_values_are_valid(changes):
+    assert run_settings_errors(dataclasses.replace(RunSettings(), **changes)) == []
+
+
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"threshold_advisor": -0.01}, "--threshold-advisor"),
+        ({"threshold_advisor": 1.01}, "--threshold-advisor"),
+        ({"threshold_advisor": math.nan}, "--threshold-advisor"),
+        ({"box_requery_every": 0}, "--box-requery-every"),
+        ({"box_requery_every": -3}, "--box-requery-every"),
+    ],
+)
+def test_surface_out_of_range_values_are_reported_with_option_name(changes, option):
+    errors = run_settings_errors(dataclasses.replace(RunSettings(), **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_run_settings_to_json_writes_surface_as_string():
+    value = run_settings_to_json(RunSettings(surface=SurfaceKind.FAKE))
+    assert value["surface"] == "fake"
+    assert type(value["surface"]) is str
+    assert value["threshold_advisor"] == 0.5
+    assert value["box_requery_every"] == 5
 
 
 def test_multiple_errors_are_all_reported():

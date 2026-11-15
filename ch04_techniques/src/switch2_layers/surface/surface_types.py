@@ -1,6 +1,7 @@
 """surface 層の型: SurfaceDecider の入力 (SurfaceInput) と出力 (SurfaceOutput)、その部品と Protocol。"""
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from switch2_layers.deep.deep_types import DocumentKind
@@ -87,6 +88,13 @@ class InfoLabel:
     probability: float
 
 
+class BoxSource(StrEnum):
+    """box の出どころ。値は surface.jsonl の boxes の source に書く。"""
+
+    JEV = "jev"  # Jev の Box の問いの答え
+    TRACKER = "tracker"  # 追跡の部品 (surface.box_tracker) が前のフレームから追った位置
+
+
 @dataclass(frozen=True)
 class Box:
     """最新のフレームから取った box。座標は画像の幅・高さを 1 とした 0〜1 の値。
@@ -96,7 +104,8 @@ class Box:
     y_min        上端
     x_max        右端
     y_max        下端
-    confidence   確信度 (0〜1)
+    confidence   確信度 (0〜1)。Jev が確信度を返さないとき None
+    source       出どころ。None は不明 (フェイクなど)
     """
 
     label: str
@@ -104,7 +113,8 @@ class Box:
     y_min: float
     x_max: float
     y_max: float
-    confidence: float
+    confidence: float | None
+    source: BoxSource | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +124,7 @@ class SurfaceOutput:
     action          コントローラーの操作 (送る前にボタンの制限に通す)
     deep_kinds      deep を呼ぶ文書の種類の集合 (advisor 判定)。呼ばなければ空
     info_labels     フレームへの情報ラベル
-    boxes           box
+    boxes           要求の最新のフレーム (SurfaceInput.frames の最後) での box
     scene_changed   場面転換を検知したら True (次の middle の入力に伝わる)
     """
 
@@ -126,7 +136,8 @@ class SurfaceOutput:
 
 
 class SurfaceDecider(Protocol):
-    """surface の判断。後続の実装では Decision Model (TypeSafe Jev) を呼ぶ。"""
+    """surface の判断。実装は surface.jev_surface.JevSurfaceDecider (TypeSafe Jev を呼ぶ) と
+    surface.fake_surface.FakeSurfaceDecider (フェイク)。"""
 
     def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
         """surface_input から操作と付随する情報を決めて返す。失敗したら例外を出す (surface_loop が数える)。"""

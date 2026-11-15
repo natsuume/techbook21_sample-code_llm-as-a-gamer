@@ -23,16 +23,19 @@ from switch2_layers.app import (
 from switch2_layers.deep.deep_types import DeepJob, DeepResult
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.error_text import describe_exception
+from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.hardware.capture_source import LatestCapture
 from switch2_layers.hardware.capture_watcher import REASON_STALE_FRAME
 from switch2_layers.middle.fake_middle import FAKE_SCENE_NAME, FakeMiddleAnalyzer
 from switch2_layers.middle.middle_loop import middle_failure_reason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 from switch2_layers.pad_action import PadAction
+from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import RunSettings
+from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.surface_loop import surface_failure_reason
-from switch2_layers.surface.surface_types import SurfaceInput, SurfaceOutput
+from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
 SAFETY_TIMEOUT_S = 20.0  # 止まらないときに、テストを終わらせるために止める秒数
@@ -609,3 +612,72 @@ def test_failure_while_starting_deep_scheduler_thread_cleans_up_and_writes_stop(
     recorder = StartPartsRecorder(monkeypatch, None, error)
     app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
     check_failed_start(tmp_path, app, error, recorder, [])
+
+
+class SurfaceHooks:
+    """LayersParts の surface の接続点 (on_run_directory・on_frame・surface_boxes_at) の偽物。呼ばれ方を記録する。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.run_directories: list[Path] = []
+        # on_run_directory が呼ばれたときに、box の対象の一覧の初期ファイルがあったか
+        self.box_targets_existed: list[bool] = []
+        self.frames_before_run_directory = 0
+        self.frame_times: list[float] = []
+        self.boxes_at_times: list[float] = []
+
+    def on_run_directory(self, paths: RunPaths) -> None:
+        with self.lock:
+            self.run_directories.append(paths.root)
+            self.box_targets_existed.append(
+                (paths.notes_dir / "common" / "box_targets.md").is_file()
+            )
+            self.frames_before_run_directory = len(self.frame_times)
+
+    def on_frame(self, frame: CapturedFrame) -> None:
+        with self.lock:
+            self.frame_times.append(frame.t)
+
+    def boxes_at(self, t: float) -> list[Box]:
+        with self.lock:
+            self.boxes_at_times.append(t)
+        return []
+
+
+def test_surface_hooks_are_connected(tmp_path):
+    sender = FakeSender()
+    hooks = SurfaceHooks()
+    base = parts(sender)
+    app = LayersApp(
+        settings(tmp_path),
+        dataclasses.replace(
+            base,
+            on_frame=hooks.on_frame,
+            surface_boxes_at=hooks.boxes_at,
+            on_run_directory=hooks.on_run_directory,
+        ),
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    # 実行ディレクトリーを作り、notes/ の初期ファイルを書いた後、フレームを渡す前に 1 回だけ呼んだ
+    assert hooks.run_directories == [root]
+    assert hooks.box_targets_existed == [True]
+    assert hooks.frames_before_run_directory == 0
+    # キャプチャーの新しいフレームを渡した (時刻は増える順)
+    assert len(hooks.frame_times) >= 5
+    assert hooks.frame_times == sorted(set(hooks.frame_times))
+    # surface に送った画像ごとに、その時刻の box を求めた
+    surface_rows = read_rows(root / "surface.jsonl")
+    sent_times = {frame["t"] for row in surface_rows for frame in row["frames"]}
+    assert sent_times
+    assert sent_times <= set(hooks.boxes_at_times)
+    assert set(hooks.boxes_at_times) <= set(hooks.frame_times)
+
+
+def test_initial_notes_include_box_targets(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender))
+    reason, root = run_app(app, stop_after=0.5)
+    assert reason == REASON_INTERRUPTED
+    text = (root / "notes" / "common" / "box_targets.md").read_text(encoding="utf-8")
+    assert parse_box_targets(text) == DEFAULT_BOX_TARGETS
