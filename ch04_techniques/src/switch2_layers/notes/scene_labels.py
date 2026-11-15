@@ -1,7 +1,9 @@
-"""場面ラベルの一覧 notes/scene_labels.json の読み書きと、名前から場面 ID を引く・無ければ足す処理。
+"""場面ラベルの一覧 notes/scene_labels.json の読み書きと、名前から場面 ID を引く処理、一覧に足す処理。
 
 形式: {"scenes": [{"id": "scene-001", "name": 場面名, "first_seen_t": 秒}]}
 ID は `scene-` と 3 桁の連番 (1000 番目からは 4 桁)。一覧に足すのは middle のスレッド (と middle-once) だけ。
+新しい場面の ID は resolve_scene で一覧を書き換えずに決め、ほかのファイルを書き終えてから add_scene_label で足す
+(middle.middle_output_writer の書く順)。
 """
 
 from collections.abc import Sequence
@@ -59,14 +61,23 @@ def next_scene_id(labels: Sequence[SceneLabel]) -> str:
     raise NotImplementedError
 
 
-def find_or_add_scene(
-    path: Path, name: str, first_seen_t: float
+def resolve_scene(
+    labels: Sequence[SceneLabel], name: str, first_seen_t: float
 ) -> tuple[SceneLabel, bool]:
-    """path の一覧から name の場面を引く。無ければ足して書く。(場面ラベル, 足したら True) を返す。
+    """一覧 labels から name の場面を引く。(場面ラベル, 一覧に無い新しい場面なら True) を返す。ファイルは扱わない。
 
-    - 一覧にあれば、その SceneLabel と False を返す (ファイルは変えない)
-    - 無ければ SceneLabel(next_scene_id(一覧), normalize_scene_name(name), first_seen_t) を末尾に足して
-      write_scene_labels で書き、それと True を返す
-    name が空か空白だけなら ValueError にする (ファイルは変えない)。
+    - 一覧にあれば (find_scene_id)、その SceneLabel と False を返す
+    - 無ければ SceneLabel(next_scene_id(labels), normalize_scene_name(name), first_seen_t) と True を返す
+      (一覧には足さない。足すのは add_scene_label)
+    name が空か空白だけなら ValueError にする。
+    """
+    raise NotImplementedError
+
+
+def add_scene_label(path: Path, label: SceneLabel) -> bool:
+    """path の一覧の末尾に label を足して書き (write_scene_labels)、足したら True を返す。
+
+    一覧に同じ名前 (normalize_scene_name で比べる) の場面が既にあれば、何も書かずに False を返す。
+    ファイルが無いか読めないときは、空の一覧に足したものを書く。
     """
     raise NotImplementedError

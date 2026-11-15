@@ -1,5 +1,8 @@
 import json
+import shutil
 from pathlib import Path
+
+import pytest
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.middle.middle_output_writer import (
@@ -19,7 +22,10 @@ STATE_KEYS = [
     "stuck_description",
     "surface_wait_s",
     "timeline",
+    "surface_rows_until_t",
+    "operations_rows_until_t",
 ]
+EMPTY_LABELS = {"scenes": []}
 
 
 def make_run(tmp_path: Path) -> Path:
@@ -32,7 +38,11 @@ def make_run(tmp_path: Path) -> Path:
     return root
 
 
-def middle_input(t: float) -> MiddleInput:
+def middle_input(
+    t: float,
+    surface_rows_until_t: float | None = None,
+    operations_rows_until_t: float | None = None,
+) -> MiddleInput:
     return MiddleInput(
         t=t,
         frames=(),
@@ -43,6 +53,8 @@ def middle_input(t: float) -> MiddleInput:
         previous_state=None,
         strategy="",
         current_tasks="",
+        surface_rows_until_t=surface_rows_until_t,
+        operations_rows_until_t=operations_rows_until_t,
     )
 
 
@@ -69,7 +81,9 @@ def test_new_scene_deep_kinds_are_controls_and_tips():
 
 def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
     root = make_run(tmp_path)
-    result = write_middle_output(RunPaths(root), middle_input(12.0), output("町"), 12.8)
+    result = write_middle_output(
+        RunPaths(root), middle_input(12.0, 11.5, 11.8), output("町"), 12.8
+    )
     assert result.new_scene == SceneLabel("scene-001", "町", 12.0)
     assert result.state == MiddleState(
         generated_t=12.8,
@@ -80,6 +94,8 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         stuck_description="扉の前で止まっている",
         surface_wait_s=0.5,
         timeline="## 直近\n町",
+        surface_rows_until_t=11.5,
+        operations_rows_until_t=11.8,
     )
     assert read_json(root / "notes" / "scene_labels.json") == {
         "scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 12.0}]
@@ -98,7 +114,17 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         "stuck_description": "扉の前で止まっている",
         "surface_wait_s": 0.5,
         "timeline": "## 直近\n町",
+        "surface_rows_until_t": 11.5,
+        "operations_rows_until_t": 11.8,
     }
+
+
+def test_row_bounds_of_input_are_written_to_state(tmp_path):
+    root = make_run(tmp_path)
+    write_middle_output(RunPaths(root), middle_input(3.0), output(None), 3.5)
+    state = read_json(root / "middle" / "state.json")
+    assert state["surface_rows_until_t"] is None
+    assert state["operations_rows_until_t"] is None
 
 
 def test_known_scene_name_is_not_added_again(tmp_path):
@@ -140,7 +166,7 @@ def test_no_scene_name_writes_only_state(tmp_path):
         state = read_json(root / "middle" / "state.json")
         assert state["scene_id"] is None
         assert state["scene_name"] is None
-    assert read_json(root / "notes" / "scene_labels.json") == {"scenes": []}
+    assert read_json(root / "notes" / "scene_labels.json") == EMPTY_LABELS
     assert not (root / "notes" / "scenes").exists()
 
 
@@ -158,3 +184,55 @@ def test_state_is_replaced_without_temp_files(tmp_path):
     write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
     assert read_json(root / "middle" / "state.json")["generated_t"] == 6.5
     assert sorted(p.name for p in (root / "middle").iterdir()) == ["state.json"]
+
+
+# --- 書き込みに失敗したとき (一覧に足すのは最後) ---
+
+
+def test_failed_tasks_write_does_not_add_scene_label(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    # notes/scenes をファイルにして、tasks.md の書き込みを失敗させる
+    (root / "notes" / "scenes").write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OSError):
+        write_middle_output(paths, middle_input(1.0), output("町"), 1.5)
+    assert read_json(root / "notes" / "scene_labels.json") == EMPTY_LABELS
+    assert not (root / "middle" / "state.json").exists()
+    # 書けるようになった次の回では、同じ名前が新しい場面 (同じ ID) として扱われる
+    (root / "notes" / "scenes").unlink()
+    result = write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
+    assert result.new_scene == SceneLabel("scene-001", "町", 6.0)
+    assert read_json(root / "notes" / "scene_labels.json") == {
+        "scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 6.0}]
+    }
+
+
+def test_failed_state_write_does_not_add_scene_label(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    # middle/state.json をディレクトリーにして、state.json の置き換えを失敗させる
+    (root / "middle" / "state.json").mkdir()
+    with pytest.raises(OSError):
+        write_middle_output(paths, middle_input(1.0), output("町"), 1.5)
+    # tasks.md は書いた後だが、一覧には足していない
+    assert (root / "notes" / "scenes" / "scene-001" / "tasks.md").exists()
+    assert read_json(root / "notes" / "scene_labels.json") == EMPTY_LABELS
+    shutil.rmtree(root / "middle" / "state.json")
+    result = write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
+    assert result.new_scene == SceneLabel("scene-001", "町", 6.0)
+    assert result.state.scene_id == "scene-001"
+
+
+def test_failed_label_write_keeps_scene_new_for_next_call(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    # scene_labels.json をディレクトリーにして、一覧の書き込み (最後) を失敗させる
+    (root / "notes" / "scene_labels.json").unlink()
+    (root / "notes" / "scene_labels.json").mkdir()
+    with pytest.raises(OSError):
+        write_middle_output(paths, middle_input(1.0), output("町"), 1.5)
+    # tasks.md と state.json は書き終えている
+    assert read_json(root / "middle" / "state.json")["scene_id"] == "scene-001"
+    (root / "notes" / "scene_labels.json").rmdir()
+    result = write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
+    assert result.new_scene == SceneLabel("scene-001", "町", 6.0)

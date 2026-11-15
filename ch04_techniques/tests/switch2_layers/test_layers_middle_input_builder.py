@@ -22,6 +22,8 @@ STATE = {
     "stuck_description": "扉の前で止まっている",
     "surface_wait_s": 1.0,
     "timeline": "## 直近",
+    "surface_rows_until_t": 5.0,
+    "operations_rows_until_t": 5.0,
 }
 
 
@@ -143,6 +145,8 @@ def test_empty_run_gives_empty_input(tmp_path):
     assert middle_input.previous_state is None
     assert middle_input.strategy == ""
     assert middle_input.current_tasks == ""
+    assert middle_input.surface_rows_until_t is None
+    assert middle_input.operations_rows_until_t is None
 
 
 def test_frames_are_read_from_saved_interval_images(tmp_path):
@@ -184,10 +188,81 @@ def test_rows_since_previous_middle_run(tmp_path):
         ],
     )
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
-    # 前回の based_on_t (5.0) より後で、今回の t (20.0) 以前の行
+    # 前回までに読んだ行の時刻 (5.0) より後で、今回の t (20.0) 以前の行
     assert [row["t_received"] for row in middle_input.surface_rows] == [6.0, 7.0]
     assert [row["t"] for row in middle_input.operation_rows] == [5.1, 7.5]
     assert middle_input.previous_state == MiddleState(**STATE)
+    # 次の入力の下限は、今回読んだ行の時刻の最大値 (20.0 より後の 30.0 の行は読んでいない)
+    assert middle_input.surface_rows_until_t == 7.0
+    assert middle_input.operations_rows_until_t == 7.5
+
+
+def test_lower_bound_comes_from_rows_read_not_from_input_time(tmp_path):
+    # 前回の入力を作った時刻 (based_on_t = 10.0) より前の t_received を持つ行でも、前回の入力の後に追記されて
+    # まだ読んでいなければ (前回読んだ行の最大 6.0 より後なら)、今回の入力に含める
+    root = make_run(tmp_path)
+    state = {
+        **STATE,
+        "based_on_t": 10.0,
+        "surface_rows_until_t": 6.0,
+        "operations_rows_until_t": 6.5,
+    }
+    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    write_jsonl(
+        root / "surface.jsonl",
+        [surface_row(6.0), surface_row(7.0, scene_changed=True), surface_row(12.0)],
+    )
+    write_jsonl(
+        root / "operations.jsonl",
+        [{"t": 6.5}, {"t": 8.0}, {"t": 11.0}],
+    )
+    middle_input = build_middle_input(RunPaths(root), now_t=15.0, window_s=10.0)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [7.0, 12.0]
+    assert [row["t"] for row in middle_input.operation_rows] == [8.0, 11.0]
+    # 遅れて書かれた行の場面転換の印も middle に届く
+    assert middle_input.scene_change_reported is True
+    assert middle_input.surface_rows_until_t == 12.0
+    assert middle_input.operations_rows_until_t == 11.0
+
+
+def test_bounds_neither_move_back_nor_forward_without_new_rows(tmp_path):
+    root = make_run(tmp_path)
+    state = {
+        **STATE,
+        "based_on_t": 10.0,
+        "surface_rows_until_t": 6.0,
+        "operations_rows_until_t": None,
+    }
+    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    # 読んだことのある行と、今回の t より新しい行だけがある
+    write_jsonl(
+        root / "surface.jsonl", [surface_row(5.0), surface_row(6.0), surface_row(25.0)]
+    )
+    write_jsonl(root / "operations.jsonl", [{"t": 21.0}])
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.surface_rows == ()
+    assert middle_input.operation_rows == ()
+    # 入力を作った時刻 (20.0) にも、今回の t より新しい行の時刻にも進めない
+    assert middle_input.surface_rows_until_t == 6.0
+    assert middle_input.operations_rows_until_t is None
+
+
+def test_null_bounds_in_previous_state_read_all_rows(tmp_path):
+    root = make_run(tmp_path)
+    state = {
+        **STATE,
+        "based_on_t": 10.0,
+        "surface_rows_until_t": None,
+        "operations_rows_until_t": None,
+    }
+    (root / "middle" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    write_jsonl(root / "surface.jsonl", [surface_row(4.0), surface_row(11.0)])
+    write_jsonl(root / "operations.jsonl", [{"t": 3.0}])
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert [row["t_received"] for row in middle_input.surface_rows] == [4.0, 11.0]
+    assert [row["t"] for row in middle_input.operation_rows] == [3.0]
+    assert middle_input.surface_rows_until_t == 11.0
+    assert middle_input.operations_rows_until_t == 3.0
 
 
 def test_all_rows_without_previous_state(tmp_path):
@@ -201,6 +276,9 @@ def test_all_rows_without_previous_state(tmp_path):
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert [row["t_received"] for row in middle_input.surface_rows] == [1.0, 2.0]
     assert [row["t"] for row in middle_input.operation_rows] == [0.5]
+    # 書いている途中の行 (3.0) と、時刻が数でない行は、下限の計算にも使わない
+    assert middle_input.surface_rows_until_t == 2.0
+    assert middle_input.operations_rows_until_t == 0.5
 
 
 def test_broken_previous_state_is_treated_as_missing(tmp_path):

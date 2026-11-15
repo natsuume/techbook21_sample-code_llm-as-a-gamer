@@ -8,8 +8,20 @@ run の middle のループと middle-once は、同じ build_middle_input で�
     middle/state.json                    前回の middle の出力
     notes/strategy.md                    大方針
     notes/scenes/<場面ID>/tasks.md        現在の場面の短期タスクリスト
-「前回の middle の実行以降」は、前回の middle/state.json の based_on_t より後 (書けた最後の出力の入力の時刻より後)。
-analyze が失敗して middle/state.json を書かなかった回の行は、次の入力にも含める。
+
+「前回の middle の実行以降」の行の決め方:
+    - 行の時刻は、surface.jsonl では t_received、operations.jsonl では t を使う
+    - 下限は、入力を作った時刻 (based_on_t) ではなく、前回までに実際に読んだ行の時刻の最大値
+      (前回の middle/state.json の surface_rows_until_t と operations_rows_until_t)。この値より後の行を読む
+    - 上限は今回の入力の時刻 now_t (この時刻以前の行を読む)
+    - 今回読んだ行の時刻の最大値を、今回の MiddleInput の surface_rows_until_t・operations_rows_until_t にし、
+      出力を書くときに middle/state.json に記録する。読んだ行が無ければ前回の値のまま (後退も前進もしない)
+前提: 行は時刻の順に追記される。surface.jsonl は surface の 1 本のスレッドだけが t_received の順に書き、
+operations.jsonl は records.operation_log.OperationLog がロックの中で t を取って書く (同じ t の行はありうる)。
+surface は t_received を決めた後、操作の送信 (ブリッジの ack の待ち) を挟んでから行を追記するため、入力を作った時点で
+「t_received が now_t 以下なのに、まだ書かれていない行」がありうる。下限を実際に読んだ行から決めることで、
+その行も次の入力に含める。
+analyze が失敗して middle/state.json を書かなかった回は下限を進めないため、その回に読んだ行は次の入力にも含める。
 """
 
 from collections.abc import Sequence
@@ -56,9 +68,13 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - frames: select_interval_frames(read_frame_records(paths), now_t, window_s) の各画像を読んだ MiddleFrame。
       画像のファイルが読めないものは除く
     - previous_state: read_middle_state(paths.middle_state)
-    - surface_rows: surface.jsonl の行のうち、previous_state.based_on_t < t_received <= now_t のもの
-      (previous_state が None なら t_received <= now_t のすべて。t_received が数でない行は除く)
-    - operation_rows: operations.jsonl の行のうち、同じ範囲の t のもの
+    - surface_rows: surface.jsonl の行のうち、下限 < t_received <= now_t のもの (書かれた順)。
+      下限は previous_state.surface_rows_until_t。previous_state が None か、その値が None なら下限なし。
+      t_received が数 (bool を除く) でない行は除く
+    - operation_rows: operations.jsonl の行のうち、下限 < t <= now_t のもの (下限は previous_state.operations_rows_until_t。
+      決め方は surface_rows と同じ)
+    - surface_rows_until_t: surface_rows の t_received の最大値。surface_rows が空なら下限の値 (None を含む)
+    - operations_rows_until_t: operation_rows の t の最大値。operation_rows が空なら下限の値 (None を含む)
     - scene_change_reported: surface_rows のどれかの scene_changed が True なら True
     - scene_labels: notes.scene_labels.read_scene_labels(notes/scene_labels.json)
     - strategy: notes/strategy.md (無ければ空文字列)

@@ -35,6 +35,8 @@ INPUT = MiddleInput(
     previous_state=None,
     strategy="",
     current_tasks="",
+    surface_rows_until_t=7.0,
+    operations_rows_until_t=6.5,
 )
 STATE = MiddleState(
     generated_t=10.6,
@@ -45,6 +47,8 @@ STATE = MiddleState(
     stuck_description="",
     surface_wait_s=0.2,
     timeline="",
+    surface_rows_until_t=7.0,
+    operations_rows_until_t=6.5,
 )
 
 

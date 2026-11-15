@@ -53,5 +53,9 @@ class OperationLog:
         raise NotImplementedError
 
     def write(self, event: OperationEvent) -> None:
-        """operation_row(clock.now(), event) を 1 行追記する。複数のスレッドから呼んでよい (ロックの中で書く)。"""
+        """operation_row(clock.now(), event) を 1 行追記する。複数のスレッドから呼んでよい。
+
+        clock.now() を取ることと追記を 1 つのロックの中で行い、行が t の順 (同じ値を含む) に並ぶようにする
+        (middle の入力は、読んだ行の t の最大値より後の行を次に読むため)。
+        """
         raise NotImplementedError

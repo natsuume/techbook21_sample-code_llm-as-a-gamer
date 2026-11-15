@@ -38,9 +38,10 @@ class RunLog:
         """属性を持つ。ファイルはまだ作らない。"""
         raise NotImplementedError
 
-    def write(self, event: str, **fields: object) -> None:
+    def write(self, event: str, /, **fields: object) -> None:
         """{"t": clock.now(), "event": event, **fields} を 1 行追記する (file_io.append_json_line)。
 
+        event は位置専用の引数にし、fields に "event" のキーを渡しても引数の名前と衝突しないようにする。
         複数のスレッドから呼んでよい (追記と echo はロックの中で行う)。
         fields に "t" か "event" のキーがあれば ValueError にする (何も書かない)。
         JSON にできない値 (Path など) は文字列にする。

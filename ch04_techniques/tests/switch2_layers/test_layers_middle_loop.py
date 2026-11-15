@@ -180,6 +180,34 @@ def test_new_scene_requests_controls_and_tips_deep(tmp_path):
     assert row["deep_requests_sent"] is True
 
 
+def test_new_scene_is_requested_again_after_failed_write(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    sink = FakeDeepSink()
+    analyzer = ScriptedAnalyzer(monotonic, output("町"))
+    # tasks.md の書き込みを失敗させる (notes/scenes をファイルにする)
+    (root / "notes" / "scenes").write_text("not a directory", encoding="utf-8")
+    result = run_middle_step(paths, analyzer, clock, 10.0, sink)
+    assert result.ok is False
+    assert result.new_scene is None
+    assert sink.requests == []
+    assert json.loads(
+        (root / "notes" / "scene_labels.json").read_text(encoding="utf-8")
+    ) == {"scenes": []}
+    # 次の回では、同じ名前が初めての場面として扱われ、deep の要求が出る
+    (root / "notes" / "scenes").unlink()
+    result = run_middle_step(paths, analyzer, clock, 10.0, sink)
+    assert result.ok is True
+    assert result.new_scene is not None
+    assert result.new_scene.id == "scene-001"
+    assert sink.requests == [
+        (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001"),
+        (DocumentKind.TIPS, DeepTrigger.NEW_SCENE, "scene-001"),
+    ]
+
+
 def test_known_scene_requests_no_deep(tmp_path):
     root = make_run(tmp_path)
     monotonic = FakeMonotonic(ORIGIN + 10.0)
@@ -239,30 +267,73 @@ def test_failed_analyze_keeps_previous_output(tmp_path):
     assert row["scene_id"] is None
 
 
-def test_next_input_uses_rows_since_previous_successful_output(tmp_path):
-    root = make_run(tmp_path)
-    monotonic = FakeMonotonic(ORIGIN + 10.0)
-    clock = RunClock(monotonic, origin=ORIGIN)
-    analyzer = ScriptedAnalyzer(monotonic, output("町"))
-    run_middle_step(RunPaths(root), analyzer, clock, 10.0, None)
-    (root / "surface.jsonl").write_text(
-        json.dumps({"t_received": 9.0})
-        + "\n"
-        + json.dumps({"t_received": 12.0})
-        + "\n",
-        encoding="utf-8",
-    )
-    monotonic.now = ORIGIN + 15.0
-    run_middle_step(RunPaths(root), analyzer, clock, 10.0, None)
-    # 前回の入力の時刻 (10.0) より後の行だけ
-    assert [row["t_received"] for row in analyzer.inputs[1].surface_rows] == [12.0]
-    assert analyzer.inputs[1].previous_state is not None
-
-
 def append_rows(root: Path, name: str, rows: list[dict]) -> None:
     with (root / name).open("a", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row) + "\n")
+
+
+def read_state(root: Path) -> dict:
+    return json.loads((root / "middle" / "state.json").read_text(encoding="utf-8"))
+
+
+def test_row_written_after_input_with_earlier_time_is_in_next_input(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, output("町"), elapsed=0.0)
+    append_rows(root, "surface.jsonl", [{"t_received": 8.0}])
+    append_rows(root, "operations.jsonl", [{"t": 8.2}])
+    # 1 回目は t=10.0 に入力を作る。このとき 9.5 の行はまだ書かれていない (surface が送信の ack を待っている)
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert [row["t_received"] for row in analyzer.inputs[0].surface_rows] == [8.0]
+    state = read_state(root)
+    assert state["based_on_t"] == 10.0
+    assert state["surface_rows_until_t"] == 8.0
+    assert state["operations_rows_until_t"] == 8.2
+    # 入力を作った時刻 (10.0) より前の t を持つ行が、入力を作った後に追記される
+    append_rows(
+        root,
+        "surface.jsonl",
+        [{"t_received": 9.5, "scene_changed": True}, {"t_received": 12.0}],
+    )
+    append_rows(root, "operations.jsonl", [{"t": 9.6}])
+    monotonic.now = ORIGIN + 15.0
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    second = analyzer.inputs[1]
+    # 前回読んだ行の時刻 (8.0・8.2) より後の行を読むため、遅れて書かれた行も含める
+    assert [row["t_received"] for row in second.surface_rows] == [9.5, 12.0]
+    assert [row["t"] for row in second.operation_rows] == [9.6]
+    assert second.scene_change_reported is True
+    state = read_state(root)
+    assert state["surface_rows_until_t"] == 12.0
+    assert state["operations_rows_until_t"] == 9.6
+
+
+def test_bounds_do_not_move_after_call_without_new_rows(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, output("町"), elapsed=0.0)
+    append_rows(root, "surface.jsonl", [{"t_received": 8.0}])
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    # 2 回目 (t=15.0) は新しい行が無い。下限は 8.0 と null のまま (15.0 に進めず、後退もしない)
+    monotonic.now = ORIGIN + 15.0
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert analyzer.inputs[1].surface_rows == ()
+    state = read_state(root)
+    assert state["based_on_t"] == 15.0
+    assert state["surface_rows_until_t"] == 8.0
+    assert state["operations_rows_until_t"] is None
+    # 2 回目の入力の時刻より前の t の行が、その後に書かれても 3 回目に含める
+    append_rows(root, "surface.jsonl", [{"t_received": 14.0}])
+    append_rows(root, "operations.jsonl", [{"t": 3.0}])
+    monotonic.now = ORIGIN + 20.0
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    assert [row["t_received"] for row in analyzer.inputs[2].surface_rows] == [14.0]
+    assert [row["t"] for row in analyzer.inputs[2].operation_rows] == [3.0]
 
 
 def test_rows_of_failed_call_are_included_in_next_input(tmp_path):
@@ -273,14 +344,18 @@ def test_rows_of_failed_call_are_included_in_next_input(tmp_path):
     analyzer = ScriptedAnalyzer(
         monotonic, output("町"), RuntimeError("luna failed"), output("町"), elapsed=0.0
     )
-    # 1 回目 (t=10.0) は成功し、based_on_t = 10.0 の middle/state.json を書く
+    append_rows(root, "surface.jsonl", [{"t_received": 8.0}])
+    append_rows(root, "operations.jsonl", [{"t": 9.0}])
+    # 1 回目 (t=10.0) は成功し、読んだ行の時刻 (8.0・9.0) を下限として middle/state.json に書く
     assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is True
     append_rows(root, "surface.jsonl", [{"t_received": 12.0}])
     append_rows(root, "operations.jsonl", [{"t": 13.0}])
-    # 2 回目 (t=15.0) は失敗し、middle/state.json は 1 回目のまま
+    # 2 回目 (t=15.0) は失敗し、middle/state.json (と下限) は 1 回目のまま
     monotonic.now = ORIGIN + 15.0
     assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is False
     assert [row["t_received"] for row in analyzer.inputs[1].surface_rows] == [12.0]
+    assert read_state(root)["surface_rows_until_t"] == 8.0
+    assert read_state(root)["operations_rows_until_t"] == 9.0
     append_rows(root, "surface.jsonl", [{"t_received": 17.0}])
     append_rows(root, "operations.jsonl", [{"t": 18.0}])
     # 3 回目 (t=20.0) の入力には、失敗した 2 回目に渡した行 (12.0・13.0) も含める
@@ -288,10 +363,11 @@ def test_rows_of_failed_call_are_included_in_next_input(tmp_path):
     assert run_middle_step(paths, analyzer, clock, 10.0, None).ok is True
     third = analyzer.inputs[2]
     assert third.previous_state is not None
-    assert third.previous_state.based_on_t == 10.0
+    assert third.previous_state.surface_rows_until_t == 8.0
+    assert third.previous_state.operations_rows_until_t == 9.0
     assert [row["t_received"] for row in third.surface_rows] == [12.0, 17.0]
     assert [row["t"] for row in third.operation_rows] == [13.0, 18.0]
-    # 成功した 3 回目の後は、その入力の時刻 (20.0) より後の行だけになる
+    # 成功した 3 回目の後は、3 回目に読んだ行 (17.0・18.0) より後の行だけになる
     monotonic.now = ORIGIN + 25.0
     run_middle_step(paths, analyzer, clock, 10.0, None)
     assert analyzer.inputs[3].surface_rows == ()
