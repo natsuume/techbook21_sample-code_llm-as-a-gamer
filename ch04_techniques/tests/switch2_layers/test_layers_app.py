@@ -425,6 +425,18 @@ START_PART_NAMES = (
 )
 
 
+class CallCounter:
+    """呼ばれた回数を数えてから、元の関数を呼ぶ。"""
+
+    def __init__(self, original: Callable[..., object]):
+        self.original = original
+        self.count = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self.count += 1
+        return self.original(*args, **kwargs)
+
+
 class StartPartsRecorder:
     """app モジュールの部品のクラスを包み、start が作った部品を覚える。fail_at の名前の部品は作らずに error を出す。
 
@@ -459,6 +471,18 @@ class StartPartsRecorder:
             return part
 
         return build
+
+    def count_teardown_calls(self) -> list[CallCounter]:
+        """作った部品の close と stop_output を、呼ばれた回数を数えてから元の関数を呼ぶものに差し替え、その一覧を返す。"""
+        counters: list[CallCounter] = []
+        for part in self.made:
+            for method_name in ("close", "stop_output"):
+                method = getattr(part, method_name, None)
+                if method is not None:
+                    counter = CallCounter(method)
+                    setattr(part, method_name, counter)
+                    counters.append(counter)
+        return counters
 
     def close_all(self) -> None:
         for part in reversed(self.made):
@@ -512,9 +536,11 @@ def check_failed_start(
         assert rows[-1]["event"] == "stop"
         assert describe_exception(error) in rows[-1]["reason"]
         assert app.stop_reason == rows[-1]["reason"]
-        # 後から close を呼んでも、二重に閉じない (run.jsonl が変わらない)
+        # 後から close を呼んでも、二重に閉じない (作った部品の close・stop_output を呼ばず、run.jsonl も変わらない)
         written = run_log.read_bytes()
+        counters = recorder.count_teardown_calls()
         app.close()
+        assert [counter.count for counter in counters] == [0] * len(counters)
         assert run_log.read_bytes() == written
     finally:
         app.request_stop("test cleanup")
