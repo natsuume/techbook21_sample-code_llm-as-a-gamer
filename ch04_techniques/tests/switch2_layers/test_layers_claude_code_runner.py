@@ -687,6 +687,16 @@ def test_exit_without_result_line_is_a_failure(tmp_path):
     assert result.message.startswith("claude exited with code 0")
 
 
+def test_result_without_is_error_is_a_failure(tmp_path):
+    # 成功の判定は、result.json から読む判定 (deep_job_success.is_success_result_record) と同じにする
+    job, job_dir = prepare(make_run(tmp_path))
+    result_line = {key: value for key, value in RESULT.items() if key != "is_error"}
+    fake = FakeClaude(lines=[line(result_line)], exit_code=0)
+    result = fake.runner().run(job, job_dir)
+    assert result.ok is False
+    assert result.message.startswith("claude exited with code 0")
+
+
 def test_claude_that_cannot_start_is_recorded_as_a_failure(tmp_path):
     job, job_dir = prepare(make_run(tmp_path))
     fake = FakeClaude(start_error=FileNotFoundError(2, "No such file", "claude"))

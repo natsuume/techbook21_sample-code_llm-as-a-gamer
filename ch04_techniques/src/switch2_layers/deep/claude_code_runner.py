@@ -46,6 +46,7 @@ from switch2_layers.deep.claude_stream_log import (
     ClaudeStreamLog,
     build_result_record,
 )
+from switch2_layers.deep.deep_job_success import is_success_result_record
 from switch2_layers.deep.deep_prompt import build_deep_prompt, read_prompt_context
 from switch2_layers.deep.deep_types import DeepJob, DeepResult, DocumentKind
 from switch2_layers.error_text import describe_exception
@@ -242,7 +243,8 @@ class ClaudeCodeDeepRunner:
            呼ばれたら True、killed は kill が呼ばれたら True、error は stream.jsonl の書き込みの失敗があればその説明
         9. 戻り値:
              stop か kill が呼ばれた         DeepResult(ok=False, stopped=True, message=KILLED_MESSAGE か STOPPED_MESSAGE)
-             終了コード 0 で、result の行があり、is_error が True でない
+             8 の辞書が deep_job_success.is_success_result_record で正常な終わり (終了コード 0、is_error が False、
+             止めていない)
                                              DeepResult(ok=True, message=最後のメッセージの先頭 RESULT_MESSAGE_MAX_CHARS 文字
                                              (無ければ空文字列))
              それ以外                         DeepResult(ok=False, message=`claude exited with code <終了コード>` と、
@@ -335,11 +337,8 @@ class ClaudeCodeDeepRunner:
             return _stopped_result(kill_requested)
         last_message = record["last_message"]
         last_text = last_message if isinstance(last_message, str) else ""
-        if (
-            output.returncode == 0
-            and output.result_message is not None
-            and output.result_message.get("is_error") is not True
-        ):
+        # 次のジョブが前回の時刻を取るときの判定 (result.json から読む) と同じ判定にする
+        if is_success_result_record(record):
             return DeepResult(ok=True, message=last_text[:RESULT_MESSAGE_MAX_CHARS])
         message = f"claude exited with code {output.returncode}"
         if last_text:
@@ -493,8 +492,11 @@ def _stopped_result(killed: bool) -> DeepResult:
 
 
 def _write_result(job_dir: Path, record: dict[str, object]) -> None:
-    """job_dir/result.json に record を置き換えて書く。書けなければ (OSError) 警告を書く。"""
+    """job_dir/result.json に record を置き換えて書く。
+
+    書けなければ (OSError、UTF-8 にできない文字などの ValueError) 警告を書く。
+    """
     try:
         write_json_atomic(job_dir / RESULT_FILE, record)
-    except OSError:
+    except (OSError, ValueError):
         logger.warning("failed to write %s", job_dir / RESULT_FILE, exc_info=True)

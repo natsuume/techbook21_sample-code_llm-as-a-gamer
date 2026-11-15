@@ -95,8 +95,9 @@ class ClaudeStreamLog:
 
         - data が result の行 (is_result_message) なら、result_message をその値にする
         - data が assistant の行で文がある (assistant_text が None でない) なら、last_assistant_text をその文にする
-        書き込みが OSError で失敗したら、以後は書かずに覚えるだけにし、write_error に最初の失敗の説明を入れる
-        (例外は出さない。記録の失敗で claude の出力を読むのを止めないため)。
+        書き込みが OSError か ValueError (UTF-8 にできない、対になっていないサロゲートなど) で失敗したら、以後は
+        書かずに覚えるだけにし、write_error に最初の失敗の説明を入れる (例外は出さない。記録の失敗で claude の出力を
+        読むのを止めないため)。
         """
         record = stream_line_record(line, elapsed_s)
         data = record.get("data")
@@ -110,7 +111,7 @@ class ClaudeStreamLog:
         try:
             self._file.write(format_json_line(record))
             self._file.flush()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self._write_error = describe_exception(error)
 
     @property

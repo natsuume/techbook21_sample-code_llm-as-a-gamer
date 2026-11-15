@@ -98,6 +98,19 @@ def test_stream_log_writes_each_line_and_remembers_result(tmp_path):
     assert log.write_error is None
 
 
+def test_stream_log_keeps_reading_when_a_line_cannot_be_encoded(tmp_path):
+    # 対になっていないサロゲートを含む文字列は UTF-8 で書けない (UnicodeEncodeError)。記録はやめるが例外は出さない
+    path = tmp_path / STREAM_FILE
+    log = ClaudeStreamLog(path)
+    surrogate = '{"type":"assistant","message":{"content":[{"type":"text","text":"\\ud800"}]}}\n'
+    log.add_line(surrogate, 1.0)
+    log.add_line(line(RESULT), 2.0)
+    log.close()
+    assert log.write_error is not None
+    assert log.last_assistant_text == "\ud800"
+    assert log.result_message == RESULT
+
+
 def test_stream_log_starts_with_an_empty_file(tmp_path):
     path = tmp_path / STREAM_FILE
     path.write_text("old\n", encoding="utf-8")

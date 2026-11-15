@@ -19,7 +19,8 @@ def resolve_note_file(notes_dir: Path, note: str) -> Path | None:
     次のときは None を返す (例外は出さない):
         - note が空・絶対パス・.. を含む
         - 解決した先が無い、通常のファイルでない (ディレクトリーなど)、notes_dir を解決した先の下に無い
-        - パスの確認で OSError が出た (名前が長すぎる、シンボリックリンクの循環など)
+        - パスの確認で OSError が出た (名前が長すぎる、シンボリックリンクの循環など)。Python 3.12 の Path.resolve は
+          シンボリックリンクの循環で RuntimeError を出すため、これも同じに扱う
     """
     if not note:
         return None
@@ -33,7 +34,7 @@ def resolve_note_file(notes_dir: Path, note: str) -> Path | None:
             return None
         if not target.is_file():
             return None
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     return target
 

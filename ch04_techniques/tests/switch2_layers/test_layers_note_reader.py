@@ -72,6 +72,18 @@ def test_os_error_while_checking_the_path_is_a_missing_document(tmp_path):
     assert read_note_bytes(notes, "loop.md") is None
 
 
+def test_runtime_error_while_resolving_is_a_missing_document(tmp_path, monkeypatch):
+    # Python 3.12 の Path.resolve は、シンボリックリンクの循環で RuntimeError を出す
+    notes = make_notes(tmp_path)
+
+    def loop_error(self, strict=False):
+        raise RuntimeError("Symlink loop")
+
+    monkeypatch.setattr(Path, "resolve", loop_error)
+    assert resolve_note_file(notes, "strategy.md") is None
+    assert read_note_text(notes, "strategy.md") == ""
+
+
 def test_text_that_is_not_utf8_is_empty(tmp_path):
     notes = make_notes(tmp_path)
     (notes / "advice.md").write_bytes(b"\xff\xfe")
