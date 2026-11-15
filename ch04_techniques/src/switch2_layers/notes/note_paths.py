@@ -7,6 +7,7 @@
     scenes/<場面ID>/controls.md     場面の操作説明
     scenes/<場面ID>/tips.md         場面の攻略情報
     scenes/<場面ID>/tasks.md        場面の短期タスクリスト (共通の文書は無い)
+    scenes/<場面ID>/box_targets.md  場面の「box で取るもの」(`- 名前: 説明` の行。場面の攻略情報の deep のジョブが書く)
     scene_labels.json              場面ラベルの一覧 (notes.scene_labels)
     map/                           マップの文書を置くディレクトリー
     .publish.lock                  publish-note のファイルロック
@@ -33,6 +34,7 @@ SCENES_DIR = "scenes"
 MAP_DIR = "map"
 SCENE_LABELS_FILE = "scene_labels.json"
 PUBLISH_LOCK_FILE = ".publish.lock"
+BOX_TARGETS_FILE = "box_targets.md"
 
 # 場面の文書の名前 (拡張子を除く)
 SceneNoteName = Literal["controls", "tips", "tasks"]
@@ -57,6 +59,14 @@ def scene_note(scene_id: str, name: SceneNoteName) -> str:
     return f"{SCENES_DIR}/{scene_id}/{name}.md"
 
 
+def box_targets_note(scene_id: str) -> str:
+    """場面の「box で取るもの」の文書の相対パス scenes/<scene_id>/box_targets.md を返す。
+
+    scene_id が場面 ID の形でなければ ValueError。
+    """
+    raise NotImplementedError
+
+
 def document_key(kind: DocumentKind, scene_id: str | None) -> DocumentKey:
     """種類 kind で場面 scene_id のときに対象になる文書のキーを返す。
 
@@ -72,17 +82,23 @@ def document_key(kind: DocumentKind, scene_id: str | None) -> DocumentKey:
 
 
 def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
-    """deep のジョブの対象の文書の相対パスのリストを返す (job.json の documents と work/ のコピーに使う)。
+    """deep のジョブの対象の文書の相対パスのリストを返す。
 
-    - controls・tips で場面あり: [scenes/<場面ID>/<種類>.md, common/<種類>.md] (場面の文書と共通の文書の両方)
+    結果は job.json の documents になり、deep が Edit・Write で書いてよい文書の範囲 (権限のルール) になる。
+
+    - controls で場面あり: [scenes/<場面ID>/controls.md, common/controls.md] (場面の文書と共通の文書の両方)
+    - tips で場面あり: [scenes/<場面ID>/tips.md, scenes/<場面ID>/box_targets.md, common/tips.md]
+      (場面の攻略情報のジョブは、場面の「box で取るもの」も書く)
     - controls・tips で場面なし: [common/<種類>.md]
     - strategy: [strategy.md]、advice: [advice.md]
     - map: notes_dir/map/ の下の通常のファイルの相対パス (map/... の形、文字列の順)。無ければ空のリスト。
-      次のものは除く (置き換えの書き込みの途中や、kill されたジョブが残したファイルを文書として扱わないため):
+      次のものは除く:
         - パスの要素のどれかが `.` で始まるもの (隠しファイルと隠しディレクトリーの下)
         - 名前が置き換えの一時ファイルの規則 (file_io.is_temporary_file_name) に当たるもの
-    map 以外は、ファイルがまだ無くてもパスを返す。列挙した後にファイルが消えることがあるため、読む側は
-    読むときに無い文書を扱う (deep_job_directory.create_job_directory)。
+          (置き換えの書き込みの途中や、kill されたジョブが残したファイルを文書として扱わないため)
+        - notes.note_reader.resolve_note_file が None のもの (シンボリックリンクを解決した先が notes/ の中の
+          通常のファイルでないもの。notes/ の外のファイルを文書として列挙しない)
+    map 以外は、ファイルがまだ無くてもパスを返す (deep が Write で作る)。
     """
     if key.kind in SCENE_DOCUMENT_KINDS:
         notes = [common_note(key.kind)]

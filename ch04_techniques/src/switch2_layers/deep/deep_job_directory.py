@@ -1,11 +1,15 @@
-"""deep のジョブのディレクトリー deep/<種類>-<連番3桁>/ と、その中の job.json・work/ の用意。
+"""deep のジョブのディレクトリー deep/<種類>-<連番3桁>/ と、その中の job.json の用意。
 
 - 連番は種類ごとに 1 から振る (deep/ にある同じ種類のディレクトリーの番号の最大 + 1)
 - job.json: {"kind", "scene_id", "trigger", "requested_t", "previous_latest_frame_t", "latest_frame_t",
-  "documents": [{"note": notes/ からの相対パス, "sha256": SHA-256 か "none"}]}
-- work/: 対象の文書のコピーを work/<notes/ からの相対パス> に置く。controls と tips で場面がある場合は、
-  場面の文書と共通の文書の両方を入れる。まだ無い文書はコピーせず、sha256 を "none" にする。
-  map では、work/map/ をいつも作る (文書が無くても)
+  "documents": [notes/ からの / 区切りの相対パス, ...]}
+- documents は、そのジョブの対象の文書 (deep が Edit・Write で直接編集してよい文書) の相対パスの文字列のリスト
+  (note_paths.deep_document_notes の結果をそのまま並べる)。controls と tips で場面がある場合は、場面の文書と
+  共通の文書の両方 (tips の場面は box_targets.md も)。まだ無い文書のパスも含める
+- deep は notes/ の文書の本体を直接編集するため、ジョブのディレクトリーには job.json だけを置く (文書のコピーや
+  作業用のディレクトリーを作らない。ジョブの実行で、DeepRunner が記録のファイルを足す)
+- ジョブの用意では文書の中身を読まない。map の文書の列挙 (note_paths.deep_document_notes) は、シンボリックリンクを
+  解決した先が notes/ の中の通常のファイルでないものを除く
 """
 
 import json
@@ -62,19 +66,16 @@ def create_job_directory(
     job: DeepJob,
     list_documents: Callable[[Path, DocumentKey], list[str]] = deep_document_notes,
 ) -> Path:
-    """job のディレクトリーを deep/ に作り、job.json と work/ を用意して、そのパスを返す。
+    """job のディレクトリーを deep/ に作り、job.json を用意して、そのパスを返す。
 
     list_documents は対象の文書の相対パスを列挙する関数 (既定 notes.note_paths.deep_document_notes)。テストでは、
-    列挙した後に消える文書を表すため、無いパスを返す関数を渡せる。
+    列挙の失敗や、決まった一覧を表す関数を渡せる。
     1. 連番 next_job_number(paths.deep_dir, job.kind) で deep/<種類>-<連番>/ を mkdir(exist_ok=False) で作る。
        既にあれば (同時に作られた場合) 連番を 1 増やして作り直す
-    2. 対象の文書 list_documents(paths.notes_dir, job.key) のそれぞれについて、本体のファイルのバイト列を 1 回だけ読み、
-       そのバイト列を work/<相対パス> に書き (親のディレクトリーを作る)、同じバイト列の SHA-256 を記録する
-       (コピーとハッシュが同じ内容を表すようにする)。読むときに文書が無ければ (FileNotFoundError、または通常の
-       ファイルでない。列挙した後に消えた文書を含む)、無い文書として扱う: コピーせず、sha256 を NO_DOCUMENT_SHA256 にする
-    3. work/ を作る (コピーが無くても)。map なら work/map/ も作る
-    4. job.json を置き換えの書き込みで書く (モジュールの docstring の形。documents は 2 の順)
-    1 でディレクトリーを作った後に失敗したら (無い文書以外の OSError、list_documents の例外など。Exception)、
+    2. 対象の文書 list_documents(paths.notes_dir, job.key) を列挙する。文書の中身は読まず、コピーもハッシュも作らない
+    3. job.json を置き換えの書き込みで書く (モジュールの docstring の形。documents は 2 の結果をそのままの順で並べた
+       文字列のリスト)。ジョブのディレクトリーには job.json のほかに何も作らない
+    1 でディレクトリーを作った後に失敗したら (list_documents の例外、job.json の書き込みの OSError など。Exception)、
     作りかけのジョブのディレクトリーを中身ごと消してから、元の例外をそのまま出す。消すのに失敗しても、
     消すときの例外ではなく元の例外を出す。消したディレクトリーの連番は、次のジョブがもう一度使う。
     例外は呼び出し側の DeepScheduler.request から外に出て、surface・middle・自動の呼び出しが deep_request_error として
@@ -95,6 +96,16 @@ def create_job_directory(
         _remove_partial_directory(job_dir)
         raise
     return job_dir
+
+
+def run_directory_of_job(job_dir: Path) -> Path:
+    """ジョブのディレクトリー job_dir (<実行ディレクトリー>/deep/<種類>-<連番>/) の実行ディレクトリーを返す。
+
+    job_dir の名前がジョブのディレクトリー名 (parse_job_directory_name で読める名前) で、親の名前が deep
+    (run_directory.DEEP_DIR) なら、親の親 (job_dir.parent.parent) を返す。そうでなければ ValueError にする。
+    パスの文字列だけで判断し、ファイルシステムには問い合わせない (シンボリックリンクも解決しない)。
+    """
+    raise NotImplementedError
 
 
 def read_job_file(job_dir: Path) -> dict[str, object]:

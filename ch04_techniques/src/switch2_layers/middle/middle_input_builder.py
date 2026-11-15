@@ -109,6 +109,8 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
       あって空 (空白だけを含む) でなければその本文、そうでなければ notes/common/controls.md の本文 (どちらも読めなければ
       空文字列)。本文は読んだまま (前後の空白も除かない) にする
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0) にする。
+    strategy と current_tasks の文書は notes.note_reader.read_note_text で読み、シンボリックリンクを解決した先が
+    notes/ の中の通常のファイルでなければ、無い文書 (空文字列) として扱う。
     """
     previous_state = read_middle_state(paths.middle_state)
     surface_chunk = read_json_lines_from(

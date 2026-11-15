@@ -1,18 +1,18 @@
-"""コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once / publish-note を持つ。
+"""コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once を持つ。
 
     switch2-layers run [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--max-surface-errors N]
                        [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
+                       [--deep claude|fake]
         実機で 3 層を動かす。surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
-        middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep はフェイク
-        (deep.fake_deep) を使う
+        middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep は --deep で選ぶ
+        (既定 claude = Claude Code、fake = deep.fake_deep)
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
-    switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID]
-        保存済みの実行に対して deep を 1 回動かす (きっかけ manual)
-    switch2-layers publish-note --run-dir DIR --note PATH --base-sha256 HASH|none --from FILE
-        deep が編集した文書を本体と入れ替える (notes.publish_note)
+    switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude|fake]
+        保存済みの実行に対して deep を 1 回動かす (きっかけ manual。deep は run と同じく --deep で選ぶ)
+deep は notes/ の文書の本体を直接編集するため、文書を入れ替えるサブコマンドは無い。
 
 --middle (run と middle-once) は middle の実装を選ぶ。既定の luna は gpt-6-luna を呼び (middle.luna_middle)、
 fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境変数 OPENAI_API_KEY が無い (空を含む) ときは、
@@ -39,7 +39,7 @@ from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_layers.app import REASON_INTERRUPTED, LayersApp, LayersParts
 from switch2_layers.deep.deep_scheduler import DeepJobStatus, run_deep_once
-from switch2_layers.deep.deep_types import DOCUMENT_KINDS, DocumentKind
+from switch2_layers.deep.deep_types import DOCUMENT_KINDS, DeepRunner, DocumentKind
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.file_io import format_json_line
 from switch2_layers.hardware.capture_source import SwitchCaptureReader
@@ -54,6 +54,7 @@ from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
+    DEFAULT_DEEP_RUNNER,
     DEFAULT_DEEP_TIMEOUT_S,
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
@@ -73,6 +74,7 @@ from switch2_layers.settings import (
     OPENAI_API_KEY_ENV,
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
+    DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
     PublishNoteSettings,
@@ -95,10 +97,10 @@ EXIT_USAGE = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """4 つのサブコマンドの引数を定義した ArgumentParser を返す。
+    """3 つのサブコマンド (run・middle-once・deep-once) の引数を定義した ArgumentParser を返す。
 
     各サブコマンドの Namespace には、処理の関数 (handler: Namespace → 終了コード) を持たせる。
-    サブコマンドは必須 (無ければ argparse が SystemExit 2 にする)。
+    サブコマンドは必須 (無ければ argparse が SystemExit 2 にする)。知らないサブコマンドは argparse が SystemExit 2 にする。
     """
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -124,9 +126,9 @@ def add_run_parser(
     """
     parser = commands.add_parser(
         "run",
-        help="実機で 3 層を動かす (deep はフェイク)",
+        help="実機で 3 層を動かす",
         description=(
-            "実機で 3 層を動かす。surface は --surface、middle は --middle で選び、deep はフェイク。"
+            "実機で 3 層を動かす。surface は --surface、middle は --middle、deep は --deep で選ぶ。"
             "Ctrl+C で止まる"
         ),
     )
@@ -244,6 +246,7 @@ def add_run_parser(
             f"(1 以上。既定 {DEFAULT_BOX_REQUERY_EVERY})"
         ),
     )
+    add_deep_runner_argument(parser)
     parser.set_defaults(handler=run_command)
 
 
@@ -262,6 +265,32 @@ def add_middle_kind_argument(parser: argparse.ArgumentParser) -> None:
             f"fake は固定の出力を返すフェイク (既定 {DEFAULT_MIDDLE_KIND.value})"
         ),
     )
+
+
+def add_deep_runner_argument(parser: argparse.ArgumentParser) -> None:
+    """--deep の引数を parser に足す (run と deep-once で共通)。
+
+    値は DeepRunnerChoice の値 (claude・fake) から選び、既定は DEFAULT_DEEP_RUNNER の値 (claude)。
+    Namespace の deep には文字列が入る (処理の関数が DeepRunnerChoice(args.deep) にする)。
+    """
+    parser.add_argument(
+        "--deep",
+        choices=[choice.value for choice in DeepRunnerChoice],
+        default=DEFAULT_DEEP_RUNNER.value,
+        help=(
+            "deep のジョブを実行するもの (claude = Claude Code、fake = 何もせず成功を返すフェイク。"
+            f"既定 {DEFAULT_DEEP_RUNNER.value})"
+        ),
+    )
+
+
+def build_deep_runner(choice: DeepRunnerChoice) -> DeepRunner:
+    """--deep の選択 choice の DeepRunner を作って返す。
+
+    CLAUDE → deep.claude_code_runner.ClaudeCodeDeepRunner() (既定の設定。claude の起動は run を呼んだときに行う)
+    FAKE   → deep.fake_deep.FakeDeepRunner()
+    """
+    raise NotImplementedError
 
 
 def add_middle_window_argument(parser: argparse.ArgumentParser) -> None:
@@ -321,6 +350,7 @@ def add_deep_once_parser(
             "付けなければ middle/state.json の現在の場面 (無ければ共通の文書) を対象にする"
         ),
     )
+    add_deep_runner_argument(parser)
     parser.set_defaults(handler=deep_once_command)
 
 
@@ -443,8 +473,9 @@ def run_command(args: argparse.Namespace) -> int:
     7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
        bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
-       deep=FakeDeepRunner(), on_frame=部品の on_frame, surface_boxes_at=部品の boxes_at,
-       on_run_directory=部品の on_run_directory, surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
+       deep=build_deep_runner(DeepRunnerChoice(args.deep)), on_frame=部品の on_frame,
+       surface_boxes_at=部品の boxes_at, on_run_directory=部品の on_run_directory,
+       surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
     9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close() の順に閉じる
        (5 の後に 6 で失敗しても、surface の部品は閉じる)
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
@@ -560,7 +591,9 @@ def deep_once_command(args: argparse.Namespace) -> int:
 
     1. deep_once_settings_from_args → settings.deep_once_settings_errors。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
     2. --run-dir がディレクトリーでなければ、標準エラー出力に書いて EXIT_USAGE を返す
-    3. deep.deep_scheduler.run_deep_once(run_dir, kind, scene_id, FakeDeepRunner()) を呼ぶ
+    3. deep.deep_scheduler.run_deep_once(run_dir, kind, scene_id, build_deep_runner(DeepRunnerChoice(args.deep)))
+       を呼ぶ
+       (map のジョブは、--deep claude でも Claude Code を起動せず、成功として何もしない。message にそのことが入る)
     4. 標準出力に結果の JSON 1 行 {"job": 実行ディレクトリーからのジョブのディレクトリーの相対パス, "status": deep_end の status,
        "message": 説明} を書く
     status が "ok" なら 0、それ以外なら 1 を返す。

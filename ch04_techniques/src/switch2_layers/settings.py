@@ -71,6 +71,19 @@ DEFAULT_SURFACE = SurfaceKind.JEV
 TYPESAFE_API_KEY_ENV = JEV_API_KEY_ENV
 
 
+class DeepRunnerChoice(StrEnum):
+    """deep のジョブを実行するもの (run と deep-once の --deep)。値は --deep に書く名前。
+
+    RunSettings・DeepOnceSettings には持たせず、cli の処理の関数が Namespace の deep から作る。
+    """
+
+    CLAUDE = "claude"  # Claude Code (deep.claude_code_runner.ClaudeCodeDeepRunner)
+    FAKE = "fake"  # 何もせず成功を返すフェイク (deep.fake_deep.FakeDeepRunner)
+
+
+DEFAULT_DEEP_RUNNER = DeepRunnerChoice.CLAUDE
+
+
 @dataclass(frozen=True)
 class RunSettings:
     """run の起動引数。

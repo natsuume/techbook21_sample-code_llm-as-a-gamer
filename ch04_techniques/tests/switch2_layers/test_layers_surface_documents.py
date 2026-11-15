@@ -138,3 +138,52 @@ def test_missing_documents_are_empty(tmp_path):
         uses_common_controls=True,
         uses_common_tips=True,
     )
+
+
+# --- notes/ の外を指す文書 ---
+
+SECRET = "text outside of notes\n"
+
+
+def write_secret(tmp_path: Path) -> Path:
+    """notes/ の外の、surface に読ませたくないファイルを作って返す。"""
+    secret = tmp_path / "secret.env"
+    secret.write_text(SECRET, encoding="utf-8")
+    return secret
+
+
+def test_scene_document_symlinked_to_outside_falls_back_to_common(tmp_path):
+    notes = make_notes(tmp_path)
+    secret = write_secret(tmp_path)
+    write_scene(notes, "scene-001", {"tips.md": SCENE_TIPS})
+    (notes / "scenes" / "scene-001" / "controls.md").symlink_to(secret)
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.controls == COMMON_CONTROLS
+    assert documents.uses_common_controls is True
+    assert documents.tips == SCENE_TIPS
+
+
+def test_documents_symlinked_to_outside_are_empty(tmp_path):
+    notes = make_notes(tmp_path)
+    secret = write_secret(tmp_path)
+    (notes / "advice.md").unlink()
+    (notes / "advice.md").symlink_to(secret)
+    (notes / "common" / "tips.md").unlink()
+    (notes / "common" / "tips.md").symlink_to(secret)
+    write_scene(notes, "scene-001", {})
+    (notes / "scenes" / "scene-001" / "tasks.md").symlink_to(secret)
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.advice == ""
+    assert documents.tips == ""
+    assert documents.tasks == ""
+
+
+def test_scene_directory_symlinked_to_outside_is_not_read(tmp_path):
+    notes = make_notes(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "controls.md").write_text(SECRET, encoding="utf-8")
+    (notes / "scenes").mkdir()
+    (notes / "scenes" / "scene-001").symlink_to(outside)
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.controls == COMMON_CONTROLS

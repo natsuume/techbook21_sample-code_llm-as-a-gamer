@@ -4,7 +4,8 @@
   場面が決まっていない、または場面の文書が無いか空 (空白だけを含む) なら、notes/common/ の同じ種類の文書
 - 短期タスクリスト (tasks): 場面の文書 scenes/<場面ID>/tasks.md。共通の文書は無く、場面が無いか文書が無ければ空文字列
 - 助言 (advice): notes/advice.md
-読めない文書 (無い・OSError・UnicodeDecodeError) は空文字列として扱う。
+文書は notes.note_reader.read_note_text で読む。読めない文書 (無い・シンボリックリンクを解決した先が notes/ の中の
+通常のファイルでない・OSError・UnicodeDecodeError) は空文字列として扱う (場面の文書なら、無いものとして共通の文書を読む)。
 """
 
 from pathlib import Path

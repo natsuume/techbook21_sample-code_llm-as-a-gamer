@@ -11,7 +11,9 @@
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
-    deep/<種類>-<連番3桁>/job.json・work/      deep のジョブ (deep.deep_job_directory)
+    deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
+                                            Claude Code で動かしたジョブには stream.jsonl・result.json も置く
+                                            (deep.claude_stream_log)
 """
 
 from collections.abc import Collection

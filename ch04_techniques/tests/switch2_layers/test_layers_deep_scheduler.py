@@ -813,9 +813,7 @@ def test_run_deep_once_without_scene_uses_common_document(tmp_path):
     root = make_run(tmp_path)
     result = run_deep_once(root, DocumentKind.TIPS, None, FakeRunner())
     assert job_json(result.job_dir)["scene_id"] is None
-    assert job_json(result.job_dir)["documents"] == [
-        {"note": "common/tips.md", "sha256": "none"}
-    ]
+    assert job_json(result.job_dir)["documents"] == ["common/tips.md"]
 
 
 def test_run_deep_once_errors(tmp_path):

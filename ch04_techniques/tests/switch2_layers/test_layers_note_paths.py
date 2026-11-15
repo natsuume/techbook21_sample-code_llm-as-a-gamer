@@ -1,7 +1,11 @@
+import os
+
 import pytest
 
 from switch2_layers.deep.deep_types import DocumentKey, DocumentKind
 from switch2_layers.notes.note_paths import (
+    BOX_TARGETS_FILE,
+    box_targets_note,
     common_note,
     deep_document_notes,
     document_key,
@@ -103,3 +107,48 @@ def test_map_listing_skips_temporary_and_hidden_files(tmp_path):
     (map_dir / ".hidden" / "inside.md").write_text("x", encoding="utf-8")
     (map_dir / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
     assert deep_document_notes(tmp_path, key) == ["map/places.md", "map/town/house.md"]
+
+
+# --- box で取るもの ---
+
+
+def test_box_targets_note():
+    assert BOX_TARGETS_FILE == "box_targets.md"
+    assert box_targets_note("scene-001") == "scenes/scene-001/box_targets.md"
+    with pytest.raises(ValueError):
+        box_targets_note("../x")
+
+
+def test_scene_tips_job_also_targets_box_targets(tmp_path):
+    key = DocumentKey(DocumentKind.TIPS, "scene-002")
+    assert deep_document_notes(tmp_path, key) == [
+        "scenes/scene-002/tips.md",
+        "scenes/scene-002/box_targets.md",
+        "common/tips.md",
+    ]
+
+
+def test_common_tips_and_scene_controls_jobs_do_not_target_box_targets(tmp_path):
+    assert deep_document_notes(tmp_path, DocumentKey(DocumentKind.TIPS, None)) == [
+        "common/tips.md"
+    ]
+    assert deep_document_notes(
+        tmp_path, DocumentKey(DocumentKind.CONTROLS, "scene-002")
+    ) == ["scenes/scene-002/controls.md", "common/controls.md"]
+
+
+# --- map の列挙とリンク ---
+
+
+def test_map_listing_skips_symlinks_to_outside_of_notes(tmp_path):
+    notes = tmp_path / "notes"
+    map_dir = notes / "map"
+    map_dir.mkdir(parents=True)
+    (map_dir / "places.md").write_text("# 場所\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret\n", encoding="utf-8")
+    os.symlink(outside / "secret.md", map_dir / "linked.md")
+    os.symlink(outside, map_dir / "linked-dir")
+    key = DocumentKey(DocumentKind.MAP, None)
+    assert deep_document_notes(notes, key) == ["map/places.md"]

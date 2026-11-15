@@ -9,7 +9,7 @@ from switch2_layers.deep.fake_deep import FakeDeepRunner
 
 def test_fake_deep_does_nothing_and_succeeds(tmp_path):
     job_dir = tmp_path / "deep" / "advice-001"
-    (job_dir / "work").mkdir(parents=True)
+    job_dir.mkdir(parents=True)
     (job_dir / "job.json").write_text("{}", encoding="utf-8")
     before = sorted(str(p.relative_to(job_dir)) for p in job_dir.rglob("*"))
     job = DeepJob(
@@ -29,11 +29,12 @@ def test_fake_deep_does_nothing_and_succeeds(tmp_path):
 
 def test_fake_deep_stop_and_kill_do_nothing(tmp_path):
     job_dir = tmp_path / "deep" / "advice-001"
-    (job_dir / "work").mkdir(parents=True)
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text("{}", encoding="utf-8")
     runner = FakeDeepRunner()
     # 止めるものが無いため、どちらも例外を出さずにすぐ戻る (終わったジョブ・知らないジョブでも)
     runner.stop(job_dir)
     runner.kill(job_dir)
     runner.stop(tmp_path / "deep" / "missing-001")
     runner.kill(tmp_path / "deep" / "missing-001")
-    assert sorted(p.name for p in job_dir.iterdir()) == ["work"]
+    assert sorted(p.name for p in job_dir.iterdir()) == ["job.json"]

@@ -1,5 +1,6 @@
 import base64
 import json
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -7,7 +8,7 @@ import pytest
 from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_layers import cli
-from switch2_layers.app import REASON_INTERRUPTED
+from switch2_layers.app import REASON_INTERRUPTED, LayersParts
 from switch2_layers.cli import (
     build_parser,
     create_middle_analyzer,
@@ -15,9 +16,18 @@ from switch2_layers.cli import (
     middle_once_settings_from_args,
     run_settings_from_args,
 )
+from switch2_layers.deep.claude_code_runner import (
+    MAP_SKIPPED_MESSAGE,
+    ClaudeCodeDeepRunner,
+)
+from switch2_layers.deep.deep_scheduler import (
+    DeepJobOutcome,
+    DeepJobStatus,
+    DeepOnceResult,
+)
+from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
-from switch2_layers.notes.publish_note import EXIT_CONFLICT, EXIT_INVALID
 from switch2_layers.settings import (
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
@@ -28,6 +38,7 @@ from switch2_layers.settings import (
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_WINDOW_S,
+    DeepRunnerChoice,
     MiddleKind,
     RunSettings,
     SurfaceKind,
@@ -36,7 +47,9 @@ from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_surface import JevSurfaceDecider
 from switch2_layers.surface.surface_assembly import SurfaceAssembly
 
-COMMANDS = ["run", "middle-once", "deep-once", "publish-note"]
+COMMANDS = ["run", "middle-once", "deep-once"]
+# deep が文書の本体を直接編集するため、文書を入れ替えるサブコマンドは無い
+REMOVED_COMMAND = "publish-note"
 API_KEY_ENV = "OPENAI_API_KEY"
 
 
@@ -56,6 +69,18 @@ def test_help_lists_all_commands(capsys):
     out = capsys.readouterr().out
     for command in COMMANDS:
         assert command in out
+
+
+def test_publish_note_command_does_not_exist(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+    assert exit_info.value.code == 0
+    assert REMOVED_COMMAND not in capsys.readouterr().out
+    # 知らないサブコマンドとして、argparse が使い方の誤り (終了コード 2) にする
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([REMOVED_COMMAND, "--help"])
+    assert exit_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", COMMANDS)
@@ -275,7 +300,6 @@ def test_deep_once_rejects_unknown_document_kind():
     [
         ["middle-once"],
         ["deep-once", "--run-dir", "runs/x"],
-        ["publish-note", "--run-dir", "runs/x", "--note", "advice.md"],
     ],
 )
 def test_required_options(argv):
@@ -284,30 +308,11 @@ def test_required_options(argv):
     assert exit_info.value.code == 2
 
 
-def test_publish_note_from_option_is_stored_as_source():
-    args = build_parser().parse_args(
-        [
-            "publish-note",
-            "--run-dir",
-            "runs/x",
-            "--note",
-            "advice.md",
-            "--base-sha256",
-            "none",
-            "--from",
-            "edited.md",
-        ]
-    )
-    assert args.source == Path("edited.md")
-    assert args.base_sha256 == "none"
-    assert args.note == "advice.md"
-
-
 # --- サブコマンドの処理 (保存済みの実行ディレクトリーに対して) ---
 
 
 def make_saved_run(tmp_path: Path) -> Path:
-    """middle-once・deep-once・publish-note が対象にする、最小の実行ディレクトリーを作って返す (パッケージのコードは使わない)。"""
+    """middle-once・deep-once が対象にする、最小の実行ディレクトリーを作って返す (パッケージのコードは使わない)。"""
     run_dir = tmp_path / "runs" / "20261115-120000"
     (run_dir / "notes" / "common").mkdir(parents=True)
     (run_dir / "notes" / "map").mkdir()
@@ -327,106 +332,6 @@ def make_saved_run(tmp_path: Path) -> Path:
         '{"scenes": []}', encoding="utf-8"
     )
     return run_dir
-
-
-def job_work_file(run_dir: Path) -> Path:
-    """deep のジョブの work/ の中のファイルのパスを返す (publish-note の --from に使える置き場所。親は作る)。"""
-    path = run_dir / "deep" / "tips-001" / "work" / "edited.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def test_publish_note_command_publishes_and_prints_json(tmp_path, capsys):
-    run_dir = make_saved_run(tmp_path)
-    edited = job_work_file(run_dir)
-    edited.write_text("# 助言\n\n新しい助言\n", encoding="utf-8")
-    code = main(
-        [
-            "publish-note",
-            "--run-dir",
-            str(run_dir),
-            "--note",
-            "scenes/scene-001/tips.md",
-            "--base-sha256",
-            "none",
-            "--from",
-            str(edited),
-        ]
-    )
-    assert code == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["status"] == "published"
-    assert len(out["sha256"]) == 64
-    assert (run_dir / "notes" / "scenes" / "scene-001" / "tips.md").read_text(
-        encoding="utf-8"
-    ) == "# 助言\n\n新しい助言\n"
-
-
-def test_publish_note_command_conflict_exit_code(tmp_path, capsys):
-    run_dir = make_saved_run(tmp_path)
-    edited = job_work_file(run_dir)
-    edited.write_text("x", encoding="utf-8")
-    code = main(
-        [
-            "publish-note",
-            "--run-dir",
-            str(run_dir),
-            "--note",
-            "advice.md",
-            "--base-sha256",
-            "none",
-            "--from",
-            str(edited),
-        ]
-    )
-    assert code == EXIT_CONFLICT == 3
-    out = json.loads(capsys.readouterr().out)
-    assert out["status"] == "conflict"
-    assert len(out["current_sha256"]) == 64
-
-
-def test_publish_note_command_outside_path_exit_code(tmp_path, capsys):
-    run_dir = make_saved_run(tmp_path)
-    edited = job_work_file(run_dir)
-    edited.write_text("x", encoding="utf-8")
-    code = main(
-        [
-            "publish-note",
-            "--run-dir",
-            str(run_dir),
-            "--note",
-            "../run.jsonl",
-            "--base-sha256",
-            "none",
-            "--from",
-            str(edited),
-        ]
-    )
-    assert code == EXIT_INVALID == 2
-    assert capsys.readouterr().out == ""
-    assert not (run_dir / "run.jsonl").exists()
-
-
-def test_publish_note_command_rejects_source_outside_job_work(tmp_path, capsys):
-    run_dir = make_saved_run(tmp_path)
-    secret = tmp_path / ".env"
-    secret.write_text("API_KEY=secret\n", encoding="utf-8")
-    code = main(
-        [
-            "publish-note",
-            "--run-dir",
-            str(run_dir),
-            "--note",
-            "scenes/scene-001/tips.md",
-            "--base-sha256",
-            "none",
-            "--from",
-            str(secret),
-        ]
-    )
-    assert code == EXIT_INVALID == 2
-    assert capsys.readouterr().out == ""
-    assert not (run_dir / "notes" / "scenes").exists()
 
 
 def test_middle_once_command_writes_middle_outputs(tmp_path, capsys):
@@ -451,7 +356,10 @@ def test_middle_once_command_missing_run_dir(tmp_path, capsys):
 
 def test_deep_once_command_creates_job_directory(tmp_path, capsys):
     run_dir = make_saved_run(tmp_path)
-    code = main(["deep-once", "--run-dir", str(run_dir), "--doc", "strategy"])
+    # 既定の --deep は claude (Claude Code を起動する) なので、フェイクを明示する
+    code = main(
+        ["deep-once", "--run-dir", str(run_dir), "--doc", "strategy", "--deep", "fake"]
+    )
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["job"] == "deep/strategy-001"
@@ -481,6 +389,7 @@ def test_deep_once_command_rejects_invalid_scene(tmp_path, capsys, extra):
 
 
 # --- --middle (middle の実装の選択) ---
+# run を動かすテストは、既定の --deep claude (Claude Code を起動する) を避けて --deep fake を付ける
 
 
 @pytest.mark.parametrize(
@@ -536,7 +445,7 @@ def test_run_without_api_key_exits_before_hardware(
         monkeypatch.setenv(API_KEY_ENV, value)
     monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
     runs_dir = tmp_path / "runs"
-    code = main(["run", "--runs-dir", str(runs_dir)])
+    code = main(["run", "--runs-dir", str(runs_dir), "--deep", "fake"])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -548,7 +457,7 @@ def test_run_without_api_key_exits_before_hardware(
 
 def test_run_range_errors_are_reported_before_api_key(monkeypatch, capsys):
     monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
-    code = main(["run", "--middle-interval", "0"])
+    code = main(["run", "--middle-interval", "0", "--deep", "fake"])
     assert code == 2
     err = capsys.readouterr().err
     assert "--middle-interval" in err
@@ -561,7 +470,7 @@ def test_run_with_fake_middle_does_not_need_api_key(monkeypatch, capsys):
 
     # API キーの確かめを通り、ブリッジの起動 (ここでは失敗させる) まで進む
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--middle", "fake", "--surface", "fake"])
+    code = main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"])
     assert code == 1
     assert "no bridge in test" in capsys.readouterr().err
 
@@ -599,7 +508,7 @@ def stub_hardware_and_app(monkeypatch) -> list:
 def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
     monkeypatch.setenv(API_KEY_ENV, "sk-test")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--surface", "fake"]) == 0
+    assert main(["run", "--surface", "fake", "--deep", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.LUNA
     assert isinstance(parts.middle, LunaMiddleAnalyzer)
@@ -608,7 +517,7 @@ def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
 
 def test_run_passes_fake_middle_to_app(monkeypatch):
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.FAKE
     assert isinstance(parts.middle, FakeMiddleAnalyzer)
@@ -794,3 +703,124 @@ def test_middle_once_with_luna_records_usage_and_cost(tmp_path, monkeypatch, cap
     assert row["error_body_head"] is None
     state = json.loads((run_dir / "middle" / "state.json").read_text(encoding="utf-8"))
     assert state["surface_wait_s"] == 1.5
+
+
+# --- --deep (deep のジョブを実行するもの) ---
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["run"], ["deep-once", "--run-dir", "runs/x", "--doc", "advice"]],
+)
+def test_deep_runner_option_defaults_to_claude(argv):
+    assert build_parser().parse_args(argv).deep == "claude"
+    assert build_parser().parse_args([*argv, "--deep", "fake"]).deep == "fake"
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*argv, "--deep", "openai"])
+    assert exit_info.value.code == 2
+
+
+def test_build_deep_runner():
+    assert isinstance(
+        cli.build_deep_runner(DeepRunnerChoice.CLAUDE), ClaudeCodeDeepRunner
+    )
+    assert isinstance(cli.build_deep_runner(DeepRunnerChoice.FAKE), FakeDeepRunner)
+
+
+class CapturedDeepOnce:
+    """run_deep_once の偽物。渡された runner を記録し、成功の結果を返す (ジョブは作らない)。"""
+
+    def __init__(self):
+        self.runners: list[object] = []
+
+    def __call__(self, run_dir, kind, scene_id, runner) -> DeepOnceResult:
+        self.runners.append(runner)
+        return DeepOnceResult(
+            job_dir=run_dir / "deep" / "advice-001",
+            job="deep/advice-001",
+            outcome=DeepJobOutcome(DeepJobStatus.OK, ""),
+        )
+
+
+@pytest.mark.parametrize(
+    "extra, runner_type",
+    [
+        ([], ClaudeCodeDeepRunner),
+        (["--deep", "claude"], ClaudeCodeDeepRunner),
+        (["--deep", "fake"], FakeDeepRunner),
+    ],
+)
+def test_deep_once_uses_the_selected_runner(
+    tmp_path, monkeypatch, capsys, extra, runner_type
+):
+    captured = CapturedDeepOnce()
+    monkeypatch.setattr(cli, "run_deep_once", captured)
+    run_dir = make_saved_run(tmp_path)
+    code = main(["deep-once", "--run-dir", str(run_dir), "--doc", "advice", *extra])
+    assert code == 0
+    assert len(captured.runners) == 1
+    assert isinstance(captured.runners[0], runner_type)
+
+
+def must_not_start_process(*args, **kwargs):
+    raise AssertionError("claude must not be started")
+
+
+def test_deep_once_map_with_claude_does_not_start_claude(tmp_path, monkeypatch, capsys):
+    # map のジョブは Claude Code を起動せず、成功として何もしない
+    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+    run_dir = make_saved_run(tmp_path)
+    code = main(["deep-once", "--run-dir", str(run_dir), "--doc", "map"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {
+        "job": "deep/map-001",
+        "status": "ok",
+        "message": MAP_SKIPPED_MESSAGE,
+    }
+
+
+class FakeBridgeSupervisor:
+    """BridgeSupervisor の偽物 (実機に触れない)。"""
+
+    state = "ok"
+
+    def __init__(self, **kwargs):
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class FakeCapture:
+    """switch2_remote.capture.Capture の偽物 (実機に触れない)。"""
+
+    def __init__(self, *args):
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "extra, runner_type",
+    [([], ClaudeCodeDeepRunner), (["--deep", "fake"], FakeDeepRunner)],
+)
+def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
+    parts_seen: list[LayersParts] = []
+
+    class FakeLayersApp:
+        def __init__(self, settings, parts):
+            parts_seen.append(parts)
+
+        def run(self) -> str:
+            return REASON_INTERRUPTED
+
+    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+    monkeypatch.setattr(cli, "BridgeSupervisor", FakeBridgeSupervisor)
+    monkeypatch.setattr(cli, "Capture", FakeCapture)
+    monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
+    # middle は API キーの要らないフェイクにする
+    assert main(["run", "--middle", "fake", *extra]) == 0
+    assert len(parts_seen) == 1
+    assert isinstance(parts_seen[0].deep, runner_type)

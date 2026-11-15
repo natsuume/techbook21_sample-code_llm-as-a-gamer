@@ -8,7 +8,7 @@
 - 自動の呼び出し (check_auto) は、種類ごとに現在の対象の文書について判定し、次の 2 つを満たしたら、きっかけ auto で起動する
     - その文書のジョブが実行中でない
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
-- ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json・work/ を用意し (deep_job_directory)、
+- ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
   DeepRunner.stop を呼び (run.jsonl に deep_stop)、stop_grace_s 秒 (既定 5 秒) たっても run が戻らなければ

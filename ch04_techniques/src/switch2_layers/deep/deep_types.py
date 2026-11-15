@@ -91,16 +91,17 @@ class DeepResult:
 
 
 class DeepRunner(Protocol):
-    """deep の 1 回のジョブを実行する。後続の実装では Claude Code を起動する。
+    """deep の 1 回のジョブを実行する。実装は、Claude Code を起動する deep.claude_code_runner.ClaudeCodeDeepRunner と、
+    何もしないフェイク deep.fake_deep.FakeDeepRunner。
 
     run はジョブのスレッドから、stop と kill はスケジューラーのスレッド (タイムアウトの判定と終了処理) から呼ばれる。
     同じ job_dir の run と stop・kill が同時に呼ばれてもよいようにする。
     """
 
     def run(self, job: DeepJob, job_dir: Path) -> DeepResult:
-        """job_dir (deep/<種類>-<連番3桁>/。job.json と work/ を用意済み) で job を実行し、結果を返す。
+        """job_dir (deep/<種類>-<連番3桁>/。job.json を用意済み) で job を実行し、結果を返す。
 
-        別スレッドから呼ばれる。文書の本体への反映は publish-note で行う。
+        別スレッドから呼ばれる。文書は notes/ の本体を直接編集する (job.json の documents の文書だけ)。
         stop で止められたら、DeepResult(ok=False, stopped=True) を返して戻る。
         """
         ...

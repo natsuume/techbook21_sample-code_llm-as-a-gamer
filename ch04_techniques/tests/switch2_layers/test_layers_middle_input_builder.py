@@ -355,6 +355,20 @@ def test_current_tasks_without_scene_is_empty(tmp_path):
     assert middle_input.current_tasks == ""
 
 
+def test_documents_symlinked_to_outside_of_notes_are_empty(tmp_path):
+    root = make_run(tmp_path)
+    secret = tmp_path / "secret.env"
+    secret.write_text("text outside of notes\n", encoding="utf-8")
+    (root / "middle" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")
+    (root / "notes" / "strategy.md").symlink_to(secret)
+    scene_dir = root / "notes" / "scenes" / "scene-001"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "tasks.md").symlink_to(secret)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.strategy == ""
+    assert middle_input.current_tasks == ""
+
+
 # --- 現在の場面の操作説明 (surface の文書と同じ選び方) ---
 
 COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n- B: unknown\n"

@@ -218,7 +218,6 @@ def test_run_with_fake_layers_for_a_few_seconds(tmp_path):
         job = read_json(root / "deep" / f"{kind}-001" / "job.json")
         assert job["trigger"] == "new_scene"
         assert job["scene_id"] == "scene-001"
-        assert (root / "deep" / f"{kind}-001" / "work").is_dir()
 
     # 記録: start (起動引数を含む) で始まり、frames_dropped の後に stop (理由を含む) で終わる
     run_rows = read_rows(root / "run.jsonl")
