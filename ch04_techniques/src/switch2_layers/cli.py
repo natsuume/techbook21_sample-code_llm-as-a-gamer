@@ -38,6 +38,7 @@ from switch2_remote.capture import Capture
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_layers.app import REASON_INTERRUPTED, LayersApp, LayersParts
+from switch2_layers.deep.claude_code_runner import ClaudeCodeDeepRunner
 from switch2_layers.deep.deep_scheduler import DeepJobStatus, run_deep_once
 from switch2_layers.deep.deep_types import DOCUMENT_KINDS, DeepRunner, DocumentKind
 from switch2_layers.deep.fake_deep import FakeDeepRunner
@@ -47,7 +48,6 @@ from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
-from switch2_layers.notes.publish_note import publish_note
 from switch2_layers.settings import (
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
@@ -77,7 +77,6 @@ from switch2_layers.settings import (
     DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
-    PublishNoteSettings,
     RunSettings,
     SurfaceKind,
     deep_once_settings_errors,
@@ -112,7 +111,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_parser(commands)
     add_middle_once_parser(commands)
     add_deep_once_parser(commands)
-    add_publish_note_parser(commands)
     return parser
 
 
@@ -290,7 +288,9 @@ def build_deep_runner(choice: DeepRunnerChoice) -> DeepRunner:
     CLAUDE → deep.claude_code_runner.ClaudeCodeDeepRunner() (既定の設定。claude の起動は run を呼んだときに行う)
     FAKE   → deep.fake_deep.FakeDeepRunner()
     """
-    raise NotImplementedError
+    if choice is DeepRunnerChoice.CLAUDE:
+        return ClaudeCodeDeepRunner()
+    return FakeDeepRunner()
 
 
 def add_middle_window_argument(parser: argparse.ArgumentParser) -> None:
@@ -354,43 +354,11 @@ def add_deep_once_parser(
     parser.set_defaults(handler=deep_once_command)
 
 
-def add_publish_note_parser(
-    commands: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """サブコマンド publish-note の引数を定義する。--from の値は Namespace の source に入れる。"""
-    parser = commands.add_parser(
-        "publish-note",
-        help="deep が編集した文書を本体と入れ替える",
-        description=(
-            "本体の今の SHA-256 (無ければ none) が --base-sha256 と一致したら、--from の内容で本体を置き換える。"
-            "終了コード: 0 置き換えた、3 一致しなかった、2 引数の誤り"
-        ),
-    )
-    parser.add_argument(
-        "--run-dir", type=Path, required=True, help="実行ディレクトリー"
-    )
-    parser.add_argument(
-        "--note", required=True, help="置き換える文書の notes/ からの相対パス"
-    )
-    parser.add_argument(
-        "--base-sha256",
-        required=True,
-        metavar="HASH|none",
-        help="編集を始めたときの文書の SHA-256。文書が無かったなら none",
-    )
-    parser.add_argument(
-        "--from",
-        dest="source",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="編集したファイル (同じ実行の deep/<種類>-<連番>/work/ の中に限る)",
-    )
-    parser.set_defaults(handler=publish_note_command)
-
-
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
-    """run の Namespace を RunSettings にする (範囲は確かめない。--surface は SurfaceKind にする)。"""
+    """run の Namespace を RunSettings にする (範囲は確かめない)。
+
+    --middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice にする。
+    """
     return RunSettings(
         runs_dir=args.runs_dir,
         interval_fps=args.interval_fps,
@@ -407,6 +375,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         surface=SurfaceKind(args.surface),
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
+        deep=DeepRunnerChoice(args.deep),
     )
 
 
@@ -423,16 +392,6 @@ def deep_once_settings_from_args(args: argparse.Namespace) -> DeepOnceSettings:
     """deep-once の Namespace を DeepOnceSettings にする (--doc は DocumentKind にする。範囲は確かめない)。"""
     return DeepOnceSettings(
         run_dir=args.run_dir, kind=DocumentKind(args.doc), scene_id=args.scene
-    )
-
-
-def publish_note_settings_from_args(args: argparse.Namespace) -> PublishNoteSettings:
-    """publish-note の Namespace を PublishNoteSettings にする。"""
-    return PublishNoteSettings(
-        run_dir=args.run_dir,
-        note=args.note,
-        base_sha256=args.base_sha256,
-        source=args.source,
     )
 
 
@@ -473,9 +432,9 @@ def run_command(args: argparse.Namespace) -> int:
     7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
        bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
-       deep=build_deep_runner(DeepRunnerChoice(args.deep)), on_frame=部品の on_frame,
-       surface_boxes_at=部品の boxes_at, on_run_directory=部品の on_run_directory,
-       surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
+       deep=build_deep_runner(settings.deep), on_frame=部品の on_frame, surface_boxes_at=部品の boxes_at,
+       on_run_directory=部品の on_run_directory, surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
+       (settings.deep は --deep の値。run.jsonl の start の args にも deep として書く)
     9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close() の順に閉じる
        (5 の後に 6 で失敗しても、surface の部品は閉じる)
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
@@ -529,7 +488,7 @@ def _run_with_hardware(
             bridge_state=lambda: supervisor.state,
             surface=surface.decider,
             middle=middle,
-            deep=FakeDeepRunner(),
+            deep=build_deep_runner(settings.deep),
             on_frame=surface.on_frame,
             surface_boxes_at=surface.boxes_at,
             on_run_directory=surface.on_run_directory,
@@ -607,7 +566,10 @@ def deep_once_command(args: argparse.Namespace) -> int:
         _print_errors([f"--run-dir is not a directory: {settings.run_dir}"])
         return EXIT_USAGE
     result = run_deep_once(
-        settings.run_dir, settings.kind, settings.scene_id, FakeDeepRunner()
+        settings.run_dir,
+        settings.kind,
+        settings.scene_id,
+        build_deep_runner(DeepRunnerChoice(args.deep)),
     )
     _print_json(
         {
@@ -617,26 +579,6 @@ def deep_once_command(args: argparse.Namespace) -> int:
         }
     )
     return 0 if result.outcome.status is DeepJobStatus.OK else 1
-
-
-def publish_note_command(args: argparse.Namespace) -> int:
-    """publish-note の処理。notes.publish_note.publish_note を呼び、終了コードを返す。
-
-    標準出力には PublishResult.stdout_json() があればその JSON を 1 行で書く
-    ({"status": "published", "sha256": ...} か {"status": "conflict", "current_sha256": ...})。
-    引数の誤り (終了コード 2) のときは、標準出力に何も書かず、理由を標準エラー出力に 1 行で書く。
-    終了コードは PublishResult.exit_code() (0 / 2 / 3)。
-    """
-    settings = publish_note_settings_from_args(args)
-    result = publish_note(
-        settings.run_dir, settings.note, settings.base_sha256, settings.source
-    )
-    stdout_value = result.stdout_json()
-    if stdout_value is not None:
-        _print_json(stdout_value)
-    if result.message is not None:
-        print(result.message, file=sys.stderr)
-    return result.exit_code()
 
 
 def main(argv: list[str] | None = None) -> int:

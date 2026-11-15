@@ -8,6 +8,8 @@ notes/ より上 (実行ディレクトリーとその親) は確かめない。
 (壊れたリンク) はリンクとして扱う。
 """
 
+import os
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -27,4 +29,36 @@ def find_symlink_in_note_paths(notes_dir: Path, notes: Iterable[str]) -> Path | 
     ファイルシステムを調べる前に ValueError にする。
     notes_dir 自体が無ければ (FileNotFoundError)、確かめるものが無いため None を返す。
     """
-    raise NotImplementedError
+    # ファイルシステムを調べる前に、すべての文書のパスの形を確かめる
+    parts_of_notes = [_note_parts(note) for note in notes]
+    try:
+        if _is_symlink(notes_dir):
+            return notes_dir
+    except FileNotFoundError:
+        return None
+    for parts in parts_of_notes:
+        path = notes_dir
+        for part in parts:
+            path = path / part
+            try:
+                if _is_symlink(path):
+                    return path
+            except (FileNotFoundError, NotADirectoryError):
+                # このパスとその下はまだ無い (deep が Write で作る)
+                break
+    return None
+
+
+def _note_parts(note: str) -> list[str]:
+    """文書の notes/ からの / 区切りの相対パス note を要素に分けて返す。相対パスの形でなければ ValueError。"""
+    if not note or note.startswith("/"):
+        raise ValueError(f"document must be a relative path in notes/: {note!r}")
+    parts = note.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"document must stay inside notes/: {note!r}")
+    return parts
+
+
+def _is_symlink(path: Path) -> bool:
+    """path 自体がシンボリックリンクなら True を返す (os.lstat で調べ、リンクをたどらない)。OSError はそのまま出す。"""
+    return stat.S_ISLNK(os.lstat(path).st_mode)

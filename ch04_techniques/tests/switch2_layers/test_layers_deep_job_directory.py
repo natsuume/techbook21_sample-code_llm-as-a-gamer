@@ -312,21 +312,151 @@ def test_read_job_file(tmp_path):
         read_job_file(broken)
 
 
+SUCCESS_RESULT = {
+    "returncode": 0,
+    "duration_s": 60.0,
+    "cost_usd": 0.5,
+    "last_message": "更新した",
+    "is_error": False,
+    "permission_denials": [],
+    "stopped": False,
+    "killed": False,
+    "error": None,
+    "stderr": "",
+}
+
+
+def write_deep_end(root: Path, job_dir: Path, status: str) -> None:
+    """run.jsonl に、job_dir のジョブの deep_end を 1 行足す (パッケージのコードは使わない)。"""
+    kind = job_dir.name.split("-")[0]
+    row = {
+        "t": 10.0,
+        "event": "deep_end",
+        "kind": kind,
+        "scene_id": None,
+        "trigger": "surface",
+        "job": f"deep/{job_dir.name}",
+        "status": status,
+        "message": "",
+        "stop_reason": None,
+    }
+    with (root / "run.jsonl").open("a", encoding="utf-8") as file:
+        file.write(json.dumps(row) + "\n")
+
+
+def write_result(job_dir: Path, **overrides: object) -> None:
+    """job_dir/result.json を書く (既定は正常に終わったジョブの値)。"""
+    (job_dir / "result.json").write_text(
+        json.dumps({**SUCCESS_RESULT, **overrides}), encoding="utf-8"
+    )
+
+
+def create_ended_job(root: Path, deep_job: DeepJob, status: str = "ok") -> Path:
+    """ジョブを用意し、run.jsonl に status の deep_end を書いて、ジョブのディレクトリーを返す。"""
+    job_dir = create_job_directory(RunPaths(root), deep_job)
+    write_deep_end(root, job_dir, status)
+    return job_dir
+
+
 def test_find_previous_latest_frame_t_matches_the_same_document(tmp_path):
     root = make_run(tmp_path)
     paths = RunPaths(root)
     scene_key = DocumentKey(DocumentKind.CONTROLS, "scene-001")
     common_key = DocumentKey(DocumentKind.CONTROLS, None)
     assert find_previous_latest_frame_t(paths, scene_key) is None
-    create_job_directory(paths, job(DocumentKind.CONTROLS, "scene-001", latest=5.0))
-    create_job_directory(paths, job(DocumentKind.CONTROLS, None, latest=7.0))
-    create_job_directory(paths, job(DocumentKind.TIPS, "scene-001", latest=7.5))
+    create_ended_job(root, job(DocumentKind.CONTROLS, "scene-001", latest=5.0))
+    create_ended_job(root, job(DocumentKind.CONTROLS, None, latest=7.0))
+    create_ended_job(root, job(DocumentKind.TIPS, "scene-001", latest=7.5))
     assert find_previous_latest_frame_t(paths, scene_key) == 5.0
     assert find_previous_latest_frame_t(paths, common_key) == 7.0
-    create_job_directory(paths, job(DocumentKind.CONTROLS, "scene-001", latest=9.0))
+    create_ended_job(root, job(DocumentKind.CONTROLS, "scene-001", latest=9.0))
     assert find_previous_latest_frame_t(paths, scene_key) == 9.0
-    create_job_directory(paths, job(DocumentKind.CONTROLS, "scene-001", latest=None))
+    create_ended_job(root, job(DocumentKind.CONTROLS, "scene-001", latest=None))
     assert find_previous_latest_frame_t(paths, scene_key) is None
+
+
+@pytest.mark.parametrize("status", ["failed", "error", "stopped", "killed"])
+def test_previous_latest_frame_t_skips_jobs_that_did_not_end_normally(tmp_path, status):
+    # 失敗・stop・kill で終わったジョブに渡した期間は、次のジョブが読み直す
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.STRATEGY, None)
+    create_ended_job(root, job(DocumentKind.STRATEGY, latest=5.0))
+    create_ended_job(root, job(DocumentKind.STRATEGY, latest=9.0), status)
+    assert find_previous_latest_frame_t(paths, key) == 5.0
+
+
+def test_previous_latest_frame_t_skips_running_jobs(tmp_path):
+    # まだ実行中のジョブ (終わりの記録が無い) は飛ばす
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.ADVICE, None)
+    create_ended_job(root, job(DocumentKind.ADVICE, latest=5.0))
+    create_job_directory(paths, job(DocumentKind.ADVICE, latest=9.0))
+    assert find_previous_latest_frame_t(paths, key) == 5.0
+
+
+def test_previous_latest_frame_t_without_successful_jobs_is_none(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.ADVICE, None)
+    create_ended_job(root, job(DocumentKind.ADVICE, latest=5.0), "failed")
+    create_job_directory(paths, job(DocumentKind.ADVICE, latest=9.0))
+    assert find_previous_latest_frame_t(paths, key) is None
+
+
+def test_previous_latest_frame_t_from_result_json_of_deep_once(tmp_path):
+    # deep-once は run.jsonl に書かないため、Claude Code の result.json で正常な終わりを読む
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.TIPS, "scene-001")
+    first = create_job_directory(paths, job(DocumentKind.TIPS, "scene-001", latest=5.0))
+    write_result(first)
+    assert find_previous_latest_frame_t(paths, key) == 5.0
+    second = create_job_directory(
+        paths, job(DocumentKind.TIPS, "scene-001", latest=9.0)
+    )
+    write_result(second, returncode=143, stopped=True, is_error=None)
+    assert find_previous_latest_frame_t(paths, key) == 5.0
+    third = create_job_directory(
+        paths, job(DocumentKind.TIPS, "scene-001", latest=12.0)
+    )
+    write_result(third)
+    assert find_previous_latest_frame_t(paths, key) == 12.0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"returncode": 1},  # claude が失敗で終わった
+        {"is_error": True},  # result の行が失敗を示す
+        {"is_error": None},  # result の行が無い
+        {"returncode": 143, "stopped": True},  # stop で止めた
+        {"returncode": -9, "stopped": True, "killed": True},  # kill した
+        {"returncode": None, "error": "Claude Code was not started: x"},  # 起動を拒んだ
+    ],
+)
+def test_previous_latest_frame_t_skips_failed_result_json(tmp_path, overrides):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.STRATEGY, None)
+    first = create_job_directory(paths, job(DocumentKind.STRATEGY, latest=5.0))
+    write_result(first)
+    second = create_job_directory(paths, job(DocumentKind.STRATEGY, latest=9.0))
+    write_result(second, **overrides)
+    assert find_previous_latest_frame_t(paths, key) == 5.0
+
+
+def test_deep_end_of_another_job_does_not_count(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    key = DocumentKey(DocumentKind.STRATEGY, None)
+    strategy_dir = create_job_directory(paths, job(DocumentKind.STRATEGY, latest=5.0))
+    advice_dir = create_job_directory(paths, job(DocumentKind.ADVICE, latest=7.0))
+    write_deep_end(root, advice_dir, "ok")
+    assert find_previous_latest_frame_t(paths, key) is None
+    write_deep_end(root, strategy_dir, "ok")
+    assert find_previous_latest_frame_t(paths, key) == 5.0
 
 
 # --- 実行ディレクトリー ---

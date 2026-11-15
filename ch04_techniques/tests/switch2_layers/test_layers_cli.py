@@ -727,6 +727,13 @@ def test_build_deep_runner():
     assert isinstance(cli.build_deep_runner(DeepRunnerChoice.FAKE), FakeDeepRunner)
 
 
+def test_run_settings_from_args_convert_deep_to_choice():
+    default_args = build_parser().parse_args(["run"])
+    assert run_settings_from_args(default_args).deep is DeepRunnerChoice.CLAUDE
+    fake_args = build_parser().parse_args(["run", "--deep", "fake"])
+    assert run_settings_from_args(fake_args).deep is DeepRunnerChoice.FAKE
+
+
 class CapturedDeepOnce:
     """run_deep_once の偽物。渡された runner を記録し、成功の結果を返す (ジョブは作らない)。"""
 
@@ -803,6 +810,24 @@ class FakeCapture:
 
 
 @pytest.mark.parametrize(
+    "extra, choice, runner_type",
+    [
+        ([], DeepRunnerChoice.CLAUDE, ClaudeCodeDeepRunner),
+        (["--deep", "fake"], DeepRunnerChoice.FAKE, FakeDeepRunner),
+    ],
+)
+def test_run_passes_the_deep_choice_in_settings(
+    monkeypatch, extra, choice, runner_type
+):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake", *extra]) == 0
+    [(settings, parts)] = created
+    # 起動引数 (run.jsonl の start の args) の deep と、実際に渡す DeepRunner がそろう
+    assert settings.deep is choice
+    assert isinstance(parts.deep, runner_type)
+
+
+@pytest.mark.parametrize(
     "extra, runner_type",
     [([], ClaudeCodeDeepRunner), (["--deep", "fake"], FakeDeepRunner)],
 )
@@ -820,7 +845,7 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
     monkeypatch.setattr(cli, "BridgeSupervisor", FakeBridgeSupervisor)
     monkeypatch.setattr(cli, "Capture", FakeCapture)
     monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
-    # middle は API キーの要らないフェイクにする
-    assert main(["run", "--middle", "fake", *extra]) == 0
+    # middle と surface は API キーの要らないフェイクにする
+    assert main(["run", "--middle", "fake", "--surface", "fake", *extra]) == 0
     assert len(parts_seen) == 1
     assert isinstance(parts_seen[0].deep, runner_type)

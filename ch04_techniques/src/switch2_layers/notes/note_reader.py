@@ -8,7 +8,7 @@ surface と middle の文書の読み込み (surface_documents・middle_input_bu
 deep のジョブの用意で使う map の文書の列挙 (note_paths.deep_document_notes) は、resolve_note_file で確かめる。
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def resolve_note_file(notes_dir: Path, note: str) -> Path | None:
@@ -20,7 +20,21 @@ def resolve_note_file(notes_dir: Path, note: str) -> Path | None:
         - 解決した先が無い、通常のファイルでない (ディレクトリーなど)、notes_dir を解決した先の下に無い
         - パスの確認で OSError が出た (名前が長すぎる、シンボリックリンクの循環など)
     """
-    raise NotImplementedError
+    if not note:
+        return None
+    relative = PurePosixPath(note)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    try:
+        notes_root = notes_dir.resolve()
+        target = (notes_dir / relative).resolve()
+        if target == notes_root or not target.is_relative_to(notes_root):
+            return None
+        if not target.is_file():
+            return None
+    except OSError:
+        return None
+    return target
 
 
 def read_note_bytes(notes_dir: Path, note: str) -> bytes | None:
@@ -28,9 +42,21 @@ def read_note_bytes(notes_dir: Path, note: str) -> bytes | None:
 
     resolve_note_file が返したパスを読む。読むときの OSError (確かめた後に消えた・置き換えられた等) も None にする。
     """
-    raise NotImplementedError
+    target = resolve_note_file(notes_dir, note)
+    if target is None:
+        return None
+    try:
+        return target.read_bytes()
+    except OSError:
+        return None
 
 
 def read_note_text(notes_dir: Path, note: str) -> str:
     """文書 note を UTF-8 で読んだ文字列を返す。read_note_bytes が None か、UTF-8 として読めなければ空文字列。"""
-    raise NotImplementedError
+    data = read_note_bytes(notes_dir, note)
+    if data is None:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""

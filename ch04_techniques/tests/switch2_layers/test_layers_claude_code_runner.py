@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from switch2_layers.deep import claude_code_runner
 from switch2_layers.deep.claude_code_command import (
     ClaudeCodeOptions,
     build_claude_command,
@@ -383,6 +384,31 @@ def test_claude_is_started_with_the_built_command(tmp_path):
         "ANTHROPIC_API_KEY": "anthropic",
         "PATH": "/usr/bin",
         "HOME": "/home/user",
+    }
+
+
+def test_claude_does_not_receive_variables_of_the_parent_claude_code_session(tmp_path):
+    # deep-once を Claude Code のセッションの中から動かしても、親のセッションの変数を claude に渡さない
+    root = make_run(tmp_path)
+    job, job_dir = prepare(root)
+    fake = FakeClaude(lines=[line(RESULT)])
+    environ = {
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_CHILD_SESSION": "1",
+        "CLAUDE_CODE_SESSION_ID": "parent-session",
+        "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/inbox.sock",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "token",
+        "CLAUDE_EFFORT": "max",
+        "CLAUDE_PID": "4242",
+        "CLAUDE_CONFIG_DIR": "/home/user/.claude",
+        "ANTHROPIC_API_KEY": "anthropic",
+        "PATH": "/usr/bin",
+    }
+    fake.runner(environ).run(job, job_dir)
+    assert fake.processes[0].kwargs["env"] == {
+        "CLAUDE_CONFIG_DIR": "/home/user/.claude",
+        "ANTHROPIC_API_KEY": "anthropic",
+        "PATH": "/usr/bin",
     }
 
 
@@ -812,6 +838,128 @@ def test_concurrent_jobs_are_stopped_separately(tmp_path):
     runner.stop(first_dir)
     first_thread.join(WAIT_LIMIT_S * 2)
     assert first_results[0].stopped is True
+
+
+# --- run が例外で抜けるときの後片付け ---
+
+
+class InterruptingStdout:
+    """lines を返した後、次の読み取りで KeyboardInterrupt を出す標準出力の偽物 (deep-once の最中の Ctrl+C の代わり)。"""
+
+    def __init__(self, lines: list[str]):
+        self._lines = list(lines)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        if self._lines:
+            return self._lines.pop(0)
+        raise KeyboardInterrupt
+
+
+def interrupting_runner(
+    fake: FakeClaude, wait: Callable[..., int] | None = None
+) -> ClaudeCodeDeepRunner:
+    """起動した子プロセスの標準出力を、1 行の後に KeyboardInterrupt を出すものに差し替える runner を返す。
+
+    wait を渡すと、子プロセスの wait もそれに差し替える。
+    """
+
+    def start(args: list[str], **kwargs) -> FakeClaudeProcess:
+        process = fake.start(args, **kwargs)
+        process.stdout = InterruptingStdout([line(INIT)])
+        if wait is not None:
+            process.wait = wait
+        return process
+
+    return ClaudeCodeDeepRunner(
+        start_process=start,
+        signal_process_group=fake.signal_group,
+        environ={"PATH": "/usr/bin"},
+        clock=fake.clock,
+    )
+
+
+def test_interrupted_run_stops_claude_before_raising(tmp_path):
+    job, job_dir = prepare(make_run(tmp_path))
+    fake = FakeClaude(wait_for_signal=True)
+    runner = interrupting_runner(fake)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(job, job_dir)
+    [process] = fake.processes
+    # プロセスグループに SIGTERM を送り、終わるのを待って回収してから例外を出す
+    assert fake.signals == [(process.pid, signal.SIGTERM)]
+    assert process.returncode == 143
+    # 読んだ行は stream.jsonl に残る。result.json は書かない
+    assert read_jsonl(job_dir / "stream.jsonl") == [{"elapsed_s": 0.0, "data": INIT}]
+    assert not (job_dir / "result.json").exists()
+    # 実行中の記録から外れているため、後から stop・kill を呼んでもシグナルを送らない
+    runner.stop(job_dir)
+    runner.kill(job_dir)
+    assert fake.signals == [(process.pid, signal.SIGTERM)]
+
+
+def test_interrupted_run_kills_claude_that_ignores_sigterm(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_code_runner, "ERROR_STOP_GRACE_S", 0.1)
+    job, job_dir = prepare(make_run(tmp_path))
+    fake = FakeClaude(wait_for_signal=True, ignore_sigterm=True)
+    runner = interrupting_runner(fake)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(job, job_dir)
+    [process] = fake.processes
+    assert fake.signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
+    assert process.returncode == -signal.SIGKILL
+
+
+def test_second_interrupt_while_waiting_sends_sigkill(tmp_path):
+    job, job_dir = prepare(make_run(tmp_path))
+    fake = FakeClaude(wait_for_signal=True, ignore_sigterm=True)
+
+    def interrupted_wait(timeout: float | None = None) -> int:
+        # SIGTERM の後の待ちの最中に、もう一度 Ctrl+C を押した
+        raise KeyboardInterrupt
+
+    runner = interrupting_runner(fake, wait=interrupted_wait)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(job, job_dir)
+    [process] = fake.processes
+    assert fake.signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
+
+
+def test_failure_to_create_stream_log_stops_claude(tmp_path):
+    job, job_dir = prepare(make_run(tmp_path))
+    # stream.jsonl をディレクトリーにして、作れなくする
+    (job_dir / "stream.jsonl").mkdir()
+    fake = FakeClaude(lines=[line(INIT)], wait_for_signal=True)
+    runner = fake.runner()
+    with pytest.raises(OSError):
+        runner.run(job, job_dir)
+    [process] = fake.processes
+    assert fake.signals == [(process.pid, signal.SIGTERM)]
+    assert process.returncode == 143
+
+
+def test_exception_after_claude_ended_sends_no_signal(tmp_path, monkeypatch):
+    job, job_dir = prepare(make_run(tmp_path))
+    fake = FakeClaude(lines=[line(RESULT)])
+    runner = fake.runner()
+
+    def failing_join(self, timeout: float) -> str:
+        raise RuntimeError("stderr reader failed")
+
+    # 子プロセスを回収した後 (wait の後) の例外では、シグナルを送らない
+    monkeypatch.setattr(claude_code_runner._StderrReader, "join", failing_join)
+    with pytest.raises(RuntimeError):
+        runner.run(job, job_dir)
+    assert fake.processes[0].returncode == 0
+    assert fake.signals == []
 
 
 # --- タイムアウト (DeepScheduler が stop・kill を呼ぶ) ---

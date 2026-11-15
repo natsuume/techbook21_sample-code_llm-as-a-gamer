@@ -6,6 +6,8 @@
     https://code.claude.com/docs/en/tools-reference        ツールの名前と、ルールが効くツール (Glob と Grep の既定)
     https://code.claude.com/docs/en/permission-modes       dontAsk
     https://code.claude.com/docs/en/settings-reference     DEEP_SETTINGS のキー
+    https://code.claude.com/docs/en/memory                 AGENTS.md を読む組み込みの plugin と、その pluginConfigs
+    https://code.claude.com/docs/en/env-vars               Claude Code が子のプロセスに設定する環境変数
     https://code.claude.com/docs/en/skills                 Skill のツールを拒むルール
     https://code.claude.com/docs/en/headless               stream-json・--bare の認証
 
@@ -52,27 +54,47 @@
     - --restricted: ユーザー・プロジェクト・ローカルの設定ファイルを読まず、managed の設定と --settings だけを読む
       (ユーザーの permissions.allow のルールが混ざらない)。コマンドやコードを実行する組み込みのツールと WebFetch を、
       --tools で名前を挙げない限り外す。ファイルのツールを作業ディレクトリーに閉じ込める。bypassPermissions を拒む
-    - --safe-mode: CLAUDE.md・skills・plugins・hooks・MCP サーバー・カスタムのコマンドとエージェント・auto memory などを
-      読まない。認証・モデルの選択・組み込みのツール・権限はふだんどおり動く
+    - --safe-mode: CLAUDE.md・skills・インストールした plugins・hooks・MCP サーバー・カスタムのコマンドとエージェント・
+      auto memory などを読まない。認証・モデルの選択・組み込みのツールと plugin・権限はふだんどおり動く
+      (claude --help の説明)
     - --strict-mcp-config: --mcp-config で渡したもの以外の MCP サーバーを読まない (--mcp-config は渡さない)
     - --disable-slash-commands: skills とコマンドをすべて使えなくする
     - --settings (DEEP_SETTINGS): disableAllHooks (hooks と、インストールした mods を止める)、autoMemoryEnabled false、
       disableClaudeAiConnectors (claude.ai のコネクターを取得しない)、blockReadsOutsideWorkingDirectories、
-      blockWritesOutsideWorkingDirectories
+      blockWritesOutsideWorkingDirectories、pluginConfigs (AGENTS_MD_PLUGIN_ID の instructionFiles を
+      AGENTS_MD_INSTRUCTION_FILES にし、AGENTS.md を読ませない)
     - --bare は使わない。--bare では認証が ANTHROPIC_API_KEY (か --settings の apiKeyHelper) だけになり、
       ログインの認証情報を読まないため
     - --mcp-config・--plugin-dir・--plugin-url・--agents・--agent・--add-dir は渡さない
-未確認 (公式ドキュメントに記載が無く、実際の起動で確かめる事項):
-    - --restricted と --safe-mode を同時に付けたときの動き (--safe-mode のもとで --settings が読まれるか)
-    - stream-json の system/init の行で、tools が 5 つのツールだけになり、mcp_servers・plugins が空になるか
+    - 子プロセスの環境変数から、ほかの層の API キー (HIDDEN_ENV_NAMES) と、親の Claude Code のセッションに結びつく変数
+      (PARENT_SESSION_ENV_NAMES) と、DEEP_SETTINGS の設定を上書きする変数 (SETTING_OVERRIDE_ENV_NAMES) を除く
+      (build_child_env)。deep-once を Claude Code のセッションの中から動かしても、deep が親のセッションの子として
+      扱われず、ユーザーが設定した環境変数で DEEP_SETTINGS が変わらないようにする
+インストールした plugin・skill・MCP は読み込まない。Claude Code に組み込まれた plugin (cc-plugin-agents-md・
+cc-plugin-telemetry・cc-plugin-privacy・cc-plugin-plugin-authoring) は --safe-mode でも読み込まれるが、ツール・skill・
+MCP は足さず (system/init の tools は 5 つ、skills・slash_commands・mcp_servers は空)、AGENTS.md を読む
+cc-plugin-agents-md は pluginConfigs で AGENTS.md を読まない設定にする。
+実際の起動で確かめたこと (2026-11-15、Claude Code 2.1.325):
+    - --restricted と --safe-mode を同時に付けて起動でき、正常に終わる
+    - stream-json の system/init の行の tools は Edit・Glob・Grep・Read・Write の 5 つだけで、mcp_servers・skills・
+      slash_commands は空。plugins には、上の組み込みの plugin の 4 つ (path は builtin) だけが載る
+    - 作業ディレクトリーの親のディレクトリーに置いた AGENTS.md の目印 (最後の答えに書かせる文字列) が、最後の答えにも
+      stream-json の出力にも出ない
+未確認 (公式ドキュメントに記載が無く、実際の起動で確かめていない事項):
+    - --safe-mode のもとで --settings が読まれるか (system/init の行には、読まれたかが出ない)
+    - 上の AGENTS.md が、読まれなかったのか、読まれたうえで指示に従わなかったのか。読まれなかったなら、それが
+      pluginConfigs と --safe-mode のどちらによるか
     - 作業ディレクトリーの中の、外を指すシンボリックリンクを読むとき (許すルールが無くても通る読み取り) の扱い
     - Write が、まだ無い親のディレクトリー (notes/scenes/<場面ID>/ など) を作るか
 """
 
+import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from switch2_layers.run_directory import NOTES_DIR
 
 CLAUDE_EXECUTABLE = "claude"
 DEEP_MODEL = "claude-opus-5-5"
@@ -92,6 +114,38 @@ DISALLOWED_TOOLS: tuple[str, ...] = (
 )
 # 子プロセスに渡さない環境変数 (surface と middle の API キー)
 HIDDEN_ENV_NAMES: tuple[str, ...] = ("TYPESAFE_API_KEY", "OPENAI_API_KEY")
+# 子プロセスに渡さない、親の Claude Code のセッションに結びつく環境変数。Claude Code が自分の起動したプロセス
+# (Bash のツール・hooks など) に設定するもの (公式ドキュメントの環境変数の一覧に、Claude Code が設定すると書かれた
+# もの) と、Claude Code のセッションの中で実際に設定されていたもの。認証 (ANTHROPIC_ で始まる変数・
+# CLAUDE_CODE_OAUTH_TOKEN など) と設定の場所 (CLAUDE_CONFIG_DIR) の変数は含めない
+PARENT_SESSION_ENV_NAMES: tuple[str, ...] = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_REMOTE",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_ISOLATED_GIT_ROOTS",
+    "CLAUDE_JOB_DIR",
+    "CLAUDE_PID",
+    "CLAUDE_PLUGIN_ROOT",
+    "CLAUDE_PLUGIN_DATA",
+    "CLAUDE_PROJECT_DIR",
+)
+# 子プロセスに渡さない、DEEP_SETTINGS の設定を上書きする環境変数。CLAUDE_CODE_DISABLE_AUTO_MEMORY は、1 でも 0 でも
+# autoMemoryEnabled より優先される (0 なら auto memory を有効にする。公式ドキュメントの環境変数の一覧)
+SETTING_OVERRIDE_ENV_NAMES: tuple[str, ...] = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)
+# AGENTS.md を読む、Claude Code に組み込まれた plugin の ID (pluginConfigs のキー)
+AGENTS_MD_PLUGIN_ID = "cc-plugin-agents-md@builtin"
+# その plugin の instructionFiles の値。managed-only は、managed の CLAUDE.md と auto memory だけを読み、
+# プロジェクト・ローカル・ユーザーの CLAUDE.md と、すべての AGENTS.md を読まない
+AGENTS_MD_INSTRUCTION_FILES = "managed-only"
 # --settings に渡す設定
 DEEP_SETTINGS: dict[str, object] = {
     "disableAllHooks": True,
@@ -100,6 +154,11 @@ DEEP_SETTINGS: dict[str, object] = {
     "permissions": {
         "blockReadsOutsideWorkingDirectories": True,
         "blockWritesOutsideWorkingDirectories": True,
+    },
+    "pluginConfigs": {
+        AGENTS_MD_PLUGIN_ID: {
+            "options": {"instructionFiles": AGENTS_MD_INSTRUCTION_FILES}
+        }
     },
 }
 # 権限のルールに埋めてよい絶対パスの形: / で始まり、英数字と . _ / @ + - だけからなる。
@@ -120,7 +179,8 @@ class ClaudeCodeOptions:
     executable         claude の実行ファイル (既定 CLAUDE_EXECUTABLE)。テストでは偽物を起動するときに変える
     model              --model の値 (既定 DEEP_MODEL)
     effort             --effort の値 (既定 DEEP_EFFORT)
-    hidden_env_names   子プロセスに渡さない環境変数の名前 (既定 HIDDEN_ENV_NAMES)
+    hidden_env_names   子プロセスに渡さない環境変数の名前 (既定 HIDDEN_ENV_NAMES)。PARENT_SESSION_ENV_NAMES と
+                       SETTING_OVERRIDE_ENV_NAMES は、これに関わらず build_child_env がいつも除く
     """
 
     executable: str = CLAUDE_EXECUTABLE
@@ -135,7 +195,14 @@ def rule_path(path: Path) -> str:
     path が絶対パスでないか、文字列が RULE_PATH_PATTERN に fullmatch しなければ RulePathError にする。
     シンボリックリンクの解決はしない (呼び出し側が解決したパスを渡す)。
     """
-    raise NotImplementedError
+    if not path.is_absolute():
+        raise RulePathError(f"path for a permission rule must be absolute: {path}")
+    text = path.as_posix()
+    if RULE_PATH_PATTERN.fullmatch(text) is None:
+        raise RulePathError(
+            f"path for a permission rule has characters that are not allowed: {text!r}"
+        )
+    return text
 
 
 def validate_document_note(note: str) -> str:
@@ -146,7 +213,16 @@ def validate_document_note(note: str) -> str:
         - / で区切った要素のどれかが、空 (`a//b`・末尾の `/`)、`.`、`..` のどれか
         - 要素のどれかが NOTE_PART_PATTERN に fullmatch しない (空白・カンマ・括弧・* などを含む)
     """
-    raise NotImplementedError
+    if not note or note.startswith("/"):
+        raise RulePathError(f"document must be a relative path in notes/: {note!r}")
+    for part in note.split("/"):
+        if part in ("", ".", ".."):
+            raise RulePathError(f"document must stay inside notes/: {note!r}")
+        if NOTE_PART_PATTERN.fullmatch(part) is None:
+            raise RulePathError(
+                f"document has characters that are not allowed: {note!r}"
+            )
+    return note
 
 
 def read_rule(run_dir: Path) -> str:
@@ -155,7 +231,7 @@ def read_rule(run_dir: Path) -> str:
     rule_path は / で始まるため、結果は `Read(//...)` (ファイルシステムの根からの絶対パス) になる。Read・Glob・Grep に効く。
     run_dir が rule_path で RulePathError なら、そのまま出す。
     """
-    raise NotImplementedError
+    return f"Read(/{rule_path(run_dir)}/**)"
 
 
 def edit_rule(run_dir: Path, note: str) -> str:
@@ -164,7 +240,8 @@ def edit_rule(run_dir: Path, note: str) -> str:
     結果は `Edit(//<実行ディレクトリー>/notes/<note>)` になる。Edit・Write に効き、その 1 つのファイルだけに一致する。
     note を validate_document_note で確かめる。note か run_dir が RulePathError なら、そのまま出す。
     """
-    raise NotImplementedError
+    document = run_dir / NOTES_DIR / validate_document_note(note)
+    return f"Edit(/{rule_path(document)})"
 
 
 def build_allowed_tools(run_dir: Path, notes: Sequence[str]) -> list[str]:
@@ -176,7 +253,7 @@ def build_allowed_tools(run_dir: Path, notes: Sequence[str]) -> list[str]:
     パスを限らないルール (Read・Edit・Write・Glob・Grep などのツール名だけのもの、`*` を含むツール名) と、
     Bash・Write・Glob・Grep のルールは含めない。どれかのパスが RulePathError なら、そのまま出す。
     """
-    raise NotImplementedError
+    return [read_rule(run_dir), *(edit_rule(run_dir, note) for note in notes)]
 
 
 def build_claude_command(
@@ -198,7 +275,34 @@ def build_claude_command(
     --dangerously-skip-permissions・--allow-dangerously-skip-permissions・--bare・--add-dir・--mcp-config・
     --plugin-dir・--plugin-url・--agents・--agent は付けない。
     """
-    raise NotImplementedError
+    if not prompt or prompt.startswith(("/", "-")):
+        raise ValueError("prompt must not be empty or start with '/' or '-'")
+    return [
+        options.executable,
+        "-p",
+        prompt,
+        "--model",
+        options.model,
+        "--effort",
+        options.effort,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        DEEP_PERMISSION_MODE,
+        "--restricted",
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--settings",
+        deep_settings_json(),
+        "--tools",
+        ",".join(DEEP_TOOLS),
+        "--allowedTools",
+        ",".join(build_allowed_tools(run_dir, notes)),
+        "--disallowedTools",
+        ",".join(DISALLOWED_TOOLS),
+    ]
 
 
 def deep_settings_json() -> str:
@@ -206,7 +310,7 @@ def deep_settings_json() -> str:
 
     json.dumps(DEEP_SETTINGS, ensure_ascii=False, separators=(",", ":")) (空白を入れない形)。
     """
-    raise NotImplementedError
+    return json.dumps(DEEP_SETTINGS, ensure_ascii=False, separators=(",", ":"))
 
 
 def build_child_env(
@@ -214,7 +318,11 @@ def build_child_env(
 ) -> dict[str, str]:
     """子プロセスに渡す環境変数の辞書を返す。
 
-    environ から hidden_names にある名前の変数を除いた新しい辞書を返す (environ は変えない)。
-    ほかの変数は claude 自身の認証や HOME・PATH に使われるため、すべて残す。
+    environ から、hidden_names にある名前の変数と、親の Claude Code のセッションに結びつく変数
+    (PARENT_SESSION_ENV_NAMES) と、DEEP_SETTINGS の設定を上書きする変数 (SETTING_OVERRIDE_ENV_NAMES) を除いた
+    新しい辞書を返す (environ は変えない)。
+    ほかの変数は claude 自身の認証 (ANTHROPIC_ で始まる変数・CLAUDE_CODE_OAUTH_TOKEN など)、設定の場所
+    (CLAUDE_CONFIG_DIR)、HOME・PATH に使われるため、すべて残す。
     """
-    raise NotImplementedError
+    removed = {*hidden_names, *PARENT_SESSION_ENV_NAMES, *SETTING_OVERRIDE_ENV_NAMES}
+    return {name: value for name, value in environ.items() if name not in removed}

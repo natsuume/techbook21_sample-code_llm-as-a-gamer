@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Literal
 
 from switch2_layers.deep.deep_types import DocumentKind
-from switch2_layers.file_io import read_text_or_empty
 from switch2_layers.notes.note_paths import (
     ADVICE_NOTE,
     common_note,
     is_scene_id,
     scene_note,
 )
+from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.surface.surface_types import SurfaceDocuments
 
 
@@ -44,12 +44,12 @@ def read_surface_documents(notes_dir: Path, scene_id: str | None) -> SurfaceDocu
     )
     tasks = ""
     if scene_id is not None:
-        tasks = read_text_or_empty(notes_dir / scene_note(scene_id, "tasks"))
+        tasks = read_note_text(notes_dir, scene_note(scene_id, "tasks"))
     return SurfaceDocuments(
         tasks=tasks,
         tips=tips,
         controls=controls,
-        advice=read_text_or_empty(notes_dir / ADVICE_NOTE),
+        advice=read_note_text(notes_dir, ADVICE_NOTE),
         scene_id=scene_id,
         uses_common_controls=uses_common_controls,
         uses_common_tips=uses_common_tips,
@@ -64,7 +64,7 @@ def _read_scene_or_common(
     """種類 kind の場面の文書を読み、無いか空なら共通の文書を読む。(文書, 共通の文書を使ったら True) を返す。"""
     if scene_id is not None:
         name = "controls" if kind is DocumentKind.CONTROLS else "tips"
-        text = read_text_or_empty(notes_dir / scene_note(scene_id, name))
+        text = read_note_text(notes_dir, scene_note(scene_id, name))
         if not is_blank(text):
             return text, False
-    return read_text_or_empty(notes_dir / common_note(kind)), True
+    return read_note_text(notes_dir, common_note(kind)), True

@@ -25,7 +25,7 @@ ${documents}
   - 1 行が画像 1 枚で、`{"t": 時刻 (秒), "kind": "interval" か "surface", "file": 実行ディレクトリーからの画像のパス, ...}` の形
 - フレームの画像: ${frames_dir} の下
   - `frames/interval/` は一定間隔で保存した縮小画像、`frames/surface/` は surface に送った画像
-- 前回の同じ文書のジョブに渡した最新のフレームの時刻: ${previous_latest_frame_t}
+- 前回、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻: ${previous_latest_frame_t}
 - 今回の最新のフレームの時刻: ${latest_frame_t}
   - どこまで遡って読むかは、あなたが決める。前回の時刻より後のフレームを中心に読み、必要なら前回より前も読む
 - surface の記録: ${surface_log}

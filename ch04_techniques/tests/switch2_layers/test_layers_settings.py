@@ -218,6 +218,16 @@ def test_deep_runner_defaults_to_claude_code():
     assert DEFAULT_DEEP_RUNNER is DeepRunnerChoice.CLAUDE
 
 
+def test_run_settings_keep_the_deep_runner_choice():
+    assert RunSettings().deep is DeepRunnerChoice.CLAUDE
+    # run.jsonl の start の args に、値の文字列で書く (Claude Code とフェイクのどちらで動かしたかを残す)
+    assert run_settings_to_json(RunSettings())["deep"] == "claude"
+    fake = run_settings_to_json(RunSettings(deep=DeepRunnerChoice.FAKE))
+    assert fake["deep"] == "fake"
+    assert type(fake["deep"]) is str
+    assert json.loads(json.dumps(fake))["deep"] == "fake"
+
+
 # --- --middle と API キー ---
 
 

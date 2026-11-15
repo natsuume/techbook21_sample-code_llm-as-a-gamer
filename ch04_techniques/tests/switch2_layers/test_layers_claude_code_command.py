@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from switch2_layers.deep.claude_code_command import (
+    AGENTS_MD_INSTRUCTION_FILES,
+    AGENTS_MD_PLUGIN_ID,
     CLAUDE_EXECUTABLE,
     DEEP_EFFORT,
     DEEP_MODEL,
@@ -12,6 +14,8 @@ from switch2_layers.deep.claude_code_command import (
     DEEP_TOOLS,
     DISALLOWED_TOOLS,
     HIDDEN_ENV_NAMES,
+    PARENT_SESSION_ENV_NAMES,
+    SETTING_OVERRIDE_ENV_NAMES,
     ClaudeCodeOptions,
     RulePathError,
     build_allowed_tools,
@@ -104,6 +108,19 @@ def test_deep_settings_disable_hooks_memory_connectors_and_outside_access():
     assert permissions["blockWritesOutsideWorkingDirectories"] is True
     # 許すルールは --allowedTools だけで渡す
     assert "allow" not in permissions
+
+
+def test_deep_settings_keep_agents_md_out():
+    # Claude Code に組み込まれた、AGENTS.md を読む plugin に、AGENTS.md を読ませない
+    assert AGENTS_MD_PLUGIN_ID == "cc-plugin-agents-md@builtin"
+    assert AGENTS_MD_INSTRUCTION_FILES == "managed-only"
+    assert DEEP_SETTINGS["pluginConfigs"] == {
+        "cc-plugin-agents-md@builtin": {"options": {"instructionFiles": "managed-only"}}
+    }
+    command = build_claude_command(PROMPT, RUN_DIR, TIPS_NOTES, ClaudeCodeOptions())
+    settings = json.loads(option_value(command, "--settings"))
+    plugin_config = settings["pluginConfigs"]["cc-plugin-agents-md@builtin"]
+    assert plugin_config["options"]["instructionFiles"] == "managed-only"
 
 
 def test_deep_settings_json_is_compact_json_of_the_settings():
@@ -357,3 +374,74 @@ def test_child_env_removes_api_keys_of_other_layers():
     }
     # 元の辞書は変えない
     assert "TYPESAFE_API_KEY" in environ
+
+
+# 親の Claude Code のセッションの中で、Bash のツールなどが受け取る変数 (deep-once をその中から動かしたときに残る)
+PARENT_SESSION_ENVIRON = {
+    "CLAUDECODE": "1",
+    "CLAUDE_CODE_CHILD_SESSION": "1",
+    "CLAUDE_CODE_ENTRYPOINT": "cli",
+    "CLAUDE_CODE_EXECPATH": "/usr/local/bin/claude",
+    "CLAUDE_CODE_SESSION_ID": "00000000-0000-0000-0000-000000000000",
+    "CLAUDE_CODE_SESSION_ATTENDED": "1",
+    "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/claude-inbox.sock",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "messaging-token",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID": "bridge",
+    "CLAUDE_CODE_REMOTE": "true",
+    "CLAUDE_CODE_REMOTE_SESSION_ID": "remote",
+    "CLAUDE_EFFORT": "max",
+    "CLAUDE_ISOLATED_GIT_ROOTS": "/home/user/repo",
+    "CLAUDE_JOB_DIR": "/home/user/.claude/jobs/1",
+    "CLAUDE_PID": "4242",
+    "CLAUDE_PLUGIN_ROOT": "/home/user/.claude/plugins/cache/x",
+    "CLAUDE_PLUGIN_DATA": "/home/user/.claude/plugins/data/x",
+    "CLAUDE_PROJECT_DIR": "/home/user/repo",
+}
+# 認証と設定の場所に使う変数 (子プロセスに残す)
+AUTH_AND_CONFIG_ENVIRON = {
+    "ANTHROPIC_API_KEY": "anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "auth-token",
+    "ANTHROPIC_BASE_URL": "https://example.invalid",
+    "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "CLAUDE_CONFIG_DIR": "/home/user/.claude-work",
+    "HOME": "/home/user",
+    "PATH": "/usr/bin",
+}
+
+
+def test_parent_session_env_names_are_the_claude_code_session_variables():
+    assert set(PARENT_SESSION_ENV_NAMES) == set(PARENT_SESSION_ENVIRON)
+    for name in AUTH_AND_CONFIG_ENVIRON:
+        assert name not in PARENT_SESSION_ENV_NAMES
+    assert not set(PARENT_SESSION_ENV_NAMES) & set(HIDDEN_ENV_NAMES)
+
+
+def test_child_env_removes_variables_of_the_parent_claude_code_session():
+    environ = {
+        **PARENT_SESSION_ENVIRON,
+        **AUTH_AND_CONFIG_ENVIRON,
+        "OPENAI_API_KEY": "openai",
+    }
+    env = build_child_env(environ, HIDDEN_ENV_NAMES)
+    # 認証・設定の場所・HOME・PATH は残し、親のセッションの変数と API キーは除く
+    assert env == AUTH_AND_CONFIG_ENVIRON
+    # hidden_names を空にしても、親のセッションの変数は除く
+    assert build_child_env(PARENT_SESSION_ENVIRON, ()) == {}
+
+
+# DEEP_SETTINGS の設定を上書きする変数 (0 は autoMemoryEnabled: false を上書きして auto memory を有効にする)
+SETTING_OVERRIDE_ENVIRON = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}
+
+
+def test_setting_override_env_names_are_the_auto_memory_variable():
+    assert set(SETTING_OVERRIDE_ENV_NAMES) == set(SETTING_OVERRIDE_ENVIRON)
+    for name in AUTH_AND_CONFIG_ENVIRON:
+        assert name not in SETTING_OVERRIDE_ENV_NAMES
+
+
+def test_child_env_removes_setting_override_variables():
+    environ = {**SETTING_OVERRIDE_ENVIRON, **AUTH_AND_CONFIG_ENVIRON}
+    assert build_child_env(environ, HIDDEN_ENV_NAMES) == AUTH_AND_CONFIG_ENVIRON
+    # hidden_names を空にしても、設定を上書きする変数は除く
+    assert build_child_env(SETTING_OVERRIDE_ENVIRON, ()) == {}

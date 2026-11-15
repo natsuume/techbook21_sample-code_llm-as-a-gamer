@@ -32,7 +32,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from switch2_layers.file_io import read_json_lines_from, read_text_or_empty
+from switch2_layers.file_io import read_json_lines_from
 from switch2_layers.frames.frame_store import FrameRecord, read_frame_records
 from switch2_layers.frames.surface_frames import pick_evenly
 from switch2_layers.middle.middle_types import (
@@ -42,6 +42,7 @@ from switch2_layers.middle.middle_types import (
     middle_state_from_json,
 )
 from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, scene_note
+from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.notes.surface_documents import read_surface_documents
 from switch2_layers.run_directory import RunPaths
@@ -123,8 +124,8 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     )
     current_tasks = ""
     if previous_state is not None and previous_state.scene_id is not None:
-        current_tasks = read_text_or_empty(
-            paths.notes_dir / scene_note(previous_state.scene_id, "tasks")
+        current_tasks = read_note_text(
+            paths.notes_dir, scene_note(previous_state.scene_id, "tasks")
         )
     # 操作説明は、surface が読むものと同じ文書にする (surface と同じ関数で選ぶ)
     current_controls = read_surface_documents(
@@ -140,7 +141,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         ),
         scene_labels=tuple(read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)),
         previous_state=previous_state,
-        strategy=read_text_or_empty(paths.notes_dir / STRATEGY_NOTE),
+        strategy=read_note_text(paths.notes_dir, STRATEGY_NOTE),
         current_tasks=current_tasks,
         surface_rows_offset=surface_chunk.end_offset,
         operations_rows_offset=operations_chunk.end_offset,

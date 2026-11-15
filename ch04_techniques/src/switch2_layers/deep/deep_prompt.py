@@ -20,10 +20,16 @@ Markdown の { } はそのまま残る。
 同じ文書のジョブが並行して動くことがあるので、書く直前に本体を読み直し、ほかのジョブの更新を取り込んでから書く。
 """
 
+import string
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 
-from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.deep.claude_code_command import validate_document_note
+from switch2_layers.deep.deep_job_directory import read_job_file, run_directory_of_job
+from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
+from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, is_scene_id
+from switch2_layers.run_directory import FRAMES_DIR, RunPaths
 
 # プロンプトのファイルを置くパッケージの中のディレクトリー (importlib.resources.files("switch2_layers.deep") / PROMPTS_DIR)
 PROMPTS_PACKAGE = "switch2_layers.deep"
@@ -88,7 +94,7 @@ class DeepPromptContext:
     scene_id                  場面 ID (job.json の scene_id)。無ければ None
     run_dir                   実行ディレクトリー (シンボリックリンクを解決した絶対パス)
     documents                 対象の文書 (job.json の documents の順)
-    previous_latest_frame_t   前回の同じ文書のジョブに渡した最新のフレームの時刻 (job.json)。無ければ None
+    previous_latest_frame_t   前回の、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻 (job.json)。無ければ None
     latest_frame_t            今回の最新のフレームの時刻 (job.json)。無ければ None
     """
 
@@ -103,7 +109,7 @@ class DeepPromptContext:
     @property
     def notes(self) -> tuple[str, ...]:
         """対象の文書の notes/ からの相対パスを、documents の順に返す。"""
-        raise NotImplementedError
+        return tuple(document.note for document in self.documents)
 
 
 def load_prompt_template(file_name: str) -> str:
@@ -111,7 +117,11 @@ def load_prompt_template(file_name: str) -> str:
 
     無いファイルなら FileNotFoundError をそのまま出す。
     """
-    raise NotImplementedError
+    return (
+        resources.files(PROMPTS_PACKAGE)
+        .joinpath(PROMPTS_DIR, file_name)
+        .read_text(encoding="utf-8")
+    )
 
 
 def read_prompt_context(job_dir: Path) -> DeepPromptContext:
@@ -132,12 +142,85 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
         - note が validate_document_note で RulePathError
         - job_dir がジョブのディレクトリーの形でない (run_directory_of_job の ValueError)
     """
-    raise NotImplementedError
+    resolved_job_dir = job_dir.resolve()
+    run_dir = run_directory_of_job(resolved_job_dir)
+    value = read_job_file(resolved_job_dir)
+    kind = _document_kind_of(value.get("kind"))
+    trigger = _trigger_of(value.get("trigger"))
+    scene_id = _scene_id_of(value.get("scene_id"))
+    notes_dir = RunPaths(run_dir).notes_dir
+    documents = tuple(
+        PromptDocument(note=note, path=notes_dir / note)
+        for note in _document_notes_of(value.get("documents"))
+    )
+    return DeepPromptContext(
+        kind=kind,
+        trigger=trigger,
+        scene_id=scene_id,
+        run_dir=run_dir,
+        documents=documents,
+        previous_latest_frame_t=_frame_time_of(
+            "previous_latest_frame_t", value.get("previous_latest_frame_t")
+        ),
+        latest_frame_t=_frame_time_of("latest_frame_t", value.get("latest_frame_t")),
+    )
+
+
+# 以下の job.json の値の読み取りは、契約 (read_prompt_context) どおり型の誤りも ValueError にする。
+# 型が合えば値を確かめて返し、合わなければ if の後で ValueError を出す
+
+
+def _document_kind_of(value: object) -> DocumentKind:
+    """job.json の kind を DocumentKind にする。DocumentKind の値でないか map なら ValueError。"""
+    if isinstance(value, str):
+        kind = DocumentKind(value)
+        if kind in KIND_PROMPT_FILES:
+            return kind
+        raise ValueError(f"no prompt for the kind: {kind}")
+    raise ValueError(f"kind in job.json must be a string: {value!r}")
+
+
+def _trigger_of(value: object) -> str:
+    """job.json の trigger を確かめて返す。DeepTrigger の値の文字列でなければ ValueError。"""
+    if isinstance(value, str):
+        return DeepTrigger(value).value
+    raise ValueError(f"trigger in job.json must be a string: {value!r}")
+
+
+def _document_notes_of(value: object) -> list[str]:
+    """job.json の documents を確かめて返す。
+
+    文字列のリストでなければ ValueError。要素は claude_code_command.validate_document_note で確かめる
+    (notes/ の外を指す文書や、権限のルールに埋められない文書は RulePathError。これも ValueError)。
+    """
+    if isinstance(value, list) and all(isinstance(note, str) for note in value):
+        return [validate_document_note(note) for note in value]
+    raise ValueError(f"documents in job.json must be a list of strings: {value!r}")
+
+
+def _scene_id_of(value: object) -> str | None:
+    """job.json の scene_id を確かめて返す。null でも場面 ID の形の文字列でもなければ ValueError。"""
+    if value is None:
+        return None
+    if isinstance(value, str) and is_scene_id(value):
+        return value
+    raise ValueError(f"scene_id in job.json must be null or a scene id: {value!r}")
+
+
+def _frame_time_of(name: str, value: object) -> float | None:
+    """job.json の時刻 (名前 name) を確かめて返す。null でも数 (真偽値を除く) でもなければ ValueError。"""
+    if value is None:
+        return None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    raise ValueError(f"{name} in job.json must be null or a number: {value!r}")
 
 
 def format_frame_time(t: float | None) -> str:
     """フレームの時刻をプロンプトに書く形にする。None なら NOT_AVAILABLE_TEXT、数なら `<小数第 3 位まで> 秒` (例: 12.345 秒)。"""
-    raise NotImplementedError
+    if t is None:
+        return NOT_AVAILABLE_TEXT
+    return f"{t:.3f} 秒"
 
 
 def format_documents(documents: tuple[PromptDocument, ...]) -> str:
@@ -147,7 +230,13 @@ def format_documents(documents: tuple[PromptDocument, ...]) -> str:
           - パス: <path>
     文書が無ければ NO_DOCUMENTS_TEXT の 1 行にする。行は改行 1 つでつなぎ、末尾に改行を付けない。
     """
-    raise NotImplementedError
+    if not documents:
+        return NO_DOCUMENTS_TEXT
+    lines: list[str] = []
+    for document in documents:
+        lines.append(f"- notes/{document.note}")
+        lines.append(f"  - パス: {document.path.as_posix()}")
+    return "\n".join(lines)
 
 
 def prompt_values(context: DeepPromptContext) -> dict[str, str]:
@@ -168,7 +257,24 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         scene_labels              実行ディレクトリー/notes/scene_labels.json
     パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths に合わせる。
     """
-    raise NotImplementedError
+    paths = RunPaths(context.run_dir)
+    return {
+        "kind_title": KIND_TITLES[context.kind],
+        "trigger": context.trigger,
+        "scene_id": context.scene_id
+        if context.scene_id is not None
+        else NOT_AVAILABLE_TEXT,
+        "run_dir": paths.root.as_posix(),
+        "documents": format_documents(context.documents),
+        "frames_log": paths.frames_log.as_posix(),
+        "frames_dir": (paths.root / FRAMES_DIR).as_posix(),
+        "previous_latest_frame_t": format_frame_time(context.previous_latest_frame_t),
+        "latest_frame_t": format_frame_time(context.latest_frame_t),
+        "surface_log": paths.surface_log.as_posix(),
+        "middle_state": paths.middle_state.as_posix(),
+        "notes_dir": paths.notes_dir.as_posix(),
+        "scene_labels": (paths.notes_dir / SCENE_LABELS_FILE).as_posix(),
+    }
 
 
 def build_deep_prompt(context: DeepPromptContext) -> str:
@@ -179,4 +285,13 @@ def build_deep_prompt(context: DeepPromptContext) -> str:
     どちらも string.Template.substitute で埋める (値が足りなければ KeyError)。kind が map なら ValueError にする。
     結果の先頭は / でも - でもない (claude -p の引数として、スラッシュコマンドやオプションに読まれない)。
     """
-    raise NotImplementedError
+    kind_file = KIND_PROMPT_FILES.get(context.kind)
+    if kind_file is None:
+        raise ValueError(f"no prompt for the kind: {context.kind}")
+    values = prompt_values(context)
+    kind_instructions = string.Template(load_prompt_template(kind_file)).substitute(
+        values
+    )
+    return string.Template(load_prompt_template(COMMON_PROMPT_FILE)).substitute(
+        values, **{KIND_INSTRUCTIONS_NAME: kind_instructions}
+    )

@@ -5,7 +5,8 @@
 キャプチャーのフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に固定する。
 middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
 読む (openai_api_key_errors で有無を確かめる)。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
-環境変数 TYPESAFE_API_KEY_ENV から読む (typesafe_api_key_errors で有無を確かめる)。
+環境変数 TYPESAFE_API_KEY_ENV から読む (typesafe_api_key_errors で有無を確かめる)。deep のジョブを実行するものは
+--deep (DeepRunnerChoice) で選ぶ。
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 """
 
@@ -74,7 +75,8 @@ TYPESAFE_API_KEY_ENV = JEV_API_KEY_ENV
 class DeepRunnerChoice(StrEnum):
     """deep のジョブを実行するもの (run と deep-once の --deep)。値は --deep に書く名前。
 
-    RunSettings・DeepOnceSettings には持たせず、cli の処理の関数が Namespace の deep から作る。
+    run では RunSettings.deep に持たせ、run.jsonl の start の args に値の文字列で書く (どちらで動かしたかを記録に残す)。
+    deep-once では、cli の処理の関数が Namespace の deep から作る。
     """
 
     CLAUDE = "claude"  # Claude Code (deep.claude_code_runner.ClaudeCodeDeepRunner)
@@ -109,6 +111,7 @@ class RunSettings:
                                 (--threshold-advisor、既定 0.5。0 以上 1 以下)
     box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
                                 (--box-requery-every、既定 5。1 以上)
+    deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -126,6 +129,7 @@ class RunSettings:
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
+    deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
 
 
 @dataclass(frozen=True)
@@ -156,22 +160,6 @@ class DeepOnceSettings:
     run_dir: Path
     kind: DocumentKind
     scene_id: str | None = None
-
-
-@dataclass(frozen=True)
-class PublishNoteSettings:
-    """publish-note の起動引数。
-
-    run_dir       実行ディレクトリー (--run-dir)
-    note          置き換える文書の notes/ からの相対パス (--note)
-    base_sha256   deep が編集を始めたときの文書の SHA-256。文書が無かったなら "none" (--base-sha256)
-    source        編集したファイル (--from)
-    """
-
-    run_dir: Path
-    note: str
-    base_sha256: str
-    source: Path
 
 
 def run_settings_errors(settings: RunSettings) -> list[str]:
@@ -326,10 +314,12 @@ def typesafe_api_key_errors(
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle と surface は値の文字列 "fake" / "luna"・"jev" / "fake") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep は値の文字列。
+    middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake") にする。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
     value["surface"] = settings.surface.value
+    value["deep"] = settings.deep.value
     return value

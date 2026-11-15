@@ -59,7 +59,8 @@ class DeepJob:
     scene_id                  場面 ID。共通の文書と、場面に依らない種類では None
     trigger                   起動したきっかけ
     requested_t               要求の時刻 (実行の経過秒 t)
-    previous_latest_frame_t   前回の同じ文書のジョブに渡した最新のフレームの時刻。前回が無い、または前回にフレームが無ければ None
+    previous_latest_frame_t   前回の、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻。正常に終わった前回が
+                              無い、または前回にフレームが無ければ None
     latest_frame_t            今回の最新のフレームの時刻 (frames.jsonl の最後の t)。まだフレームが無ければ None
     """
 

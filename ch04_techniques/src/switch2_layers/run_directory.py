@@ -196,7 +196,7 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
 
 
 def open_run_directory(run_dir: Path) -> RunPaths:
-    """保存済みの実行ディレクトリー run_dir の RunPaths を返す (middle-once・deep-once・publish-note で使う)。
+    """保存済みの実行ディレクトリー run_dir の RunPaths を返す (middle-once・deep-once で使う)。
 
     run_dir がディレクトリーでなければ FileNotFoundError にする。中のファイルは確かめない。
     """
