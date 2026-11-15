@@ -278,6 +278,43 @@ def test_keyboard_interrupt_stops_with_interrupted(tmp_path):
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
+class InterruptOnceSender(FakeSender):
+    """armed の後、テストのスレッドからの最初の送信で KeyboardInterrupt を出す (停止の処理の途中の Ctrl+C)。"""
+
+    def __init__(self):
+        super().__init__()
+        self.armed_thread: threading.Thread | None = None
+
+    def set_report(self, report: bytes) -> str:
+        if self.armed_thread is threading.current_thread():
+            self.armed_thread = None
+            raise KeyboardInterrupt
+        return super().set_report(report)
+
+
+def test_close_redoes_stop_output_interrupted_inside_request_stop(tmp_path):
+    sender = InterruptOnceSender()
+    app = LayersApp(settings(tmp_path), parts(sender))
+    app.start()
+    try:
+        time.sleep(1.0)
+        sender.armed_thread = threading.current_thread()
+        # 中立のレポートを送る途中で割り込まれ、理由だけが決まった状態になる
+        try:
+            app.request_stop(REASON_INTERRUPTED)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("request_stop should have been interrupted")
+        count_before_close = len(sender.reports)
+    finally:
+        app.close()
+    # close が停止の処理をやり直し、中立のレポートを送った
+    assert len(sender.reports) > count_before_close
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    assert app.stop_reason == REASON_INTERRUPTED
+
+
 def test_bridge_failure_stops_everything(tmp_path):
     state = {"value": "ok"}
     sender = FakeSender()

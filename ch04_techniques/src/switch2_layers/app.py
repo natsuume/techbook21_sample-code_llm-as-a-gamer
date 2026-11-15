@@ -132,6 +132,9 @@ class LayersApp:
         # ループの停止の合図 (surface と middle のループが見る)
         self._stop_event = threading.Event()
         self._stop_reason: str | None = None
+        # 停止の処理 (PadOutput.stop_output) を終えたか。理由が決まっただけで処理の途中に割り込まれた場合
+        # (Ctrl+C など) に、close でやり直すために理由とは別に持つ
+        self._output_stopped = False
         self._start_called = False
         self._closed = False
         self._started: _StartedParts | None = None
@@ -290,6 +293,8 @@ class LayersApp:
         self._stop_event.set()
         if started is not None:
             started.pad_output.stop_output()
+            with self._lock:
+                self._output_stopped = True
 
     def wait(self) -> str:
         """止まるまで待ち、止まった理由を返す。
@@ -328,6 +333,8 @@ class LayersApp:
         5. PadOutput.close()
         実機の部品 (キャプチャー・ブリッジ) は閉じない (作った側が閉じる)。2 回目以降の呼び出しは何もしない。
         start の前に呼んだら、理由を REASON_CLOSED にするだけで、後片付けするものは無い。
+        先に request_stop が理由だけを決めて、停止の処理 (合図と PadOutput.stop_output) の途中で割り込まれていた場合
+        (Ctrl+C など) は、1 の前に停止の処理をやり直す。
         """
         with self._lock:
             if self._closed:
@@ -337,6 +344,14 @@ class LayersApp:
         self.request_stop(REASON_CLOSED)
         if started is None:
             return
+        # 0. 停止の処理が途中で終わっていたらやり直す
+        self._stop_event.set()
+        with self._lock:
+            output_stopped = self._output_stopped
+        if not output_stopped:
+            started.pad_output.stop_output()
+            with self._lock:
+                self._output_stopped = True
         # 1. ループの終わりを待つ
         for thread in started.loop_threads:
             thread.join(LOOP_JOIN_TIMEOUT_S)
