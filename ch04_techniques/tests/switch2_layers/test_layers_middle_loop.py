@@ -1,6 +1,8 @@
 import dataclasses
 import json
+import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,11 +38,15 @@ class FakeDeepSink:
         self.requests: list[tuple[DocumentKind, DeepTrigger, str | None]] = []
         # この種類の要求では、この例外を出す (deep のジョブのディレクトリーの用意の失敗など)
         self.fail_for: dict[DocumentKind, Exception] = {}
+        # 要求を記録した後に呼ぶ関数 (要求を処理する間に全体が止められた場合を作る)
+        self.on_request: Callable[[], None] | None = None
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
     ) -> DeepRequestResult:
         self.requests.append((kind, trigger, scene_id))
+        if self.on_request is not None:
+            self.on_request()
         if kind in self.fail_for:
             raise self.fail_for[kind]
         return DeepRequestResult(started=True)
@@ -649,4 +655,90 @@ def test_loop_run_returns_when_stopped_during_analyze(tmp_path):
     assert len(analyzer.inputs) == 1
     assert not (harness.root / "middle" / "state.json").exists()
     assert read_rows(harness.root / "middle" / "calls.jsonl") == []
+    assert harness.stops == []
+
+
+# --- 出力の書き込みと deep の要求の間に止められたとき ---
+
+
+class StopAfterReplace:
+    """os.replace を包み、名前が file_name のファイルを置き換えた直後に止める合図を立てる。
+
+    出力のファイルを書いている途中で全体が止められた場合を作る (出力のファイルは置き換えの書き込みで書く)。
+    """
+
+    def __init__(
+        self,
+        original: Callable[..., None],
+        file_name: str,
+        stop: threading.Event,
+    ):
+        self.original = original
+        self.file_name = file_name
+        self.stop = stop
+
+    def __call__(self, src: object, dst: object, *args: object, **kwargs: object):
+        self.original(src, dst, *args, **kwargs)
+        if Path(str(dst)).name == self.file_name:
+            self.stop.set()
+
+
+def scene_ids(root: Path) -> list[str]:
+    labels = json.loads(
+        (root / "notes" / "scene_labels.json").read_text(encoding="utf-8")
+    )
+    return [scene["id"] for scene in labels["scenes"]]
+
+
+@pytest.mark.parametrize(
+    ("written_file", "state_written", "label_added"),
+    [
+        ("tasks.md", False, False),
+        ("state.json", True, False),
+        ("scene_labels.json", True, True),
+    ],
+)
+def test_stop_while_writing_outputs_leaves_the_rest_unwritten(
+    tmp_path, monkeypatch, written_file, state_written, label_added
+):
+    root = make_run(tmp_path)
+    stop = threading.Event()
+    # 書く順は tasks.md → middle/state.json → notes/scene_labels.json → deep の要求 → calls.jsonl
+    monkeypatch.setattr(os, "replace", StopAfterReplace(os.replace, written_file, stop))
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    sink = FakeDeepSink()
+    result = run_middle_step(
+        RunPaths(root),
+        ScriptedAnalyzer(monotonic, output("町")),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        sink,
+        stop,
+    )
+    assert result.stopped is True
+    assert result.ok is False
+    assert result.error is None
+    # 止める合図が立つ前に書いたファイルは残り、後のファイルは書かない
+    assert (root / "notes" / "scenes" / "scene-001" / "tasks.md").exists()
+    assert (root / "middle" / "state.json").exists() is state_written
+    assert scene_ids(root) == (["scene-001"] if label_added else [])
+    assert sink.requests == []
+    assert read_rows(root / "middle" / "calls.jsonl") == []
+
+
+def test_stop_during_new_scene_deep_request_skips_the_rest(tmp_path):
+    harness = make_loop(tmp_path, output("町"), max_errors=1)
+    stop = threading.Event()
+    # 最初の種類 (controls) の要求を処理する間に全体が止められ、その要求は例外を出す
+    harness.deep_sink.on_request = stop.set
+    harness.deep_sink.fail_for[DocumentKind.CONTROLS] = OSError("disk full")
+    result = harness.loop.run_once(stop)
+    assert result.stopped is True
+    # 残りの種類 (tips) は要求せず、calls.jsonl の行も run.jsonl の deep_request_error も書かない
+    assert harness.deep_sink.requests == [
+        (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001")
+    ]
+    assert read_rows(harness.root / "middle" / "calls.jsonl") == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert harness.loop.consecutive_errors == 0
     assert harness.stops == []

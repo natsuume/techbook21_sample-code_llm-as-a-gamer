@@ -12,8 +12,9 @@
     7. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
 decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S 秒待つ。max_errors 回続けたら on_stop で全体を止める。
 ブリッジの復旧中は要求を送らず、操作を中立にして BRIDGE_WAIT_S 秒待つ。
-decide が戻った (例外を含む) ときに止める合図が立っていたら、操作を送らず、surface.jsonl・run.jsonl に書かず、
-deep も呼ばずにループを抜ける (止めた後に記録を増やさない)。
+止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (4 の apply と、decide の失敗の後の neutral) が戻ったとき
+(成功・失敗とも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、その回の
+残りの送信・記録 (surface.jsonl・run.jsonl)・deep の要求をせずにループを抜ける (止めた後に記録を増やさない)。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。
 """
 
@@ -90,7 +91,7 @@ class SurfaceStepOutcome(StrEnum):
     DECIDE_ERROR = (
         "decide_error"  # decide が例外を出した。surface.jsonl に error の行を書いた
     )
-    # decide が戻ったときに止める合図が立っていた。操作を送らず、行も書かない
+    # 止める合図を見て途中で抜けた (SurfaceLoop.step)。それより後の送信・記録・deep の要求をしていない
     STOPPED = "stopped"
 
 
@@ -100,7 +101,7 @@ class SurfaceStepResult:
 
     outcome   結果の種類
     wait_s    次の step までに待つ秒数
-    row       surface.jsonl に書いた行。書かなかったら None
+    row       surface.jsonl に書いた行。書かなかったら None。STOPPED では、行を書いた後に抜けた場合も None
     """
 
     outcome: SurfaceStepOutcome
@@ -186,29 +187,36 @@ class SurfaceLoop:
            frame_store.save_surface(t, 画像) で保存して、SurfaceFrame(t, jpeg, format_frame_label(t)) にする
         4. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) を読む
         5. t_sent = clock.now() で SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t,
-           直近の操作) を decide に渡し、戻ったら (例外でも) t_received = clock.now()
+           直近の操作) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
         6. decide が例外 (Exception) を出したら:
-           pad_output.neutral() を呼び、続けて失敗した回数を 1 増やし、run_log に
+           pad_output.neutral() を呼び、戻ったら stop を確かめる。続けて失敗した回数を 1 増やし、run_log に
            surface_error {"error": 説明, "count": 続けて失敗した回数} を書き、surface.jsonl に error の行
            (action は null、blocked_buttons・deep_requests・info_labels・boxes は空、scene_changed は False、
-           wait_s は DECIDE_ERROR_WAIT_S) を書く。回数が max_errors に達したら on_stop(surface_failure_reason(回数)) を呼ぶ。
-           DECIDE_ERROR (wait_s = DECIDE_ERROR_WAIT_S) を返す
-        7. 成功したら、続けて失敗した回数を 0 にし、pad_output.apply(出力の操作) で送る。行の action と blocked_buttons は
+           wait_s は DECIDE_ERROR_WAIT_S) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
+           on_stop(surface_failure_reason(回数)) を呼ぶ。DECIDE_ERROR (wait_s = DECIDE_ERROR_WAIT_S) を返す
+        7. 成功したら、続けて失敗した回数を 0 にし、pad_output.apply(出力の操作) で送る。apply が戻ったら
+           (例外でも) stop を確かめる。行の action と blocked_buttons は
            apply が返した FilteredAction の値 (制限と相反する方向を外した後の操作と、制限で外したボタン) にする。
            apply が例外 (OutputStoppedError・送信の失敗) を出したら、行の error にその説明を書き、action と
            blocked_buttons は buttons.filter_action(出力の操作, pad_output.allowed_buttons) の結果にする。送れたら、送った操作を
            直近の操作に足す (RECENT_ACTIONS_COUNT 件まで)。apply の例外は、decide の失敗の回数に数えない
-        8. surface.jsonl に 1 行書く (deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に並べたもの、
-           wait_s は SurfaceContext.wait_s)。surface.jsonl に書くのはこのスレッドだけ
-        9. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、deep_requests.request(種類, DeepTrigger.SURFACE, 現在の場面 ID)
-           を呼ぶ。request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error
-           {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、残りの種類の要求を続ける
-           (decide の失敗の回数には数えず、ループも止めない)
+        8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に
+           並べたもの、wait_s は SurfaceContext.wait_s)。surface.jsonl に書くのはこのスレッドだけ
+        9. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、request の直前に stop を確かめてから、
+           deep_requests.request(種類, DeepTrigger.SURFACE, 現在の場面 ID) を呼ぶ。request が例外 (Exception) を出したら、
+           外に出さずに run_log に deep_request_error {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、
+           残りの種類の要求を続ける (decide の失敗の回数には数えず、ループも止めない)
         SENT (wait_s = SurfaceContext.wait_s) を返す。
-        decide が戻った (例外を含む) ときに stop が立っていたら、6〜9 をせずに STOPPED (wait_s = 0.0、row は None)
-        を返す: 操作を送らず (neutral も呼ばない)、surface.jsonl と run.jsonl に書かず、失敗の回数も変えず、
-        deep も呼ばない。7 の apply が OutputStoppedError を出し、そのとき stop が立っていた場合 (確かめた後に
-        全体が止められた) も同じく、行を書かず deep も呼ばずに STOPPED を返す。
+
+        stop を確かめたときに立っていたら、そこで STOPPED (wait_s = 0.0、row は None) を返し、それより後の手順
+        (操作の送信・失敗の回数の変更・run.jsonl と surface.jsonl への書き込み・on_stop・deep の要求) をしない。
+        それより前にしたことは戻さない。抜ける位置ごとの結果:
+            - decide が戻ったとき: 操作を送らず (neutral も呼ばない)、何も書かず、失敗の回数も変えず、deep も呼ばない
+            - neutral が戻ったとき (6): 失敗の回数を変えず、surface_error も行も書かない
+            - apply が戻ったとき (7。OutputStoppedError を含む): 行を書かず、deep も呼ばない
+            - 行を書く直前 (6・8): 行を書かず、deep も呼ばない (6 では、run.jsonl の surface_error は書いた後で、
+              on_stop は呼ばない)
+            - deep を要求する直前 (9): その種類と残りの種類の要求をしない (行は書いた後)
         """
         parts = self.parts
         if parts.bridge_state() != BRIDGE_OK:
@@ -241,14 +249,14 @@ class SurfaceLoop:
             output = parts.decider.decide(surface_input)
         except Exception as error:
             t_received = parts.clock.now()
-            if stop is not None and stop.is_set():
+            if _is_stopped(stop):
                 return _stopped_result()
             logger.debug("surface decide failed", exc_info=True)
             return self._handle_decide_error(
-                error, t_sent, t_received, sent_frames, documents, context
+                error, t_sent, t_received, sent_frames, documents, context, stop
             )
         t_received = parts.clock.now()
-        if stop is not None and stop.is_set():
+        if _is_stopped(stop):
             return _stopped_result()
         return self._handle_output(
             output, t_sent, t_received, sent_frames, documents, context, stop
@@ -258,7 +266,7 @@ class SurfaceLoop:
         """stop が立つまで step を繰り返し、各 step の後に stop.wait(wait_s) で待つ (スレッドの本体)。
 
         step の想定外の例外 (Exception) は外に出さず、on_stop(説明を含む理由) を呼んでから戻る。
-        step が STOPPED を返したら (decide の間に stop が立った)、待たずに戻る。
+        step が STOPPED を返したら (止める合図を見て途中で抜けた)、待たずに戻る。
         """
         while not stop.is_set():
             try:
@@ -296,10 +304,17 @@ class SurfaceLoop:
         sent_frames: Sequence[SentFrame],
         documents: SurfaceDocuments,
         context: SurfaceContext,
+        stop: threading.Event | None,
     ) -> SurfaceStepResult:
-        """decide の例外を扱う (step の 6)。"""
+        """decide の例外を扱う (step の 6)。
+
+        neutral が戻った後と、surface.jsonl の行を書く直前に stop を確かめ、立っていれば STOPPED を返す。
+        """
         parts = self.parts
         parts.pad_output.neutral()
+        # 中立のレポートの送信 (ブリッジの応答待ち) の間に全体が止められたら、失敗を数えず何も書かない
+        if _is_stopped(stop):
+            return _stopped_result()
         self._consecutive_errors += 1
         description = describe_exception(error)
         parts.run_log.write(
@@ -321,6 +336,8 @@ class SurfaceLoop:
             error=description,
         )
         row = surface_row(record)
+        if _is_stopped(stop):
+            return _stopped_result()
         append_json_line(parts.paths.surface_log, row)
         if self._consecutive_errors >= self.settings.max_errors:
             parts.on_stop(surface_failure_reason(self._consecutive_errors))
@@ -340,16 +357,15 @@ class SurfaceLoop:
     ) -> SurfaceStepResult:
         """decide の出力を送り、記録して、deep を要求する (step の 7〜9)。
 
-        apply が OutputStoppedError を出したときに stop が立っていれば、何も書かずに STOPPED を返す。
+        apply が戻った後 (例外でも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に stop を確かめ、
+        立っていれば STOPPED を返す。
         """
         parts = self.parts
+        self._consecutive_errors = 0
         error_text: str | None = None
         try:
             filtered = parts.pad_output.apply(output.action)
         except OutputStoppedError as error:
-            if stop is not None and stop.is_set():
-                # stop を確かめた後に全体が止められた。止めた後に記録を増やさない
-                return _stopped_result()
             logger.debug("the pad output was stopped", exc_info=True)
             error_text = describe_exception(error)
             filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
@@ -360,7 +376,9 @@ class SurfaceLoop:
             filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
         else:
             self._recent_actions.append(RecentAction(t_received, filtered.action))
-        self._consecutive_errors = 0
+        # 操作の送信 (ブリッジの応答待ち) の間に全体が止められたら、止めた後に記録を増やさない
+        if _is_stopped(stop):
+            return _stopped_result()
         deep_kinds = [kind for kind in DOCUMENT_KINDS if kind in output.deep_kinds]
         record = SurfaceRecord(
             t_sent=t_sent,
@@ -378,15 +396,27 @@ class SurfaceLoop:
             error=error_text,
         )
         row = surface_row(record)
+        if _is_stopped(stop):
+            return _stopped_result()
         append_json_line(parts.paths.surface_log, row)
-        self._request_deep(deep_kinds, context.scene_id)
+        if not self._request_deep(deep_kinds, context.scene_id, stop):
+            return _stopped_result()
         return SurfaceStepResult(SurfaceStepOutcome.SENT, context.wait_s, row)
 
     def _request_deep(
-        self, kinds: Sequence[DocumentKind], scene_id: str | None
-    ) -> None:
-        """deep を要求する (step の 9)。受け口の例外は deep_request_error に書き、残りの種類を続ける。"""
+        self,
+        kinds: Sequence[DocumentKind],
+        scene_id: str | None,
+        stop: threading.Event | None,
+    ) -> bool:
+        """deep を要求する (step の 9)。受け口の例外は deep_request_error に書き、残りの種類を続ける。
+
+        要求の直前に stop を確かめ、立っていたらその種類と残りの種類を要求せずに False を返す。
+        すべての種類を要求し終えたら True を返す。
+        """
         for kind in kinds:
+            if _is_stopped(stop):
+                return False
             try:
                 self.parts.deep_requests.request(kind, DeepTrigger.SURFACE, scene_id)
             except Exception as error:
@@ -399,6 +429,12 @@ class SurfaceLoop:
                     scene_id=scene_id,
                     error=describe_exception(error),
                 )
+        return True
+
+
+def _is_stopped(stop: threading.Event | None) -> bool:
+    """止める合図 stop が立っていれば True。stop が None (合図を確かめない) なら False。"""
+    return stop is not None and stop.is_set()
 
 
 def _stopped_result() -> SurfaceStepResult:

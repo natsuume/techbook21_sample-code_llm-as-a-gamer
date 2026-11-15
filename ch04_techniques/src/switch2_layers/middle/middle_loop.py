@@ -10,8 +10,10 @@
 ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから最初の実行を始め、
 前回の応答 (失敗を含む) から interval_s 秒待って次を始める。analyze が例外を出したら、前回の出力を残したまま
 次の間隔で再び呼ぶ。max_errors 回続けたら on_stop で全体を止める。
-analyze が戻った (例外を含む) ときに止める合図が立っていたら、出力・middle/calls.jsonl・run.jsonl に書かず、
-deep も呼ばずにループを抜ける (止めた後に記録を増やさない)。
+止める合図は、analyze が戻ったとき (例外を含む)、出力のファイル (tasks.md・middle/state.json・notes/scene_labels.json) と
+middle/calls.jsonl のそれぞれを書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、残りのファイル・
+middle/calls.jsonl・run.jsonl に書かず、deep も呼ばずにループを抜ける (止めた後に記録を増やさない。書く順は変えず、
+それまでに書いたファイルは戻さない)。
 """
 
 import logging
@@ -54,14 +56,14 @@ class MiddleStepResult:
     """middle の 1 回分の結果。
 
     ok                    analyze と出力の書き込みに成功したら True
-    state                 書いた middle/state.json の値。失敗したら None
+    state                 書いた middle/state.json の値。失敗したときと、止める合図で抜けたときは None
     new_scene             一覧に新しく足した場面。無ければ None
     deep_requests         初めての場面のために deep を呼ぶ文書の種類 (new_scene があれば controls と tips。無ければ空)
     error                 失敗の説明。成功なら None
     deep_request_errors   deep の要求で受け口が出した例外の (種類, 説明)。要求の順。無ければ空
                           (要求の例外は ok に影響しない)
-    stopped               analyze が戻ったときに止める合図が立っていて、何も書かずに抜けたら True
-                          (このとき ok は False、error は None。失敗には数えない)
+    stopped               止める合図を見て途中で抜けたら True。このときの結果は常に STOPPED_STEP_RESULT
+                          (ok は False、error は None、ほかの値も空。途中まで書いたファイルがあっても同じ。失敗には数えない)
     """
 
     ok: bool
@@ -92,17 +94,20 @@ def run_middle_step(
     stop は止める合図 (MiddleLoop.run が渡す)。None なら合図を確かめない。
 
     1. now_t = clock.now() で build_middle_input(paths, now_t, window_s)
-    2. t_sent = clock.now() で analyze を呼び、戻ったら (例外でも) t_received = clock.now()
-    3. write_middle_output(paths, 入力, 出力, generated_t=t_received)
-    4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に
+    2. t_sent = clock.now() で analyze を呼び、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
+    3. write_middle_output(paths, 入力, 出力, generated_t=t_received, stop) で出力を書く:
+       notes/scenes/<場面ID>/tasks.md → middle/state.json → notes/scene_labels.json (新しい場面のときだけ)。
+       それぞれのファイルを書く直前に stop を確かめる (立っていたら write_middle_output が None を返す)
+    4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に、request の直前に stop を確かめてから
        deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
        外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
-    5. middle/calls.jsonl に middle_call_record.middle_call_row の行を書く
+    5. middle/calls.jsonl に middle_call_record.middle_call_row の行を書く (書く直前に stop を確かめる)
        (deep_requests_sent は deep_requests が None でなく、要求を渡したら True。要求が例外を出した場合も True)
-    1〜3 の例外 (Exception) は外に出さず、error の行を calls.jsonl に書いて ok=False の結果を返す
-    (middle/state.json は、書く前に失敗したなら前回の出力のまま)。
-    analyze が戻った (例外を含む) ときに stop が立っていたら、3〜5 をせずに STOPPED_STEP_RESULT を返す
-    (tasks.md・middle/state.json・scene_labels.json・calls.jsonl に書かず、deep も呼ばない)。
+    1〜3 の例外 (Exception) は外に出さず、error の行を calls.jsonl に書いて (書く直前に stop を確かめる)
+    ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。
+    stop を確かめたときに立っていたら、そこで STOPPED_STEP_RESULT を返し、残りのファイル (tasks.md・middle/state.json・
+    notes/scene_labels.json のうちまだ書いていないもの)・deep の要求・calls.jsonl の行を書かない。書く順は変えず、
+    それまでに書いたファイルは戻さない。analyze が戻ったときに立っていたら、何も書かず deep も呼ばない。
     """
     now_t = clock.now()
     t_sent = now_t
@@ -113,20 +118,23 @@ def run_middle_step(
         output = analyzer.analyze(middle_input)
     except Exception as error:
         t_received = clock.now()
-        if stop is not None and stop.is_set():
+        if _is_stopped(stop):
             return STOPPED_STEP_RESULT
         logger.debug("middle analyze failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error)
+        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
     t_received = clock.now()
-    if stop is not None and stop.is_set():
+    if _is_stopped(stop):
         return STOPPED_STEP_RESULT
     try:
+        # tasks.md・middle/state.json・notes/scene_labels.json のそれぞれを書く直前に stop を確かめる
         write_result = write_middle_output(
-            paths, middle_input, output, generated_t=t_received
+            paths, middle_input, output, generated_t=t_received, stop=stop
         )
     except Exception as error:
         logger.debug("writing the middle output failed", exc_info=True)
-        return _record_failure(paths, t_sent, t_received, middle_input, error)
+        return _record_failure(paths, t_sent, t_received, middle_input, error, stop)
+    if write_result is None:
+        return STOPPED_STEP_RESULT
     new_scene = write_result.new_scene
     deep_kinds = NEW_SCENE_DEEP_KINDS if new_scene is not None else ()
     request_errors: list[tuple[DocumentKind, str]] = []
@@ -134,6 +142,8 @@ def run_middle_step(
     if new_scene is not None and deep_requests is not None:
         requests_sent = True
         for kind in deep_kinds:
+            if _is_stopped(stop):
+                return STOPPED_STEP_RESULT
             try:
                 deep_requests.request(kind, DeepTrigger.NEW_SCENE, new_scene.id)
             except Exception as error:
@@ -148,6 +158,8 @@ def run_middle_step(
         deep_requests_sent=requests_sent,
         error=None,
     )
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
     append_json_line(paths.middle_calls, middle_call_row(record))
     return MiddleStepResult(
         ok=True,
@@ -165,8 +177,14 @@ def _record_failure(
     t_received: float,
     middle_input: MiddleInput | None,
     error: Exception,
+    stop: threading.Event | None,
 ) -> MiddleStepResult:
-    """失敗した回の行を calls.jsonl に書き、ok=False の結果を返す。"""
+    """失敗した回の行を calls.jsonl に書き、ok=False の結果を返す。
+
+    書く直前に stop を確かめ、立っていれば書かずに STOPPED_STEP_RESULT を返す。
+    """
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
     description = describe_exception(error)
     record = MiddleCallRecord(
         t_sent=t_sent,
@@ -181,6 +199,11 @@ def _record_failure(
     return MiddleStepResult(
         ok=False, state=None, new_scene=None, deep_requests=(), error=description
     )
+
+
+def _is_stopped(stop: threading.Event | None) -> bool:
+    """止める合図 stop が立っていれば True。stop が None (合図を確かめない) なら False。"""
+    return stop is not None and stop.is_set()
 
 
 @dataclass(frozen=True)
@@ -244,7 +267,7 @@ class MiddleLoop:
           回数が max_errors に達したら on_stop(middle_failure_reason(回数)) を呼ぶ
         - 結果の deep_request_errors ごとに、run_log に deep_request_error {"source": "middle", "kind", "trigger": "new_scene",
           "scene_id": new_scene の ID, "error": 説明} を書く (失敗の回数には数えず、ループも止めない)
-        結果の stopped が True なら (analyze の間に stop が立った)、数えず、run_log にも書かない。
+        結果の stopped が True なら (止める合図を見て途中で抜けた)、数えず、run_log にも書かない。
         run_middle_step の結果をそのまま返す。
         """
         parts = self.parts

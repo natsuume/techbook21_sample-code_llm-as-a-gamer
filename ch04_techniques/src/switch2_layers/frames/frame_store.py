@@ -12,6 +12,10 @@
 書き込み (縮小・JPEG 化・ファイルの書き込み) は専用の書き出しスレッドで行い、受け付けは上限付きのキューで行う。
 キューが満杯のときは保存を捨て、捨てた件数を dropped に数える (終了時に run.jsonl の frames_dropped に記録する)。
 受け付ける側 (キャプチャーのスレッドと surface のスレッド) は I/O をせず、書き出しスレッドを待たない。
+close の待ちが時間切れになったら、書き出しスレッドが画像を書いている途中の 1 件も捨てたものとして数え、その 1 件を
+後から書き終えても frames.jsonl に行を足さない。行を足すと決めることと、あきらめて捨てたと数えることは同じロックの中で
+決めるため、1 件は written と dropped のどちらか一方にだけ数える。行の追記 (I/O) はロックの外で行うので、close は
+追記が止まっていても timeout_s を過ぎて待たない。
 """
 
 import logging
@@ -184,6 +188,8 @@ class FrameStore:
         self.interval_width = interval_width
         self.capacity = capacity
         self.jpeg_quality = jpeg_quality
+        # 受け付け・キュー・件数と、行を足すか close があきらめるかを決めるロック。
+        # 受け付ける側と close が待たないよう、この中では I/O をしない
         self._condition = threading.Condition()
         self._queue: deque[_SaveItem] = deque()
         self._next_due_t: float | None = None
@@ -193,8 +199,12 @@ class FrameStore:
         self._dropped = 0
         self._accepting = True
         self._closed = False
-        self._given_up = False  # close の時間切れで書き出しをやめた
-        self._writing = False  # 書き出しスレッドが 1 件を書いている途中
+        # close の時間切れで書き出しをやめた
+        self._given_up = False
+        # 書き出しスレッドが 1 件を書いている途中で、まだ written にも dropped にも数えていない
+        self._writing = False
+        # 書いている途中の 1 件について、frames.jsonl に行を足すと決めた (追記を終えたら書き出しスレッドが数える)
+        self._appending = False
         self._thread: threading.Thread | None = None
         if start_thread:
             self._thread = threading.Thread(
@@ -268,7 +278,17 @@ class FrameStore:
     def close(self, timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S) -> None:
         """以後の受け付けをやめ、書き出しスレッドがキューの分を書き終えるまで最大 timeout_s 秒待つ。
 
-        書き終えられなかった分は dropped に足す。書き出しスレッドが無ければ、キューに残った分を dropped に足す。
+        待ちが時間切れになったら (書き出しスレッドがまだ動いていたら)、書き終えるのをあきらめる:
+            - キューに残った分と、書き出しスレッドが画像を書いている途中の 1 件を dropped に足す
+              (キューに残った surface の画像は予約から外す)
+            - 以後、書き出しスレッドは frames.jsonl に行を足さない。画像を書いている途中の 1 件は、画像を書き終えても
+              行を足さず、written にも数えない (書いた画像のファイルは消さない)
+            - 書き出しスレッドが既に行を足すと決めていた 1 件 (行の追記の途中) は dropped に足さない。その 1 件は、
+              追記を終えたときに書き出しスレッドが written (追記に失敗したら dropped) に数える
+        あきらめることと、書き出しスレッドが行を足すと決めること (_write_item) は同じロック (_condition) の中で決める。
+        そのため書いている途中の 1 件は、written と dropped のどちらか一方だけに数える。行の追記 (I/O) はロックの外なので、
+        close は追記の終わりを待たない (待つのは書き出しスレッドの join の timeout_s 秒まで)。
+        書き出しスレッドが無ければ、キューに残った分を dropped に足す。
         2 回目以降の呼び出しは何もしない。
         """
         with self._condition:
@@ -280,10 +300,14 @@ class FrameStore:
         thread = self._thread
         if thread is not None:
             thread.join(max(timeout_s, 0.0))
+        # 書き出しスレッドが行を足すと決めるのと同じロックの中であきらめる
+        # (書いている途中の 1 件を、written と dropped の一方だけに数える)
         with self._condition:
             if thread is None or thread.is_alive():
-                # 書き終えられなかった分を捨てた件数に数え、書き出しスレッドにはこれ以上書かせない
-                self._dropped += len(self._queue) + (1 if self._writing else 0)
+                # 書き終えられなかった分を捨てた件数に数え、書き出しスレッドにはこれ以上書かせない。
+                # 行を足すと決めた後の 1 件は、追記を終えた書き出しスレッドが数える
+                in_flight = 1 if self._writing and not self._appending else 0
+                self._dropped += len(self._queue) + in_flight
                 for item in self._queue:
                     self._release_reservation_locked(item)
                 self._queue.clear()
@@ -305,23 +329,43 @@ class FrameStore:
     def _write_item(self, item: _SaveItem) -> bool:
         """1 件を書く (画像を置き換えの書き込みで書いてから、frames.jsonl に 1 行足す)。書けたら True。
 
-        書き込みに失敗したら (OSError・ValueError) dropped に数え、surface の画像なら予約から外して False を返す。
-        close の時間切れで手放した後に戻った 1 件は、数えずに False を返す (もう dropped に数えてある)。
+        1. 画像を書く。失敗したら (OSError・ValueError) dropped に数え、surface の画像なら予約から外して False を返す。
+           close があきらめた後の失敗は数えない (もう dropped に数えてある)
+        2. close があきらめたかを確かめ、あきらめていなければ行を足すと決める (_appending)。この 2 つは、close が
+           あきらめて dropped に足すのと同じロック (_condition) の中で行う。あきらめた後なら、行を足さず、数えずに
+           False を返す (もう dropped に数えてある)
+        3. ロックの外で行を足し、written に数えて True を返す。追記に失敗したら (OSError・ValueError) dropped に数え、
+           surface の画像なら予約から外して False を返す。2 で行を足すと決めた 1 件は close が数えないので、
+           close があきらめた後でも、ここで written か dropped に数える
         """
         try:
             record = self._write_image(item)
-            append_json_line(self.paths.frames_log, frame_record_row(record))
         except (OSError, ValueError):
             logger.warning("failed to save a %s frame", item.kind, exc_info=True)
             with self._condition:
                 if not self._given_up:
                     self._dropped += 1
+                    self._writing = False
                     self._release_reservation_locked(item)
             return False
         with self._condition:
             if self._given_up:
                 return False
+            self._appending = True
+        try:
+            append_json_line(self.paths.frames_log, frame_record_row(record))
+        except (OSError, ValueError):
+            logger.warning("failed to record a %s frame", item.kind, exc_info=True)
+            with self._condition:
+                self._dropped += 1
+                self._appending = False
+                self._writing = False
+                self._release_reservation_locked(item)
+            return False
+        with self._condition:
             self._written += 1
+            self._appending = False
+            self._writing = False
         return True
 
     def _write_image(self, item: _SaveItem) -> FrameRecord:

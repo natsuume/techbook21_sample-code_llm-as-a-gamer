@@ -4,12 +4,16 @@ import dataclasses
 import json
 import threading
 import time
+import types
 from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
+import pytest
 from switch2_remote.controller_state import NEUTRAL_REPORT
 
+import switch2_layers.app as app_module
+import switch2_layers.deep.deep_scheduler as deep_scheduler_module
 from switch2_layers.app import (
     REASON_BRIDGE_FAILED,
     REASON_INTERRUPTED,
@@ -18,6 +22,7 @@ from switch2_layers.app import (
 )
 from switch2_layers.deep.deep_types import DeepJob, DeepResult
 from switch2_layers.deep.fake_deep import FakeDeepRunner
+from switch2_layers.error_text import describe_exception
 from switch2_layers.hardware.capture_source import LatestCapture
 from switch2_layers.hardware.capture_watcher import REASON_STALE_FRAME
 from switch2_layers.middle.fake_middle import FAKE_SCENE_NAME, FakeMiddleAnalyzer
@@ -392,3 +397,215 @@ def test_close_stops_running_deep_jobs(tmp_path):
     events = [row["event"] for row in run_rows]
     assert events[-1] == "stop"
     assert max(i for i, e in enumerate(events) if e == "deep_end") < len(events) - 1
+
+
+# --- start の途中の例外 ---
+
+
+class InjectedStartError(Exception):
+    """start の途中で出す例外 (テストで差し込む)。"""
+
+
+class NoFrameReader:
+    """フレームを返さないキャプチャーの偽物。起動したスレッドに、画像の保存や surface の要求をさせない。"""
+
+    def read_latest(self) -> LatestCapture | None:
+        return None
+
+    def is_ended(self) -> bool:
+        return False
+
+
+# start が作る部品のうち、スレッドを持つ部品とループの組み立ての、app モジュールでの名前 (作る順)。
+# PadOutput は run.jsonl に start を書いた後に作る
+START_PART_NAMES = (
+    "PadOutput",
+    "FrameStore",
+    "CaptureSource",
+    "DeepScheduler",
+    "SurfaceLoop",
+)
+
+
+class CallCounter:
+    """呼ばれた回数を数えてから、元の関数を呼ぶ。"""
+
+    def __init__(self, original: Callable[..., object]):
+        self.original = original
+        self.count = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self.count += 1
+        return self.original(*args, **kwargs)
+
+
+class StartPartsRecorder:
+    """app モジュールの部品のクラスを包み、start が作った部品を覚える。fail_at の名前の部品は作らずに error を出す。
+
+    覚えた部品はテストの最後に閉じる (start が後片付けをしなかったときに、スレッドを残さないため)。
+    """
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fail_at: str | None,
+        error: BaseException,
+    ):
+        self.made: list[object] = []
+        for name in START_PART_NAMES:
+            original = getattr(app_module, name)
+            monkeypatch.setattr(
+                app_module, name, self._wrap(name, original, fail_at, error)
+            )
+
+    def _wrap(
+        self,
+        name: str,
+        original: Callable[..., object],
+        fail_at: str | None,
+        error: BaseException,
+    ) -> Callable[..., object]:
+        def build(*args: object, **kwargs: object) -> object:
+            if name == fail_at:
+                raise error
+            part = original(*args, **kwargs)
+            self.made.append(part)
+            return part
+
+        return build
+
+    def count_teardown_calls(self) -> list[CallCounter]:
+        """作った部品の close と stop_output を、呼ばれた回数を数えてから元の関数を呼ぶものに差し替え、その一覧を返す。"""
+        counters: list[CallCounter] = []
+        for part in self.made:
+            for method_name in ("close", "stop_output"):
+                method = getattr(part, method_name, None)
+                if method is not None:
+                    counter = CallCounter(method)
+                    setattr(part, method_name, counter)
+                    counters.append(counter)
+        return counters
+
+    def close_all(self) -> None:
+        for part in reversed(self.made):
+            close = getattr(part, "close", None)
+            if close is not None:
+                close()
+
+
+class FailingThreadStarter:
+    """ループのスレッドを started_before_failure 本だけ起動し、次の起動で error を出す (LayersApp の start_thread)。"""
+
+    def __init__(self, started_before_failure: int, error: BaseException):
+        self.started_before_failure = started_before_failure
+        self.error = error
+        self.started: list[threading.Thread] = []
+
+    def __call__(self, thread: threading.Thread) -> None:
+        if len(self.started) == self.started_before_failure:
+            raise self.error
+        thread.start()
+        self.started.append(thread)
+
+
+def only_run_dir(tmp_path: Path) -> Path:
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    return run_dir
+
+
+def check_failed_start(
+    tmp_path: Path,
+    app: LayersApp,
+    error: BaseException,
+    recorder: StartPartsRecorder,
+    loop_threads: list[threading.Thread],
+) -> None:
+    """app.start が error をそのまま外に出し、それまでに作った部品の後片付けを済ませていることを確かめる。
+
+    最後に、残った部品とスレッドを止める (start が後片付けをしなかったときのため)。
+    """
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(type(error)) as raised:
+            app.start()
+        assert raised.value is error
+        # start が起動したスレッドが残っていない
+        assert [t for t in threading.enumerate() if t not in before] == []
+        # run.jsonl は start で始まり、理由つきの stop で終わる
+        run_log = only_run_dir(tmp_path) / "run.jsonl"
+        rows = read_rows(run_log)
+        assert rows[0]["event"] == "start"
+        assert rows[-1]["event"] == "stop"
+        assert describe_exception(error) in rows[-1]["reason"]
+        assert app.stop_reason == rows[-1]["reason"]
+        # 後から close を呼んでも、二重に閉じない (作った部品の close・stop_output を呼ばず、run.jsonl も変わらない)
+        written = run_log.read_bytes()
+        counters = recorder.count_teardown_calls()
+        app.close()
+        assert [counter.count for counter in counters] == [0] * len(counters)
+        assert run_log.read_bytes() == written
+    finally:
+        app.request_stop("test cleanup")
+        for thread in loop_threads:
+            thread.join(SAFETY_TIMEOUT_S)
+        recorder.close_all()
+
+
+@pytest.mark.parametrize("error_type", [InjectedStartError, KeyboardInterrupt])
+@pytest.mark.parametrize("fail_at", START_PART_NAMES)
+def test_failure_while_building_parts_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch, fail_at, error_type
+):
+    error = error_type("injected")
+    recorder = StartPartsRecorder(monkeypatch, fail_at, error)
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
+    check_failed_start(tmp_path, app, error, recorder, [])
+
+
+@pytest.mark.parametrize("error_type", [InjectedStartError, KeyboardInterrupt])
+@pytest.mark.parametrize(
+    "started_before_failure",
+    [0, 1],
+    ids=["first_loop_thread", "after_surface_thread"],
+)
+def test_failure_while_starting_loop_threads_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch, started_before_failure, error_type
+):
+    error = error_type("injected")
+    recorder = StartPartsRecorder(monkeypatch, None, error)
+    starter = FailingThreadStarter(started_before_failure, error)
+    app = LayersApp(
+        settings(tmp_path),
+        parts(FakeSender(), reader=NoFrameReader()),
+        start_thread=starter,
+    )
+    check_failed_start(tmp_path, app, error, recorder, starter.started)
+
+
+def threading_with_unstartable_thread(error: BaseException) -> types.SimpleNamespace:
+    """threading と同じ名前を持ち、Thread だけを start で error を出すスレッドに替えたものを返す。
+
+    スレッドを作れないとき (資源が足りないときなど) の再現に使う。
+    """
+
+    class UnstartableThread(threading.Thread):
+        def start(self) -> None:
+            raise error
+
+    names = {name: getattr(threading, name) for name in dir(threading)}
+    names["Thread"] = UnstartableThread
+    return types.SimpleNamespace(**names)
+
+
+def test_failure_while_starting_deep_scheduler_thread_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch
+):
+    # DeepScheduler.start がスレッドを起動できないと、後片付けの DeepScheduler.close も例外を出す。
+    # その後の段階 (キャプチャー・画像の書き出し・PadOutput を閉じる、stop を書く) も行われることを確かめる
+    error = RuntimeError("can't start new thread")
+    monkeypatch.setattr(
+        deep_scheduler_module, "threading", threading_with_unstartable_thread(error)
+    )
+    recorder = StartPartsRecorder(monkeypatch, None, error)
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
+    check_failed_start(tmp_path, app, error, recorder, [])
