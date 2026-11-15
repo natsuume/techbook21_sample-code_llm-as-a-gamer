@@ -5,11 +5,10 @@
   "documents": [notes/ からの / 区切りの相対パス, ...]}
 - documents は、そのジョブの対象の文書 (deep が Edit・Write で直接編集してよい文書) の相対パスの文字列のリスト
   (note_paths.deep_document_notes の結果をそのまま並べる)。controls と tips で場面がある場合は、場面の文書と
-  共通の文書の両方 (tips の場面は box_targets.md も)。まだ無い文書のパスも含める
+  共通の文書の両方 (tips の場面は box_targets.md も)。map は map/map.json と map/places.md。まだ無い文書のパスも含める
 - deep は notes/ の文書の本体を直接編集するため、ジョブのディレクトリーには job.json だけを置く (文書のコピーや
   作業用のディレクトリーを作らない。ジョブの実行で、DeepRunner が記録のファイルを足す)
-- ジョブの用意では文書の中身を読まない。map の文書の列挙 (note_paths.deep_document_notes) は、シンボリックリンクを
-  解決した先が notes/ の中の通常のファイルでないものを除く
+- ジョブの用意では文書の中身を読まない
 - 次のジョブの previous_latest_frame_t は、同じ文書の前回の正常に終わったジョブ (deep_job_success) の
   job.json の latest_frame_t から取る (find_previous_latest_frame_t)
 """

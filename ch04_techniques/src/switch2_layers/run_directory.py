@@ -11,6 +11,7 @@
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
+    middle/map_records.jsonl                middle のマップの記録 (middle.map_records)
     deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
                                             Claude Code で動かしたジョブには stream.jsonl・result.json も置く
                                             (deep.claude_stream_log)
@@ -50,6 +51,8 @@ NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
 MIDDLE_CALLS_FILE = "calls.jsonl"
+# middle のマップの記録 (middle.map_records)
+MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
 DEEP_DIR = "deep"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
@@ -119,6 +122,11 @@ class RunPaths:
     def middle_calls(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_CALLS_FILE"""
         return self.root / MIDDLE_DIR / MIDDLE_CALLS_FILE
+
+    @property
+    def middle_map_records(self) -> Path:
+        """root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE"""
+        return self.root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE
 
     @property
     def deep_dir(self) -> Path:

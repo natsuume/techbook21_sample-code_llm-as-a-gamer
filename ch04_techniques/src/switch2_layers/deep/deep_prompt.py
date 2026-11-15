@@ -5,9 +5,9 @@
                    ${kind_instructions} の位置に種類ごとの指示を入れる
     controls.md    操作説明の指示
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)
-    strategy.md    大方針の指示
-    advice.md      詰まったときの助言の指示
-マップ (map) の指示は無い (map のジョブは Claude Code を起動しない。deep.claude_code_runner)。
+    strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
+    advice.md      詰まったときの助言の指示 (マップの場所の構造を使うことを含む)
+    map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く)
 
 値の埋め方: string.Template の ${名前} の形の置き場所に、PROMPT_VALUE_NAMES の値を入れる
 (Template.substitute。足りない値があれば KeyError)。種類ごとの指示も同じ値で埋めてから ${kind_instructions} に入れる。
@@ -28,19 +28,20 @@ from pathlib import Path
 from switch2_layers.deep.claude_code_command import validate_document_note
 from switch2_layers.deep.deep_job_directory import read_job_file, run_directory_of_job
 from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
-from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, is_scene_id
+from switch2_layers.notes.note_paths import MAP_DIR, SCENE_LABELS_FILE, is_scene_id
 from switch2_layers.run_directory import FRAMES_DIR, RunPaths
 
 # プロンプトのファイルを置くパッケージの中のディレクトリー (importlib.resources.files("switch2_layers.deep") / PROMPTS_DIR)
 PROMPTS_PACKAGE = "switch2_layers.deep"
 PROMPTS_DIR = "prompts"
 COMMON_PROMPT_FILE = "common.md"
-# 種類ごとの指示のファイル。map は無い
+# 種類ごとの指示のファイル (どの種類にもある)
 KIND_PROMPT_FILES: dict[DocumentKind, str] = {
     DocumentKind.CONTROLS: "controls.md",
     DocumentKind.TIPS: "tips.md",
     DocumentKind.STRATEGY: "strategy.md",
     DocumentKind.ADVICE: "advice.md",
+    DocumentKind.MAP: "map.md",
 }
 # 種類の日本語の名前 (プロンプトの ${kind_title})
 KIND_TITLES: dict[DocumentKind, str] = {
@@ -48,6 +49,7 @@ KIND_TITLES: dict[DocumentKind, str] = {
     DocumentKind.TIPS: "攻略情報",
     DocumentKind.STRATEGY: "大方針",
     DocumentKind.ADVICE: "詰まったときの助言",
+    DocumentKind.MAP: "マップ",
 }
 # 時刻や場面が無いときにプロンプトに書く文字列
 NOT_AVAILABLE_TEXT = "なし"
@@ -66,8 +68,10 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
     "latest_frame_t",
     "surface_log",
     "middle_state",
+    "map_records",
     "notes_dir",
     "scene_labels",
+    "map_dir",
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
@@ -89,7 +93,7 @@ class PromptDocument:
 class DeepPromptContext:
     """プロンプトに埋める、1 つのジョブの値。
 
-    kind                      文書の種類 (map 以外)
+    kind                      文書の種類
     trigger                   きっかけ (job.json の trigger。DeepTrigger の値)
     scene_id                  場面 ID (job.json の scene_id)。無ければ None
     run_dir                   実行ディレクトリー (シンボリックリンクを解決した絶対パス)
@@ -135,7 +139,7 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
       note は claude_code_command.validate_document_note で確かめる
     次のときは ValueError にする (claude_code_command.RulePathError も ValueError):
         - job.json が読めない (deep_job_directory.read_job_file の ValueError)
-        - kind が DocumentKind の値でないか map。trigger が DeepTrigger の値でない
+        - kind が DocumentKind の値でない。trigger が DeepTrigger の値でない
         - scene_id が null でも場面 ID の形 (note_paths.is_scene_id) の文字列でもない
         - previous_latest_frame_t・latest_frame_t が null でも数 (真偽値を除く) でもない
         - documents がリストでないか、要素が文字列でない
@@ -171,12 +175,9 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
 
 
 def _document_kind_of(value: object) -> DocumentKind:
-    """job.json の kind を DocumentKind にする。DocumentKind の値でないか map なら ValueError。"""
+    """job.json の kind を DocumentKind にする。DocumentKind の値でなければ ValueError。"""
     if isinstance(value, str):
-        kind = DocumentKind(value)
-        if kind in KIND_PROMPT_FILES:
-            return kind
-        raise ValueError(f"no prompt for the kind: {kind}")
+        return DocumentKind(value)
     raise ValueError(f"kind in job.json must be a string: {value!r}")
 
 
@@ -253,9 +254,12 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         latest_frame_t            format_frame_time(context.latest_frame_t)
         surface_log               実行ディレクトリー/surface.jsonl
         middle_state              実行ディレクトリー/middle/state.json
+        map_records               実行ディレクトリー/middle/map_records.jsonl (middle のマップの記録)
         notes_dir                 実行ディレクトリー/notes
         scene_labels              実行ディレクトリー/notes/scene_labels.json
-    パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths に合わせる。
+        map_dir                   実行ディレクトリー/notes/map (マップの文書を置くディレクトリー)
+    パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths と
+    notes.note_paths に合わせる。
     """
     paths = RunPaths(context.run_dir)
     return {
@@ -272,8 +276,10 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "latest_frame_t": format_frame_time(context.latest_frame_t),
         "surface_log": paths.surface_log.as_posix(),
         "middle_state": paths.middle_state.as_posix(),
+        "map_records": paths.middle_map_records.as_posix(),
         "notes_dir": paths.notes_dir.as_posix(),
         "scene_labels": (paths.notes_dir / SCENE_LABELS_FILE).as_posix(),
+        "map_dir": (paths.notes_dir / MAP_DIR).as_posix(),
     }
 
 
@@ -282,13 +288,11 @@ def build_deep_prompt(context: DeepPromptContext) -> str:
 
     1. 種類ごとの指示 (KIND_PROMPT_FILES[kind]) を load_prompt_template で読み、prompt_values(context) で埋める
     2. 共通の部分 (COMMON_PROMPT_FILE) を、prompt_values(context) と kind_instructions (1 の結果) で埋める
-    どちらも string.Template.substitute で埋める (値が足りなければ KeyError)。kind が map なら ValueError にする。
+    どちらも string.Template.substitute で埋める (値が足りなければ KeyError)。
     結果の先頭は / でも - でもない (claude -p の引数として、スラッシュコマンドやオプションに読まれない)。
     """
-    kind_file = KIND_PROMPT_FILES.get(context.kind)
-    if kind_file is None:
-        raise ValueError(f"no prompt for the kind: {context.kind}")
     values = prompt_values(context)
+    kind_file = KIND_PROMPT_FILES[context.kind]
     kind_instructions = string.Template(load_prompt_template(kind_file)).substitute(
         values
     )

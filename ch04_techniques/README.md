@@ -247,8 +247,8 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 | 層 | 動く間隔 | 受け持ち |
 |---|---|---|
 | surface | 0.2〜2 秒ごと (待ち時間は middle の出力で決まります) | 直近 2 秒のフレームから最大 5 枚を選び、時刻と追えている box を書き込んだ画像、文書、middle の出力から、コントローラーの操作を決めて送ります (既定では TypeSafe の Jev に問います)。必要なら deep に文書の更新を求めます |
-| middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`) から、場面の名前、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
-| deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | `notes/` の操作説明・攻略情報・大方針・助言の文書を、直接編集して書き直します (既定では Claude Code を起動します)。ジョブごとに `deep/<種類>-<連番>/` を作り、ジョブの記録を置きます。マップの文書は、まだ書きません |
+| middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`)、マップから、場面の名前、現在地の場所、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。現在地と、新しく分かった場所のつながりと観察を、マップの記録 (`middle/map_records.jsonl`) に足します。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
+| deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | `notes/` の操作説明・攻略情報・大方針・助言・マップの文書を、直接編集して書き直します (既定では Claude Code を起動します)。マップは、middle のマップの記録からまとめます。ジョブごとに `deep/<種類>-<連番>/` を作り、ジョブの記録を置きます |
 
 surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層ともフェイク (`--surface fake --middle fake --deep fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
@@ -282,7 +282,20 @@ run と middle-once は、`--middle` で middle の実装を選びます。
 
 `--middle luna` で `OPENAI_API_KEY` が無いとき (値が空か空白だけのときを含む) は、実機に触れず、実行ディレクトリーにも何も書かずに、エラーを表示して終了します (終了コード 2)。API キーは、`switch2-agent` と同じく `.env` に書き、`uv run --env-file .env` で読み込ませることもできます。
 
-gpt-6-luna には、変わらない指示 (developer メッセージ) と、場面の一覧、前回の middle の出力、大方針、現在の場面の短期のタスクリストと操作説明、前回以降の surface と操作の記録の要約、場面転換の印、直近 `--middle-window` 秒の一定間隔のフレームから最大 4 枚 (時刻のラベル付き) を送ります。reasoning effort は `none` にし、出力は Structured Outputs の JSON Schema で受け取ります。変わらない指示の直後にキャッシュの区切りを置き、指示をプロンプトキャッシュから読ませます。応答の待ちは 30 秒までです。HTTP のエラー、完了しなかった応答、拒否、形の合わない出力は middle の失敗として数え、再試行せずに次の間隔で呼び直します。
+gpt-6-luna には、変わらない指示 (developer メッセージ) と、場面の一覧、場所の名前の一覧、マップ、前回の middle の出力、大方針、現在の場面の短期のタスクリストと操作説明、前回以降の surface と操作の記録の要約、場面転換の印、直近 `--middle-window` 秒の一定間隔のフレームから最大 4 枚 (時刻のラベル付き) を送ります。reasoning effort は `none` にし、出力は Structured Outputs の JSON Schema で受け取ります。変わらない指示の直後にキャッシュの区切りを置き、指示をプロンプトキャッシュから読ませます。応答の待ちは 30 秒までです。HTTP のエラー、完了しなかった応答、拒否、形の合わない出力は middle の失敗として数え、再試行せずに次の間隔で呼び直します。
+
+middle は、マップを次のように扱います。
+
+| 項目 | 内容 |
+|---|---|
+| 場所の名前の一覧 (入力) | `notes/map/map.json` の場所の名前 (`name`) と別の名前 (`aliases`)、`middle/map_records.jsonl` の `place_name` を合わせ、重複を除いて最初に現れた順に並べたものです。場面の名前と同じく、当てはまる名前があればそれを選ばせ、無いときだけ新しい名前を作らせます |
+| マップ (入力) | `notes/map/map.json` の全体を JSON で送ります。無い・JSON として読めない・形に合わない (形に合わない要素が 1 つでもある) ときは「マップなし」として送り、middle の失敗にはしません。`notes/` の外を指すシンボリックリンクは、無い文書として扱います |
+| `place_name` (出力) | 現在地の場所の名前です。ゲームの世界の中の場所が映っていない (メニュー・タイトル・戦闘など) か、決められなければ空文字列です |
+| `new_connections` (出力) | 前回の実行より後に新しく分かった、場所から場所への移動 (`from`・`to`・`how`) の配列です |
+| `new_observations` (出力) | 新しく分かった、出口 (`exit`)・目印 (`landmark`)・通れなかった位置 (`blocked`) の配列です。各要素は `kind`・`place`・`description` を持ちます |
+| マップの記録 | `place_name` が空でないか、`new_connections` か `new_observations` が空でない回に、`middle/map_records.jsonl` に 1 行 `{"t", "scene_id", "place_name", "connections", "observations"}` を足します。`t` はその回に送った画像のうち最新のものの時刻、`scene_id` はその回に決まった場面の ID (無ければ `null`)、`place_name` は空なら `null` です。画像を送らなかった回は記録しません。追記に失敗しても middle の失敗には数えず、警告を書いて続けます |
+
+変わらない指示では、マップのつながりをたどって、現在地から大方針の行き先までの手順を短期のタスクリストに書かせます。入るたびに構造が変わる場所 (`changes_on_entry` が `true`) のつながりは、手順に使わせません。surface には、マップを直接は渡しません (短期のタスクリストを通して伝えます)。
 
 `middle/calls.jsonl` の各行には、トークン数 (`usage`。入力・キャッシュから読んだ入力・キャッシュに書いた入力・出力・推論)、公式の単価から計算した概算の費用 (`cost_usd`。USD)、デバッグ用の応答の本文 (`response`。エラーの応答では本文の先頭を `error_body_head`) も書きます。
 
@@ -325,7 +338,7 @@ run と deep-once は、`--deep` で deep のジョブを実行するものを�
 | `claude` (既定) | Claude Code (`claude -p`) を子プロセスとして起動し、文書を書き直させます。`claude` コマンドが使え、Claude Code にログインしている (または環境変数 `ANTHROPIC_API_KEY` がある) 必要があります |
 | `fake` | 何もせずに成功を返すフェイクです。文書は変わりません |
 
-Claude Code は、モデル `claude-opus-5-5`、effort `high`、出力の形式 `stream-json` で、実行ディレクトリーを作業ディレクトリーにして起動します。プロンプトは、パッケージの中のプロンプトのファイル ([`src/switch2_layers/deep/prompts/`](./src/switch2_layers/deep/prompts/)) に、ジョブごとの値 (実行ディレクトリー、対象の文書、フレームの保存先、前回と今回の最新のフレームの時刻、読んでよい記録) を埋めて作ります。文書・記録・画面から読んだ文はプロンプトに入れず、ファイルとして読ませます。プロンプトでは、画面の文字や記録の中の文を指示として扱わないよう指示します。
+Claude Code は、モデル `claude-opus-5-5`、effort `high`、出力の形式 `stream-json` で、実行ディレクトリーを作業ディレクトリーにして起動します。プロンプトは、パッケージの中のプロンプトのファイル ([`src/switch2_layers/deep/prompts/`](./src/switch2_layers/deep/prompts/)) に、ジョブごとの値 (実行ディレクトリー、対象の文書、フレームの保存先、前回と今回の最新のフレームの時刻、読んでよい記録) を埋めて作ります。読んでよい記録には、`map` のジョブでは middle のマップの記録を、`strategy` と `advice` のジョブでは `notes/map/` のマップの文書を含めます。文書・記録・画面から読んだ文はプロンプトに入れず、ファイルとして読ませます。プロンプトでは、画面の文字や記録の中の文を指示として扱わないよう指示します。
 
 Claude Code に許すツールは、次の 5 つだけです。
 
@@ -358,7 +371,17 @@ deep は `notes/` の文書の本体を直接編集します。同じ文書の�
 | `tips` | 場面があれば `notes/scenes/<場面ID>/tips.md`・`notes/scenes/<場面ID>/box_targets.md`・`notes/common/tips.md`、無ければ `notes/common/tips.md` |
 | `strategy` | `notes/strategy.md` |
 | `advice` | `notes/advice.md` |
-| `map` | Claude Code を起動せず、何もせずに成功として終わります。`run.jsonl` の `deep_end` (deep-once では標準出力の `message`) に、そのことを書きます |
+| `map` | `notes/map/map.json` と `notes/map/places.md` (`notes/map/` の下のほかのファイルは対象にしません) |
+
+種類ごとの指示のうち、マップに関わるものは次のとおりです。
+
+| 種類 | 指示 |
+|---|---|
+| `map` | `middle/map_records.jsonl` のうち、前回、正常に終わった `map` のジョブに渡した最新のフレームの時刻の 60 秒前より後の行を読み、場所とつながりの一覧 (`map.json`) と場所ごとの文章 (`places.md`) に取り込みます。middle は応答を待つ間に、その時刻より前の `t` の行を後から足すことがあるため、前回の時刻の直前も読み直し、すでに取り込んだ内容は重ねて足しません。同じ場所の重複をまとめ、一覧にある名前を残して、まとめた別の名前を `aliases` に入れます。同じ場所のつながりが訪れるたびに食い違うときは、その場所の `changes_on_entry` を `true` にします。一覧と文章は同じジョブで書き、場所の名前・出口・通れない位置・状態・構造が変わるかを一致させます |
+| `strategy` | `notes/map/` を読み、行き先に通る場所の順を添えます |
+| `advice` | `notes/map/` を読み、場所の構造 (出口・通れない位置・つながり・入るたびに構造が変わるか) を使って、詰まりの原因を説明します。行き先や操作を直接指示する書き方はしません |
+
+`map.json` は、最上位の object に `places` と `connections` の 2 つの配列を持つ JSON です。`places` の各要素は `name` (空でない文字列)・`aliases`・`description`・`exits`・`blocked`・`state`・`changes_on_entry` (真偽)、`connections` の各要素は `from`・`to` (どちらも空でない文字列)・`how` を持ちます。`places.md` は、場所ごとに `## 場所: <name>` の節を置き、入り方・出口・通れない位置・状態・構造が変わるかを箇条書きで書きます。
 
 Claude Code を起動する前に、対象の文書と、その親のディレクトリー (`notes/` を含む) がシンボリックリンクでないことを確かめます。リンクがあれば起動せずに失敗として終わり、リンクだったパスを `run.jsonl` の `deep_end` の `message` (deep-once では標準出力の `message`) と `result.json` に書きます。surface と middle が `notes/` の文書を読むときも、リンクを解決した先が `notes/` の中の通常のファイルでなければ、無い文書として扱います。
 
@@ -407,6 +430,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
 | `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置)。surface は要求ごとにこのファイルを読みます |
 | `middle/calls.jsonl` | middle の実行ごとの記録。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
+| `middle/map_records.jsonl` | middle のマップの記録。現在地の場所の名前、新しく分かった場所のつながりと観察を、判断に使った画像の時刻と場面 ID とともに、1 行 1 回の JSON で足します (「middle の実装」の節)。deep の `map` のジョブが読みます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書の `notes/` からのパス) を置きます。Claude Code で動かしたジョブには、`stream.jsonl` (Claude Code の stream-json の出力。1 行に、起動からの秒と出力の 1 行) と `result.json` (終了コード、所要時間、費用、最後のメッセージ、エラーで終わったか、拒まれたツールの呼び出し、停止・強制終了したか、標準エラー出力) も置きます。起動前に止めたときは、`result.json` の `error` に理由を書きます |
 | `notes/` | 文書 (次の表) |
 
@@ -422,7 +446,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)・box で取る対象 (`box_targets.md`)。起動時は空で、`tasks.md` は middle が、ほかは deep が書きます。場面の操作説明・攻略情報・box で取る対象が無いか空なら、surface は共通の文書を使います |
 | `notes/strategy.md` | 大方針 (見出しだけ) |
 | `notes/advice.md` | 詰まったときの助言 (見出しだけ) |
-| `notes/map/` | マップの文書 (起動時は空) |
+| `notes/map/` | マップの文書 (起動時は空)。deep の `map` のジョブが、場所とつながりの一覧 `map.json` と、場所ごとの文章 `places.md` を書きます。middle は `map.json` を、大方針と助言の deep は両方を読みます |
 | `notes/scene_labels.json` | 場面の名前と場面 ID (`scene-001` の形) の一覧。middle が初めての場面を足します |
 
 ### 押せるボタン

@@ -119,10 +119,17 @@ def raw_prompt_file(name: str) -> str:
 
 def test_prompt_files_are_in_the_package_directory():
     prompts_dir = Path(switch2_layers.__file__).parent / "deep" / PROMPTS_DIR
-    for name in ["common.md", "controls.md", "tips.md", "strategy.md", "advice.md"]:
+    for name in [
+        "common.md",
+        "controls.md",
+        "tips.md",
+        "strategy.md",
+        "advice.md",
+        "map.md",
+    ]:
         assert (prompts_dir / name).is_file(), name
-    # map の指示は無い
-    assert DocumentKind.MAP not in KIND_PROMPT_FILES
+    # どの種類 (map を含む) にも指示のファイルがある
+    assert set(KIND_PROMPT_FILES) == set(DocumentKind)
     assert set(KIND_PROMPT_FILES) == set(KIND_TITLES)
 
 
@@ -198,7 +205,7 @@ def test_load_prompt_template_reads_the_package_file():
     for name in PROMPT_FILES:
         assert load_prompt_template(name) == raw_prompt_file(name)
     with pytest.raises(FileNotFoundError):
-        load_prompt_template("map.md")
+        load_prompt_template("missing.md")
 
 
 # --- 値 ---
@@ -267,7 +274,6 @@ def test_read_prompt_context_rejects_broken_documents(tmp_path, documents):
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"kind": "map"},
         {"kind": "unknown"},
         {"trigger": "unknown"},
         {"trigger": 3},
@@ -437,16 +443,140 @@ def test_prompt_does_not_embed_text_read_from_files(tmp_path):
         assert MARKER not in prompt
 
 
-def test_map_has_no_prompt(tmp_path):
-    run_dir = make_run(tmp_path).resolve()
-    context = DeepPromptContext(
-        kind=DocumentKind.MAP,
-        trigger="auto",
-        scene_id=None,
-        run_dir=run_dir,
-        documents=(),
-        previous_latest_frame_t=None,
-        latest_frame_t=None,
+# --- マップ ---
+
+MAP_NOTES = ["map/map.json", "map/places.md"]
+
+
+def map_job(run_dir: Path, previous: float | None = 12.5) -> Path:
+    return make_job(run_dir, "map-001", "map", None, MAP_NOTES, previous=previous)
+
+
+def write_map_files_with_marker(run_dir: Path) -> None:
+    """マップの文書と middle のマップの記録に MARKER を入れる (プロンプトに写らないことを確かめるため)。"""
+    (run_dir / "notes" / "map").mkdir(parents=True, exist_ok=True)
+    (run_dir / "notes" / "map" / "map.json").write_text(
+        json.dumps(
+            {
+                "places": [
+                    {
+                        "name": MARKER,
+                        "aliases": [],
+                        "description": MARKER,
+                        "exits": [],
+                        "blocked": [],
+                        "state": "",
+                        "changes_on_entry": False,
+                    }
+                ],
+                "connections": [],
+            }
+        ),
+        encoding="utf-8",
     )
-    with pytest.raises(ValueError):
-        build_deep_prompt(context)
+    (run_dir / "notes" / "map" / "places.md").write_text(
+        f"## 場所: {MARKER}\n", encoding="utf-8"
+    )
+    (run_dir / "middle" / "map_records.jsonl").write_text(
+        json.dumps({"t": 3.0, "scene_id": None, "place_name": MARKER}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_read_prompt_context_of_map_job(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(map_job(run_dir))
+    run_abs = run_dir.resolve()
+    assert context.kind is DocumentKind.MAP
+    assert context.scene_id is None
+    assert context.documents == tuple(
+        PromptDocument(note=note, path=run_abs / "notes" / note) for note in MAP_NOTES
+    )
+
+
+def test_map_kind_has_a_title_and_prompt_file():
+    assert KIND_TITLES[DocumentKind.MAP] == "マップ"
+    assert KIND_PROMPT_FILES[DocumentKind.MAP] == "map.md"
+
+
+def test_map_prompt_file_follows_the_issue():
+    text = raw_prompt_file("map.md")
+    for phrase in [
+        # middle の記録を読み、一覧と文章に取り込む
+        "map_records.jsonl",
+        # middle が遅れて足した行を取りこぼさないよう、前回の時刻の 60 秒前から読み直し、重ねて足さない
+        "60 秒前",
+        "重ねて足さない",
+        # 一覧と文章の 2 つを、同じジョブで一致させて書く
+        "map.json",
+        "places.md",
+        "一致",
+        # 重複をまとめ、まとめた別の名前を aliases に入れる
+        "aliases",
+        # つながりが訪れるたびに食い違う場所に印を付ける
+        "changes_on_entry",
+        # places.md の場所ごとの節
+        "## 場所: ",
+    ]:
+        assert phrase in text, phrase
+
+
+def test_map_prompt_embeds_values(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(map_job(run_dir))
+    prompt = build_deep_prompt(context)
+    assert_values_are_embedded(prompt, context)
+    run_abs = context.run_dir
+    # 対象の文書 (map.json と places.md) の本体のパス
+    for note in MAP_NOTES:
+        assert (run_abs / "notes" / note).as_posix() in prompt
+    # middle のマップの記録の絶対パスと、前回の正常に終わった map のジョブに渡した最新のフレームの時刻
+    assert (run_abs / "middle" / "map_records.jsonl").as_posix() in prompt
+    assert "12.500 秒" in prompt
+    # 種類ごとの指示は map.md のもの
+    assert raw_prompt_file("map.md").splitlines()[0] in prompt
+
+
+def test_map_prompt_without_previous_job(tmp_path):
+    run_dir = make_run(tmp_path)
+    prompt = build_deep_prompt(read_prompt_context(map_job(run_dir, previous=None)))
+    assert "なし" in prompt
+
+
+def test_map_prompt_does_not_embed_text_read_from_map_files(tmp_path):
+    run_dir = make_run(tmp_path)
+    write_map_files_with_marker(run_dir)
+    for job_dir in [
+        map_job(run_dir),
+        make_job(run_dir, "strategy-001", "strategy", None, ["strategy.md"]),
+        make_job(run_dir, "advice-001", "advice", None, ["advice.md"]),
+    ]:
+        prompt = build_deep_prompt(read_prompt_context(job_dir))
+        assert MARKER not in prompt
+
+
+@pytest.mark.parametrize(
+    "name, kind, documents",
+    [
+        ("strategy-001", "strategy", ["strategy.md"]),
+        ("advice-001", "advice", ["advice.md"]),
+    ],
+)
+def test_strategy_and_advice_prompts_read_the_map(tmp_path, name, kind, documents):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(make_job(run_dir, name, kind, None, documents))
+    prompt = build_deep_prompt(context)
+    # 読んでよい記録に notes/map/ を足す
+    assert (context.run_dir / "notes" / "map").as_posix() in prompt
+    # 対象の文書は変わらない (マップの文書は書かない)
+    assert context.notes == tuple(documents)
+
+
+def test_strategy_and_advice_instructions_use_the_map():
+    strategy = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind.STRATEGY])
+    # 大方針の行き先に、通る場所の順を添える
+    assert "通る場所" in strategy
+    advice = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind.ADVICE])
+    # 助言に場所の構造を使う (直接の指示ではなく、原因の説明にする)
+    assert "場所の構造" in advice
+    assert "直接指示する書き方をしない" in advice

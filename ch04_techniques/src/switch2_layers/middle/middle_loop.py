@@ -4,17 +4,19 @@
     1. 実行ディレクトリーのファイルだけから入力を作る (middle_input_builder.build_middle_input)
     2. MiddleAnalyzer.analyze を呼ぶ
     3. 出力を書く (middle_output_writer.write_middle_output)
-    4. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報の deep を、きっかけ new_scene でスケジューラーに渡す
+    4. マップの記録の行 (middle.map_records.build_map_record) があれば、middle/map_records.jsonl に追記する。
+       追記の失敗は middle の失敗として数えず、logging で警告を書いて続ける (run.jsonl には書かない)
+    5. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報の deep を、きっかけ new_scene でスケジューラーに渡す
        (middle-once では渡さず、記録だけする)
-    5. 1 行を middle/calls.jsonl に書く。MiddleAnalyzer が middle_call_record.MiddleCallDetailsSource でもあれば
+    6. 1 行を middle/calls.jsonl に書く。MiddleAnalyzer が middle_call_record.MiddleCallDetailsSource でもあれば
        (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を行に足す (失敗した回も同じ)
 ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから最初の実行を始め、
 前回の応答 (失敗を含む) から interval_s 秒待って次を始める。analyze が例外を出したら、前回の出力を残したまま
 次の間隔で再び呼ぶ。max_errors 回続けたら on_stop で全体を止める。
-止める合図は、analyze が戻ったとき (例外を含む)、出力のファイル (tasks.md・middle/state.json・notes/scene_labels.json) と
-middle/calls.jsonl のそれぞれを書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、残りのファイル・
-middle/calls.jsonl・run.jsonl に書かず、deep も呼ばずにループを抜ける (止めた後に記録を増やさない。書く順は変えず、
-それまでに書いたファイルは戻さない)。
+止める合図は、analyze が戻ったとき (例外を含む)、出力のファイル (tasks.md・middle/state.json・notes/scene_labels.json)・
+middle/map_records.jsonl・middle/calls.jsonl のそれぞれを書く直前、deep を要求する直前 (種類ごと) に確かめる。
+立っていたら、残りのファイル・middle/map_records.jsonl・middle/calls.jsonl・run.jsonl に書かず、deep も呼ばずにループを
+抜ける (止めた後に記録を増やさない。書く順は変えず、それまでに書いたファイルは戻さない)。
 """
 
 import logging
@@ -27,6 +29,7 @@ from switch2_layers.deep.deep_types import DeepRequestSink, DeepTrigger, Documen
 from switch2_layers.error_text import describe_exception
 from switch2_layers.file_io import append_json_line
 from switch2_layers.frames.frame_store import latest_frame_t
+from switch2_layers.middle.map_records import build_map_record
 from switch2_layers.middle.middle_call_record import (
     MiddleCallRecord,
     middle_call_row_with_details,
@@ -40,7 +43,12 @@ from switch2_layers.middle.middle_output_writer import (
     NEW_SCENE_DEEP_KINDS,
     write_middle_output,
 )
-from switch2_layers.middle.middle_types import MiddleAnalyzer, MiddleInput, MiddleState
+from switch2_layers.middle.middle_types import (
+    MiddleAnalyzer,
+    MiddleInput,
+    MiddleOutput,
+    MiddleState,
+)
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.records.run_log import (
     EVENT_DEEP_REQUEST_ERROR,
@@ -94,7 +102,7 @@ def run_middle_step(
     deep_requests: DeepRequestSink | None,
     stop: threading.Event | None = None,
 ) -> MiddleStepResult:
-    """middle の 1 回分を処理する (モジュールの docstring の 1〜5)。
+    """middle の 1 回分を処理する (モジュールの docstring の 1〜6)。
 
     stop は止める合図 (MiddleLoop.run が渡す)。None なら合図を確かめない。
 
@@ -103,10 +111,14 @@ def run_middle_step(
     3. write_middle_output(paths, 入力, 出力, generated_t=t_received, stop) で出力を書く:
        notes/scenes/<場面ID>/tasks.md → middle/state.json → notes/scene_labels.json (新しい場面のときだけ)。
        それぞれのファイルを書く直前に stop を確かめる (立っていたら write_middle_output が None を返す)
-    4. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に、request の直前に stop を確かめてから
+    4. middle.map_records.build_map_record(入力, 書いた middle/state.json の scene_id, 出力) が None でなければ、
+       追記の直前に stop を確かめてから、file_io.append_json_line で middle/map_records.jsonl に追記する。
+       追記が例外 (Exception) を出したら、外に出さずに logging で警告を書いて続ける (middle の失敗に数えず、
+       run.jsonl にも calls.jsonl にも書かない)
+    5. new_scene があり deep_requests が None でなければ、NEW_SCENE_DEEP_KINDS の順に、request の直前に stop を確かめてから
        deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
        外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
-    5. middle/calls.jsonl に middle_call_record.middle_call_row_with_details(記録, analyze の記録) の行を書く
+    6. middle/calls.jsonl に middle_call_record.middle_call_row_with_details(記録, analyze の記録) の行を書く
        (書く直前に stop を確かめる。deep_requests_sent は deep_requests が None でなく、要求を渡したら True。
        要求が例外を出した場合も True)
     analyze の記録は、analyze が戻った直後 (例外を含む) に middle_call_record.take_analyzer_call_details(analyzer) で
@@ -115,8 +127,8 @@ def run_middle_step(
     ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。error の行にも analyze の記録を
     足す (analyze の失敗と、analyze の後の 3 の失敗。1 で失敗して analyze を呼ばなかった回は、記録を受け取らずに空とする)。
     stop を確かめたときに立っていたら、そこで STOPPED_STEP_RESULT を返し、残りのファイル (tasks.md・middle/state.json・
-    notes/scene_labels.json のうちまだ書いていないもの)・deep の要求・calls.jsonl の行を書かない。書く順は変えず、
-    それまでに書いたファイルは戻さない。analyze が戻ったときに立っていたら、何も書かず deep も呼ばない。
+    notes/scene_labels.json のうちまだ書いていないもの)・マップの記録の行・deep の要求・calls.jsonl の行を書かない。
+    書く順は変えず、それまでに書いたファイルは戻さない。analyze が戻ったときに立っていたら、何も書かず deep も呼ばない。
     """
     now_t = clock.now()
     t_sent = now_t
@@ -154,6 +166,10 @@ def run_middle_step(
         )
     if write_result is None:
         return STOPPED_STEP_RESULT
+    if not _append_map_record(
+        paths, middle_input, write_result.state.scene_id, output, stop
+    ):
+        return STOPPED_STEP_RESULT
     new_scene = write_result.new_scene
     deep_kinds = NEW_SCENE_DEEP_KINDS if new_scene is not None else ()
     request_errors: list[tuple[DocumentKind, str]] = []
@@ -190,6 +206,33 @@ def run_middle_step(
         error=None,
         deep_request_errors=tuple(request_errors),
     )
+
+
+def _append_map_record(
+    paths: RunPaths,
+    middle_input: MiddleInput,
+    scene_id: str | None,
+    output: MiddleOutput,
+    stop: threading.Event | None,
+) -> bool:
+    """その回のマップの記録の行を middle/map_records.jsonl に追記する (run_middle_step の 4)。
+
+    行が無い回 (build_map_record が None) は何も書かない。追記の直前に stop を確かめ、立っていれば書かずに False を
+    返す (呼び出し側は STOPPED_STEP_RESULT を返す)。それ以外は True を返す。追記の例外 (Exception) は外に出さず、
+    logging で警告を書く (middle の失敗に数えない)。
+    """
+    row = build_map_record(middle_input, scene_id, output)
+    if row is None:
+        return True
+    if _is_stopped(stop):
+        return False
+    try:
+        append_json_line(paths.middle_map_records, row)
+    except Exception:
+        logger.warning(
+            "failed to append to %s", paths.middle_map_records, exc_info=True
+        )
+    return True
 
 
 def _record_failure(

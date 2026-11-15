@@ -5,6 +5,8 @@ import pytest
 from switch2_layers.deep.deep_types import DocumentKey, DocumentKind
 from switch2_layers.notes.note_paths import (
     BOX_TARGETS_FILE,
+    MAP_JSON_NOTE,
+    MAP_PLACES_NOTE,
     box_targets_note,
     common_note,
     deep_document_notes,
@@ -83,30 +85,29 @@ def test_deep_document_notes_for_scene_independent_documents(tmp_path):
     ]
 
 
-def test_deep_document_notes_for_map_lists_files(tmp_path):
+def test_deep_document_notes_for_map_are_map_json_and_places_md(tmp_path):
+    assert MAP_JSON_NOTE == "map/map.json"
+    assert MAP_PLACES_NOTE == "map/places.md"
     key = DocumentKey(DocumentKind.MAP, None)
-    assert deep_document_notes(tmp_path, key) == []
-    (tmp_path / "map" / "town").mkdir(parents=True)
-    assert deep_document_notes(tmp_path, key) == []
-    (tmp_path / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
-    (tmp_path / "map" / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
-    assert deep_document_notes(tmp_path, key) == ["map/places.md", "map/town/house.md"]
+    # まだ無くてもパスを返す (deep が Write で作る)。notes/map/ が無くても同じ
+    assert deep_document_notes(tmp_path, key) == ["map/map.json", "map/places.md"]
+    (tmp_path / "map").mkdir()
+    assert deep_document_notes(tmp_path, key) == ["map/map.json", "map/places.md"]
 
 
-def test_map_listing_skips_temporary_and_hidden_files(tmp_path):
+def test_map_documents_do_not_depend_on_files_in_map_directory(tmp_path):
+    # notes/map/ の下のほかのファイル (場所ごとのファイル・一時ファイル・隠しファイル) は対象にしない
     key = DocumentKey(DocumentKind.MAP, None)
     map_dir = tmp_path / "map"
     (map_dir / "town").mkdir(parents=True)
-    (map_dir / ".hidden").mkdir()
     (map_dir / "places.md").write_text("# 場所\n", encoding="utf-8")
-    # 置き換えの書き込みの途中 (や kill された後) に残る一時ファイル
+    (map_dir / "map.json").write_text(
+        '{"places": [], "connections": []}', encoding="utf-8"
+    )
     (map_dir / ".places.md.x7k2q.tmp").write_text("書きかけ", encoding="utf-8")
-    (map_dir / "town" / ".house.md.a1b2c.tmp").write_text("書きかけ", encoding="utf-8")
-    # `.` で始まる名前と、その下のファイル
     (map_dir / ".notes").write_text("x", encoding="utf-8")
-    (map_dir / ".hidden" / "inside.md").write_text("x", encoding="utf-8")
     (map_dir / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
-    assert deep_document_notes(tmp_path, key) == ["map/places.md", "map/town/house.md"]
+    assert deep_document_notes(tmp_path, key) == ["map/map.json", "map/places.md"]
 
 
 # --- box で取るもの ---
@@ -137,10 +138,12 @@ def test_common_tips_and_scene_controls_jobs_do_not_target_box_targets(tmp_path)
     ) == ["scenes/scene-002/controls.md", "common/controls.md"]
 
 
-# --- map の列挙とリンク ---
+# --- map の文書とリンク ---
 
 
-def test_map_listing_skips_symlinks_to_outside_of_notes(tmp_path):
+def test_map_documents_do_not_list_symlinks_in_map_directory(tmp_path):
+    # notes/map/ の下の、外を指すリンクを対象に入れない (対象の文書は 2 つに固定)。
+    # 対象の文書そのものがリンクなら、deep のジョブが起動の前に拒む (deep.claude_code_runner)
     notes = tmp_path / "notes"
     map_dir = notes / "map"
     map_dir.mkdir(parents=True)
@@ -151,4 +154,4 @@ def test_map_listing_skips_symlinks_to_outside_of_notes(tmp_path):
     os.symlink(outside / "secret.md", map_dir / "linked.md")
     os.symlink(outside, map_dir / "linked-dir")
     key = DocumentKey(DocumentKind.MAP, None)
-    assert deep_document_notes(notes, key) == ["map/places.md"]
+    assert deep_document_notes(notes, key) == ["map/map.json", "map/places.md"]

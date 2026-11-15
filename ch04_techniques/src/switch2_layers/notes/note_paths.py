@@ -10,6 +10,8 @@
     scenes/<場面ID>/box_targets.md  場面の「box で取るもの」(`- 名前: 説明` の行。場面の攻略情報の deep のジョブが書く)
     scene_labels.json              場面ラベルの一覧 (notes.scene_labels)
     map/                           マップの文書を置くディレクトリー
+    map/map.json                   マップの場所とつながりの一覧 (notes.map_document。map の deep のジョブが書く)
+    map/places.md                  マップの場所ごとの文章 (map の deep のジョブが書く)
 
 場面 ID は `scene-` と 3 桁以上の連番 (SCENE_ID_PATTERN)。パスに使う前に必ず確かめ、notes/ の外を指せないようにする。
 """
@@ -23,8 +25,6 @@ from switch2_layers.deep.deep_types import (
     DocumentKey,
     DocumentKind,
 )
-from switch2_layers.file_io import is_temporary_file_name
-from switch2_layers.notes.note_reader import resolve_note_file
 
 SCENE_ID_PATTERN = re.compile(r"scene-[0-9]{3,}")
 STRATEGY_NOTE = "strategy.md"
@@ -32,6 +32,9 @@ ADVICE_NOTE = "advice.md"
 COMMON_DIR = "common"
 SCENES_DIR = "scenes"
 MAP_DIR = "map"
+# マップの文書。場所とつながりの一覧 (形は notes.map_document) と、場所ごとの文章
+MAP_JSON_NOTE = f"{MAP_DIR}/map.json"
+MAP_PLACES_NOTE = f"{MAP_DIR}/places.md"
 SCENE_LABELS_FILE = "scene_labels.json"
 BOX_TARGETS_FILE = "box_targets.md"
 
@@ -92,14 +95,9 @@ def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
       (場面の攻略情報のジョブは、場面の「box で取るもの」も書く)
     - controls・tips で場面なし: [common/<種類>.md]
     - strategy: [strategy.md]、advice: [advice.md]
-    - map: notes_dir/map/ の下の通常のファイルの相対パス (map/... の形、文字列の順)。無ければ空のリスト。
-      次のものは除く:
-        - パスの要素のどれかが `.` で始まるもの (隠しファイルと隠しディレクトリーの下)
-        - 名前が置き換えの一時ファイルの規則 (file_io.is_temporary_file_name) に当たるもの
-          (置き換えの書き込みの途中や、kill されたジョブが残したファイルを文書として扱わないため)
-        - notes.note_reader.resolve_note_file が None のもの (シンボリックリンクを解決した先が notes/ の中の
-          通常のファイルでないもの。notes/ の外のファイルを文書として列挙しない)
-    map 以外は、ファイルがまだ無くてもパスを返す (deep が Write で作る)。
+    - map: [MAP_JSON_NOTE, MAP_PLACES_NOTE] (map/map.json と map/places.md。notes_dir/map/ の下のほかのファイルは
+      対象にしない)
+    ファイルがまだ無くてもパスを返す (deep が Write で作る)。notes_dir の中は調べない。
     """
     if key.kind in SCENE_DOCUMENT_KINDS:
         if key.scene_id is None:
@@ -115,28 +113,4 @@ def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
         return [STRATEGY_NOTE]
     if key.kind is DocumentKind.ADVICE:
         return [ADVICE_NOTE]
-    return _map_documents(notes_dir)
-
-
-def _map_documents(notes_dir: Path) -> list[str]:
-    """notes_dir/map/ の下の通常のファイルの相対パス (map/... の形、文字列の順) を返す。
-
-    パスの要素のどれかが `.` で始まるものと、置き換えの一時ファイルの名前のものは除く。
-    シンボリックリンクを解決した先が notes/ の中の通常のファイルでないもの (note_reader.resolve_note_file が None)
-    も除く。map/ が無ければ空のリスト。
-    """
-    map_dir = notes_dir / MAP_DIR
-    if not map_dir.is_dir():
-        return []
-    notes: list[str] = []
-    for path in map_dir.rglob("*"):
-        relative = path.relative_to(map_dir)
-        if any(part.startswith(".") for part in relative.parts):
-            continue
-        if is_temporary_file_name(path.name):
-            continue
-        note = f"{MAP_DIR}/{relative.as_posix()}"
-        if resolve_note_file(notes_dir, note) is None:
-            continue
-        notes.append(note)
-    return sorted(notes)
+    return [MAP_JSON_NOTE, MAP_PLACES_NOTE]

@@ -32,6 +32,10 @@ MIDDLE_INPUT = MiddleInput(
 )
 OUTPUT = {
     "scene_name": "タイトル画面",
+    # タイトル画面にはゲームの世界の中の場所が映っていない
+    "place_name": "",
+    "new_connections": [],
+    "new_observations": [],
     "is_stuck": False,
     "stuck_description": "",
     "surface_wait_s": 1.5,
@@ -124,6 +128,9 @@ def test_analyze_returns_parsed_output():
         surface_wait_s=1.5,
         timeline="## 操作のまとめ\n- まだ操作していない",
         tasks="- A でゲームを始める\n",
+        place_name=None,
+        new_connections=(),
+        new_observations=(),
     )
     assert len(handler.requests) == 1
 
@@ -143,6 +150,9 @@ def test_analyze_sends_the_expected_request():
     assert text_format["strict"] is True
     assert text_format["schema"]["required"] == [
         "scene_name",
+        "place_name",
+        "new_connections",
+        "new_observations",
         "is_stuck",
         "stuck_description",
         "surface_wait_s",
@@ -276,6 +286,9 @@ def test_refusal_raises_and_records_response():
     ids=["wait-too-long", "wait-too-short", "missing-key", "wrong-type", "extra-key"],
 )
 def test_output_that_does_not_match_schema_raises_and_records_response(output):
+    # OUTPUT そのものは読める (誤りの出力が、別の理由で ValueError になって通らないように)
+    valid, _ = make_analyzer(httpx.Response(200, json=response_body()))
+    assert valid.analyze(MIDDLE_INPUT).scene_name == "タイトル画面"
     body = response_body(output=output)
     analyzer, _ = make_analyzer(httpx.Response(200, json=body))
     with pytest.raises(ValueError):

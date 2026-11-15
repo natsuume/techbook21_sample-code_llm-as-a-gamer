@@ -243,41 +243,44 @@ def test_failed_preparation_removes_partial_job_directory(tmp_path):
     )
 
 
-def test_map_job_skips_temporary_files(tmp_path):
+MAP_DOCUMENTS = ["map/map.json", "map/places.md"]
+
+
+def test_map_job_targets_map_json_and_places_md_even_before_they_exist(tmp_path):
+    # まだ無い文書も対象に並べる (deep が Write で作る)
     root = make_run(tmp_path)
-    (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
-    (root / "notes" / "map" / ".places.md.x7k2q.tmp").write_text(
-        "書きかけ", encoding="utf-8"
-    )
     job_dir = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
-    assert read_json(job_dir / "job.json")["documents"] == ["map/places.md"]
+    assert read_json(job_dir / "job.json") == {
+        "kind": "map",
+        "scene_id": None,
+        "trigger": "surface",
+        "requested_t": 9.5,
+        "previous_latest_frame_t": None,
+        "latest_frame_t": 8.0,
+        "documents": MAP_DOCUMENTS,
+    }
+    assert list((root / "notes" / "map").iterdir()) == []
 
 
-def test_map_job_lists_all_map_files(tmp_path):
+def test_map_job_targets_only_the_two_documents(tmp_path):
     root = make_run(tmp_path)
-    empty_job = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
-    assert read_json(empty_job / "job.json")["documents"] == []
-    (root / "notes" / "map" / "town").mkdir()
-    (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
-    (root / "notes" / "map" / "town" / "house.md").write_text(
-        "# 家\n", encoding="utf-8"
-    )
+    map_dir = root / "notes" / "map"
+    (map_dir / "town").mkdir()
+    (map_dir / "places.md").write_text("# 場所\n", encoding="utf-8")
+    (map_dir / "town" / "house.md").write_text("# 家\n", encoding="utf-8")
+    (map_dir / ".places.md.x7k2q.tmp").write_text("書きかけ", encoding="utf-8")
     job_dir = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
-    assert job_dir.name == "map-002"
-    assert read_json(job_dir / "job.json")["documents"] == [
-        "map/places.md",
-        "map/town/house.md",
-    ]
+    assert read_json(job_dir / "job.json")["documents"] == MAP_DOCUMENTS
 
 
-def test_map_file_symlinked_to_outside_of_notes_is_not_listed(tmp_path):
+def test_map_file_symlinked_to_outside_of_notes_is_not_a_document(tmp_path):
     root = make_run(tmp_path)
     secret = tmp_path / "secret.md"
     secret.write_text("secret\n", encoding="utf-8")
     (root / "notes" / "map" / "places.md").write_text("# 場所\n", encoding="utf-8")
     (root / "notes" / "map" / "linked.md").symlink_to(secret)
     job_dir = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
-    assert read_json(job_dir / "job.json")["documents"] == ["map/places.md"]
+    assert read_json(job_dir / "job.json")["documents"] == MAP_DOCUMENTS
     assert job_directory_entries(job_dir) == ["job.json"]
 
 

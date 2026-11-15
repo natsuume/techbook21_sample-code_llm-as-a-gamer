@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from switch2_layers.frames.frame_store import FrameKind, FrameRecord
 from switch2_layers.middle.middle_input_builder import (
     MIDDLE_MAX_FRAMES,
@@ -10,6 +12,7 @@ from switch2_layers.middle.middle_input_builder import (
     select_interval_frames,
 )
 from switch2_layers.middle.middle_types import MiddleState
+from switch2_layers.notes.map_document import MapConnection, MapDocument, MapPlace
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.run_directory import RunPaths
 
@@ -434,3 +437,145 @@ def test_current_controls_without_any_note_is_empty(tmp_path):
     write_state(root)
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == ""
+
+
+# --- マップ (notes/map/map.json と middle/map_records.jsonl) ---
+
+MAP_JSON = {
+    "places": [
+        {
+            "name": "家の 1 階",
+            "aliases": ["1 階の部屋"],
+            "description": "自分の部屋から階段で下りた先の部屋",
+            "exits": ["左下の赤いマット (未確認)"],
+            "blocked": [],
+            "state": "訪問済み",
+            "changes_on_entry": False,
+        },
+        {
+            "name": "町",
+            "aliases": [],
+            "description": "",
+            "exits": [],
+            "blocked": [],
+            "state": "",
+            "changes_on_entry": False,
+        },
+    ],
+    "connections": [{"from": "家の 1 階", "to": "町", "how": "左下のマットから下へ"}],
+}
+MAP_DOCUMENT = MapDocument(
+    places=(
+        MapPlace(
+            name="家の 1 階",
+            aliases=("1 階の部屋",),
+            description="自分の部屋から階段で下りた先の部屋",
+            exits=("左下の赤いマット (未確認)",),
+            blocked=(),
+            state="訪問済み",
+            changes_on_entry=False,
+        ),
+        MapPlace(
+            name="町",
+            aliases=(),
+            description="",
+            exits=(),
+            blocked=(),
+            state="",
+            changes_on_entry=False,
+        ),
+    ),
+    connections=(
+        MapConnection(
+            from_place="家の 1 階", to_place="町", how="左下のマットから下へ"
+        ),
+    ),
+)
+
+
+def write_map(root: Path, value: object) -> None:
+    map_dir = root / "notes" / "map"
+    map_dir.mkdir(parents=True, exist_ok=True)
+    (map_dir / "map.json").write_text(
+        json.dumps(value, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def write_map_records(root: Path, place_names: list[object]) -> None:
+    rows = [
+        {
+            "t": float(index),
+            "scene_id": None,
+            "place_name": name,
+            "connections": [],
+            "observations": [],
+        }
+        for index, name in enumerate(place_names)
+    ]
+    write_jsonl(root / "middle" / "map_records.jsonl", rows)
+
+
+def test_map_and_place_names_are_read(tmp_path):
+    root = make_run(tmp_path)
+    # マップも記録も無ければ、マップなしで場所の名前も無い
+    before = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    assert before.map_document is None
+    assert before.place_names == ()
+    write_map(root, MAP_JSON)
+    write_map_records(
+        root, ["自分の部屋 (2 階)", "家の 1 階", None, "1 階の部屋", "庭"]
+    )
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    # マップの全体を渡す
+    assert middle_input.map_document == MAP_DOCUMENT
+    # map.json の name と aliases、記録の place_name を合わせ、重複を除いて最初に現れた順
+    assert middle_input.place_names == (
+        "家の 1 階",
+        "1 階の部屋",
+        "町",
+        "自分の部屋 (2 階)",
+        "庭",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not a map",
+        {"places": []},
+        {**MAP_JSON, "places": [*MAP_JSON["places"], {"name": "庭"}]},
+        {**MAP_JSON, "connections": [{"from": "", "to": "町", "how": ""}]},
+    ],
+    ids=["not-object", "no-connections", "place-without-keys", "empty-from"],
+)
+def test_map_that_does_not_match_is_passed_as_no_map(tmp_path, value):
+    root = make_run(tmp_path)
+    write_map(root, value)
+    write_map_records(root, ["家の 1 階", "庭"])
+    # middle の実行を失敗にしない
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.map_document is None
+    # 場所の名前の一覧は、記録の place_name だけから作る
+    assert middle_input.place_names == ("家の 1 階", "庭")
+
+
+def test_broken_map_json_is_passed_as_no_map(tmp_path):
+    root = make_run(tmp_path)
+    (root / "notes" / "map").mkdir()
+    (root / "notes" / "map" / "map.json").write_text("{broken", encoding="utf-8")
+    write_map_records(root, ["庭"])
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.map_document is None
+    assert middle_input.place_names == ("庭",)
+
+
+def test_map_symlinked_to_outside_of_notes_is_passed_as_no_map(tmp_path):
+    root = make_run(tmp_path)
+    outside = tmp_path / "outside-map.json"
+    outside.write_text(json.dumps(MAP_JSON, ensure_ascii=False), encoding="utf-8")
+    (root / "notes" / "map").mkdir()
+    (root / "notes" / "map" / "map.json").symlink_to(outside)
+    write_map_records(root, ["庭"])
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.map_document is None
+    assert middle_input.place_names == ("庭",)

@@ -8,11 +8,14 @@ from switch2_layers.middle.luna_instructions import (
 )
 from switch2_layers.middle.luna_output_schema import MIDDLE_OUTPUT_SCHEMA
 from switch2_layers.middle.luna_request import (
+    NO_MAP_TEXT,
     USER_SECTION_TITLES,
     build_developer_message,
     build_luna_payload,
     build_user_message,
     build_user_sections,
+    describe_map_document,
+    describe_place_names,
     describe_previous_state,
     describe_scene_labels,
     frame_label,
@@ -22,6 +25,12 @@ from switch2_layers.middle.middle_types import MiddleFrame, MiddleInput, MiddleS
 from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
+)
+from switch2_layers.notes.map_document import (
+    MapConnection,
+    MapDocument,
+    MapPlace,
+    map_document_to_json,
 )
 from switch2_layers.notes.scene_labels import SceneLabel
 
@@ -61,6 +70,41 @@ OPERATION_ROWS = (
         "error": None,
     },
 )
+MAP_DOCUMENT = MapDocument(
+    places=(
+        MapPlace(
+            name="家の 1 階",
+            aliases=("1 階の部屋",),
+            description="自分の部屋から階段で下りた先の部屋",
+            exits=("左下の赤いマット (未確認)",),
+            blocked=("下側の壁",),
+            state="訪問済み",
+            changes_on_entry=False,
+        ),
+    ),
+    connections=(
+        MapConnection(
+            from_place="自分の部屋 (2 階)", to_place="家の 1 階", how="右上の階段"
+        ),
+    ),
+)
+MAP_JSON = {
+    "places": [
+        {
+            "name": "家の 1 階",
+            "aliases": ["1 階の部屋"],
+            "description": "自分の部屋から階段で下りた先の部屋",
+            "exits": ["左下の赤いマット (未確認)"],
+            "blocked": ["下側の壁"],
+            "state": "訪問済み",
+            "changes_on_entry": False,
+        }
+    ],
+    "connections": [
+        {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "右上の階段"}
+    ],
+}
+PLACE_NAMES = ("家の 1 階", "1 階の部屋", "自分の部屋 (2 階)")
 FULL_INPUT = MiddleInput(
     t=15.25,
     frames=(
@@ -80,6 +124,8 @@ FULL_INPUT = MiddleInput(
     surface_rows_offset=300,
     operations_rows_offset=90,
     current_controls="\n# 操作説明 (共通)\n\n- A: unknown\n- B: ジャンプ\n",
+    place_names=PLACE_NAMES,
+    map_document=MAP_DOCUMENT,
 )
 EMPTY_INPUT = MiddleInput(
     t=0.0,
@@ -170,9 +216,9 @@ def test_user_content_is_sections_then_labeled_images():
     assert user == build_luna_payload(FULL_INPUT)["input"][1]
     content = user["content"]
     sections = build_user_sections(FULL_INPUT)
-    assert len(sections) == 10
-    assert content[:10] == [{"type": "input_text", "text": text} for text in sections]
-    assert content[10:] == [
+    assert len(sections) == 12
+    assert content[:12] == [{"type": "input_text", "text": text} for text in sections]
+    assert content[12:] == [
         {"type": "input_text", "text": "フレーム t=6.000"},
         {
             "type": "input_image",
@@ -211,6 +257,8 @@ def test_section_titles_and_order():
     assert USER_SECTION_TITLES == (
         "現在の時刻",
         "場面ラベルの一覧",
+        "場所の名前の一覧",
+        "マップ",
         "前回の middle の出力",
         "大方針",
         "現在の場面の短期タスクリスト",
@@ -237,6 +285,11 @@ def test_section_contents_of_full_input():
     assert section_body(sections, "場面ラベルの一覧") == describe_scene_labels(
         FULL_INPUT.scene_labels
     )
+    assert section_body(sections, "場所の名前の一覧") == describe_place_names(
+        PLACE_NAMES
+    )
+    # マップ (notes/map/map.json) の全体を JSON で渡す
+    assert json.loads(section_body(sections, "マップ")) == MAP_JSON
     assert section_body(sections, "前回の middle の出力") == describe_previous_state(
         PREVIOUS_STATE
     )
@@ -265,6 +318,8 @@ def test_section_contents_of_empty_input():
     sections = build_user_sections(EMPTY_INPUT)
     assert section_body(sections, "現在の時刻") == "t=0.000"
     assert section_body(sections, "場面ラベルの一覧") == "(無い)"
+    assert section_body(sections, "場所の名前の一覧") == "(無い)"
+    assert section_body(sections, "マップ") == "マップなし"
     assert section_body(sections, "前回の middle の出力") == "(無い)"
     assert section_body(sections, "大方針") == "(無い)"
     assert section_body(sections, "現在の場面の短期タスクリスト") == "(無い)"
@@ -276,7 +331,7 @@ def test_section_contents_of_empty_input():
     )
     assert section_body(sections, "フレーム") == "フレームは無い"
     content = build_user_message(EMPTY_INPUT)["content"]
-    assert len(content) == 10
+    assert len(content) == 12
     assert all(part["type"] == "input_text" for part in content)
 
 
@@ -301,6 +356,26 @@ def test_describe_scene_labels():
         ]
     )
     assert describe_scene_labels(()) == "(無い)"
+
+
+def test_describe_place_names():
+    assert describe_place_names(PLACE_NAMES) == lines_of(
+        ["- 家の 1 階", "- 1 階の部屋", "- 自分の部屋 (2 階)"]
+    )
+    assert describe_place_names(()) == "(無い)"
+
+
+def test_describe_map_document():
+    assert NO_MAP_TEXT == "マップなし"
+    assert describe_map_document(None) == "マップなし"
+    text = describe_map_document(MAP_DOCUMENT)
+    assert json.loads(text) == map_document_to_json(MAP_DOCUMENT)
+    assert json.loads(text) == MAP_JSON
+    # 日本語をエスケープしない
+    assert "家の 1 階" in text
+    # 空のマップも JSON で渡す (マップなしとは区別する)
+    empty = describe_map_document(MapDocument(places=(), connections=()))
+    assert json.loads(empty) == {"places": [], "connections": []}
 
 
 def test_describe_previous_state():
@@ -364,3 +439,19 @@ def test_instructions_cover_every_output_field_and_timeline_section():
     # user メッセージの節の見出しをすべて説明する
     for title in USER_SECTION_TITLES:
         assert title in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def test_instructions_cover_the_map():
+    # マップの 3 つの出力の項目と、観察の種類の書き方
+    for phrase in [
+        "place_name",
+        "new_connections",
+        "new_observations",
+        "exit",
+        "landmark",
+        "blocked",
+    ]:
+        assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase
+    # 場所の名前の一覧とマップを入力として説明し、マップを使って現在地から行き先までの手順をタスクにする
+    for phrase in ["場所の名前の一覧", "マップ", "現在地"]:
+        assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase

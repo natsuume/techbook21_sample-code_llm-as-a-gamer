@@ -552,7 +552,6 @@ def deep_once_command(args: argparse.Namespace) -> int:
     2. --run-dir がディレクトリーでなければ、標準エラー出力に書いて EXIT_USAGE を返す
     3. deep.deep_scheduler.run_deep_once(run_dir, kind, scene_id, build_deep_runner(DeepRunnerChoice(args.deep)))
        を呼ぶ
-       (map のジョブは、--deep claude でも Claude Code を起動せず、成功として何もしない。message にそのことが入る)
     4. 標準出力に結果の JSON 1 行 {"job": 実行ディレクトリーからのジョブのディレクトリーの相対パス, "status": deep_end の status,
        "message": 説明} を書く
     status が "ok" なら 0、それ以外なら 1 を返す。
