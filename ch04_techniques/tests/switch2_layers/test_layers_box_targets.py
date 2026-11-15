@@ -167,3 +167,20 @@ def test_unreadable_files_are_treated_as_empty(tmp_path):
     write_note(tmp_path, "scenes/scene-001/box_targets.md", b"\xff\xfe- \x80: x\n")
     write_note(tmp_path, "common/box_targets.md", "- 共通: 共通の対象\n")
     assert read_box_targets(tmp_path, "scene-001") == (BoxTarget("共通", "共通の対象"),)
+
+
+def test_symlink_to_outside_of_notes_is_treated_as_missing(tmp_path):
+    # notes/ の外を指すシンボリックリンクの文書は読まず、無い文書として扱う (notes.note_reader)
+    notes_dir = tmp_path / "notes"
+    outside = tmp_path / "outside.md"
+    outside.write_text("- 外: notes の外の対象\n", encoding="utf-8")
+    write_note(notes_dir, "common/box_targets.md", "- 共通: 共通の対象\n")
+    scene_dir = notes_dir / "scenes" / "scene-001"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "box_targets.md").symlink_to(outside)
+    assert read_box_targets(notes_dir, "scene-001") == (
+        BoxTarget("共通", "共通の対象"),
+    )
+    (notes_dir / "common" / "box_targets.md").unlink()
+    (notes_dir / "common" / "box_targets.md").symlink_to(outside)
+    assert read_box_targets(notes_dir, None) == DEFAULT_BOX_TARGETS

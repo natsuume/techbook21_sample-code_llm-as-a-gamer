@@ -4,8 +4,9 @@
     1. 場面が決まっていれば notes/scenes/<場面ID>/box_targets.md
     2. 1 が無いか空なら notes/common/box_targets.md (起動時に DEFAULT_BOX_TARGETS で作る)
     3. 2 も無いか空なら DEFAULT_BOX_TARGETS (固定の 4 つ)
-「空」は、書式に合う行が 1 つも無いこと (空のファイル、見出しだけのファイルを含む)。読めないファイル
-(無い・OSError・UnicodeDecodeError) は空として扱う。
+「空」は、書式に合う行が 1 つも無いこと (空のファイル、見出しだけのファイルを含む)。ファイルは
+notes.note_reader.read_note_text で読み、読めないファイル (無い・notes/ の外を指すシンボリックリンク・OSError・
+UnicodeDecodeError) は空として扱う。
 
 書式は 1 行に 1 つの `- 名前: 説明` (BOX_TARGET_LINE_PATTERN)。行頭は `- `、区切りは半角の `:`。
 名前と説明は前後の空白を除き、どちらも空でない行だけを使う。書式に合わない行 (見出し、空行、字下げした行、
@@ -16,8 +17,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from switch2_layers.file_io import read_text_or_empty
 from switch2_layers.notes.note_paths import COMMON_DIR, SCENES_DIR, is_scene_id
+from switch2_layers.notes.note_reader import read_note_text
 
 BOX_TARGETS_FILE = "box_targets.md"
 MAX_BOX_TARGETS = 8  # 1 回の要求で box を取る対象の最大の数
@@ -106,15 +107,15 @@ def read_box_targets(notes_dir: Path, scene_id: str | None) -> tuple[BoxTarget, 
     戻り値は 1〜MAX_BOX_TARGETS 個 (どのファイルも空なら DEFAULT_BOX_TARGETS)。
     """
     if scene_id is not None and is_scene_id(scene_id):
-        scene_targets = _read_targets_file(notes_dir / scene_box_targets_note(scene_id))
+        scene_targets = _read_targets_note(notes_dir, scene_box_targets_note(scene_id))
         if scene_targets:
             return scene_targets
-    common_targets = _read_targets_file(notes_dir / common_box_targets_note())
+    common_targets = _read_targets_note(notes_dir, common_box_targets_note())
     if common_targets:
         return common_targets
     return DEFAULT_BOX_TARGETS
 
 
-def _read_targets_file(path: Path) -> tuple[BoxTarget, ...]:
-    """path の対象の一覧を読む。無い・読めないファイルは空のタプルにする (file_io.read_text_or_empty)。"""
-    return parse_box_targets(read_text_or_empty(path))
+def _read_targets_note(notes_dir: Path, note: str) -> tuple[BoxTarget, ...]:
+    """文書 note (notes/ からの相対パス) の対象の一覧を読む。読めない文書は空のタプルにする (note_reader.read_note_text)。"""
+    return parse_box_targets(read_note_text(notes_dir, note))

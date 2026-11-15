@@ -4,7 +4,8 @@
 通常のファイルのときだけ読む。そうでないとき (無い・ディレクトリー・notes/ の外を指すシンボリックリンク・
 途中のディレクトリーが notes/ の外へのシンボリックリンク・パスの確認や読み込みで OSError) は「無い文書」として扱う。
 notes/ の中を指すシンボリックリンクは、その先の文書として読む。
-surface と middle の文書の読み込み (surface_documents・middle_input_builder) は、このモジュールの関数で読む。
+surface と middle の文書の読み込み (surface_documents・middle_input_builder・surface.box_targets) は、このモジュールの
+関数で読む。
 deep のジョブの用意で使う map の文書の列挙 (note_paths.deep_document_notes) は、resolve_note_file で確かめる。
 """
 
