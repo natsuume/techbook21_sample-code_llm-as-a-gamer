@@ -11,7 +11,7 @@
           {"type": "input_text", "text": luna_instructions.LUNA_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 10>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 12>},
           {"type": "input_text", "text": frame_label(フレーム 1 の t)},
           {"type": "input_image", "image_url": jpeg_data_url(フレーム 1 の JPEG)},
           ...]}
@@ -26,22 +26,25 @@ prompt_cache_options の mode を explicit にして、自動の区切りを置�
 user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の見出し>」の行で始まり、次の行から中身を書く):
     1. 現在の時刻                       「t=<middle_input.t>」(frames.surface_frames.format_frame_label の形)
     2. 場面ラベルの一覧                 describe_scene_labels(middle_input.scene_labels)
-    3. 前回の middle の出力             describe_previous_state(middle_input.previous_state)
-    4. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
-    5. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
-    6. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
+    3. 場所の名前の一覧                 describe_place_names(middle_input.place_names)
+    4. マップ                           describe_map_document(middle_input.map_document)
+    5. 前回の middle の出力             describe_previous_state(middle_input.previous_state)
+    6. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
+    7. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
+    8. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (unknown のボタンを確かめるタスクを作るために渡す)
-    7. 前回以降の surface の記録        record_summary.summarize_surface_rows(middle_input.surface_rows)
-    8. 前回以降の操作の記録             record_summary.summarize_operation_rows(middle_input.operation_rows)
-    9. 場面転換の印                     scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
+    9. 前回以降の surface の記録        record_summary.summarize_surface_rows(middle_input.surface_rows)
+    10. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
+    11. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
                                         SCENE_CHANGE_NOT_REPORTED_TEXT
-    10. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
+    12. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
                                         0 枚なら NO_FRAMES_TEXT
 節の後ろに、middle_input.frames の順 (古い順) に、時刻のラベル (frame_label) と画像 (input_image) を 1 組ずつ置く。
 画像の detail は指定しない (既定の auto)。
 """
 
 import base64
+import json
 from collections.abc import Sequence
 
 from switch2_layers.frames.surface_frames import format_frame_label
@@ -52,7 +55,7 @@ from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
 )
-from switch2_layers.notes.map_document import MapDocument
+from switch2_layers.notes.map_document import MapDocument, map_document_to_json
 from switch2_layers.notes.scene_labels import SceneLabel
 
 LUNA_MODEL = "gpt-6-luna"
@@ -61,6 +64,8 @@ REASONING_EFFORT = "none"
 USER_SECTION_TITLES: tuple[str, ...] = (
     "現在の時刻",
     "場面ラベルの一覧",
+    "場所の名前の一覧",
+    "マップ",
     "前回の middle の出力",
     "大方針",
     "現在の場面の短期タスクリスト",
@@ -112,7 +117,9 @@ def describe_place_names(names: Sequence[str]) -> str:
 
     一覧が空なら EMPTY_TEXT を返す。
     """
-    raise NotImplementedError
+    if not names:
+        return EMPTY_TEXT
+    return "\n".join(f"- {name}" for name in names)
 
 
 def describe_map_document(document: MapDocument | None) -> str:
@@ -121,7 +128,9 @@ def describe_map_document(document: MapDocument | None) -> str:
     document が None (マップなし) なら NO_MAP_TEXT。そうでなければ、マップの全体
     notes.map_document.map_document_to_json(document) を json.dumps(..., ensure_ascii=False) で JSON にした文字列。
     """
-    raise NotImplementedError
+    if document is None:
+        return NO_MAP_TEXT
+    return json.dumps(map_document_to_json(document), ensure_ascii=False)
 
 
 def describe_previous_state(state: MiddleState | None) -> str:
@@ -159,7 +168,7 @@ def describe_previous_state(state: MiddleState | None) -> str:
 
 
 def build_user_sections(middle_input: MiddleInput) -> list[str]:
-    """user メッセージの 10 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 12 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     frame_count = len(middle_input.frames)
     if frame_count:
         frames_text = (
@@ -171,6 +180,8 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
     bodies = [
         format_frame_label(middle_input.t),
         describe_scene_labels(middle_input.scene_labels),
+        describe_place_names(middle_input.place_names),
+        describe_map_document(middle_input.map_document),
         describe_previous_state(middle_input.previous_state),
         _stripped_or_empty_text(middle_input.strategy),
         _stripped_or_empty_text(middle_input.current_tasks),

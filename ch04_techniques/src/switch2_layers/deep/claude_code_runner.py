@@ -1,17 +1,15 @@
 """deep の 1 回のジョブを、Claude Code (claude -p) を子プロセスとして起動して実行する DeepRunner (ClaudeCodeDeepRunner)。
 
-1 回のジョブの流れ (run):
-    1. map のジョブは Claude Code を起動せず、何も書かずに DeepResult(ok=True, message=MAP_SKIPPED_MESSAGE) を返す。
-       DeepScheduler は、この message を run.jsonl の deep_end に書く
-    2. job.json を読み (deep_prompt)、対象の文書とその親のディレクトリー (notes/ を含む) がシンボリックリンクでない
+1 回のジョブの流れ (run。文書の種類によらず同じ):
+    1. job.json を読み (deep_prompt)、対象の文書とその親のディレクトリー (notes/ を含む) がシンボリックリンクでない
        ことを確かめる (notes.note_symlink_check)。リンクがあれば Claude Code を起動せず、DeepResult(ok=False,
        message=リンクだったパスを含む説明) を返す。DeepScheduler は、この message を run.jsonl の deep_end に書く
-    3. プロンプト (deep_prompt) と、引数と環境変数 (claude_code_command) を作り、claude -p を子プロセスとして起動する。
+    2. プロンプト (deep_prompt) と、引数と環境変数 (claude_code_command) を作り、claude -p を子プロセスとして起動する。
        作業ディレクトリーは実行ディレクトリー。子プロセスは新しいセッション (プロセスグループ) の先頭にする
        (start_new_session=True。プロセスグループの ID は子プロセスの pid と同じ)
-    4. 標準出力の stream-json を 1 行ずつ読み、ジョブのディレクトリーの stream.jsonl に書く (claude_stream_log)。
+    3. 標準出力の stream-json を 1 行ずつ読み、ジョブのディレクトリーの stream.jsonl に書く (claude_stream_log)。
        標準エラー出力は別のスレッドで最後まで読む
-    5. 子プロセスが終わったら、ジョブのディレクトリーの result.json に結果を書き、DeepResult を返す
+    4. 子プロセスが終わったら、ジョブのディレクトリーの result.json に結果を書き、DeepResult を返す
 deep は notes/ の対象の文書の本体を直接編集する。このクラスは文書を読み書きしない。
 止め方:
     stop はプロセスグループに SIGTERM を、kill は SIGKILL を送り、どちらも待たずにすぐ戻る。止められた run は
@@ -48,7 +46,7 @@ from switch2_layers.deep.claude_stream_log import (
 )
 from switch2_layers.deep.deep_job_success import is_success_result_record
 from switch2_layers.deep.deep_prompt import build_deep_prompt, read_prompt_context
-from switch2_layers.deep.deep_types import DeepJob, DeepResult, DocumentKind
+from switch2_layers.deep.deep_types import DeepJob, DeepResult
 from switch2_layers.error_text import describe_exception
 from switch2_layers.file_io import write_json_atomic
 from switch2_layers.notes.note_symlink_check import find_symlink_in_note_paths
@@ -57,8 +55,6 @@ from switch2_layers.run_directory import NOTES_DIR
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
 
-# map のジョブの DeepResult.message (run.jsonl の deep_end の message になる)
-MAP_SKIPPED_MESSAGE = "map jobs do not start Claude Code; nothing was done"
 # stop で止めた run の DeepResult.message
 STOPPED_MESSAGE = "stopped"
 # kill で止めた run の DeepResult.message
@@ -109,7 +105,7 @@ class ClaudeProcessStarter(Protocol):
 
 @dataclass(frozen=True)
 class _Launch:
-    """claude の起動に使う値 (run の 3 で作り、4 で使う)。
+    """claude の起動に使う値 (run の 2 で作り、3 で使う)。
 
     command   claude -p の引数の列 (claude_code_command.build_claude_command)
     cwd       作業ディレクトリー (実行ディレクトリーのシンボリックリンクを解決した絶対パス)
@@ -123,7 +119,7 @@ class _Launch:
 
 @dataclass(frozen=True)
 class _ProcessOutput:
-    """子プロセスの出力を最後まで読んだ結果 (run の 5 と 6)。
+    """子プロセスの出力を最後まで読んだ結果 (run の 4 と 5)。
 
     returncode            終了コード
     duration_s            起動から、終了と標準エラー出力の読み終わりを待ち終えるまでの秒
@@ -209,11 +205,10 @@ class ClaudeCodeDeepRunner:
     def run(self, job: DeepJob, job_dir: Path) -> DeepResult:
         """job_dir (deep/<種類>-<連番>/。job.json を用意済み) で job を実行し、結果を返す。
 
-        1. job.kind が map なら、子プロセスを起動せず、ファイルも書かずに DeepResult(ok=True, message=MAP_SKIPPED_MESSAGE)
-        2. このジョブに stop か kill が既に呼ばれていれば (run より前に止める要求が来た)、起動せずに
+        1. このジョブに stop か kill が既に呼ばれていれば (run より前に止める要求が来た)、起動せずに
            DeepResult(ok=False, stopped=True, message=kill が呼ばれていれば KILLED_MESSAGE、そうでなければ STOPPED_MESSAGE)
            を返す (result.json は書かない)
-        3. 起動の用意。次の順に行う。どれかが例外 (Exception) を出したら起動せず、説明 =
+        2. 起動の用意。次の順に行う。どれかが例外 (Exception) を出したら起動せず、説明 =
            error_text.describe_exception(例外) を result.json の error に書いて DeepResult(ok=False, message=説明) を返す:
              context = deep_prompt.read_prompt_context(job_dir)
                        (context.run_dir は、実行ディレクトリーのシンボリックリンクを解決した絶対パス)
@@ -225,39 +220,37 @@ class ClaudeCodeDeepRunner:
              command = claude_code_command.build_claude_command(deep_prompt.build_deep_prompt(context), context.run_dir,
                        context.notes, options)
              env = claude_code_command.build_child_env(environ, options.hidden_env_names)
-           この 3 と 4 の起動の失敗で書く result.json は、claude_stream_log.build_result_record(returncode=None,
+           この 2 と 3 の起動の失敗で書く result.json は、claude_stream_log.build_result_record(returncode=None,
            duration_s=0.0, result_message=None, last_assistant_text=None, stopped=False, killed=False, error=説明,
            stderr="") の辞書
-        4. ロックの中で止める要求を確かめ、来ていなければ start_process(command, cwd=context.run_dir, env=env,
+        3. ロックの中で止める要求を確かめ、来ていなければ start_process(command, cwd=context.run_dir, env=env,
            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
            errors="replace", start_new_session=True) で起動して、実行中のジョブとして記録する。
-           ロックの中で確かめるのは、起動の直前に来た stop を取りこぼさないため (来ていれば 2 と同じに戻る)。
-           start_process が OSError を出したら (claude が無いなど)、3 と同じく、説明 (describe_exception) を
+           ロックの中で確かめるのは、起動の直前に来た stop を取りこぼさないため (来ていれば 1 と同じに戻る)。
+           start_process が OSError を出したら (claude が無いなど)、2 と同じく、説明 (describe_exception) を
            result.json の error に書いて DeepResult(ok=False, message=説明) を返す (returncode は None)
-        5. 標準エラー出力を別のスレッド (daemon) で最後まで読む。標準出力を 1 行ずつ読み、届くたびに
+        4. 標準エラー出力を別のスレッド (daemon) で最後まで読む。標準出力を 1 行ずつ読み、届くたびに
            claude_stream_log.ClaudeStreamLog (job_dir/stream.jsonl) の add_line に、起動からの秒 (clock の差) とともに渡す
-        6. 標準出力が終わったら wait で終了を待ち、標準エラー出力のスレッドの終わりを最大 STDERR_JOIN_TIMEOUT_S 秒待つ
-        7. ロックの中で実行中の記録から外し (以後の stop・kill はシグナルを送らない)、stop・kill が呼ばれたかを読む
-        8. job_dir/result.json に claude_stream_log.build_result_record の辞書を置き換えの書き込み
-           (file_io.write_json_atomic) で書く。duration_s は起動から 6 の終わりまでの秒、stopped は stop か kill が
+        5. 標準出力が終わったら wait で終了を待ち、標準エラー出力のスレッドの終わりを最大 STDERR_JOIN_TIMEOUT_S 秒待つ
+        6. ロックの中で実行中の記録から外し (以後の stop・kill はシグナルを送らない)、stop・kill が呼ばれたかを読む
+        7. job_dir/result.json に claude_stream_log.build_result_record の辞書を置き換えの書き込み
+           (file_io.write_json_atomic) で書く。duration_s は起動から 5 の終わりまでの秒、stopped は stop か kill が
            呼ばれたら True、killed は kill が呼ばれたら True、error は stream.jsonl の書き込みの失敗があればその説明
-        9. 戻り値:
+        8. 戻り値:
              stop か kill が呼ばれた         DeepResult(ok=False, stopped=True, message=KILLED_MESSAGE か STOPPED_MESSAGE)
-             8 の辞書が deep_job_success.is_success_result_record で正常な終わり (終了コード 0、is_error が False、
+             7 の辞書が deep_job_success.is_success_result_record で正常な終わり (終了コード 0、is_error が False、
              止めていない)
                                              DeepResult(ok=True, message=最後のメッセージの先頭 RESULT_MESSAGE_MAX_CHARS 文字
                                              (無ければ空文字列))
              それ以外                         DeepResult(ok=False, message=`claude exited with code <終了コード>` と、
                                              最後のメッセージがあれば `: <その先頭 RESULT_MESSAGE_MAX_CHARS 文字>`)
-        result.json を書けない (OSError) ときは、logging で警告を書き、戻り値は 9 のとおりにする。
-        起動した後の 5 と 6 で例外 (BaseException。stream.jsonl を作れない OSError や、deep-once の最中の Ctrl+C の
+        result.json を書けない (OSError) ときは、logging で警告を書き、戻り値は 8 のとおりにする。
+        起動した後の 4 と 5 で例外 (BaseException。stream.jsonl を作れない OSError や、deep-once の最中の Ctrl+C の
         KeyboardInterrupt を含む) が出たら、子プロセスがまだ回収されていなければ (returncode が None)、プロセスグループに
         signal.SIGTERM を送って最大 ERROR_STOP_GRACE_S 秒待ち、終わらなければ signal.SIGKILL を送って最大
         ERROR_STOP_GRACE_S 秒待って回収してから、実行中の記録から外し、例外をそのまま出す (result.json は書かない)。
         待つ間に別の例外が出たら (もう一度 Ctrl+C を押したなど)、SIGKILL を送ってから、その例外を出す。
         """
-        if job.kind is DocumentKind.MAP:
-            return DeepResult(ok=True, message=MAP_SKIPPED_MESSAGE)
         key = job_dir.absolute()
         try:
             return self._run_claude(key, job_dir)
@@ -285,12 +278,12 @@ class ClaudeCodeDeepRunner:
         self._request_stop(job_dir, kill=True)
 
     def _run_claude(self, key: Path, job_dir: Path) -> DeepResult:
-        """run の 2〜9 (map 以外のジョブ)。key は job_dir の絶対パス。"""
+        """run の 1〜8。key は job_dir の絶対パス。"""
         with self._lock:
             stopped = self._stopped_result_locked(key)
         if stopped is not None:
             return stopped
-        # 3. 起動の用意
+        # 2. 起動の用意
         try:
             launch = self._prepare_launch(job_dir)
         except Exception as error:
@@ -298,7 +291,7 @@ class ClaudeCodeDeepRunner:
             return self._fail_before_start(job_dir, describe_exception(error))
         if isinstance(launch, str):
             return self._fail_before_start(job_dir, launch)
-        # 4. 起動 (止める要求の確かめと起動を、同じロックの中で行う)
+        # 3. 起動 (止める要求の確かめと起動を、同じロックの中で行う)
         try:
             with self._lock:
                 stopped = self._stopped_result_locked(key)
@@ -307,20 +300,20 @@ class ClaudeCodeDeepRunner:
                 process = self._start_locked(key, launch)
         except OSError as error:
             return self._fail_before_start(job_dir, describe_exception(error))
-        # 5・6. 出力を最後まで読む。例外で抜けるときは、子プロセスを止めて回収してから出す
+        # 4・5. 出力を最後まで読む。例外で抜けるときは、子プロセスを止めて回収してから出す
         started_at = self._clock()
         try:
             output = self._read_output(process, job_dir, started_at)
         except BaseException:
             self._stop_process_after_error(process)
             raise
-        # 7. 実行中の記録から外し、止める要求を読む
+        # 6. 実行中の記録から外し、止める要求を読む
         with self._lock:
             self._running.pop(key, None)
             self._finished.add(key)
             stop_requested = key in self._stop_requested
             kill_requested = key in self._kill_requested
-        # 8. result.json
+        # 7. result.json
         record = build_result_record(
             returncode=output.returncode,
             duration_s=output.duration_s,
@@ -332,7 +325,7 @@ class ClaudeCodeDeepRunner:
             stderr=output.stderr,
         )
         _write_result(job_dir, record)
-        # 9. 戻り値
+        # 8. 戻り値
         if stop_requested:
             return _stopped_result(kill_requested)
         last_message = record["last_message"]
@@ -346,7 +339,7 @@ class ClaudeCodeDeepRunner:
         return DeepResult(ok=False, message=message)
 
     def _prepare_launch(self, job_dir: Path) -> _Launch | str:
-        """run の 3 (起動の用意)。起動の引数・作業ディレクトリー・環境変数を返す。
+        """run の 2 (起動の用意)。起動の引数・作業ディレクトリー・環境変数を返す。
 
         対象の文書のパスにシンボリックリンクがあれば、起動しない理由 (symlink_refusal_message) の文字列を返す。
         job.json が読めないなどの失敗は、例外をそのまま出す。
@@ -385,7 +378,7 @@ class ClaudeCodeDeepRunner:
     def _read_output(
         self, process: ClaudeProcess, job_dir: Path, started_at: float
     ) -> _ProcessOutput:
-        """標準出力を stream.jsonl に書きながら最後まで読み、終了を待つ (run の 5 と 6)。"""
+        """標準出力を stream.jsonl に書きながら最後まで読み、終了を待つ (run の 4 と 5)。"""
         stream_log = ClaudeStreamLog(job_dir / STREAM_FILE)
         try:
             stderr_reader = _StderrReader(process.stderr)

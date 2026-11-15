@@ -12,8 +12,13 @@ map.json は deep の map の種類のジョブが書き、middle が入力と�
 middle の入力には、読めない・形に合わない map.json を「マップなし」(None) として渡す (read_map_document)。
 """
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from switch2_layers.notes.note_paths import MAP_JSON_NOTE
+from switch2_layers.notes.note_reader import read_note_bytes
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,13 @@ def parse_map_document(value: object) -> MapDocument:
     最上位と要素の object のほかのキーは無視する。値は書かれたまま (前後の空白も除かない) にし、配列はタプルにする。
     空の places・connections は形に合う。
     """
-    raise NotImplementedError
+    top = _object(value, "map.json")
+    places = _array(top, "places", "map.json")
+    connections = _array(top, "connections", "map.json")
+    return MapDocument(
+        places=tuple(_place(item) for item in places),
+        connections=tuple(_connection(item) for item in connections),
+    )
 
 
 def read_map_document(notes_dir: Path) -> MapDocument | None:
@@ -88,7 +99,14 @@ def read_map_document(notes_dir: Path) -> MapDocument | None:
         - UTF-8 として読めない、JSON として読めない
         - parse_map_document が ValueError (形に合わない要素が 1 つでもある)
     """
-    raise NotImplementedError
+    data = read_note_bytes(notes_dir, MAP_JSON_NOTE)
+    if data is None:
+        return None
+    try:
+        return parse_map_document(json.loads(data.decode("utf-8")))
+    except ValueError:
+        # UnicodeDecodeError と json.JSONDecodeError も ValueError
+        return None
 
 
 def map_document_to_json(document: MapDocument) -> dict[str, object]:
@@ -98,4 +116,108 @@ def map_document_to_json(document: MapDocument) -> dict[str, object]:
     changes_on_entry、connections の要素が from・to・how。タプルはリストにする。
     parse_map_document(map_document_to_json(document)) は document と等しい。
     """
-    raise NotImplementedError
+    return {
+        "places": [
+            {
+                "name": place.name,
+                "aliases": list(place.aliases),
+                "description": place.description,
+                "exits": list(place.exits),
+                "blocked": list(place.blocked),
+                "state": place.state,
+                "changes_on_entry": place.changes_on_entry,
+            }
+            for place in document.places
+        ],
+        "connections": [
+            {
+                "from": connection.from_place,
+                "to": connection.to_place,
+                "how": connection.how,
+            }
+            for connection in document.connections
+        ],
+    }
+
+
+# 以下の読み取りは、契約 (parse_map_document) どおり型の誤りも ValueError にする。
+# 型が合えば値を返し、合わなければ if の後で ValueError を出す。where は、誤りの説明に入れる、確かめている値の名前
+
+
+def _place(item: object) -> MapPlace:
+    """places の要素 item を MapPlace にする。形に合わなければ ValueError。"""
+    value = _object(item, "an element of places")
+    return MapPlace(
+        name=_non_blank_string(value, "name", "a place"),
+        aliases=_string_array(value, "aliases", "a place"),
+        description=_string(value, "description", "a place"),
+        exits=_string_array(value, "exits", "a place"),
+        blocked=_string_array(value, "blocked", "a place"),
+        state=_string(value, "state", "a place"),
+        changes_on_entry=_boolean(value, "changes_on_entry", "a place"),
+    )
+
+
+def _connection(item: object) -> MapConnection:
+    """connections の要素 item を MapConnection にする。形に合わなければ ValueError。"""
+    value = _object(item, "an element of connections")
+    return MapConnection(
+        from_place=_non_blank_string(value, "from", "a connection"),
+        to_place=_non_blank_string(value, "to", "a connection"),
+        how=_string(value, "how", "a connection"),
+    )
+
+
+def _object(item: object, where: str) -> Mapping[str, object]:
+    """item が JSON の object (dict) ならそのまま返す。それ以外は ValueError。"""
+    if isinstance(item, dict):
+        return item
+    raise ValueError(f"{where} must be a JSON object: {item!r}")
+
+
+def _value(value: Mapping[str, object], key: str, where: str) -> object:
+    """value[key] を返す。key が無ければ ValueError。"""
+    if key in value:
+        return value[key]
+    raise ValueError(f"{key!r} is missing in {where}")
+
+
+def _array(value: Mapping[str, object], key: str, where: str) -> list[object]:
+    """value[key] が配列 (list) ならその値を返す。無いか配列でなければ ValueError。"""
+    item = _value(value, key, where)
+    if isinstance(item, list):
+        return item
+    raise ValueError(f"{key!r} in {where} must be an array: {item!r}")
+
+
+def _string(value: Mapping[str, object], key: str, where: str) -> str:
+    """value[key] が文字列ならその値を返す。無いか文字列でなければ ValueError。"""
+    item = _value(value, key, where)
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"{key!r} in {where} must be a string: {item!r}")
+
+
+def _non_blank_string(value: Mapping[str, object], key: str, where: str) -> str:
+    """value[key] が、前後の空白を除いても空でない文字列なら、書かれたままの値を返す。それ以外は ValueError。"""
+    item = _string(value, key, where)
+    if item.strip():
+        return item
+    raise ValueError(f"{key!r} in {where} must not be empty")
+
+
+def _string_array(value: Mapping[str, object], key: str, where: str) -> tuple[str, ...]:
+    """value[key] が文字列の配列なら、タプルにして返す。無いか文字列の配列でなければ ValueError。"""
+    items = _array(value, key, where)
+    strings = tuple(item for item in items if isinstance(item, str))
+    if len(strings) == len(items):
+        return strings
+    raise ValueError(f"{key!r} in {where} must be an array of strings: {items!r}")
+
+
+def _boolean(value: Mapping[str, object], key: str, where: str) -> bool:
+    """value[key] が真偽ならその値を返す。無いか真偽でなければ ValueError。"""
+    item = _value(value, key, where)
+    if isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} in {where} must be a boolean: {item!r}")

@@ -8,7 +8,7 @@
         returncode が 0、is_error が False、stopped が False。Claude Code で動かしたジョブに残る
         (deep-once は run.jsonl に書かないため、deep-once で動かしたジョブにはこちらだけが残る)
 どちらの記録も正常な終わりを示さないジョブ (まだ実行中、起動を拒んだ、失敗した、stop・kill で止めたジョブと、
-deep-once で動かしたフェイクと map のジョブ) は、正常に終わったものとして扱わない。
+deep-once で動かしたフェイクのジョブ) は、正常に終わったものとして扱わない。
 """
 
 import json

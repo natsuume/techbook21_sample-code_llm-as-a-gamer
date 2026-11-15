@@ -17,6 +17,7 @@ file_io.append_json_line で追記する。追記の失敗は middle の失敗�
 
 from pathlib import Path
 
+from switch2_layers.file_io import read_json_lines
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 
 # middle/map_records.jsonl の行のキー (この順に書く)
@@ -42,7 +43,36 @@ def build_map_record(
     値は書かれたまま (前後の空白も除かない) にする。
     記録しない回 (モジュールの docstring) は None を返す。
     """
-    raise NotImplementedError
+    if not middle_input.frames:
+        return None
+    place_name = (output.place_name or "").strip() or None
+    if (
+        place_name is None
+        and not output.new_connections
+        and not output.new_observations
+    ):
+        return None
+    return {
+        "t": max(frame.t for frame in middle_input.frames),
+        "scene_id": scene_id,
+        "place_name": place_name,
+        "connections": [
+            {
+                "from": connection.from_place,
+                "to": connection.to_place,
+                "how": connection.how,
+            }
+            for connection in output.new_connections
+        ],
+        "observations": [
+            {
+                "kind": observation.kind.value,
+                "place": observation.place,
+                "description": observation.description,
+            }
+            for observation in output.new_observations
+        ],
+    }
 
 
 def read_recorded_place_names(path: Path) -> list[str]:
@@ -54,4 +84,13 @@ def read_recorded_place_names(path: Path) -> list[str]:
     place_name が無い行・文字列でない行 (null を含む)・前後の空白を除くと空になる行は飛ばす。
     返す名前は前後の空白を除いたもの。重複は除かない (重複は middle.place_names.collect_place_names が除く)。
     """
-    raise NotImplementedError
+    try:
+        rows = read_json_lines(path)
+    except OSError:
+        return []
+    names: list[str] = []
+    for row in rows:
+        place_name = row.get("place_name")
+        if isinstance(place_name, str) and place_name.strip():
+            names.append(place_name.strip())
+    return names

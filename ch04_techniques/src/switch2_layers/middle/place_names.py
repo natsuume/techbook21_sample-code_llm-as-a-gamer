@@ -20,4 +20,17 @@ def collect_place_names(
     の順。各名前は前後の空白を除いた形にし、除いて空になるものは入れない。同じ名前 (前後の空白を除いた形で比べる) は、
     最初に現れたものだけを残す。document が None なら recorded_names だけから作る。
     """
-    raise NotImplementedError
+    candidates: list[str] = []
+    if document is not None:
+        for place in document.places:
+            candidates.append(place.name)
+            candidates.extend(place.aliases)
+    candidates.extend(recorded_names)
+    names: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        name = candidate.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names

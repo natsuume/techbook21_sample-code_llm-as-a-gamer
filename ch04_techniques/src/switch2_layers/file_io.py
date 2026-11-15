@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # 置き換えのための一時ファイルの名前は `.<置き換える先の名前>.<ランダムな文字列>.tmp`
-# (先頭が TEMP_PREFIX、末尾が TEMP_SUFFIX)。文書を列挙する側は is_temporary_file_name でこの名前を除く
+# (先頭が TEMP_PREFIX、末尾が TEMP_SUFFIX)。is_temporary_file_name で、この規則の名前かを確かめられる
 TEMP_PREFIX = "."
 TEMP_SUFFIX = ".tmp"
 
