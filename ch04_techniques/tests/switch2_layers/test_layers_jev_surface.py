@@ -531,6 +531,26 @@ def test_hidden_target_stops_tracking_and_is_requeried_next_time(tmp_path):
     assert names_of(asker.questions_of(2), QuestionKind.BOX) == ["box_1"]
 
 
+def test_target_whose_description_changed_is_requeried(tmp_path):
+    # 名前が同じでも説明が変われば別の物を指しうるため、その対象の追跡をやめて次の要求で問い直す
+    asker = FakeAsker(all_visible())
+    decider, tracking = make_decider(tmp_path, asker)
+    targets_file = tmp_path / "notes" / "common" / "box_targets.md"
+    targets_file.parent.mkdir(parents=True)
+    targets_file.write_text("- 敵: クリボー\n- 扉: 木の扉\n", encoding="utf-8")
+    feed(tracking, FRAME_TIMES)
+    decider.decide(surface_input())
+    assert names_of(asker.questions_of(0), QuestionKind.BOX) == ["box_1", "box_2"]
+    targets_file.write_text("- 敵: ノコノコ\n- 扉: 木の扉\n", encoding="utf-8")
+    feed(tracking, [10.2])
+    second = decider.decide(surface_input(times=(9.5, 10.0, 10.2), request_t=10.2))
+    assert names_of(asker.questions_of(1), QuestionKind.BOX) == ["box_1"]
+    assert [(box.label, box.source) for box in second.boxes] == [
+        ("敵", BoxSource.JEV),
+        ("扉", BoxSource.TRACKER),
+    ]
+
+
 def test_failed_request_does_not_count_as_requery(tmp_path):
     asker = FakeAsker(all_visible())
     asker.error = JevError("timeout")

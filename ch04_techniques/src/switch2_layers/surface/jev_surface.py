@@ -14,7 +14,8 @@ recent_actions と frames は古い順。画像 (SurfaceInput.frames の JPEG) �
 
 1 回の decide の流れ:
     1. 要求の番号を 1 増やす (最初の decide が 1)
-    2. 対象の一覧を surface.box_targets.read_box_targets(notes/, 場面 ID) で読み、BoxTrackingState.set_targets に渡す
+    2. 対象の一覧を surface.box_targets.read_box_targets(notes/, 場面 ID) で読み、BoxTrackingState.set_targets に渡す。
+       前回読んだ一覧と名前が同じで説明が違う対象は、追跡をやめる (forget。3 で問い直す対象になる)
     3. 問い直す対象を box_tracking_state.select_requery_targets で選ぶ
        (2 と 3 は、送る画像を作る前に plan_boxes で済ませていれば、そのときの結果を使う)
     4. 問いの一覧 (surface_questions.build_surface_questions) と state を作り、JevClient.ask で送る
@@ -231,6 +232,8 @@ class JevSurfaceDecider:
         self._request_count = 0
         # plan_boxes が決めた次の要求の box の対象 (decide が受け取ったら None に戻す)
         self._planned: _RequestTargets | None = None
+        # 前回読んだ対象の一覧の、名前 → 説明 (説明が変わった対象を見つけるため)
+        self._target_descriptions: dict[str, str] = {}
 
     @property
     def request_count(self) -> int:
@@ -329,6 +332,14 @@ class JevSurfaceDecider:
         targets = read_box_targets(self.notes_dir, scene_id)
         names = [target.name for target in targets]
         self.tracking.set_targets(names)
+        # 名前が同じでも説明が変わった対象は別の物を指しうるため、追跡をやめて問い直す
+        for target in targets:
+            previous = self._target_descriptions.get(target.name)
+            if previous is not None and previous != target.description:
+                self.tracking.forget(target.name)
+        self._target_descriptions = {
+            target.name: target.description for target in targets
+        }
         requery_names = select_requery_targets(
             names,
             self.tracking.statuses(),
