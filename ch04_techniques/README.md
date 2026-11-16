@@ -250,7 +250,7 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 | middle | 前回の応答から `--middle-interval` 秒後 (既定 5 秒)。最初の実行は、最初の画像を `frames.jsonl` に記録した後です | 一定間隔で保存したフレーム、surface の記録 (`surface.jsonl`)、操作の記録 (`operations.jsonl`)、マップから、場面の名前、現在地の場所、詰まっているか、surface の待ち時間、系列情報、場面ごとの短期のタスクリストを決めます (既定では OpenAI の gpt-6-luna を呼びます)。現在地と、新しく分かった場所のつながりと観察を、マップの記録 (`middle/map_records.jsonl`) に足します。初めての場面に名前を付けたら、その場面の操作説明と攻略情報の deep を求めます |
 | deep | 求められたときと、同じ文書の前回の終了から `--deep-auto-seconds` 秒後 (既定 60 秒) | `notes/` の操作説明・攻略情報・大方針・助言・マップの文書を、直接編集して書き直します (既定では Claude Code を起動します)。マップは、middle のマップの記録からまとめます。ジョブごとに `deep/<種類>-<連番>/` を作り、ジョブの記録を置きます |
 
-surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層ともフェイク (`--surface fake --middle fake --deep fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
+surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層と安全の監視をすべてフェイクにしても (`--surface fake --middle fake --deep fake --safety fake`。API キーは要りません)、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
 3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。HOME メニュー・ユーザー選択・オンライン・通報・購入などの画面を見つけたら、操作を中立にして実行全体を止めます。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視はすべての確率を 0 として返すフェイクになります。
 
@@ -324,7 +324,7 @@ run は、`--surface` で surface の実装を選びます。
 | 値 | 内容 |
 |---|---|
 | `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) を呼びます。環境変数 `TYPESAFE_API_KEY` に API キーが要ります |
-| `fake` | 何も押さない中立の操作を返し、deep を求めないフェイクです。API キーは要りません |
+| `fake` | 何も押さない中立の操作を返し、deep を求めないフェイクです。API キーは要りません (既定の `--safety jev` の安全の監視は `TYPESAFE_API_KEY` を使うため、キーなしで動かすときは `--safety fake` も付けます) |
 
 `--surface jev` で `TYPESAFE_API_KEY` が無いとき (値が空か空白だけのときを含む) は、実機に触れず、実行ディレクトリーにも何も書かずに、エラーを表示して終了します (終了コード 2)。API キーは、`OPENAI_API_KEY` と同じく `.env` に書き、`uv run --env-file .env` で読み込ませることもできます。
 
