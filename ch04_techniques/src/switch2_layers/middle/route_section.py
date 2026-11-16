@@ -20,13 +20,17 @@ grid のマップのときだけ、現在地のマスから出口とつながり
     4. 前回の出力の place_name か current_tile が None  ROUTE_NO_CURRENT_TILE_TEXT
     5. 場所がマップに無い (name と aliases で探す)     「前回の middle の出力の現在地「<place_name>」がマップの場所
                                                        (name と aliases) に無いため、経路を計算しない」
-    6. 場所の tiles が空                               「マップの場所「<name>」のマスの図 (tiles) が空のため、
+    6. 場所の changes_on_entry が true                 「マップの場所「<name>」は入るたびに構造が変わる
+                                                       (changes_on_entry が true) ため、経路を計算しない」
+    7. 場所の tiles が空                               「マップの場所「<name>」のマスの図 (tiles) が空のため、
                                                        経路を計算しない」
-    7. 開始のマス (current_tile) が tiles の範囲の外   「現在地のマス (x=<x>, y=<y>) がマップの場所「<name>」の
+    8. 開始のマス (current_tile) が tiles の範囲の外   「現在地のマス (x=<x>, y=<y>) がマップの場所「<name>」の
                                                        マスの図 (tiles) の範囲の外のため、経路を計算しない」
-    8. 目標が無い                                      「マップの場所「<name>」に、マスの図 (tiles) の範囲の中の
+    9. 目標が無い                                      「マップの場所「<name>」に、マスの図 (tiles) の範囲の中の
                                                        出口とつながりが無いため、経路を計算しない」
 <name> はマップの場所の name (書かれたまま)。
+経路は、その場所から出るつながりの from_tile のマスを、目標でなければ途中で通らない
+(notes.grid_route.connection_from_tiles を find_grid_route の avoided に渡す)。
 """
 
 from switch2_layers.frames.surface_frames import format_frame_label
@@ -36,6 +40,7 @@ from switch2_layers.notes.grid_route import (
     MoveDirection,
     RouteTarget,
     RouteTargetKind,
+    connection_from_tiles,
     find_grid_place,
     find_grid_route,
     list_route_targets,
@@ -102,7 +107,8 @@ def describe_route_section(
     state      前回の middle の出力 (MiddleInput.previous_state)。None は前回の出力が無い
     場所は notes.grid_route.find_grid_place(document, state.place_name) で探し、目標は
     notes.grid_route.list_route_targets(document, 場所)、経路は notes.grid_route.find_grid_route(場所,
-    state.current_tile, 目標の position) で求める。開始のマスが範囲の外かは notes.grid_route.tile_at で確かめる。
+    state.current_tile, 目標の position, avoided=notes.grid_route.connection_from_tiles(document, 場所)) で求める。
+    開始のマスが範囲の外かは notes.grid_route.tile_at で確かめる。
     """
     if document is None:
         return ROUTE_NO_MAP_TEXT
@@ -116,6 +122,11 @@ def describe_route_section(
     if place is None:
         return (
             f"前回の middle の出力の現在地「{state.place_name}」がマップの場所 (name と aliases) に無いため、"
+            "経路を計算しない"
+        )
+    if place.changes_on_entry:
+        return (
+            f"マップの場所「{place.name}」は入るたびに構造が変わる (changes_on_entry が true) ため、"
             "経路を計算しない"
         )
     if not place.tiles:
@@ -132,10 +143,11 @@ def describe_route_section(
             f"マップの場所「{place.name}」に、マスの図 (tiles) の範囲の中の出口とつながりが無いため、"
             "経路を計算しない"
         )
+    avoided = connection_from_tiles(document, place)
     return "\n".join(
         [
             _header_line(state, place, start),
-            *(_target_line(place, start, target) for target in targets),
+            *(_target_line(place, start, target, avoided) for target in targets),
         ]
     )
 
@@ -156,12 +168,20 @@ def _header_line(state: MiddleState, place: GridMapPlace, start: TilePosition) -
     )
 
 
-def _target_line(place: GridMapPlace, start: TilePosition, target: RouteTarget) -> str:
-    """目標 target の 1 行 (種類・説明・座標・行き先・手順) を返す (モジュールの docstring)。"""
+def _target_line(
+    place: GridMapPlace,
+    start: TilePosition,
+    target: RouteTarget,
+    avoided: frozenset[TilePosition],
+) -> str:
+    """目標 target の 1 行 (種類・説明・座標・行き先・手順) を返す (モジュールの docstring)。
+
+    avoided は、経路の途中で通らないマス (その場所から出るつながりの from_tile)。
+    """
     destinations = (
         f"。行き先: {'、'.join(target.destinations)}" if target.destinations else ""
     )
-    route = find_grid_route(place, start, target.position)
+    route = find_grid_route(place, start, target.position, avoided)
     return (
         f"- {_TARGET_KIND_LABELS[target.kind]}「{target.description}」"
         f"{_position_text(target.position)}{destinations}。手順: {format_route(route)}"

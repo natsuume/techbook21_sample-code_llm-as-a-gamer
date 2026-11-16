@@ -311,8 +311,8 @@ def test_place_without_targets():
 
 
 def test_reasons_are_checked_in_order():
-    # マップなし → free → 前回の出力が無い → place_name か current_tile が無い → 場所が無い → tiles が空 →
-    # 開始が範囲の外 → 目標が無い の順に確かめ、最初に当たったものだけを書く
+    # マップなし → free → 前回の出力が無い → place_name か current_tile が無い → 場所が無い →
+    # 入るたびに構造が変わる → tiles が空 → 開始が範囲の外 → 目標が無い の順に確かめ、最初に当たったものだけを書く
     assert describe_route_section(None, None) == ROUTE_NO_MAP_TEXT
     assert describe_route_section(FREE_DOCUMENT, None) == ROUTE_FREE_LAYOUT_TEXT
     assert (
@@ -324,6 +324,20 @@ def test_reasons_are_checked_in_order():
         state(place_name="自分の部屋 (2 階)", current_tile=TilePosition(99, 99)),
     ) == (
         "マップの場所「自分の部屋 (2 階)」のマスの図 (tiles) が空のため、経路を計算しない"
+    )
+    changing_room = GridMapDocument(
+        places=(dataclasses.replace(ROOM, changes_on_entry=True),), connections=()
+    )
+    assert describe_route_section(
+        changing_room,
+        state(place_name="自分の部屋 (2 階)", current_tile=TilePosition(99, 99)),
+    ) == (
+        "マップの場所「自分の部屋 (2 階)」は入るたびに構造が変わる (changes_on_entry が true) ため、"
+        "経路を計算しない"
+    )
+    assert (
+        describe_route_section(changing_room, state(place_name="町"))
+        == "前回の middle の出力の現在地「町」がマップの場所 (name と aliases) に無いため、経路を計算しない"
     )
     no_targets = GridMapDocument(
         places=(dataclasses.replace(HOUSE, exits=()),), connections=()
@@ -383,3 +397,58 @@ def test_format_route_of_zero_tiles_and_no_route():
     assert format_route(GridRoute(steps=())) == "移動しない (合計 0 マス)"
     assert format_route(None) == NO_ROUTE_TEXT
     assert NO_ROUTE_TEXT == "経路なし (通れるマスだけではたどり着けない)"
+
+
+# --- 入るたびに構造が変わる場所 ---
+
+
+def test_place_that_changes_on_entry():
+    # 入るたびに構造が変わる場所では、古い構造の出口までの経路を書かずに、理由を 1 行で書く
+    assert_routes_are_described()
+    document = GridMapDocument(
+        places=(dataclasses.replace(HOUSE, changes_on_entry=True), ROOM),
+        connections=GRID_DOCUMENT.connections,
+    )
+    text = describe_route_section(document, STATE)
+    assert text == (
+        "マップの場所「家の 1 階」は入るたびに構造が変わる (changes_on_entry が true) ため、経路を計算しない"
+    )
+    assert "\n" not in text
+
+
+def test_place_that_does_not_change_on_entry_has_routes():
+    assert HOUSE.changes_on_entry is False
+    assert describe_route_section(GRID_DOCUMENT, STATE) == lines_of(
+        [HEADER, *TARGET_LINES]
+    )
+
+
+# --- つながりの出たマスを途中で通らない ---
+
+
+def test_route_avoids_from_tiles_of_connections():
+    # 下の行の床の階段 (4, 2) はつながりの出たマス (tiles では .)。左下の出口へは、踏まずに上の行を回る。
+    # 階段そのものが目標なら入る
+    stairs_house = dataclasses.replace(
+        HOUSE,
+        tiles=("#########", "#.......#", "#E......#"),
+        exits=(TileMark(TilePosition(1, 2), "左下の赤いマット"),),
+        blocked=(),
+    )
+    document = GridMapDocument(
+        places=(stairs_house,),
+        connections=(
+            MapConnection(
+                from_place="家の 1 階",
+                to_place="地下",
+                how="床の階段",
+                from_tile=TilePosition(4, 2),
+                to_tile=None,
+            ),
+        ),
+    )
+    text = describe_route_section(document, state(current_tile=TilePosition(7, 2)))
+    assert text.split("\n")[1:] == [
+        "- 出口「左下の赤いマット」(x=1, y=2)。手順: 上に 1 マス → 左に 6 マス → 下に 1 マス (合計 8 マス)",
+        "- つながり「床の階段」(x=4, y=2)。行き先: 地下。手順: 左に 3 マス (合計 3 マス)",
+    ]

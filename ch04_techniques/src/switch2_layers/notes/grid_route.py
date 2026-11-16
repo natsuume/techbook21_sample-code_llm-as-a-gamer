@@ -4,8 +4,10 @@
 文字は tiles[y - origin.y] の x - origin.x 文字目)。
 経路の決め方 (find_grid_route):
     - 上下左右の隣のマスへ 1 マスずつ動く。通れるマスは、文字が PASSABLE_TILES (. と E) で、場所の blocked の座標に
-      無いマス。ただし、出口のマス (文字が E のマスと、場所の exits の座標のマス) は、目標でなければ途中で通らない
-      (乗ると場所を移る扉やマットを踏むと、残りの手順が意味を失うため)。目標のマスは、文字と blocked によらず入ってよい
+      無いマス。ただし、出口のマス (文字が E のマスと、場所の exits の座標のマス) と、呼び出し側が渡す避けるマス
+      (route_section は、その場所から出るつながりの from_tile のマス。connection_from_tiles) は、目標でなければ途中で
+      通らない (乗ると場所を移る扉やマットを踏むと、残りの手順が意味を失うため)。目標のマスは、文字と blocked と
+      避けるマスによらず入ってよい
     - tiles の範囲の外へは動かない。開始のマスが範囲の外なら経路なし (None)。開始のマスの文字と blocked は問わない
     - 場所の landmarks の座標は使わない
     - 最短の経路のうち、向きを変える回数の少ないものを選ぶ。それも同じなら、1 マスずつの移動の向きの列を
@@ -19,7 +21,7 @@
 """
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -28,6 +30,7 @@ from switch2_layers.notes.map_document import (
     TILE_PASSABLE,
     GridMapDocument,
     GridMapPlace,
+    MapConnection,
     TilePosition,
 )
 
@@ -127,21 +130,25 @@ def find_grid_place(document: GridMapDocument, place_name: str) -> GridMapPlace 
 
 
 def find_grid_route(
-    place: GridMapPlace, start: TilePosition, goal: TilePosition
+    place: GridMapPlace,
+    start: TilePosition,
+    goal: TilePosition,
+    avoided: Collection[TilePosition] = (),
 ) -> GridRoute | None:
     """場所 place の中で、マス start からマス goal までの最短の経路を返す (経路の決め方はモジュールの docstring)。
 
+    avoided は、出口のマスのほかに、経路の途中で通らないマス (つながりの from_tile など)。既定は無し。
     次のときは None (経路なし) を返す:
         - start が tiles の範囲の外 (tiles が空のときを含む)
         - goal が tiles の範囲の外
-        - 途中で通れるマス (文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでないマス) だけを通っては goal に
-          たどり着けない
-    start と goal が同じマスなら、手順が空 (0 マス) の経路を返す。
+        - 途中で通れるマス (文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでも avoided のマスでもないマス)
+          だけを通っては goal にたどり着けない
+    start と goal が同じマスなら、手順が空 (0 マス) の経路を返す。start が avoided にあっても問わない。
     """
     if tile_at(place, start) is None or tile_at(place, goal) is None:
         return None
     cells = _RouteCells(
-        passable=_passable_cells(place),
+        passable=_passable_cells(place, avoided),
         start=(start.x, start.y),
         goal=(goal.x, goal.y),
     )
@@ -182,12 +189,10 @@ def list_route_targets(
     from が place の場所かは、from を前後の空白を除いたものが、place の name か aliases を前後の空白を除いたものの
     どれかと一致するかで決める。
     """
-    names = _stripped_names(place)
     connections = [
         connection
-        for connection in document.connections
-        if connection.from_place.strip() in names
-        and connection.from_tile is not None
+        for connection in _connections_from(document, place)
+        if connection.from_tile is not None
         and tile_at(place, connection.from_tile) is not None
     ]
     exits = [mark for mark in place.exits if tile_at(place, mark.position) is not None]
@@ -219,6 +224,34 @@ def list_route_targets(
     return tuple(targets[:MAX_ROUTE_TARGETS])
 
 
+def connection_from_tiles(
+    document: GridMapDocument, place: GridMapPlace
+) -> frozenset[TilePosition]:
+    """document.connections のうち、from が場所 place のつながりの from_tile (None を除く) の集合を返す。
+
+    from が place の場所かは list_route_targets と同じ規則で決める。経路の途中で、目標でなければ通らないマス
+    (find_grid_route の avoided) に使う。
+    """
+    return frozenset(
+        connection.from_tile
+        for connection in _connections_from(document, place)
+        if connection.from_tile is not None
+    )
+
+
+def _connections_from(
+    document: GridMapDocument, place: GridMapPlace
+) -> list[MapConnection]:
+    """document.connections のうち、from を前後の空白を除いたものが、place の name か aliases (前後の空白を除いたもの)
+    のどれかと一致するつながりを、connections の順に返す。"""
+    names = _stripped_names(place)
+    return [
+        connection
+        for connection in document.connections
+        if connection.from_place.strip() in names
+    ]
+
+
 # 向きごとの 1 マスの移動 (x の増分, y の増分)
 _DIRECTION_DELTAS: dict[MoveDirection, tuple[int, int]] = {
     MoveDirection.UP: (0, -1),
@@ -238,9 +271,9 @@ class _RouteCells:
     """経路の計算に使うマス。座標は (x, y) のタプル。
 
     passable   経路の途中で入れるマス (文字が PASSABLE_TILES で、blocked の座標に無く、出口のマス (文字が E のマスと
-               exits の座標のマス) でないマス)
-    start      開始のマス (tiles の範囲の中。文字と blocked は問わない)
-    goal       目標のマス (tiles の範囲の中。文字と blocked によらず入れる)
+               exits の座標のマス) でも、find_grid_route の avoided のマスでもないマス)
+    start      開始のマス (tiles の範囲の中。文字と blocked と avoided は問わない)
+    goal       目標のマス (tiles の範囲の中。文字と blocked と avoided によらず入れる)
     """
 
     passable: frozenset[tuple[int, int]]
@@ -248,15 +281,17 @@ class _RouteCells:
     goal: tuple[int, int]
 
 
-def _passable_cells(place: GridMapPlace) -> frozenset[tuple[int, int]]:
+def _passable_cells(
+    place: GridMapPlace, avoided_tiles: Collection[TilePosition]
+) -> frozenset[tuple[int, int]]:
     """場所 place の tiles の範囲の中で、経路の途中で入れるマスの集合を返す。
 
-    入れるのは、文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでないマス。出口のマスは、文字が TILE_EXIT の
-    マスと、exits の座標のマス (目標のマスは、この集合によらず入れる)。
+    入れるのは、文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでも avoided_tiles のマスでもないマス。
+    出口のマスは、文字が TILE_EXIT のマスと、exits の座標のマス (目標のマスは、この集合によらず入れる)。
     """
     avoided = {
         (mark.position.x, mark.position.y) for mark in (*place.blocked, *place.exits)
-    }
+    } | {(position.x, position.y) for position in avoided_tiles}
     return frozenset(
         (place.origin.x + column, place.origin.y + row)
         for row, line in enumerate(place.tiles)

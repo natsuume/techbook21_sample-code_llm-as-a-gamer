@@ -798,11 +798,11 @@ def test_instructions_cover_the_grid_map_and_the_route_section():
 
 
 def test_instructions_describe_exits_avoided_by_the_route():
-    # 経路は、目標でない出口のマスを途中で通らない
+    # 経路は、目標でない出口のマスとつながりの出たマスを途中で通らない
     assert (
-        "目標でない出口のマス (tiles の E と、exits の座標のマス) は、乗ると場所を移るため、途中で通りません"
-        in LUNA_DEVELOPER_INSTRUCTIONS
-    )
+        "目標でない出口のマスとつながりの出たマス (tiles の E と、exits の座標と、その場所から出る connections の "
+        "from_tile のマス) は、乗ると場所を移るため、途中で通りません"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
 
 
 def test_instructions_allow_checking_unknown_tiles_for_unreachable_targets():

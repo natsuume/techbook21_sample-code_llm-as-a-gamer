@@ -8,6 +8,7 @@ from switch2_layers.notes.grid_route import (
     RouteStep,
     RouteTarget,
     RouteTargetKind,
+    connection_from_tiles,
     find_grid_place,
     find_grid_route,
     list_route_targets,
@@ -494,3 +495,65 @@ def test_exits_beyond_ten_are_cut():
     assert [target.description for target in targets] == [
         f"出口 {x}" for x in range(10)
     ]
+
+
+# --- 途中で避けるマス (つながりの出たマス) ---
+
+
+def test_avoided_tile_that_is_not_the_goal_is_avoided():
+    # avoided のマス (つながりの from_tile など) は、tiles の文字が . でも、途中で踏まずに回り込む
+    assert find_grid_route(
+        place(OPEN_3X3), TilePosition(0, 1), TilePosition(2, 1)
+    ) == route((RIGHT, 2))
+    found = find_grid_route(
+        place(OPEN_3X3),
+        TilePosition(0, 1),
+        TilePosition(2, 1),
+        avoided={TilePosition(1, 1)},
+    )
+    assert found == route((UP, 1), (RIGHT, 2), (DOWN, 1))
+
+
+def test_avoided_goal_and_start_are_allowed():
+    # 目標のマスは avoided にあっても入ってよい。開始のマスが avoided にあっても問わない
+    assert find_grid_route(
+        place(OPEN_3X3),
+        TilePosition(0, 1),
+        TilePosition(1, 1),
+        avoided={TilePosition(1, 1)},
+    ) == route((RIGHT, 1))
+    assert find_grid_route(
+        place(OPEN_3X3),
+        TilePosition(1, 1),
+        TilePosition(2, 1),
+        avoided={TilePosition(1, 1)},
+    ) == route((RIGHT, 1))
+
+
+def test_route_is_none_when_the_only_way_is_through_an_avoided_tile():
+    found = find_grid_route(
+        place(["..."]),
+        TilePosition(0, 0),
+        TilePosition(2, 0),
+        avoided=[TilePosition(1, 0)],
+    )
+    assert found is None
+
+
+def test_connection_from_tiles_of_the_place():
+    house = place(HOUSE_TILES, name="家の 1 階", aliases=("1 階の部屋",))
+    document = grid_document(
+        house,
+        connections=(
+            connection("家の 1 階", "地下", "床の階段", (4, 2)),
+            # from は aliases でもよい (前後の空白を除いて比べる)。tiles の範囲の外の from_tile も含める
+            connection(" 1 階の部屋 ", "裏庭", "壁の外", (20, 1)),
+            # from_tile が無いつながりと、ほかの場所からのつながりは含めない
+            connection("家の 1 階", "庭", "窓から", None),
+            connection("町", "家の 1 階", "扉", (3, 1)),
+        ),
+    )
+    assert connection_from_tiles(document, house) == frozenset(
+        {TilePosition(4, 2), TilePosition(20, 1)}
+    )
+    assert connection_from_tiles(grid_document(house), house) == frozenset()
