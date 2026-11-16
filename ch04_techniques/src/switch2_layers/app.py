@@ -1,33 +1,57 @@
 """3 層をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
 
-実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep) は LayersParts で受け取る。
-cli の run は実機の部品と各層 (surface は --surface で選ぶ。middle と deep はフェイク) を渡し、テストはフェイクの
-キャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点 (on_frame・surface_boxes_at・
-surface_plan_boxes・on_run_directory) も LayersParts で受け取る。安全の監視 (safety.safety_monitor) が画面を
-確かめるもの (SafetyChecker) も LayersParts で受け取る (cli の run は --safety で選ぶ)。安全の監視が本体の画面を
-見本と照合した最新の結果は、start で作る system_screen.screen_judgment.LatestSystemScreen に渡す (ほかの部品からは
-読まない)。
+実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep)、本体の画面の middle は LayersParts で
+受け取る。cli の run は実機の部品と各層 (surface は --surface、middle と本体の画面の middle は --middle、deep は --deep で
+選ぶ) を渡し、テストはフェイクのキャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点
+(on_frame・surface_boxes_at・surface_plan_boxes・on_run_directory) も LayersParts で受け取る。安全の監視
+(safety.safety_monitor) が画面を確かめるもの (SafetyChecker) も LayersParts で受け取る (cli の run は --safety で選ぶ)。
+安全の監視が本体の画面を見本と照合した最新の結果は、start で作る system_screen.screen_judgment.LatestSystemScreen に
+渡し、同時に段階の判定 (system_screen.run_phase.PhaseTracker) にも 1 件ずつ渡す。
 
-止まる条件 (どれも、操作を中立にして出力を止め、全体を止めて、run.jsonl の stop に理由を書く):
-    - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED
+段階 (system_screen.run_phase の RunPhase。段階を変えるたびに run.jsonl に phase {"phase", "reason"} を書く):
+    実行を始めるときの安全の確かめが通ったら prepare に入る (確かめで止まったら、どの段階にも入らない)。
+    prepare・recover・clean_up では、本体の画面のループ (system_screen.system_screen_loop) が本体の画面の middle に
+    目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
+    1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送る。
+    middle のゲーム用の出力の press_home が真なら、play のときだけ HOME を短押しして recover に移る。
+押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
+press_home の HOME はこれで送る。surface は surface.surface_output_gate.SurfaceOutputGate を通し、HOME を除く 16 個に
+絞って play のときだけ送る (段階を変える処理と同じロックの中で確かめて送る)。
+
+止まる条件 (片付けを行うものには [片付け] を付ける。run.jsonl の stop に理由を書く):
+    - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED [片付け]
+    - surface か middle (ゲーム用と本体の画面用) が続けて失敗した
+                                                                    surface_loop・middle_loop の理由 [片付け]
     - キャプチャーの最新フレームが 2 秒以上古い・出力が終わった・起動から 10 秒たっても最初のフレームが無い
                                                                     hardware.capture_watcher の理由
     - ブリッジの復旧が失敗した (bridge_state() が "failed")             REASON_BRIDGE_FAILED
-    - surface か middle が続けて失敗した                                surface_loop・middle_loop の理由
     - 安全の確かめでオンライン・購入・本体の設定の画面を見つけたか、確かめが失敗した
                                                                     safety.safety_judge・safety_monitor の理由
+    - prepare か recover が時間切れになった                             run_phase.REASON_PREPARATION_TIMED_OUT・
+                                                                    REASON_RECOVERY_TIMED_OUT
+    - start の途中の例外、ループの想定外の例外                          start failed*・*loop failed*
+片付けを行わない止まり方では、すぐに操作を中立にして出力を止め、全体を止める。
+片付け: 片付けを行う理由で止めるとき (段階に入った後で、まだ片付けをしていなければ)、止まる理由を決めてから clean_up に
+移り、surface と middle のゲーム用のループを止めたまま、本体の画面の middle に目的 clean_up (HOME メニューに戻り、指定の
+ソフトを終了する) で操作の列を決めさせて送る。片付けの間も安全の監視を続ける。片付けの終わり (run_phase.CleanUpResult):
+    done            本体の画面の middle が done を真で返し、最新の照合の結果が home_menu
+    timeout         片付けを始めてから PhaseTimings.clean_up_timeout_s 秒たった
+    middle_failed   片付けの本体の画面の middle が 1 回失敗した
+    interrupted     片付けの間に 2 回目の Ctrl+C を受けた
+    unsafe          片付けの間に、安全の監視の理由で止めることになった
+    stopped         片付けの間に、キャプチャー・ブリッジの理由で止めることになった
+片付けが終わったら run.jsonl に clean_up_end {"result"} を書き、操作を中立にして出力を止め、全体を止める (止まる理由は
+片付けを始めた理由のまま)。
 ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。安全の監視は続ける。
-surface と middle のループは、安全の監視のスレッドが実行を始めるときの確かめ (最初のフレームが届いた後に 1 回) で
-止まる条件に当たらなかったと分かるまで、ループを始めずに待つ (それまで操作を 1 つも送らない)。
 start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら、それまでに作った部品と起動したスレッドだけを
 止めて閉じ、run.jsonl の stop に理由を書いてから、その例外を外に出す (LayersApp.start)。後片付けの 1 段階が例外を
 出しても、logging で警告を書いて残りの段階を続ける。
 
 スレッド:
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
-    surface のループ、middle のループ、安全の監視 (SafetyMonitor)、画面の停滞の計測のループ (progress.progress_loop)、
-    deep の自動の呼び出し (DeepScheduler) とジョブ。
-    wait を呼んだスレッド (run ではメインスレッド) が、止まる条件を MONITOR_INTERVAL_S ごとに確かめる。
+    surface のループ、middle のループ、本体の画面のループ (SystemScreenLoop)、安全の監視 (SafetyMonitor)、
+    画面の停滞の計測のループ (progress.progress_loop)、deep の自動の呼び出し (DeepScheduler) とジョブ。
+    wait を呼んだスレッド (run ではメインスレッド) が、止まる条件と段階の時間切れを MONITOR_INTERVAL_S ごとに確かめる。
 """
 
 import logging
@@ -37,7 +61,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from switch2_layers.buttons import allowed_buttons
+from switch2_layers.buttons import ALL_BUTTONS, allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
     DeepScheduler,
     DeepSchedulerParts,
@@ -57,6 +81,7 @@ from switch2_layers.middle.middle_loop import (
     MiddleLoopSettings,
 )
 from switch2_layers.middle.middle_types import MiddleAnalyzer
+from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
 from switch2_layers.progress.progress_loop import ProgressLoop
 from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.progress.screen_progress import ScreenProgressTracker
@@ -86,7 +111,9 @@ from switch2_layers.surface.surface_loop import (
     SurfaceLoopParts,
     SurfaceLoopSettings,
 )
+from switch2_layers.surface.surface_output_gate import SurfaceOutputGate
 from switch2_layers.surface.surface_types import Box, SurfaceDecider
+from switch2_layers.system_screen.run_phase import DEFAULT_PHASE_TIMINGS, PhaseTimings
 from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
@@ -96,7 +123,8 @@ REASON_INTERRUPTED = "interrupted"
 REASON_BRIDGE_FAILED = "bridge recovery failed"
 REASON_CLOSED = "closed"  # 止まる条件より前に close が呼ばれた
 MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
-# 終了時に surface と middle のループ・安全の監視・画面の停滞の計測のループのスレッドの終わりを待つ上限 (秒)
+# 終了時に surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッドの終わりを待つ
+# 上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
 # surface と middle のループのスレッドが、実行を始めるときの確かめを終えた合図を確かめ直す間隔 (秒)
 START_CHECK_POLL_S = 0.05
@@ -114,6 +142,8 @@ class LayersParts:
     middle          middle の分析
     deep            deep のジョブの実行
     safety          安全の監視が画面を確かめるもの (run では --safety の safety.safety_assembly の checker)
+    system_middle   本体の画面の middle (run では --middle luna なら LunaSystemScreenMiddle、fake なら操作なしで done を
+                    真で返し続けるフェイク)
     monotonic       単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
     local_now       実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
     on_frame        キャプチャーの新しいフレームを受け取る関数 (CaptureSource の on_frame。キャプチャーのスレッドから
@@ -126,6 +156,7 @@ class LayersParts:
     surface_plan_boxes
                     surface に送る画像への box の書き込み方を、要求ごとに場面 ID から返す関数
                     (SurfaceLoopParts.plan_boxes)。None (既定) なら、surface_boxes_at の box をすべて書き込む
+    phase_timings   段階の判定の回数と秒数 (既定は system_screen.run_phase の定数の値)。テストで短くできる
     """
 
     frame_reader: LatestFrameReader
@@ -135,12 +166,14 @@ class LayersParts:
     middle: MiddleAnalyzer
     deep: DeepRunner
     safety: SafetyChecker
+    system_middle: SystemScreenMiddle
     monotonic: Callable[[], float] = time.monotonic
     local_now: Callable[[], datetime] = datetime.now
     on_frame: Callable[[CapturedFrame], None] | None = None
     surface_boxes_at: Callable[[float], Sequence[Box]] | None = None
     on_run_directory: Callable[[RunPaths], None] | None = None
     surface_plan_boxes: Callable[[str | None], BoxDrawingPlan] | None = None
+    phase_timings: PhaseTimings = DEFAULT_PHASE_TIMINGS
 
 
 @dataclass(frozen=True)
@@ -166,8 +199,8 @@ class _PartsBuiltSoFar:
     frame_store      FrameStore (作る前は None)
     capture_source   CaptureSource (作る前は None)
     deep_scheduler   DeepScheduler (作る前は None)
-    loop_threads     作った surface と middle のループ・安全の監視・画面の停滞の計測のループのスレッド (起動したかどうかは
-                     Thread.is_alive で見分ける)
+    loop_threads     作った surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッド
+                     (起動したかどうかは Thread.is_alive で見分ける)
     """
 
     run_log: RunLog | None = None
@@ -202,8 +235,8 @@ class LayersApp:
     settings       run の起動引数
     parts          注入する部品
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
-    start_thread   start が surface と middle のループ・安全の監視・画面の停滞の計測のループのスレッドを起動する関数
-                   (既定 threading.Thread.start)。テストでは、起動の途中で例外を出す関数を渡せる
+    start_thread   start が surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループの
+                   スレッドを起動する関数 (既定 threading.Thread.start)。テストでは、起動の途中で例外を出す関数を渡せる
     """
 
     def __init__(
@@ -219,7 +252,7 @@ class LayersApp:
         self.sleep = sleep
         self.start_thread = start_thread
         self._lock = threading.Lock()
-        # ループの停止の合図 (surface と middle のループ・安全の監視・画面の停滞の計測のループが見る)
+        # ループの停止の合図 (surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループが見る)
         self._stop_event = threading.Event()
         # 実行を始めるときの安全の確かめで、止まる条件に当たらなかった合図 (surface と middle のループが見る)
         self._start_check_passed = threading.Event()
@@ -230,38 +263,54 @@ class LayersApp:
         self._start_called = False
         self._closed = False
         self._started: _StartedParts | None = None
+        # 段階の判定 (PhaseTracker) を読み書きするときと、surface の操作の関門が「play か」を確かめて送るときのロック
+        self._phase_lock = threading.Lock()
 
     def start(self) -> RunPaths:
         """実行ディレクトリーを作り、部品を組み立ててスレッドを起動し、実行ディレクトリーの RunPaths を返す。
 
         1. RunClock(parts.monotonic) を作る (ここが t = 0)
         2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
-           write_initial_notes(paths, buttons.allowed_buttons(settings.allow_home))
-        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く。
-           続けて、parts.on_run_directory があれば on_run_directory(paths) を 1 回呼ぶ (スレッドを起動する前。
-           notes/ の初期ファイルは書いた後)
-        4. OperationLog と PadOutput(report_sender, 押せるボタン, on_operation=OperationLog.write) を作る
+           write_initial_notes(paths, buttons.allowed_buttons()) (surface の押せる 16 個。HOME は書かない)
+        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く
+           (指定のソフトとユーザーの名前を含む)。続けて、parts.on_run_directory があれば on_run_directory(paths) を
+           1 回呼ぶ (スレッドを起動する前。notes/ の初期ファイルは書いた後)
+        4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個),
+           on_operation=OperationLog.write) を作る
         5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …,
            on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            progress_state は progress/state.json の値 (progress.progress_state.read_progress_state)、
-           timeout_s は deep_timeout_s、stuck_advice_seconds は stuck_advice_seconds) を作って start する
-           (タイムアウト・自動の呼び出し・きっかけ progress の判定のスレッド)
-        7. SurfaceLoop (deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
+           is_play は段階が play かを返す関数、timeout_s は deep_timeout_s、stuck_advice_seconds は
+           stuck_advice_seconds) を作って start する (タイムアウト・自動の呼び出し・きっかけ progress の判定のスレッド)
+        7. SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
+           deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
            boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
-           MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
-           on_stop には request_stop を渡す
+           MiddleLoop (interval_s・window_s・max_errors。on_press_home は、段階が play のときだけ HOME を短押しして
+           (PadOutput.apply(PadAction(taps={"HOME"}), source="system")) recover に移す関数) を作り、それぞれのスレッドを
+           start_thread で起動する。on_stop には request_stop を渡す。2 つのループは、段階が play の間だけ 1 回分ずつ
+           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ --middle-interval で呼ぶ
         8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor
            (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
-           on_stop = request_stop、on_start_passed = 実行を始めるときの確かめを終えた合図を立てる関数、
-           on_system_screen = LatestSystemScreen.update。interval_s = safety_interval_s、threshold = threshold_safety、
-           max_errors = max_safety_errors) を作り、そのスレッドを 7 の 2 つの後に start_thread で起動する
-           (allow_home は 2 と 4 の押せるボタンだけに使い、安全の監視には渡さない)
-        9. 画面の停滞の計測の ProgressLoop (ScreenProgressTracker(progress_window_s)) を作り、そのスレッドを 8 の後に
+           on_stop = request_stop、on_start_passed = prepare に入る関数 (PhaseTracker(clock.now(),
+           parts.phase_timings) を作り、run.jsonl に phase {"phase": "prepare", "reason":
+           run_phase.PHASE_REASON_START_CHECK_PASSED} を書く)、on_system_screen = LatestSystemScreen.update と
+           PhaseTracker.on_judgment(照合したフレームの時刻, 照合の結果) を呼ぶ関数。interval_s = safety_interval_s、
+           threshold = threshold_safety、max_errors = max_safety_errors) を作り、そのスレッドを 7 の 2 つの後に
            start_thread で起動する
-        7 の surface と middle のスレッドは、8 の確かめを終えた合図か、ループの停止の合図が立つまで待ってから、
-        ループを始める (停止の合図が先に立ったら、ループを始めずに終わる)。9 の計測のループは操作を送らないため、
-        確かめを待たずに始める。
+        9. SystemOperationRunner(4 の PadOutput, 8 の LatestSystemScreen, clock, judgment_wait_s =
+           max(system_operation_runner.JUDGMENT_WAIT_S, safety_interval_s + 2.0)) と SystemScreenLoop (middle =
+           parts.system_middle、judgments = 8 の LatestSystemScreen、latest_frame = FrameBuffer.latest、phases = 段階を
+           ロックの中で読み書きするもの、software_name・user_name、max_errors = max_middle_errors、on_stop = request_stop)
+           を作り、そのスレッドを 8 の後に start_thread で起動する
+        10. 画面の停滞の計測の ProgressLoop (ScreenProgressTracker(progress_window_s)) を作り、そのスレッドを 9 の後に
+            start_thread で起動する
+        段階の判定 (PhaseTracker) の入力と読み取りは、すべて段階のロックの中で行う。入力の戻り値 (run_phase.PhaseEvent) は
+        次のように扱う: 段階が変わったら run.jsonl に phase {"phase", "reason"} を書き (play から離れるときは、同じロックの
+        中で PadOutput.neutral() を送る)、止める理由なら request_stop(理由)、片付けの終わりなら片付けを終える
+        (request_stop の docstring)。
+        7 の surface と middle は、prepare に入るまで (実行を始めるときの確かめが通るまで) 操作を 1 つも送らない。
+        確かめで止まったら、どの段階にも入らない。10 の計測のループは操作を送らないため、段階に依らず動く。
         2 回目以降の呼び出しは RuntimeError にする。
 
         途中で例外 (KeyboardInterrupt などの BaseException を含む) が出たら、次の後片付けをしてから、その例外を
@@ -289,14 +338,13 @@ class LayersApp:
             raise
 
     def _build_and_start(self, built: _PartsBuiltSoFar) -> RunPaths:
-        """start の 1〜8 を行う。作った部品は、作った直後に built に記録する。"""
+        """start の 1〜10 を行う。作った部品は、作った直後に built に記録する。"""
         settings = self.settings
         parts = self.parts
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
         clock = RunClock(parts.monotonic)
         paths = create_run_directory(settings.runs_dir, parts.local_now())
-        buttons = allowed_buttons(settings.allow_home)
-        write_initial_notes(paths, buttons)
+        write_initial_notes(paths, allowed_buttons())
         run_log = RunLog(paths.run_log, clock)
         run_log.write(
             EVENT_START, run_dir=str(paths.root), args=run_settings_to_json(settings)
@@ -308,7 +356,7 @@ class LayersApp:
         operation_log = OperationLog(paths.operations_log, clock)
         pad_output = PadOutput(
             parts.report_sender,
-            buttons,
+            ALL_BUTTONS,
             clock=parts.monotonic,
             on_operation=operation_log.write,
         )
@@ -357,7 +405,9 @@ class LayersApp:
                 decider=parts.surface,
                 frame_buffer=frame_buffer,
                 frame_store=frame_store,
-                pad_output=pad_output,
+                output_gate=SurfaceOutputGate(
+                    pad_output, is_play=self._is_play, lock=self._phase_lock
+                ),
                 deep_requests=deep_scheduler,
                 deep_status=deep_scheduler,
                 run_log=run_log,
@@ -449,6 +499,10 @@ class LayersApp:
             self.start_thread(thread)
         return paths
 
+    def _is_play(self) -> bool:
+        """段階が play なら True を返す (段階のロックを持っているときに呼ぶ)。prepare に入る前は False。"""
+        raise NotImplementedError
+
     def _run_after_start_check(
         self, loop_run: Callable[[threading.Event], None]
     ) -> None:
@@ -525,10 +579,23 @@ class LayersApp:
     def request_stop(self, reason: str) -> None:
         """全体を止めるよう求める。どのスレッドから呼んでもよい。
 
-        最初の呼び出しだけが理由を決める (2 回目以降の理由は無視する)。最初の呼び出しで、ループの停止の合図を立ててから、
-        すぐに PadOutput.stop_output() (操作を中立にし、以後の操作を送らない) を呼ぶ。後片付けは close で行う。
-        合図を先に立てるのは、出力を止めた後に surface が判断の応答を受け取ったとき、合図を見て記録を書かずに
-        抜けられるようにするため (surface_loop.SurfaceLoop.step)。
+        最初の呼び出しだけが理由を決める (2 回目以降の理由は、片付けの間の扱いを除いて無視する)。
+            - 片付けを行う理由 (REASON_INTERRUPTED・surface_loop.surface_failure_reason の形・
+              middle_loop.middle_failure_reason の形) で、段階に入っていて (prepare・play・recover)、まだ片付けを
+              していなければ: 止める理由を決め、PhaseTracker.begin_clean_up で clean_up に移る (run.jsonl に phase を
+              書く。play から離れるときは中立のレポートを送る)。ループの停止の合図と PadOutput.stop_output() は、まだ
+              呼ばない (片付けの操作を送るため)
+            - 片付けの間に来た理由: 安全の監視の理由 (unsafe screen*・safety check failed*・safety monitor failed*) なら
+              片付けを unsafe で終え、キャプチャー・ブリッジの理由 (hardware.capture_watcher の理由・
+              REASON_BRIDGE_FAILED) なら stopped で終える。どちらも止める理由は片付けを始めた理由のまま。ほかの理由は
+              無視する
+            - それ以外 (片付けを行わない理由、段階に入る前、片付けを行う理由でも既に片付けをした後): 止める理由を決め、
+              ループの停止の合図を立ててから、すぐに PadOutput.stop_output() (操作を中立にし、以後の操作を送らない) を呼ぶ
+        片付けを終えるとき (PhaseTracker が片付けの終わりを返したときと、上の unsafe・stopped と、wait の 2 回目の
+        Ctrl+C の interrupted): run.jsonl に clean_up_end {"result": run_phase.CleanUpResult の値} を 1 回だけ書き、
+        ループの停止の合図を立ててから PadOutput.stop_output() を呼ぶ。
+        後片付けは close で行う。合図を先に立てるのは、出力を止めた後に surface が判断の応答を受け取ったとき、合図を
+        見て記録を書かずに抜けられるようにするため (surface_loop.SurfaceLoop.step)。
         """
         with self._lock:
             if self._stop_reason is not None:
@@ -544,10 +611,13 @@ class LayersApp:
     def wait(self) -> str:
         """止まるまで待ち、止まった理由を返す。
 
-        request_stop が呼ばれるまで、MONITOR_INTERVAL_S ごとに (sleep で待って) 次を確かめる:
+        ループの停止の合図が立つまで (片付けの間も)、MONITOR_INTERVAL_S ごとに (sleep で待って) 次を確かめる:
             - CaptureWatcher.check_once() が理由を返したら request_stop(その理由)
             - bridge_state() が "failed" なら request_stop(REASON_BRIDGE_FAILED)
-        待っている間の KeyboardInterrupt (Ctrl+C) は外に出さず、request_stop(REASON_INTERRUPTED) にする。
+            - 段階に入っていれば、PhaseTracker.check_time(clock.now()) の時間切れ (止める理由は request_stop(理由)、
+              片付けの時間切れは片付けを timeout で終える)
+        待っている間の KeyboardInterrupt (Ctrl+C) は外に出さずに確かめを続ける。1 回目は request_stop(REASON_INTERRUPTED)
+        にし、片付けの間の 2 回目は片付けを interrupted で終える。
         start の前に呼んだら RuntimeError にする。
         """
         with self._lock:
@@ -570,8 +640,8 @@ class LayersApp:
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。
 
-        1. ループの停止の合図を立て、surface と middle のループ・安全の監視・画面の停滞の計測のループのスレッドの終わりを
-           最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
+        1. ループの停止の合図を立て、surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測の
+           ループのスレッドの終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
         2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)
         3. CaptureSource.close()、FrameStore.close()
         4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書いて、
@@ -581,7 +651,8 @@ class LayersApp:
         start の前に呼んだら、理由を REASON_CLOSED にするだけで、後片付けするものは無い。
         start が途中の例外で後片付けを済ませた後に呼んだら、何もしない (二重に閉じない)。
         先に request_stop が理由だけを決めて、停止の処理 (合図と PadOutput.stop_output) の途中で割り込まれていた場合
-        (Ctrl+C など) は、1 の前に停止の処理をやり直す。
+        (Ctrl+C など) は、1 の前に停止の処理をやり直す。片付けの途中で呼ばれたら、片付けを待たずに (clean_up_end を
+        書かずに) 1 の前に停止の処理を行う (止まる理由は片付けを始めた理由のまま)。
         """
         with self._lock:
             if self._closed:

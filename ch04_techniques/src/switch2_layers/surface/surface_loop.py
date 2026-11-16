@@ -12,12 +12,14 @@
     4. advisor 判定で問う文書の種類ごとに、現在の場面の文書の deep の呼び出しの状況を deep のスケジューラーから読んで
        入力に入れ、SurfaceDecider.decide を呼ぶ。Jev を呼ぶ実装は、Jev に送る直前に、送る要求を surface_requests.jsonl に
        1 行書く (書き込み先 SurfaceRequestWriter をこのループが渡す)
-    5. 出力の操作をボタンの制限に通してから送る (PadOutput.apply)
+    5. 出力の操作を、surface の操作の関門 (surface_output_gate.SurfaceOutputGate) で送る。関門は押せるボタン (HOME を
+       除く 16 個) に絞り、段階が play のときだけ送る (play でなければ送らずに SurfaceOutputBlockedError を出す)
     6. 1 行を surface.jsonl に書く
     7. deep を呼ぶ要求を deep のスケジューラーに渡す
     8. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
 decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S 秒待つ。max_errors 回続けたら on_stop で全体を止める。
 ブリッジの復旧中は要求を送らず、操作を中立にして BRIDGE_WAIT_S 秒待つ。
+操作の送信と中立のレポートは、すべて関門 (SurfaceOutputGate) を通す (hardware.pad_output.PadOutput を直接触らない)。
 止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (5 の apply と、decide の失敗の後の neutral) が戻ったとき
 (成功・失敗とも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、その回の
 残りの送信・記録 (surface.jsonl・run.jsonl)・deep の要求をせずにループを抜ける (止めた後に記録を増やさない)。
@@ -55,7 +57,7 @@ from switch2_layers.frames.surface_frames import (
     select_boxes_to_draw,
     select_surface_frames,
 )
-from switch2_layers.hardware.pad_output import OutputStoppedError, PadOutput
+from switch2_layers.hardware.pad_output import OutputStoppedError
 from switch2_layers.notes.surface_documents import read_surface_documents
 from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.records.run_log import (
@@ -69,6 +71,7 @@ from switch2_layers.surface.middle_state_reader import (
     SurfaceContext,
     read_surface_context,
 )
+from switch2_layers.surface.surface_output_gate import SurfaceOutputGate
 from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_record import (
     SentFrame,
@@ -153,7 +156,7 @@ class SurfaceLoopParts:
     decider         surface の判断
     frame_buffer    直近のフレーム
     frame_store     送った画像の保存
-    pad_output      操作の送信 (ボタンの制限を含む)
+    output_gate     操作の送信の関門 (押せるボタンの制限と、段階が play のときだけ送ること)
     deep_requests   deep を呼ぶ要求の受け口 (run では DeepScheduler)
     deep_status     deep の文書ごとの呼び出しの状況の読み取り (run では deep_requests と同じ DeepScheduler)。step が要求ごとに、
                     advisor 判定で問う種類の状況を読む
@@ -172,7 +175,7 @@ class SurfaceLoopParts:
     decider: SurfaceDecider
     frame_buffer: FrameBuffer
     frame_store: FrameStore
-    pad_output: PadOutput
+    output_gate: SurfaceOutputGate
     deep_requests: DeepRequestSink
     deep_status: DeepStatusReader
     run_log: RunLog
@@ -242,7 +245,7 @@ class SurfaceLoop:
         stop は止める合図 (run が渡す)。None なら合図を確かめない。
 
         1. bridge_state() が BRIDGE_OK でなければ、要求を送らず BRIDGE_NOT_READY (wait_s = BRIDGE_WAIT_S) を返す。
-           直前の step でブリッジを使えていたなら (最初の step を含む)、このとき pad_output.neutral() を 1 回呼ぶ
+           直前の step でブリッジを使えていたなら (最初の step を含む)、このとき output_gate.neutral() を 1 回呼ぶ
            (使えない間は毎回は呼ばない)
         2. now_t = clock.now()。frames.surface_frames.select_surface_frames(frame_buffer.frames(), now_t) が空なら
            NO_FRAMES (wait_s = NO_FRAME_RETRY_S) を返す
@@ -270,17 +273,18 @@ class SurfaceLoop:
            step の外にそのまま出す (surface.jsonl の追記の失敗と同じ扱い。操作の送信・失敗の回数の変更・
            run.jsonl と surface.jsonl への書き込み・deep の要求をしない)
         6. decide が例外 (Exception) を出したら:
-           pad_output.neutral() を呼び、戻ったら stop を確かめる。続けて失敗した回数を 1 増やし、run_log に
+           output_gate.neutral() を呼び、戻ったら stop を確かめる。続けて失敗した回数を 1 増やし、run_log に
            surface_error {"error": 説明, "count": 続けて失敗した回数} を書き、surface.jsonl に error の行
            (action は null、blocked_buttons・deep_requests・info_labels・boxes は空、scene_changed は False、
            wait_s は DECIDE_ERROR_WAIT_S、request は writer.request_index (要求を送る前に失敗して書いていなければ
            null)、answers と usage は null) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
            on_stop(surface_failure_reason(回数)) を呼ぶ。DECIDE_ERROR (wait_s = DECIDE_ERROR_WAIT_S) を返す
-        7. 成功したら、続けて失敗した回数を 0 にし、pad_output.apply(出力の操作) で送る。apply が戻ったら
+        7. 成功したら、続けて失敗した回数を 0 にし、output_gate.apply(出力の操作) で送る。apply が戻ったら
            (例外でも) stop を確かめる。行の action と blocked_buttons は
            apply が返した FilteredAction の値 (制限と相反する方向を外した後の操作と、制限で外したボタン) にする。
-           apply が例外 (OutputStoppedError・送信の失敗) を出したら、行の error にその説明を書き、action と
-           blocked_buttons は buttons.filter_action(出力の操作, pad_output.allowed_buttons) の結果にする。送れたら、送った操作を
+           apply が例外 (OutputStoppedError (段階が play でないときの SurfaceOutputBlockedError を含む)・送信の失敗) を
+           出したら、行の error にその説明を書き、action と blocked_buttons は
+           buttons.filter_action(出力の操作, output_gate.allowed_buttons) の結果にする。送れたら、送った操作を
            直近の操作に足す (RECENT_ACTIONS_COUNT 件まで)。apply の例外は、decide の失敗の回数に数えない
         8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に
            並べたもの、wait_s は SurfaceContext.wait_s、request は出力の exchange.request.request_index、answers は
@@ -305,7 +309,7 @@ class SurfaceLoop:
         parts = self.parts
         if parts.bridge_state() != BRIDGE_OK:
             if self._bridge_was_ok:
-                parts.pad_output.neutral()
+                parts.output_gate.neutral()
             self._bridge_was_ok = False
             return SurfaceStepResult(
                 SurfaceStepOutcome.BRIDGE_NOT_READY, BRIDGE_WAIT_S, None
@@ -471,7 +475,7 @@ class SurfaceLoop:
         neutral が戻った後と、surface.jsonl の行を書く直前に stop を確かめ、立っていれば STOPPED を返す。
         """
         parts = self.parts
-        parts.pad_output.neutral()
+        parts.output_gate.neutral()
         # 中立のレポートの送信 (ブリッジの応答待ち) の間に全体が止められたら、失敗を数えず何も書かない
         if _is_stopped(stop):
             return _stopped_result()
@@ -526,16 +530,16 @@ class SurfaceLoop:
         self._consecutive_errors = 0
         error_text: str | None = None
         try:
-            filtered = parts.pad_output.apply(output.action)
+            filtered = parts.output_gate.apply(output.action)
         except OutputStoppedError as error:
             logger.debug("the pad output was stopped", exc_info=True)
             error_text = describe_exception(error)
-            filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
+            filtered = filter_action(output.action, parts.output_gate.allowed_buttons)
         except Exception as error:
             # 送信の失敗は行の error に書く (decide の失敗には数えない)
             logger.debug("sending the surface action failed", exc_info=True)
             error_text = describe_exception(error)
-            filtered = filter_action(output.action, parts.pad_output.allowed_buttons)
+            filtered = filter_action(output.action, parts.output_gate.allowed_buttons)
         else:
             self._recent_actions.append(RecentAction(t_received, filtered.action))
         # 操作の送信 (ブリッジの応答待ち) の間に全体が止められたら、止めた後に記録を増やさない

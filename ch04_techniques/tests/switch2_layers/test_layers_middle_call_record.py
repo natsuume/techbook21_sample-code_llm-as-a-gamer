@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 from switch2_layers.deep.deep_types import DocumentKind
@@ -25,6 +26,7 @@ CALL_KEYS = [
     "scene_name",
     "new_scene",
     "surface_wait_s",
+    "press_home",
     "deep_requests",
     "deep_requests_sent",
     "error",
@@ -86,11 +88,27 @@ def test_row_of_successful_call_with_new_scene():
         "scene_name": "町",
         "new_scene": True,
         "surface_wait_s": 0.2,
+        "press_home": False,
         "deep_requests": ["controls", "tips"],
         "deep_requests_sent": True,
         "error": None,
     }
     assert json.loads(json.dumps(row)) == row
+
+
+def test_row_has_press_home_of_the_state():
+    record = MiddleCallRecord(
+        t_sent=10.1,
+        t_received=10.6,
+        middle_input=INPUT,
+        write_result=MiddleWriteResult(
+            dataclasses.replace(STATE, press_home=True), None
+        ),
+        deep_requests=[],
+        deep_requests_sent=True,
+        error=None,
+    )
+    assert middle_call_row(record)["press_home"] is True
 
 
 def test_row_of_failed_call():
@@ -107,6 +125,7 @@ def test_row_of_failed_call():
     assert row["scene_id"] is None
     assert row["scene_name"] is None
     assert row["surface_wait_s"] is None
+    assert row["press_home"] is None
     assert row["new_scene"] is False
     assert row["deep_requests"] == []
     assert row["error"] == "RuntimeError: luna failed"

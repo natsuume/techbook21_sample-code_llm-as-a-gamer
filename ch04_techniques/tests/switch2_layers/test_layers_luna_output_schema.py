@@ -16,7 +16,7 @@ from switch2_layers.middle.middle_types import (
 from switch2_layers.notes.map_document import MapConnection, TilePosition
 
 # 出力のキー。場所 (place_name・current_tile・new_connections・new_observations) は、短期タスクリスト (tasks) より前に
-# 書かせる
+# 書かせる。press_home は詰まり (is_stuck・stuck_description) の直後に書かせる
 OUTPUT_KEYS = [
     "scene_name",
     "place_name",
@@ -25,6 +25,7 @@ OUTPUT_KEYS = [
     "new_observations",
     "is_stuck",
     "stuck_description",
+    "press_home",
     "surface_wait_s",
     "timeline",
     "tasks",
@@ -64,6 +65,7 @@ VALID_OUTPUT = {
     ],
     "is_stuck": True,
     "stuck_description": "t=100.000 から 12 秒間、壁に向かって歩き続けている",
+    "press_home": False,
     "surface_wait_s": 0.5,
     "timeline": "## 操作のまとめ\n- 上を押し続けた",
     "tasks": "- 右の扉に入る\n- B を試す\n",
@@ -106,6 +108,7 @@ VALID_PARSED = MiddleOutput(
             tile=TilePosition(-1, 3),
         ),
     ),
+    press_home=False,
 )
 # 座標か null の値のスキーマ (説明の注釈を除いたもの)。object と null の union は anyOf で書く
 TILE_OR_NULL = {
@@ -144,7 +147,7 @@ def without_descriptions(node: object) -> object:
 # --- スキーマ ---
 
 
-def test_schema_has_ten_required_fields_without_additional_properties():
+def test_schema_has_eleven_required_fields_without_additional_properties():
     assert without_descriptions(MIDDLE_OUTPUT_SCHEMA) == {
         "type": "object",
         "properties": {
@@ -185,6 +188,7 @@ def test_schema_has_ten_required_fields_without_additional_properties():
             },
             "is_stuck": {"type": "boolean"},
             "stuck_description": {"type": "string"},
+            "press_home": {"type": "boolean"},
             "surface_wait_s": {"type": "number", "minimum": 0.2, "maximum": 2.0},
             "timeline": {"type": "string"},
             "tasks": {"type": "string"},
@@ -255,6 +259,17 @@ def test_parse_valid_output():
     assert_valid_output_parses()
 
 
+def test_press_home_field_has_a_description():
+    assert MIDDLE_OUTPUT_SCHEMA["properties"]["press_home"]["description"]
+
+
+@pytest.mark.parametrize("press_home", [True, False])
+def test_press_home_is_read(press_home):
+    assert parse_middle_output(output_text(press_home=press_home)).press_home is (
+        press_home
+    )
+
+
 @pytest.mark.parametrize("scene_name", ["", "   ", "\n"])
 def test_blank_scene_name_means_undecided(scene_name):
     assert parse_middle_output(output_text(scene_name=scene_name)).scene_name is None
@@ -302,6 +317,9 @@ def test_non_finite_wait_is_an_error(literal):
         {"new_connections": None},
         {"new_connections": {}},
         {"new_observations": "exit"},
+        {"press_home": "true"},
+        {"press_home": 1},
+        {"press_home": None},
     ],
 )
 def test_wrong_types_are_errors(changes):

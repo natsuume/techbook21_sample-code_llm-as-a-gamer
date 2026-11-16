@@ -11,6 +11,8 @@
        (middle-once では渡さず、記録だけする)
     6. 1 行を middle/calls.jsonl に書く。MiddleAnalyzer が middle_call_record.MiddleCallDetailsSource でもあれば
        (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を行に足す (失敗した回も同じ)
+成功した回の出力の press_home が真なら、MiddleLoop.run_once が部品の on_press_home で app に知らせる (app は段階が
+play のときだけ HOME を短押しし、復帰の段階に移る)。
 ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから最初の実行を始め、
 前回の応答 (失敗を含む) から interval_s 秒待って次を始める。analyze が例外を出したら、前回の出力を残したまま
 次の間隔で再び呼ぶ。max_errors 回続けたら on_stop で全体を止める。
@@ -298,6 +300,8 @@ class MiddleLoopParts:
     run_log         run.jsonl (middle_error を書く)
     deep_requests   deep を呼ぶ要求の受け口 (run では DeepScheduler)
     on_stop         全体を止める関数 (理由の文字列を受け取る)
+    on_press_home   成功した回の出力の press_home が真のときに呼ぶ関数 (run では app が HOME を短押しする関数)。
+                    None (既定) なら呼ばない
     """
 
     paths: RunPaths
@@ -306,6 +310,7 @@ class MiddleLoopParts:
     run_log: RunLog
     deep_requests: DeepRequestSink
     on_stop: Callable[[str], None]
+    on_press_home: Callable[[], None] | None = None
 
 
 def middle_failure_reason(count: int) -> str:
@@ -335,6 +340,7 @@ class MiddleLoop:
           回数が max_errors に達したら on_stop(middle_failure_reason(回数)) を呼ぶ
         - 結果の deep_request_errors ごとに、run_log に deep_request_error {"source": "middle", "kind", "trigger": "new_scene",
           "scene_id": new_scene の ID, "error": 説明} を書く (失敗の回数には数えず、ループも止めない)
+        - 成功して、結果の state の press_home が真なら、最後に on_press_home() を呼ぶ (on_press_home が None なら呼ばない)
         結果の stopped が True なら (止める合図を見て途中で抜けた)、数えず、run_log にも書かない。
         run_middle_step の結果をそのまま返す。
         """

@@ -2,9 +2,10 @@
 
 行の形:
     {"t_sent", "t_received", "based_on_t", "frames": [{"t", "file"}], "surface_rows": 行数, "operation_rows": 行数,
-     "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "deep_requests": [種類...],
-     "deep_requests_sent", "error"}
-失敗した回は scene_id・scene_name・surface_wait_s を null、new_scene を false、deep_requests を空にし、error に説明を書く。
+     "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "press_home",
+     "deep_requests": [種類...], "deep_requests_sent", "error"}
+失敗した回は scene_id・scene_name・surface_wait_s・press_home を null、new_scene を false、deep_requests を空にし、
+error に説明を書く。
 MiddleAnalyzer が MiddleCallDetailsSource でもあれば (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を
 上のキーの後ろに足す (middle_call_row_with_details)。フェイクの MiddleAnalyzer では上のキーだけにする。
 """
@@ -45,7 +46,7 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
     """middle/calls.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
     based_on_t は middle_input.t、frames は middle_input.frames の [{"t", "file"}]、surface_rows と operation_rows は
-    行数、scene_id・scene_name・surface_wait_s は write_result.state の値、new_scene は write_result.new_scene が
+    行数、scene_id・scene_name・surface_wait_s・press_home は write_result.state の値、new_scene は write_result.new_scene が
     あれば True、deep_requests は種類の値 (文字列) のリスト。
     """
     middle_input = record.middle_input

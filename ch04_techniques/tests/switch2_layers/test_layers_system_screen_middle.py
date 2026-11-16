@@ -13,6 +13,7 @@ from switch2_layers.middle.system_screen_instructions import (
     goal_text,
 )
 from switch2_layers.middle.system_screen_middle import (
+    FAKE_DONE_OUTPUT,
     FakeSystemScreenMiddle,
     LunaSystemScreenMiddle,
     SystemScreenMiddleError,
@@ -657,3 +658,20 @@ def test_fake_reads_the_given_iterable_once():
     middle = FakeSystemScreenMiddle(outputs)
     assert middle.decide(SCREEN_INPUT).observation == "1 回目"
     assert middle.decide(SCREEN_INPUT).operations == ()
+
+
+def test_fake_for_run_returns_done_without_operations_forever():
+    # run の --middle fake の本体の画面の middle: 操作なしで done を真で返し続ける
+    assert FAKE_DONE_OUTPUT == SystemScreenOutput(
+        observation="", operations=(), done=True
+    )
+    middle = FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT)
+    for _ in range(3):
+        assert middle.decide(SCREEN_INPUT) == FAKE_DONE_OUTPUT
+
+
+def test_fake_returns_the_given_outputs_before_the_exhausted_output():
+    first = fake_output("1 回目")
+    middle = FakeSystemScreenMiddle([first], exhausted_output=FAKE_DONE_OUTPUT)
+    assert middle.decide(SCREEN_INPUT) == first
+    assert middle.decide(SCREEN_INPUT) == FAKE_DONE_OUTPUT

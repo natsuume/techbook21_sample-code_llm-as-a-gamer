@@ -5,7 +5,8 @@
 
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
-     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t", "place_name", "current_tile"}
+     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t", "place_name", "current_tile",
+     "press_home"}
 surface_rows_offset と operations_rows_offset は、次の middle の入力で surface.jsonl と operations.jsonl を読み始める
 バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
 docstring)。
@@ -15,6 +16,7 @@ first_task は出力の短期タスクリストの最初のタスクの文、fir
 place_name は出力の現在地の場所の名前 (前後の空白を除いたもの。決められなければ null)、current_tile は出力の現在地の
 マス ({"x": 整数, "y": 整数}。place_name が null のときと書かれなかったときは null)。次の middle の入力で、現在地から
 出口までの経路を計算するのに使う (middle.route_section)。読むときは、2 つのキーが無ければどちらも null とみなす。
+press_home は出力の press_home (HOME を押して本体の画面に出るか) を残したもの。読むときは、キーが無ければ false とみなす。
 """
 
 from collections.abc import Mapping
@@ -97,9 +99,11 @@ class MiddleState:
                              決められなければ None
     current_tile             この出力の現在地のマス (MiddleOutput.current_tile)。place_name が None のときと、
                              書かれなかったときは None
+    press_home               この出力の press_home (MiddleOutput.press_home)
     first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
     記録しない値 (テストなど) のため。place_name・current_tile の既定値も同じく、2 つのキーが無い middle/state.json を
-    読むときと、現在地を記録しない値 (テストなど) のため。
+    読むときと、現在地を記録しない値 (テストなど) のため。press_home の既定値も同じく、キーが無い middle/state.json を
+    読むときと、HOME を押さない値 (テストなど) のため。
     """
 
     generated_t: float
@@ -116,6 +120,7 @@ class MiddleState:
     first_task_since_t: float | None = None
     place_name: str | None = None
     current_tile: TilePosition | None = None
+    press_home: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,8 +190,10 @@ class MiddleOutput:
                         (出力の値のまま。place_name が None でも None にしない)
     new_connections     前回の実行より後に新しく分かった、場所から場所への移動 (無ければ空)
     new_observations    新しく分かった、出口・目印・通れなかった位置 (無ければ空)
+    press_home          HOME を押して本体の画面に出るなら True (ゲームが操作を受け付けないなど、本体の画面に出る必要が
+                        あるときだけ。app は段階が play のときだけ HOME を短押しし、復帰の段階に移る)
     place_name・current_tile・new_connections・new_observations の既定値は、マップを記録しない出力 (フェイクや
-    テストなど) のため。
+    テストなど) のため。press_home の既定値は、HOME を押さない出力 (フェイクやテストなど) のため。
     """
 
     scene_name: str | None
@@ -199,6 +206,7 @@ class MiddleOutput:
     current_tile: TilePosition | None = None
     new_connections: tuple[MapConnection, ...] = ()
     new_observations: tuple[MapObservation, ...] = ()
+    press_home: bool = False
 
 
 class MiddleAnalyzer(Protocol):
@@ -213,6 +221,7 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
     """MiddleState を middle/state.json の辞書 (モジュールの docstring のキーの順) にする。
 
     current_tile は notes.map_document.tile_position_to_json の形 ({"x", "y"} の順のキー)。None は null。
+    press_home は最後のキーにする。
     """
     return {
         "generated_t": state.generated_t,
@@ -246,6 +255,7 @@ def middle_state_from_json(value: object) -> MiddleState:
     place_name と current_tile も省けるキーで、無ければどちらも None にする。あれば、place_name は文字列か null
     (文字列は書かれたまま)、current_tile は {"x": 整数, "y": 整数} の object か null でなければ ValueError にする
     (x か y が無い、整数でない (bool と小数 (1.0 を含む) は整数でない) ときも ValueError。object のほかのキーは無視する)。
+    press_home も省けるキーで、無ければ False にする。あれば、真偽でなければ ValueError にする。
     """
     if isinstance(value, dict):
         return _middle_state_from_object(value)

@@ -12,6 +12,7 @@ from switch2_layers.app import REASON_INTERRUPTED, LayersParts
 from switch2_layers.cli import (
     build_parser,
     create_middle_analyzer,
+    create_system_screen_middle,
     main,
     middle_once_settings_from_args,
     run_settings_from_args,
@@ -25,6 +26,14 @@ from switch2_layers.deep.deep_scheduler import (
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
+from switch2_layers.middle.system_screen_middle import (
+    FAKE_DONE_OUTPUT,
+    LunaSystemScreenMiddle,
+)
+from switch2_layers.middle.system_screen_types import (
+    SystemGoal,
+    SystemScreenInput,
+)
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
 from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.safety.fake_safety import FakeSafetyChecker
@@ -49,8 +58,13 @@ from switch2_layers.settings import (
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_surface import JevSurfaceDecider
 from switch2_layers.surface.surface_assembly import SurfaceAssembly
+from switch2_layers.system_screen.system_screen_references import SYSTEM_SCREEN_NAMES
 
 COMMANDS = ["run", "middle-once", "deep-once"]
+# run の必須の引数 (指定のソフトとユーザーの名前)
+SOFTWARE = "テストのソフト"
+USER = "テストのユーザー"
+RUN = ["run", "--software", SOFTWARE, "--user", USER]
 # deep が文書の本体を直接編集するため、文書を入れ替えるサブコマンドは無い
 REMOVED_COMMAND = "publish-note"
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -110,7 +124,7 @@ def test_command_is_required():
 
 
 def test_run_defaults_follow_the_issue():
-    args = build_parser().parse_args(["run"])
+    args = build_parser().parse_args(RUN)
     assert args.runs_dir == Path("runs")
     assert args.interval_fps == DEFAULT_INTERVAL_FPS == 5
     assert args.interval_width == DEFAULT_INTERVAL_WIDTH == 640
@@ -121,13 +135,14 @@ def test_run_defaults_follow_the_issue():
     assert args.deep_min_start_interval == DEFAULT_DEEP_MIN_START_INTERVAL_S == 30
     assert args.deep_auto_seconds == DEFAULT_DEEP_AUTO_SECONDS == 60
     assert args.deep_timeout == DEFAULT_DEEP_TIMEOUT_S == 300
-    assert args.allow_home is False
+    assert args.software == SOFTWARE
+    assert args.user == USER
 
 
 def test_run_accepts_all_options():
     args = build_parser().parse_args(
         [
-            "run",
+            *RUN,
             "--runs-dir",
             "elsewhere",
             "--interval-fps",
@@ -148,7 +163,6 @@ def test_run_accepts_all_options():
             "30",
             "--deep-timeout",
             "60",
-            "--allow-home",
         ]
     )
     assert args.runs_dir == Path("elsewhere")
@@ -161,7 +175,71 @@ def test_run_accepts_all_options():
     assert args.deep_min_start_interval == 0.0
     assert args.deep_auto_seconds == 30.0
     assert args.deep_timeout == 60.0
-    assert args.allow_home is True
+
+
+# --- run の指定のソフトとユーザー (--software・--user) ---
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run"],
+        ["run", "--software", SOFTWARE],
+        ["run", "--user", USER],
+    ],
+    ids=["neither", "without_user", "without_software"],
+)
+def test_run_requires_software_and_user(argv, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(argv)
+    assert exit_info.value.code == 2
+    assert "required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["", "   ", "\t"], ids=["empty", "spaces", "tab"])
+@pytest.mark.parametrize("option", ["--software", "--user"])
+def test_run_rejects_blank_software_or_user(no_hardware, option, name, capsys):
+    values = {"--software": SOFTWARE, "--user": USER, option: name}
+    argv = ["run", "--software", values["--software"], "--user", values["--user"]]
+    with pytest.raises(SystemExit) as exit_info:
+        main([*argv, *ALL_FAKE])
+    assert exit_info.value.code == 2
+    assert option in capsys.readouterr().err
+
+
+def test_run_keeps_the_names_as_written_in_settings():
+    args = build_parser().parse_args(
+        ["run", "--software", "ソフト A", "--user", "ユーザー 1"]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.software_name == "ソフト A"
+    assert settings.user_name == "ユーザー 1"
+
+
+def test_run_rejects_allow_home(capsys):
+    # HOME は surface に押させず、本体の画面の操作だけが押す (--allow-home は無い)
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, "--allow-home"])
+    assert exit_info.value.code == 2
+    assert "--allow-home" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["middle-once", "--run-dir", "runs/x"],
+        ["deep-once", "--run-dir", "runs/x", "--doc", "advice"],
+    ],
+    ids=["middle_once", "deep_once"],
+)
+def test_once_commands_do_not_take_software_or_user(argv):
+    # middle-once と deep-once は変えない (名前は要らず、渡すと知らない引数)
+    args = build_parser().parse_args(argv)
+    assert not hasattr(args, "software")
+    assert not hasattr(args, "user")
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*argv, "--software", SOFTWARE])
+    assert exit_info.value.code == 2
 
 
 def test_run_rejects_auto_seconds_shorter_than_min_interval_without_hardware(
@@ -173,7 +251,7 @@ def test_run_rejects_auto_seconds_shorter_than_min_interval_without_hardware(
     # 範囲の誤りでは、実機 (ブリッジ) に触れずに終了する
     monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
     # 既定の --deep-min-start-interval は 15
-    code = main(["run", "--deep-auto-seconds", "5"])
+    code = main([*RUN, "--deep-auto-seconds", "5"])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -204,7 +282,7 @@ def failing_bridge(**kwargs):
 
 
 def test_run_surface_defaults_follow_the_issue():
-    args = build_parser().parse_args(["run"])
+    args = build_parser().parse_args(RUN)
     assert args.surface == "jev"
     assert args.threshold_advisor == 0.5
     assert args.box_requery_every == 5
@@ -213,7 +291,7 @@ def test_run_surface_defaults_follow_the_issue():
 def test_run_accepts_surface_options():
     args = build_parser().parse_args(
         [
-            "run",
+            *RUN,
             "--surface",
             "fake",
             "--threshold-advisor",
@@ -230,7 +308,7 @@ def test_run_accepts_surface_options():
 
 def test_run_rejects_unknown_surface():
     with pytest.raises(SystemExit) as exit_info:
-        build_parser().parse_args(["run", "--surface", "luna"])
+        build_parser().parse_args([*RUN, "--surface", "luna"])
     assert exit_info.value.code == 2
 
 
@@ -240,7 +318,7 @@ def test_run_without_typesafe_api_key_exits_before_hardware(
 ):
     if key is not None:
         monkeypatch.setenv("TYPESAFE_API_KEY", key)
-    code = main(["run", "--middle", "fake"])
+    code = main([*RUN, "--middle", "fake"])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -248,7 +326,7 @@ def test_run_without_typesafe_api_key_exits_before_hardware(
 
 
 def test_run_range_error_is_reported_before_api_key(no_hardware, capsys):
-    code = main(["run", "--threshold-advisor", "1.5"])
+    code = main([*RUN, "--threshold-advisor", "1.5"])
     assert code == 2
     err = capsys.readouterr().err
     assert "--threshold-advisor" in err
@@ -256,14 +334,14 @@ def test_run_range_error_is_reported_before_api_key(no_hardware, capsys):
 
 
 def test_run_box_requery_every_range_error(no_hardware, capsys):
-    code = main(["run", "--surface", "fake", "--box-requery-every", "0"])
+    code = main([*RUN, "--surface", "fake", "--box-requery-every", "0"])
     assert code == 2
     assert "--box-requery-every" in capsys.readouterr().err
 
 
 def test_run_with_fake_surface_does_not_need_api_key(no_hardware, monkeypatch, capsys):
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--surface", "fake", "--middle", "fake", "--safety", "fake"])
+    code = main([*RUN, "--surface", "fake", "--middle", "fake", "--safety", "fake"])
     # API キーの確かめを通り、ブリッジの起動 (偽物) まで進んだ
     assert code == 1
     assert "stub bridge failed" in capsys.readouterr().err
@@ -288,7 +366,7 @@ def test_run_builds_surface_with_api_key_and_closes_it(
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--threshold-advisor", "0.6", "--middle", "fake"])
+    code = main([*RUN, "--threshold-advisor", "0.6", "--middle", "fake"])
     assert code == 1
     assert len(built) == 1
     settings, api_key = built[0]
@@ -435,7 +513,7 @@ def test_deep_once_command_creates_game_job_directory(tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
-    "argv", [["run"], ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
+    "argv", [RUN, ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
 )
 def test_middle_defaults_to_luna(argv):
     args = build_parser().parse_args(argv)
@@ -443,7 +521,7 @@ def test_middle_defaults_to_luna(argv):
 
 
 @pytest.mark.parametrize(
-    "argv", [["run"], ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
+    "argv", [RUN, ["middle-once", "--run-dir", "runs/x"]], ids=["run", "once"]
 )
 def test_middle_accepts_fake_and_rejects_unknown_values(argv):
     assert build_parser().parse_args([*argv, "--middle", "fake"]).middle == "fake"
@@ -453,7 +531,7 @@ def test_middle_accepts_fake_and_rejects_unknown_values(argv):
 
 
 def test_settings_from_args_convert_middle_to_kind():
-    run_args = build_parser().parse_args(["run", "--middle", "fake"])
+    run_args = build_parser().parse_args([*RUN, "--middle", "fake"])
     assert run_settings_from_args(run_args).middle is MiddleKind.FAKE
     once_args = build_parser().parse_args(["middle-once", "--run-dir", "runs/x"])
     assert middle_once_settings_from_args(once_args).middle is MiddleKind.LUNA
@@ -475,6 +553,40 @@ def test_create_middle_analyzer_for_luna_without_api_key_is_an_error(environ):
         create_middle_analyzer(MiddleKind.LUNA, environ)
 
 
+# 本体の画面の middle に渡す入力 (フェイクは入力を見ない)
+SYSTEM_SCREEN_INPUT = SystemScreenInput(
+    t=1.0,
+    goal=SystemGoal.PREPARE,
+    software_name=SOFTWARE,
+    user_name=USER,
+    frame_jpeg=b"",
+    frame_t=1.0,
+    judged_screen=None,
+    judged_frame_t=None,
+    history=(),
+)
+
+
+def test_create_system_screen_middle_for_fake_returns_done_forever():
+    middle = create_system_screen_middle(MiddleKind.FAKE, {})
+    for _ in range(3):
+        assert middle.decide(SYSTEM_SCREEN_INPUT) == FAKE_DONE_OUTPUT
+
+
+def test_create_system_screen_middle_for_luna_uses_api_key_and_reference_names():
+    middle = create_system_screen_middle(MiddleKind.LUNA, {API_KEY_ENV: " sk-test\n"})
+    assert isinstance(middle, LunaSystemScreenMiddle)
+    assert middle.api_key == "sk-test"
+    # 照合と同じ見本の名前
+    assert middle.screen_names == SYSTEM_SCREEN_NAMES
+
+
+@pytest.mark.parametrize("environ", [{}, {API_KEY_ENV: ""}, {API_KEY_ENV: "  "}])
+def test_create_system_screen_middle_for_luna_without_api_key_is_an_error(environ):
+    with pytest.raises(ValueError):
+        create_system_screen_middle(MiddleKind.LUNA, environ)
+
+
 def must_not_start_bridge(**kwargs):
     raise AssertionError("the bridge must not be started")
 
@@ -487,7 +599,7 @@ def test_run_without_api_key_exits_before_hardware(
         monkeypatch.setenv(API_KEY_ENV, value)
     monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
     runs_dir = tmp_path / "runs"
-    code = main(["run", "--runs-dir", str(runs_dir), "--deep", "fake"])
+    code = main([*RUN, "--runs-dir", str(runs_dir), "--deep", "fake"])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -499,7 +611,7 @@ def test_run_without_api_key_exits_before_hardware(
 
 def test_run_range_errors_are_reported_before_api_key(monkeypatch, capsys):
     monkeypatch.setattr(cli, "BridgeSupervisor", must_not_start_bridge)
-    code = main(["run", "--middle-interval", "0", "--deep", "fake"])
+    code = main([*RUN, "--middle-interval", "0", "--deep", "fake"])
     assert code == 2
     err = capsys.readouterr().err
     assert "--middle-interval" in err
@@ -514,7 +626,7 @@ def test_run_with_fake_middle_does_not_need_api_key(monkeypatch, capsys):
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
     code = main(
         [
-            "run",
+            *RUN,
             "--middle",
             "fake",
             "--surface",
@@ -562,11 +674,17 @@ def stub_hardware_and_app(monkeypatch) -> list:
 def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
     monkeypatch.setenv(API_KEY_ENV, "sk-test")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--surface", "fake", "--deep", "fake", "--safety", "fake"]) == 0
+    assert main([*RUN, "--surface", "fake", "--deep", "fake", "--safety", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.LUNA
     assert isinstance(parts.middle, LunaMiddleAnalyzer)
     assert parts.middle.api_key == "sk-test"
+    # 本体の画面の middle も --middle で選ぶ
+    assert isinstance(parts.system_middle, LunaSystemScreenMiddle)
+    assert parts.system_middle.api_key == "sk-test"
+    # 指定のソフトとユーザーの名前は、起動引数として app に渡す
+    assert settings.software_name == SOFTWARE
+    assert settings.user_name == USER
 
 
 def test_run_passes_fake_middle_to_app(monkeypatch):
@@ -574,7 +692,7 @@ def test_run_passes_fake_middle_to_app(monkeypatch):
     assert (
         main(
             [
-                "run",
+                *RUN,
                 "--middle",
                 "fake",
                 "--surface",
@@ -590,13 +708,14 @@ def test_run_passes_fake_middle_to_app(monkeypatch):
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.FAKE
     assert isinstance(parts.middle, FakeMiddleAnalyzer)
+    assert parts.system_middle.decide(SYSTEM_SCREEN_INPUT) == FAKE_DONE_OUTPUT
 
 
 def test_run_passes_fake_surface_to_app_without_hooks(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     created = stub_hardware_and_app(monkeypatch)
     assert (
-        main(["run", "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
+        main([*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
     )
     [(settings, parts)] = created
     assert settings.surface is SurfaceKind.FAKE
@@ -610,7 +729,7 @@ def test_run_passes_fake_surface_to_app_without_hooks(monkeypatch):
 def test_run_passes_jev_surface_parts_to_app_by_default(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "  ts-test  ")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--box-requery-every", "2"]) == 0
+    assert main([*RUN, "--middle", "fake", "--box-requery-every", "2"]) == 0
     [(settings, parts)] = created
     # run.jsonl の start に書く起動引数 (settings) と、動かす surface が一致する
     assert settings.surface is SurfaceKind.JEV
@@ -639,7 +758,7 @@ def test_run_closes_surface_parts_after_app_stops(monkeypatch):
     monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
     stub_hardware_and_app(monkeypatch)
     assert (
-        main(["run", "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
+        main([*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
     )
     assert closed == [True]
 
@@ -672,6 +791,7 @@ LUNA_OUTPUT = {
     "new_observations": [],
     "is_stuck": False,
     "stuck_description": "",
+    "press_home": False,
     "surface_wait_s": 1.5,
     "timeline": "## 操作のまとめ\n- まだ操作していない",
     "tasks": "- A でゲームを始める\n",
@@ -908,7 +1028,7 @@ def test_middle_once_with_luna_reads_and_records_the_map(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize(
     "argv",
-    [["run"], ["deep-once", "--run-dir", "runs/x", "--doc", "advice"]],
+    [RUN, ["deep-once", "--run-dir", "runs/x", "--doc", "advice"]],
 )
 def test_deep_runner_option_defaults_to_claude(argv):
     assert build_parser().parse_args(argv).deep == "claude"
@@ -926,9 +1046,9 @@ def test_build_deep_runner():
 
 
 def test_run_settings_from_args_convert_deep_to_choice():
-    default_args = build_parser().parse_args(["run"])
+    default_args = build_parser().parse_args(RUN)
     assert run_settings_from_args(default_args).deep is DeepRunnerChoice.CLAUDE
-    fake_args = build_parser().parse_args(["run", "--deep", "fake"])
+    fake_args = build_parser().parse_args([*RUN, "--deep", "fake"])
     assert run_settings_from_args(fake_args).deep is DeepRunnerChoice.FAKE
 
 
@@ -1045,7 +1165,7 @@ def test_run_passes_the_deep_choice_in_settings(
     created = stub_hardware_and_app(monkeypatch)
     assert (
         main(
-            ["run", "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+            [*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
         )
         == 0
     )
@@ -1076,7 +1196,7 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
     # middle・surface・安全の監視は API キーの要らないフェイクにする
     assert (
         main(
-            ["run", "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+            [*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
         )
         == 0
     )
@@ -1088,7 +1208,7 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
 
 
 def test_run_safety_defaults_follow_the_issue():
-    args = build_parser().parse_args(["run"])
+    args = build_parser().parse_args(RUN)
     assert args.safety == "jev"
     assert args.safety_interval == 1.0
     assert args.threshold_safety == 0.7
@@ -1099,7 +1219,7 @@ def test_run_safety_defaults_follow_the_issue():
 def test_run_accepts_safety_options():
     args = build_parser().parse_args(
         [
-            "run",
+            *RUN,
             "--safety",
             "fake",
             "--safety-interval",
@@ -1119,7 +1239,7 @@ def test_run_accepts_safety_options():
 
 def test_run_rejects_unknown_safety():
     with pytest.raises(SystemExit) as exit_info:
-        build_parser().parse_args(["run", "--safety", "luna"])
+        build_parser().parse_args([*RUN, "--safety", "luna"])
     assert exit_info.value.code == 2
 
 
@@ -1149,7 +1269,7 @@ def test_run_safety_range_errors_exit_before_hardware(
     no_hardware, tmp_path, capsys, extra, option
 ):
     runs_dir = tmp_path / "runs"
-    code = main(["run", "--runs-dir", str(runs_dir), *ALL_FAKE, *extra])
+    code = main([*RUN, "--runs-dir", str(runs_dir), *ALL_FAKE, *extra])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -1167,7 +1287,7 @@ def test_run_with_jev_safety_without_api_key_exits_before_hardware(
     runs_dir = tmp_path / "runs"
     code = main(
         [
-            "run",
+            *RUN,
             "--runs-dir",
             str(runs_dir),
             "--middle",
@@ -1189,7 +1309,7 @@ def test_run_with_jev_safety_without_api_key_exits_before_hardware(
 def test_run_without_typesafe_api_key_reports_both_surface_and_safety(
     no_hardware, capsys
 ):
-    code = main(["run", "--middle", "fake", "--deep", "fake"])
+    code = main([*RUN, "--middle", "fake", "--deep", "fake"])
     assert code == 2
     err = capsys.readouterr().err
     assert "--surface fake" in err
@@ -1199,7 +1319,7 @@ def test_run_without_typesafe_api_key_reports_both_surface_and_safety(
 def test_run_passes_fake_safety_to_app(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", *ALL_FAKE, "--threshold-safety", "0.9"]) == 0
+    assert main([*RUN, *ALL_FAKE, "--threshold-safety", "0.9"]) == 0
     [(settings, parts)] = created
     # run.jsonl の start に書く起動引数 (settings) と、動かす安全の監視が一致する
     assert settings.safety is SafetyKind.FAKE
@@ -1210,7 +1330,7 @@ def test_run_passes_fake_safety_to_app(monkeypatch):
 def test_run_passes_jev_safety_to_app_by_default(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "  ts-test  ")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
+    assert main([*RUN, "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.safety is SafetyKind.JEV
     assert isinstance(parts.safety, JevSafetyChecker)
@@ -1220,7 +1340,7 @@ def test_run_passes_jev_safety_to_app_by_default(monkeypatch):
 def test_run_uses_separate_jev_clients_for_surface_and_safety(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--deep", "fake"]) == 0
+    assert main([*RUN, "--middle", "fake", "--deep", "fake"]) == 0
     [(_, parts)] = created
     assert isinstance(parts.surface, JevSurfaceDecider)
     assert isinstance(parts.safety, JevSafetyChecker)
@@ -1239,7 +1359,7 @@ def test_run_builds_safety_with_api_key_and_closes_it_after_app_stops(monkeypatc
     monkeypatch.setenv("TYPESAFE_API_KEY", " ts-test ")
     monkeypatch.setattr(cli, "build_safety_assembly", fake_build)
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
+    assert main([*RUN, "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
     assert built == [(SafetyKind.JEV, "ts-test")]
     [(_, parts)] = created
     assert parts.safety is checker
@@ -1256,7 +1376,7 @@ def test_run_closes_safety_parts_when_the_bridge_fails(no_hardware, monkeypatch)
 
     monkeypatch.setattr(cli, "build_safety_assembly", fake_build)
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    assert main(["run", *ALL_FAKE]) == 1
+    assert main([*RUN, *ALL_FAKE]) == 1
     assert closed == [True]
 
 
@@ -1264,7 +1384,7 @@ def test_run_closes_safety_parts_when_the_bridge_fails(no_hardware, monkeypatch)
 
 
 def test_run_progress_defaults_follow_the_issue():
-    args = build_parser().parse_args(["run"])
+    args = build_parser().parse_args(RUN)
     assert args.progress_window == DEFAULT_PROGRESS_WINDOW_S == 300
     assert args.stuck_advice_seconds == DEFAULT_STUCK_ADVICE_SECONDS == 60
     settings = run_settings_from_args(args)
@@ -1274,7 +1394,7 @@ def test_run_progress_defaults_follow_the_issue():
 
 def test_run_accepts_progress_options():
     args = build_parser().parse_args(
-        ["run", "--progress-window", "120.5", "--stuck-advice-seconds", "30"]
+        [*RUN, "--progress-window", "120.5", "--stuck-advice-seconds", "30"]
     )
     settings = run_settings_from_args(args)
     assert settings.progress_window_s == 120.5
@@ -1297,7 +1417,7 @@ def test_run_accepts_progress_options():
 def test_run_progress_range_errors_exit_without_hardware(
     no_hardware, capsys, argv, option
 ):
-    code = main(["run", "--middle", "fake", "--surface", "fake", *argv])
+    code = main([*RUN, "--middle", "fake", "--surface", "fake", *argv])
     assert code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -1306,7 +1426,7 @@ def test_run_progress_range_errors_exit_without_hardware(
 
 def test_run_passes_the_progress_arguments_in_settings(monkeypatch):
     created = stub_hardware_and_app(monkeypatch)
-    argv = ["run", *ALL_FAKE, "--progress-window", "90", "--stuck-advice-seconds", "45"]
+    argv = [*RUN, *ALL_FAKE, "--progress-window", "90", "--stuck-advice-seconds", "45"]
     assert main(argv) == 0
     [(settings, _)] = created
     # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)

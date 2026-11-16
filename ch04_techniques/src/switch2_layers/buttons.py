@@ -1,9 +1,11 @@
 """押せるボタンの集合と、コントローラーへ送る直前のボタンの制限。
 
-押せるボタンは switch2_remote.controller_state.BUTTON_ORDER の 17 個から HOME を除いた 16 個。
---allow-home を付けたときだけ HOME を足す (ゲームの起動・終了まで含めて検証する場合)。
-制限は hardware.pad_output.PadOutput.apply が送る直前に filter_action で行い、外したボタンは
-surface.jsonl の blocked_buttons に記録する。
+コントローラーのボタンは switch2_remote.controller_state.BUTTON_ORDER の 17 個 (ALL_BUTTONS)。
+    surface の押せるボタン       ALL_BUTTONS から HOME を除いた 16 個 (allowed_buttons)。surface は HOME を押さない
+    本体の画面の操作と press_home の HOME
+                                 ALL_BUTTONS の 17 個 (hardware.pad_output.PadOutput はこれで作る)
+surface の操作の制限は surface.surface_output_gate.SurfaceOutputGate.apply が送る直前に filter_action で行い、外した
+ボタンは surface.jsonl の blocked_buttons に記録する。
 """
 
 from collections.abc import Collection
@@ -18,10 +20,8 @@ HOME_BUTTON = "HOME"
 ALL_BUTTONS: tuple[str, ...] = BUTTON_ORDER
 
 
-def allowed_buttons(allow_home: bool) -> frozenset[str]:
-    """押せるボタンの集合を返す。allow_home が False なら ALL_BUTTONS から HOME を除いた 16 個、True なら 17 個。"""
-    if allow_home:
-        return frozenset(ALL_BUTTONS)
+def allowed_buttons() -> frozenset[str]:
+    """surface の押せるボタンの集合 (ALL_BUTTONS から HOME を除いた 16 個) を返す。"""
     return frozenset(ALL_BUTTONS) - {HOME_BUTTON}
 
 

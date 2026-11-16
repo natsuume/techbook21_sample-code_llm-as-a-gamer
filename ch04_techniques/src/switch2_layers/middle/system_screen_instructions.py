@@ -14,14 +14,17 @@ SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS の節 (この順):
     2. 入力: user メッセージの節 (middle.system_screen_request の節) ごとの中身と、打ち切りの理由の意味
     3. 出力: observation・operations (screen・type・buttons・seconds)・done の書き方。先頭の操作の screen には照合の
        結果の画面の名前をそのまま書くこと、画面が切り替わる途中では操作の列を空にすること
-    4. 本体の画面: 見本の画面 (home_menu・controllers・controller_order・user_select) ごとの見た目と使う操作、
-       確認のダイアログ「プレイ中のソフトを終了します。」、none の画面
-    5. 目的ごとの手順: PREPARE_TEXT・RECOVER_TEXT・CLEAN_UP_TEXT
+    4. 本体の画面: 見本の画面 (home_menu・controllers・controller_order・user_select・software_close) ごとの見た目と
+       使う操作 (software_close は終了の確認「プレイ中のソフトを終了します。」)、none の画面
+    5. 目的ごとの手順: PREPARE_TEXT・RECOVER_TEXT・CLEAN_UP_TEXT。CLEAN_UP_TEXT は「HOME メニューに戻り、指定の
+       ソフトを終了する」手順で、HOME メニューで指定のソフトの「プレイ中」の絵を選び、X (ソフトをおわる) で終了の確認
+       (software_close) を出し、最初に選ばれている「終了する」で A を押す
     6. 決定の A の置き方: A は操作の列の先頭にだけ置き、今回の画像でカーソルが目的の項目にあると確かめたときに限る。
        カーソルを動かした後の決定は、次の呼び出しで画像を見てから返す
     7. カーソルの移動: 短押しで行い、押し続けを使わない。十字キーは 1 回の press に 1 方向だけ
     8. してはいけない操作: 目的の手順に無いアイコンで A を押さない、指定のソフト以外を起動しない、指定のユーザー以外で
-       決定しない、ユーザーの追加・ソフトの削除・データの削除に進まない、迷ったら操作の列を空にして done を偽にする、など
+       決定しない、ユーザーの追加・ソフトの削除・データの削除に進まない、迷ったら操作の列を空にして done を偽にする、など。
+       X (ソフトをおわる) と終了の確認の A は、片付けで指定のソフトを終了するときだけ使う
     9. 安全のための規則: safety.safety_rules.SAFETY_RULES の文
 指示と手順の文には、ソフトの名前とユーザーの名前を書かない (「指定のソフト」「指定のユーザー」と書く)。
 """

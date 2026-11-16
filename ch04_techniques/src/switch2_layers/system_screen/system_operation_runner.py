@@ -48,7 +48,8 @@ from switch2_layers.run_clock import RunClock
 
 # 前の操作を終えてから、照合に使うフレームとして認めるまでの秒数 (入力の直後は、反映前や遷移の途中の画面になるため)
 SETTLE_S = 0.5
-# 2 つ目以降の操作の前に、照合の結果を待つ最大の秒数 (前の操作を終えた時刻 + SETTLE_S から数える)
+# 2 つ目以降の操作の前に、照合の結果を待つ最大の秒数の既定値 (前の操作を終えた時刻 + SETTLE_S から数える)。
+# run では、安全の監視の間隔に合わせて max(JUDGMENT_WAIT_S, --safety-interval + 2 秒) を渡す
 JUDGMENT_WAIT_S = 3.0
 # 照合の結果を待つ間に、止める合図を確かめる間隔 (秒)。JudgmentSource.wait_newer の 1 回の timeout_s の上限
 JUDGMENT_POLL_S = 0.1
@@ -145,10 +146,11 @@ def _screen_name(screen: str | None) -> str:
 class SystemOperationRunner:
     """操作の列を、照合の結果を確かめながら送る。run は 1 つのスレッドからだけ呼ぶ。
 
-    pad_output     操作の送信先 (ボタンの制限を含む)
-    judgments      最新の照合の結果を読む部品
-    clock          実行の経過秒の時計 (照合の結果の frame_t と同じ時計)
-    wait_or_stop   止める合図を見ながら待つ関数 (WaitOrStop)。テストでは偽の時計を進める関数を渡す
+    pad_output        操作の送信先 (ボタンの制限を含む)
+    judgments         最新の照合の結果を読む部品
+    clock             実行の経過秒の時計 (照合の結果の frame_t と同じ時計)
+    wait_or_stop      止める合図を見ながら待つ関数 (WaitOrStop)。テストでは偽の時計を進める関数を渡す
+    judgment_wait_s   2 つ目以降の操作の前に、照合の結果を待つ最大の秒数 (既定 JUDGMENT_WAIT_S)
     """
 
     def __init__(
@@ -157,8 +159,9 @@ class SystemOperationRunner:
         judgments: JudgmentSource,
         clock: RunClock,
         wait_or_stop: WaitOrStop = threading.Event.wait,
+        judgment_wait_s: float = JUDGMENT_WAIT_S,
     ) -> None:
-        """部品を持つ。ここでは何も送らず、待たない。"""
+        """部品と照合の結果を待つ上限を持つ。ここでは何も送らず、待たない。"""
         self.pad_output = pad_output
         self.judgments = judgments
         self.clock = clock
@@ -183,7 +186,7 @@ class SystemOperationRunner:
                   (押し続けと同時押しの中の A も同じ)
                b. after_frame_t = 前の操作を終えた時刻 + SETTLE_S とする。clock.now() が after_frame_t になるまで
                   wait_or_stop(stop, 残りの秒) で待つ。stop が立ったら STOPPED で打ち切る
-               c. clock.now() が after_frame_t + JUDGMENT_WAIT_S を過ぎるまで、judgments.wait_newer(after_frame_t,
+               c. clock.now() が after_frame_t + judgment_wait_s を過ぎるまで、judgments.wait_newer(after_frame_t,
                   timeout_s) を繰り返し呼んで、frame_t が after_frame_t より大きい照合の結果を待つ。timeout_s は
                   JUDGMENT_POLL_S と残りの秒の小さい方 (0 以上) にし、呼ぶ前と戻った後に stop を確かめる。stop が
                   立っていたら、結果が届いていても STOPPED で打ち切る
@@ -332,7 +335,7 @@ class SystemOperationRunner:
     def _wait_judgment(
         self, after_frame_t: float, stop: threading.Event
     ) -> JudgmentResult | None:
-        """frame_t が after_frame_t より大きい照合の結果を、after_frame_t + JUDGMENT_WAIT_S まで待って返す (run の 3c)。
+        """frame_t が after_frame_t より大きい照合の結果を、after_frame_t + judgment_wait_s まで待って返す (run の 3c)。
 
         届かないか、stop が立ったら None を返す (呼び出し側が stop を確かめ直して理由を決める)。
         """

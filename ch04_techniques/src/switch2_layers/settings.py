@@ -9,6 +9,8 @@ middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キー�
 --deep (DeepRunnerChoice) で選ぶ。安全の監視の実装は --safety (SafetyKind) で選ぶ。jev に要る API キーは surface と
 同じ環境変数 TYPESAFE_API_KEY_ENV から読む (safety_api_key_errors で有無を確かめる)。
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
+run の指定のソフトの名前 (--software) と指定のユーザーの名前 (--user) は、cli が必須の引数にして、空か空白だけの値を
+引数の誤りにする (RunSettings の既定値の空文字列は、テストで作るときのため)。
 """
 
 import dataclasses
@@ -108,6 +110,8 @@ DEFAULT_MAX_SAFETY_ERRORS = 3
 class RunSettings:
     """run の起動引数。
 
+    software_name               指定のソフトの名前 (--software。必須)。本体の画面の middle の入力に入れる
+    user_name                   指定のユーザーの名前 (--user。必須)。本体の画面の middle の入力に入れる
     runs_dir                    実行ディレクトリーを作る親 (--runs-dir、既定 runs)
     interval_fps                一定間隔のフレームの保存のフレームレート (--interval-fps、既定 5。0 より大きく INTERVAL_FPS_MAX 以下)
     interval_width              一定間隔のフレームを縮小する幅 (--interval-width、既定 640。INTERVAL_WIDTH_MIN〜INTERVAL_WIDTH_MAX)
@@ -121,7 +125,6 @@ class RunSettings:
                                 (--deep-auto-seconds、既定 60。0 より大きい有限の値で、deep_min_start_interval_s 以上。
                                 最小間隔より短いと、自動の呼び出しが判定の周期ごとに最小間隔で捨てられ続けるため)
     deep_timeout_s              deep のジョブの実行時間の上限 (--deep-timeout、既定 300。0 より大きい有限の値)
-    allow_home                  押せるボタンに HOME を足す (--allow-home、既定 False)
     middle                      middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
                                 OPENAI_API_KEY が要る (openai_api_key_errors)
     surface                     surface の実装 (--surface、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
@@ -144,6 +147,8 @@ class RunSettings:
                                 0 より大きい有限の値)
     """
 
+    software_name: str = ""
+    user_name: str = ""
     runs_dir: Path = DEFAULT_RUNS_DIR
     interval_fps: float = DEFAULT_INTERVAL_FPS
     interval_width: int = DEFAULT_INTERVAL_WIDTH
@@ -154,7 +159,6 @@ class RunSettings:
     deep_min_start_interval_s: float = DEFAULT_DEEP_MIN_START_INTERVAL_S
     deep_auto_seconds: float = DEFAULT_DEEP_AUTO_SECONDS
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
-    allow_home: bool = False
     middle: MiddleKind = DEFAULT_MIDDLE_KIND
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
@@ -401,6 +405,7 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
 
     キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety は値の文字列。
     middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake") にする。
+    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)

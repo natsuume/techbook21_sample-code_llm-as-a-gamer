@@ -34,9 +34,7 @@ TARGETS = (BoxTarget("自機", "勇者"), BoxTarget("敵", "スライム"))
 
 
 def questions() -> tuple[SurfaceQuestion, ...]:
-    return build_surface_questions(
-        allowed_buttons(allow_home=False), TARGETS, set(), frame_count=1
-    )
+    return build_surface_questions(allowed_buttons(), TARGETS, set(), frame_count=1)
 
 
 def neutral_answers() -> tuple[dict[str, dict[str, float]], dict[str, float]]:
