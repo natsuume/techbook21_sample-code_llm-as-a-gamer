@@ -13,7 +13,8 @@
     prepare・recover・clean_up では、本体の画面のループ (system_screen.system_screen_loop) が本体の画面の middle に
     目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
     1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送る。
-    middle のゲーム用の出力の press_home が真なら、play のときだけ HOME を短押しして recover に移る。
+    middle のゲーム用の出力の press_home が真なら、play のときだけ recover に移し (phase の行を書き、play から離れる
+    中立のレポートを送る)、その後で HOME を短押しする (中立のレポートで短押しを取り消さないため)。
 押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
 press_home の HOME はこれで送る。surface は surface.surface_output_gate.SurfaceOutputGate を通し、HOME を除く 16 個に
 絞って play のときだけ送る (段階を変える処理と同じロックの中で確かめて送る)。
@@ -286,8 +287,10 @@ class LayersApp:
         7. SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
            deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
            boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
-           MiddleLoop (interval_s・window_s・max_errors。on_press_home は、段階が play のときだけ HOME を短押しして
-           (PadOutput.apply(PadAction(taps={"HOME"}), source="system")) recover に移す関数) を作り、それぞれのスレッドを
+           MiddleLoop (interval_s・window_s・max_errors。on_press_home は、段階のロックの中で、段階が play のときだけ
+           次の順に行う関数: PhaseTracker.on_press_home で recover に移し、run.jsonl に phase を書き、play から離れる
+           PadOutput.neutral() を送ってから、HOME を短押しする (PadOutput.apply(PadAction(taps={"HOME"}),
+           source="system"))。中立のレポートを短押しの後に送ると、短押しが取り消されるため) を作り、それぞれのスレッドを
            start_thread で起動する。on_stop には request_stop を渡す。2 つのループは、段階が play の間だけ 1 回分ずつ
            進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ --middle-interval で呼ぶ
         8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor

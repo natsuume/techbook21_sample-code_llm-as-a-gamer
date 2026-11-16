@@ -85,7 +85,11 @@ class FakeJudgments:
 
 
 class FakePhases:
-    """SystemScreenPhases の偽物。段階はテストが書き換え、入力の呼ばれ方を名前の列で記録する。"""
+    """SystemScreenPhases の偽物。段階はテストが書き換え、入力の呼ばれ方を名前の列で記録する。
+
+    on_stop が呼ばれたことも、calls に "stop" として記録する (stop_requested)。clean_up_on_stop が True なら、
+    そのときに clean_up に移す (app の request_stop が、片付けを行う理由で片付けを始めるのと同じ)。
+    """
 
     def __init__(self, phase: RunPhase = RunPhase.PREPARE, started_t: float = START_T):
         self.phase = phase
@@ -93,6 +97,15 @@ class FakePhases:
         self.wants_system_middle = True
         self.calls: list[str] = []
         self.outputs_done: list[bool] = []
+        # on_system_middle_failed を受け取ったときの段階
+        self.failed_phases: list[RunPhase] = []
+        self.clean_up_on_stop = False
+
+    def stop_requested(self, t: float) -> None:
+        self.calls.append("stop")
+        if self.clean_up_on_stop:
+            self.phase = RunPhase.CLEAN_UP
+            self.phase_started_t = t
 
     def on_system_output(self, t: float, done: bool) -> None:
         self.calls.append("output")
@@ -106,6 +119,7 @@ class FakePhases:
 
     def on_system_middle_failed(self, t: float) -> None:
         self.calls.append("failed")
+        self.failed_phases.append(self.phase)
 
 
 class ScriptedMiddle:
@@ -215,6 +229,10 @@ def make_harness(
     frame: dict[str, float | None] = {"t": None}
     stops: list[str] = []
 
+    def request_stop(reason: str) -> None:
+        stops.append(reason)
+        phases.stop_requested(clock.now())
+
     def latest_frame() -> CapturedFrame | None:
         t = frame["t"]
         return None if t is None else CapturedFrame(t=t, nv12=NV12)
@@ -230,7 +248,7 @@ def make_harness(
             phases=phases,
             clock=clock,
             bridge_state=lambda: bridge["state"],
-            on_stop=stops.append,
+            on_stop=request_stop,
         ),
         SystemScreenLoopSettings(
             software_name=SOFTWARE, user_name=USER, max_errors=max_errors
@@ -457,6 +475,37 @@ def test_middle_failures_are_counted_and_stop_after_max_errors(tmp_path):
     step(harness)
     assert harness.loop.consecutive_errors == 2
     assert harness.stops == [middle_failure_reason(2)]
+
+
+def test_failure_reaching_max_errors_is_passed_before_stopping(tmp_path):
+    # 上限に達した回の失敗は、on_stop で片付けに移る前の段階 (prepare) のうちに段階の判定に渡す。片付けに移った後で
+    # 同じ失敗を片付けの middle の失敗にしないので、片付けの middle をその後に呼べる
+    error = SystemScreenMiddleError("luna failed")
+    harness = make_harness(tmp_path, [error, error, output_of()], max_errors=2)
+    harness.phases.clean_up_on_stop = True
+    show(harness)
+    step(harness)
+    show(harness)
+    assert step(harness) == outcome(SystemScreenStepOutcome.MIDDLE_ERROR)
+    assert harness.phases.calls == ["failed", "failed", "stop"]
+    assert harness.phases.failed_phases == [RunPhase.PREPARE, RunPhase.PREPARE]
+    assert harness.stops == [middle_failure_reason(2)]
+    assert harness.phases.phase is RunPhase.CLEAN_UP
+    show(harness)
+    assert step(harness) == outcome(SystemScreenStepOutcome.SENT)
+    assert harness.middle.inputs[-1].goal is SystemGoal.CLEAN_UP
+
+
+# --- 操作が 0 個の列 ---
+
+
+def test_empty_operations_are_not_passed_as_sending(tmp_path):
+    # 何も送らない列では、送り始めと送り終えを段階の判定に渡さない (recover で、ゲームの画面の照合の結果の
+    # 続けた数を 0 に戻さないため)
+    harness = make_harness(tmp_path, [output_of()], phase=RunPhase.RECOVER)
+    show(harness, None)
+    assert step(harness) == outcome(SystemScreenStepOutcome.SENT)
+    assert harness.phases.calls == ["output"]
 
 
 # --- 送信の失敗 ---

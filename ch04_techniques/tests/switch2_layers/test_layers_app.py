@@ -52,6 +52,7 @@ from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 from switch2_layers.system_screen.run_phase import (
     PHASE_REASON_PREPARED,
+    PHASE_REASON_PRESS_HOME,
     PHASE_REASON_START_CHECK_PASSED,
     CleanUpResult,
     PhaseTimings,
@@ -127,6 +128,14 @@ class HomePressingSurface:
 class FailingSurface:
     def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
         raise RuntimeError("decision model failed")
+
+
+class HomePressingMiddle:
+    """middle の偽物。フェイクの middle の出力の press_home を真にして返す。"""
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        output = FakeMiddleAnalyzer().analyze(middle_input)
+        return dataclasses.replace(output, press_home=True)
 
 
 class FailingMiddle:
@@ -549,6 +558,28 @@ def test_interrupt_while_playing_cleans_up_before_stopping(tmp_path):
     assert applied
     assert all(row["t"] <= clean_up_t for row in applied)
     assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_press_home_taps_home_after_the_neutral_report_of_leaving_play(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender, middle=HomePressingMiddle()))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    recover = [row for row in phase_rows(root) if row["phase"] == "recover"]
+    assert recover
+    assert recover[0]["reason"] == PHASE_REASON_PRESS_HOME
+    # recover に移して play から離れる中立のレポートを送ってから、HOME を短押しする (中立のレポートで短押しを
+    # 取り消さない)
+    rows = read_rows(root / "operations.jsonl")
+    homes = [
+        index
+        for index, row in enumerate(rows)
+        if row["source"] == "system" and row["taps"] == ["HOME"]
+    ]
+    assert homes
+    assert rows[homes[0] - 1]["source"] == "neutral"
+    assert rows[homes[0]]["t"] >= recover[0]["t"]
+    assert any(report[1] & HOME_BIT for report in sender.reports)
 
 
 def test_unsafe_screen_stops_without_cleaning_up(tmp_path):

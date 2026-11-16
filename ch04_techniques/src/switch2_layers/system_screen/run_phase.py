@@ -196,7 +196,10 @@ class PhaseTracker:
         raise NotImplementedError
 
     def on_operations_started(self, t: float) -> PhaseEvent:
-        """操作の列を送り始めた。RECOVER では、続けた数を 0 にし、送り終えるまで照合の結果を数えない。"""
+        """操作の列を送り始めた。RECOVER では、続けた数を 0 にし、送り終えるまで照合の結果を数えない。
+
+        本体の画面のループは、操作が 0 個の列では呼ばない (on_operations_finished も同じ)。
+        """
         raise NotImplementedError
 
     def on_operations_finished(self, t: float) -> PhaseEvent:

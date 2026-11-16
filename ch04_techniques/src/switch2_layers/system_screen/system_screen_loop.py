@@ -9,10 +9,13 @@
        読ませないため)。届くまで middle を呼ばない
     4. 入力の画像は、その照合のフレーム以降の最新のフレーム
     5. SystemScreenInput (目的は段階から PHASE_GOALS で決める。履歴はこの段階のもの) を作り、middle の decide を呼ぶ
-    6. 失敗 (SystemScreenMiddleError) なら、middle/system_calls.jsonl に呼び出しの行を書き、続けた失敗を数える
-       (max_errors 回で on_stop)。段階の判定に on_system_middle_failed を渡す
+    6. 失敗 (SystemScreenMiddleError) なら、middle/system_calls.jsonl に呼び出しの行を書き、続けた失敗を数える。
+       段階の判定に on_system_middle_failed を渡してから、max_errors 回に達していれば on_stop を呼ぶ (on_stop で
+       片付けに移った後に、同じ失敗を片付けの middle の失敗として渡さないため)
     7. 成功なら、呼び出しの行を書き、段階の判定に on_system_output を渡し、on_operations_started → 列を送る
-       (OperationsRunner.run) → on_operations_finished の順に呼ぶ。実行の結果の行を書き、履歴に足す
+       (OperationsRunner.run) → on_operations_finished の順に呼ぶ。実行の結果の行を書き、履歴に足す。操作が 0 個の列
+       では、on_operations_started と on_operations_finished を段階の判定に渡さない (何も送らない列で、recover の
+       照合の結果の続けた数を 0 に戻さないため)
     8. 列を送る途中の SystemOutputError (送信の失敗) なら、PadOutput.neutral() を送り、例外の result で実行の結果の行と
        履歴を作る (on_operations_finished も呼ぶ)。失敗の数には数えない
 送り終えたら (打ち切りを含む)、間隔を置かずに次の回に進む (照合の結果を待つ)。middle の呼び出しの間隔
@@ -224,14 +227,18 @@ class SystemScreenLoop:
         7. phases.phase_started_t が 2 で読んだ値と違えば (middle を呼んでいる間に段階が変わった)、呼び出しの行だけを
            書いて DISCARDED を返す (失敗の数を変えず、段階の判定に渡さず、操作を送らない)
         8. decide が SystemScreenMiddleError を出したら: 呼び出しの行 (system_call_record.system_call_row。output は
-           None、error に説明) を paths.system_calls に書き、続けた失敗を 1 増やす。回数が max_errors に達したら
-           on_stop(middle.middle_loop.middle_failure_reason(回数)) を呼ぶ。phases.on_system_middle_failed(t_received)
-           を呼び、MIDDLE_ERROR を返す
+           None、error に説明) を paths.system_calls に書き、続けた失敗を 1 増やす。先に
+           phases.on_system_middle_failed(t_received) を呼び、その後で、回数が max_errors に達していれば
+           on_stop(middle.middle_loop.middle_failure_reason(回数)) を呼ぶ (この順にするのは、on_stop が片付けを始める
+           理由のため。逆の順では、片付けに移った直後の clean_up で同じ失敗が片付けの middle の失敗になり、片付けの
+           middle を一度も呼ばずに片付けが終わる)。MIDDLE_ERROR を返す
         9. 成功したら: 続けた失敗を 0 にし、呼び出しの行を書く。phases.on_system_output(t_received, output.done)、
            phases.on_operations_started(clock.now()) を呼び、runner.run(output, 照合の結果の screen, stop) で送る。
            finished_t = clock.now() で phases.on_operations_finished(finished_t) を呼び、実行の結果の行
            (system_call_record.system_run_row(finished_t, 結果)) を書き、履歴に SystemStepRecord(t=screen_input.t,
-           judged_screen, operations=output.operations, sent_count, cut_reason) を足す。SENT を返す
+           judged_screen, operations=output.operations, sent_count, cut_reason) を足す。SENT を返す。
+           output.operations が空 (操作が 0 個の列) なら、phases.on_operations_started と
+           phases.on_operations_finished は呼ばない (runner.run・実行の結果の行・履歴・次の after_t は同じ)
         10. runner.run が SystemOutputError を出したら: pad_output.neutral() を送り、例外の result で 9 と同じく
             on_operations_finished・実行の結果の行・履歴を作る。送信の失敗の後の待ちに入り (失敗の数には数えない)、
             SEND_FAILED を返す
