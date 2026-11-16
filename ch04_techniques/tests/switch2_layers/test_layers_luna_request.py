@@ -229,9 +229,9 @@ def test_user_content_is_sections_then_labeled_images():
     assert user == build_luna_payload(FULL_INPUT)["input"][1]
     content = user["content"]
     sections = build_user_sections(FULL_INPUT)
-    assert len(sections) == 13
-    assert content[:13] == [{"type": "input_text", "text": text} for text in sections]
-    assert content[13:] == [
+    assert len(sections) == 14
+    assert content[:14] == [{"type": "input_text", "text": text} for text in sections]
+    assert content[14:] == [
         {"type": "input_text", "text": "フレーム t=6.000"},
         {
             "type": "input_image",
@@ -366,7 +366,7 @@ def test_section_contents_of_empty_input():
     )
     assert section_body(sections, "フレーム") == "フレームは無い"
     content = build_user_message(EMPTY_INPUT)["content"]
-    assert len(content) == 13
+    assert len(content) == 14
     assert all(part["type"] == "input_text" for part in content)
 
 
@@ -750,7 +750,7 @@ GRID_INPUT = dataclasses.replace(
 
 def test_grid_map_and_route_sections():
     sections = build_user_sections(GRID_INPUT)
-    assert len(sections) == 13
+    assert len(sections) == 14
     map_json = json.loads(section_body(sections, "マップ"))
     assert map_json == map_document_to_json(GRID_MAP_DOCUMENT)
     assert map_json["layout"] == "grid"

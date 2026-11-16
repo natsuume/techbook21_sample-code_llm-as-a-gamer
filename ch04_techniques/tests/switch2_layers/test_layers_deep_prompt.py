@@ -703,7 +703,7 @@ def test_map_prompt_decides_the_layout_from_the_game_document():
     text = raw_prompt_file("map.md")
     for phrase in [
         # ゲームの性質の文書の「マップの形式」の節を読み、マス目型なら grid、それ以外なら free にする
-        "game.md",
+        "${game_note}",
         "マップの形式",
         "マス目型",
         "自由型",
