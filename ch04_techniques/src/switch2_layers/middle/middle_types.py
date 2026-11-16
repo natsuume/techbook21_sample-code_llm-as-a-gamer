@@ -5,10 +5,13 @@
 
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
-     "surface_rows_offset", "operations_rows_offset"}
+     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t"}
 surface_rows_offset と operations_rows_offset は、次の middle の入力で surface.jsonl と operations.jsonl を読み始める
 バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
 docstring)。
+first_task は出力の短期タスクリストの最初のタスクの文、first_task_since_t は最初のタスクが今の文になった時刻
+(記録が無ければ null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを伝えるのに使う
+(middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
 """
 
 from collections.abc import Mapping
@@ -73,6 +76,12 @@ class MiddleState:
                              (MiddleInput.surface_rows_offset)。次の入力はこの位置から読む
     operations_rows_offset   この出力の入力までに読んだ operations.jsonl の完全な行の末尾のバイト位置
                              (MiddleInput.operations_rows_offset)。次の入力はこの位置から読む
+    first_task               この出力の短期タスクリストの最初のタスクの文 (middle.task_progress.first_task_of の値)。
+                             無ければ空文字列
+    first_task_since_t       最初のタスクが今の文になった時刻 (middle.task_progress.first_task_since の値)。
+                             None は記録なし
+    first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
+    記録しない値 (テストなど) のため。
     """
 
     generated_t: float
@@ -85,6 +94,8 @@ class MiddleState:
     timeline: str
     surface_rows_offset: int
     operations_rows_offset: int
+    first_task: str = ""
+    first_task_since_t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +201,8 @@ def middle_state_from_json(value: object) -> MiddleState:
     generated_t・based_on_t・surface_wait_s は数 (bool を除く)、surface_rows_offset と operations_rows_offset は
     0 以上の整数 (bool を除く)、scene_id と scene_name は文字列か null、is_stuck は真偽、stuck_description と timeline は
     文字列。scene_id が文字列なら場面 ID の形に限る。
+    first_task と first_task_since_t は省けるキーで、無ければ既定値 (空文字列と None) にする。あれば、first_task は
+    文字列、first_task_since_t は数 (bool を除く) か null でなければ ValueError にする。
     """
     if isinstance(value, dict):
         return _middle_state_from_object(value)
