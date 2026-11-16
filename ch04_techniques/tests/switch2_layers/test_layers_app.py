@@ -42,6 +42,8 @@ from switch2_layers.surface.surface_loop import surface_failure_reason
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
+# 画面の停滞の計測のテストで止めるまで動かす秒数 (最初の 2 秒のフレームは新しい画面になるため、長めにとる)
+PROGRESS_RUN_SECONDS = 5.0
 SAFETY_TIMEOUT_S = 20.0  # 止まらないときに、テストを終わらせるために止める秒数
 SAFETY_REASON = "test safety timeout"
 HOME_BIT = 0x10  # レポートの b2
@@ -869,7 +871,8 @@ def test_progress_is_measured_and_advice_is_requested_with_fake_deep(tmp_path):
         ),
         parts(FakeSender(), surface=surface),
     )
-    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    # 最初の 2 秒のフレームは比べる相手が無く新しい画面になるため、その後もしきい値を超えるまで動かす
+    reason, root = run_app(app, stop_after=PROGRESS_RUN_SECONDS)
     assert reason == REASON_INTERRUPTED
 
     # progress/state.json: 一定間隔のフレームごとに計算した最新の値
@@ -877,7 +880,8 @@ def test_progress_is_measured_and_advice_is_requested_with_fake_deep(tmp_path):
     assert list(state) == ["t", "static_s", "no_novel_s", "window_s"]
     assert state["window_s"] == 120.0
     assert state["no_novel_s"] > 0.5
-    assert state["static_s"] == state["no_novel_s"]
+    # 同じ画面が続いている。新しい画面は、比べる相手が無かった最初の 2 秒のフレームまで
+    assert 1.5 < state["static_s"] - state["no_novel_s"] <= 2.0
     interval_times = [
         row["t"]
         for row in read_rows(root / "frames.jsonl")

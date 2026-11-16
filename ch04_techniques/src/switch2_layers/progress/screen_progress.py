@@ -5,8 +5,15 @@
                  (最新のフレームの時刻 − 続いている最初のフレームの時刻)。最新のフレームが直前のフレームに
                  近くなければ 0。近さは、隣どうしではなく、どれも最新のフレームのハッシュと比べる
     no_novel_s   新しい画面が出ていない秒数。最新のフレームの時刻 − 最後に新しい画面が出た時刻。
-                 新しい画面は、それより前の直近 window_s 秒 (時刻の差が window_s 以下) のどのフレームのハッシュにも
-                 近くないフレーム。最初のフレームは新しい画面とする
+                 新しい画面は、それより前の直近 window_s 秒 (時刻の差が window_s 以下) のフレームのうち、そのフレームから
+                 RECENT_EXCLUDED_S 秒以内 (時刻の差が RECENT_EXCLUDED_S 以下) のものを除いた、どのフレームのハッシュにも
+                 近くないフレーム。比べる相手のフレームが 1 つも無ければ新しい画面とする (最初のフレームと、最初の
+                 フレームから RECENT_EXCLUDED_S 秒以内のフレームを含む)
+直近 RECENT_EXCLUDED_S 秒を比べる相手から外すのは、画面が少しずつ動き続ける間 (スクロールやカメラのパン) に、
+直前のフレームと近いことだけで新しい画面にならなくなるのを防ぐため。同じ画面が続くときは、最初の
+RECENT_EXCLUDED_S 秒のフレームは新しい画面になり、その後から no_novel_s が増える。window_s が RECENT_EXCLUDED_S
+以下なら、比べる相手がいつも無く、どのフレームも新しい画面になる。
+時刻の差は、どれも run_clock.round_to_milliseconds で丸めた値で比べる。
 窓より古いフレーム (最新のフレームとの時刻の差が window_s を超えるもの) のハッシュは捨て、持つハッシュを窓の分だけに
 する。static_s も持っているハッシュだけで数えるため、画面が window_s 秒より長く変わらなくても、static_s は
 window_s を超えない。no_novel_s は時刻だけで数えるため、window_s を超えることがある。
@@ -25,6 +32,8 @@ from switch2_layers.run_clock import round_to_milliseconds
 
 # --progress-window の既定値 (秒)
 DEFAULT_PROGRESS_WINDOW_S = 300.0
+# 新しい画面かを決めるときに、比べる相手から外す直近の秒数
+RECENT_EXCLUDED_S = 2.0
 
 
 class ScreenProgressTracker:
@@ -63,7 +72,8 @@ class ScreenProgressTracker:
 
         1. t が前に足したフレームの時刻以下なら ValueError (何も変えない)
         2. t との時刻の差 (run_clock.round_to_milliseconds で丸めた値) が window_s を超えるフレームのハッシュを捨てる
-        3. 残ったどのハッシュにも近くなければ (残りが無いときを含む)、新しい画面とし、最後に新しい画面が出た時刻を t にする
+        3. 残ったハッシュのうち、t との時刻の差 (丸めた値) が RECENT_EXCLUDED_S を超えるもの (比べる相手) の、どれにも
+           近くなければ (比べる相手が無いときを含む)、新しい画面とし、最後に新しい画面が出た時刻を t にする
         4. このフレームのハッシュを足す
         5. static_s: 直前のフレームから古い方へ、このフレームのハッシュに近いハッシュが続く間たどり、続いた最初の
            フレームの時刻を t から引く。直前のフレームが近くない (または無い) なら 0
@@ -77,7 +87,12 @@ class ScreenProgressTracker:
             )
         while kept and round_to_milliseconds(t - kept[0][0]) > self.window_s:
             kept.popleft()
-        if not any(self._near(frame_hash, kept_hash) for _, kept_hash in kept):
+        compared = (
+            kept_hash
+            for kept_t, kept_hash in kept
+            if round_to_milliseconds(t - kept_t) > RECENT_EXCLUDED_S
+        )
+        if not any(self._near(frame_hash, kept_hash) for kept_hash in compared):
             self._last_novel_t = t
         static_start_t = t
         for kept_t, kept_hash in reversed(kept):

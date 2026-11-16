@@ -83,17 +83,18 @@ def test_no_frames_writes_nothing(tmp_path):
 def test_interval_frames_are_measured_and_written(tmp_path):
     root = make_run(tmp_path)
     add_frame(root, 0.0)
-    add_frame(root, 0.2)
-    add_frame(root, 0.4)
+    add_frame(root, 1.5)
+    add_frame(root, 3.0)
     loop = make_loop(root)
     state = loop.step()
+    # t=3.0 は 2 秒より前の t=0.0 と比べて同じ画面。最後の新しい画面は、比べる相手が無かった t=1.5
     assert state == ProgressState(
-        t=0.4, static_s=0.4, no_novel_s=0.4, window_s=WINDOW_S
+        t=3.0, static_s=3.0, no_novel_s=1.5, window_s=WINDOW_S
     )
     assert read_state(root) == {
-        "t": 0.4,
-        "static_s": 0.4,
-        "no_novel_s": 0.4,
+        "t": 3.0,
+        "static_s": 3.0,
+        "no_novel_s": 1.5,
         "window_s": WINDOW_S,
     }
 
@@ -105,11 +106,11 @@ def test_only_new_rows_are_read_on_the_next_step(tmp_path):
     assert loop.step() == ProgressState(0.0, 0.0, 0.0, WINDOW_S)
     # 足された行が無ければ書かない
     assert loop.step() is None
-    add_frame(root, 0.2, phase=1)
-    add_frame(root, 0.4, phase=0)
-    # 新しい行だけを、続けて計算する (t=0.2 は新しい画面、t=0.4 は前に見た画面)
-    assert loop.step() == ProgressState(0.4, 0.0, 0.2, WINDOW_S)
-    assert read_state(root)["t"] == 0.4
+    add_frame(root, 2.5, phase=1)
+    add_frame(root, 5.0, phase=0)
+    # 新しい行だけを、続けて計算する (t=2.5 は新しい画面、t=5.0 は前に見た画面)
+    assert loop.step() == ProgressState(5.0, 0.0, 2.5, WINDOW_S)
+    assert read_state(root)["t"] == 5.0
 
 
 def test_surface_frames_are_ignored(tmp_path):
@@ -127,12 +128,12 @@ def test_partial_line_is_read_after_it_is_completed(tmp_path):
     root = make_run(tmp_path)
     add_frame(root, 0.0)
     # 書いている途中の行 (改行で終わらない)
-    add_frame(root, 0.2, newline=False)
+    add_frame(root, 3.0, newline=False)
     loop = make_loop(root)
     assert loop.step() == ProgressState(0.0, 0.0, 0.0, WINDOW_S)
     with (root / "frames.jsonl").open("a", encoding="utf-8") as file:
         file.write("\n")
-    assert loop.step() == ProgressState(0.2, 0.2, 0.2, WINDOW_S)
+    assert loop.step() == ProgressState(3.0, 3.0, 3.0, WINDOW_S)
 
 
 def test_unusable_rows_are_skipped(tmp_path):
@@ -170,10 +171,10 @@ def test_rows_not_after_the_previous_frame_are_skipped(tmp_path):
     (root / other).write_bytes(jpeg_of(striped_screen(1)))
     append_row(root, {"t": 1.0, "kind": "interval", "file": other})
     add_frame(root, 0.5, phase=1)
-    add_frame(root, 1.2)
+    add_frame(root, 4.0)
     loop = make_loop(root)
     # t が前に渡したフレームの時刻以下の 2 行は読み飛ばし、違う画面を計算に入れない
-    assert loop.step() == ProgressState(1.2, 0.2, 0.2, WINDOW_S)
+    assert loop.step() == ProgressState(4.0, 3.0, 3.0, WINDOW_S)
 
 
 def test_run_returns_when_stopped_and_continues_after_errors(tmp_path):
