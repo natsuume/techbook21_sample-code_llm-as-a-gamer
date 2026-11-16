@@ -77,7 +77,7 @@ def build_history_lines(
 ) -> tuple[str, ...]:
     """今回の look の後に表示する、直近の行動の行を返す。
 
-    previous は今回の look より前のイベント (events.jsonl の全件から今回の look を除いたもの)、
+    previous は今回の look より前のイベント (events.jsonl で今回の look の行より前にある行。commands.handle_look が渡す)、
     now_time は今回の look のイベントの time、current_frame は今回の look の frame (例: "frames/000045.png")。
     previous は time の昇順に並べ替えてから (同じ時刻は元の順のまま) 使う。
 
