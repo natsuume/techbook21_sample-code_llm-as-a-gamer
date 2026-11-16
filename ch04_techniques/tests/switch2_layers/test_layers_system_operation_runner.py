@@ -86,7 +86,8 @@ class FakeTimer:
 class FakeSender:
     """送るたびに偽の時計を delay 秒進める ReportSender。
 
-    sent_t に、各送信が戻った時刻 t を記録する。on_send があれば送った後に呼ぶ。fail_with を入れると、その例外を出す。
+    sent_t に、各送信が戻った時刻 t を記録する。on_send があれば送った後に呼ぶ。fail_with を入れると、その例外を出す
+    (on_fail があれば、出す前に呼ぶ)。
     """
 
     def __init__(self, monotonic: FakeMonotonic, delay: float):
@@ -94,10 +95,13 @@ class FakeSender:
         self.delay = delay
         self.sent_t: list[float] = []
         self.on_send: Callable[[], None] | None = None
+        self.on_fail: Callable[[], None] | None = None
         self.fail_with: Exception | None = None
 
     def set_report(self, report: bytes) -> str:
         if self.fail_with is not None:
+            if self.on_fail is not None:
+                self.on_fail()
             raise self.fail_with
         self.monotonic.now += self.delay
         self.sent_t.append(self.monotonic.now - ORIGIN)
@@ -168,12 +172,14 @@ class FakeJudgments:
 class FakeWaits:
     """wait_or_stop の偽物。stop が立っていればすぐ True を返し、立っていなければ偽の時計を seconds 秒
     (正の秒数なら少なくとも MIN_FAKE_STEP_S 秒) timer で進めて stop.is_set() を返す。on_wait があれば始めに
-    on_wait(stop, seconds) を呼ぶ。"""
+    on_wait(stop, seconds) を呼ぶ。after_wait があれば、返す値を決めた後に after_wait(stop) を呼ぶ (待ちが戻った
+    直後に、ほかのスレッドが stop を立てた場合を作る)。"""
 
     def __init__(self, timer: FakeTimer):
         self.timer = timer
         self.calls = 0
         self.on_wait: Callable[[threading.Event, float], None] | None = None
+        self.after_wait: Callable[[threading.Event], None] | None = None
 
     def __call__(self, stop: threading.Event, seconds: float) -> bool:
         self.calls += 1
@@ -185,7 +191,10 @@ class FakeWaits:
             return True
         if seconds > 0:
             self.timer.advance(max(seconds, MIN_FAKE_STEP_S))
-        return stop.is_set()
+        stopped = stop.is_set()
+        if self.after_wait is not None:
+            self.after_wait(stop)
+        return stopped
 
 
 @dataclass
@@ -736,14 +745,19 @@ def test_send_failure_is_raised():
         run(harness, press("home_menu", "DOWN"))
 
 
-def fail_after_the_first_send(harness: Harness) -> None:
-    """最初のレポート (押すレポート) の送信の後、次のレポート (離すレポート) から送信を失敗させる。"""
+def fail_after_sends(harness: Harness, count: int) -> None:
+    """count 個のレポートの送信が成功した後、次のレポートから送信を失敗させる。"""
 
     def set_failure() -> None:
-        if len(harness.sender.sent_t) == 1:
+        if len(harness.sender.sent_t) == count:
             harness.sender.fail_with = BridgeDown("release report failed")
 
     harness.sender.on_send = set_failure
+
+
+def fail_after_the_first_send(harness: Harness) -> None:
+    """最初のレポート (押すレポート) の送信の後、次のレポート (離すレポート) から送信を失敗させる。"""
+    fail_after_sends(harness, 1)
 
 
 @pytest.mark.parametrize(
@@ -763,6 +777,76 @@ def test_failed_release_report_raises_and_sends_nothing_more(first):
 
 def test_output_error_is_a_runtime_error():
     assert issubclass(SystemOutputError, RuntimeError)
+
+
+def test_output_error_of_the_first_a_has_its_result():
+    # 先頭の A の押すレポートは届いたので、送った操作の数に入れる (この段階で送った決定に載せるため)
+    harness = make_harness(steady("user_select"))
+    fail_after_the_first_send(harness)
+    with pytest.raises(SystemOutputError) as raised:
+        run(harness, press("user_select", "A"), judged="user_select")
+    assert raised.value.result == SystemRunResult(
+        sent_count=1, cut_index=None, cut_reason=None, blocked_buttons=frozenset()
+    )
+
+
+def test_output_error_before_the_end_has_the_next_position():
+    harness = make_harness(steady("home_menu"))
+    fail_after_the_first_send(harness)
+    with pytest.raises(SystemOutputError) as raised:
+        run(harness, press("home_menu", "A"), press("home_menu", "DOWN"))
+    assert raised.value.result == SystemRunResult(
+        sent_count=1, cut_index=1, cut_reason=None, blocked_buttons=frozenset()
+    )
+
+
+def test_output_error_of_the_second_operation_has_its_result():
+    harness = make_harness(steady("home_menu"))
+    # 送信は HOME (外して何も押さない) の 0 と、RIGHT を押す 1。RIGHT を離すレポートから失敗させる
+    fail_after_sends(harness, 2)
+    with pytest.raises(SystemOutputError) as raised:
+        run(
+            harness,
+            press("home_menu", "HOME"),
+            press("home_menu", "RIGHT"),
+            press("home_menu", "B"),
+        )
+    assert raised.value.result == SystemRunResult(
+        sent_count=2,
+        cut_index=2,
+        cut_reason=None,
+        blocked_buttons=frozenset({"HOME"}),
+    )
+    assert len(system_actions(harness)) == 2
+
+
+def test_output_error_is_raised_when_stop_comes_after_the_release_is_checked():
+    harness = make_harness(steady("home_menu"))
+    fail_after_the_first_send(harness)
+    stop = threading.Event()
+
+    def stop_after_failure(event: threading.Event) -> None:
+        # 離すレポートが失敗した待ちが戻った直後に、ほかのスレッドが stop を立てる
+        if harness.pad_output.timer_send_failures:
+            event.set()
+
+    harness.waits.after_wait = stop_after_failure
+    with pytest.raises(SystemOutputError):
+        run(harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"), stop=stop)
+    assert stop.is_set()
+
+
+def test_output_error_is_not_checked_when_stop_ends_the_release_wait():
+    harness = make_harness(steady("home_menu"))
+    fail_after_the_first_send(harness)
+    stop = threading.Event()
+    # 離すのを待つ間 (離すレポートの送信が失敗するとき) に stop が立ち、待つのをやめる
+    harness.sender.on_fail = stop.set
+    result = run(
+        harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"), stop=stop
+    )
+    assert result == cut(1, SystemCutReason.STOPPED)
+    assert harness.pad_output.timer_send_failures == 1
 
 
 def test_no_timer_failure_sends_all_operations():

@@ -64,7 +64,17 @@ class SystemOutputError(RuntimeError):
 
     PadOutput は押下の記録からボタンを外しても、ブリッジ側ではボタンが押されたままのことがある。説明には
     PadOutput.last_error を入れる。
+
+    result   そこまでの実行の結果 (SystemRunResult)。呼び出し側は、これで履歴 (送った操作の数と、この段階で送った
+             決定) を作る。sent_count には、送信が失敗した press を含める (押すレポートは送ったため)。cut_index は
+             その press の次の位置 (列の最後の操作なら None)、cut_reason は None、blocked_buttons はその press までに
+             外したボタン
     """
+
+    def __init__(self, message: str, result: SystemRunResult) -> None:
+        """message を例外の説明にし、result を属性に持つ。"""
+        super().__init__(message)
+        self.result = result
 
 
 class JudgmentResult(Protocol):
@@ -184,12 +194,17 @@ class SystemOperationRunner:
         操作から後は送らない)。各操作は 5 で終えているので、どの理由でも、送った操作を終えた後に返す (stop が立って
         待つのをやめた場合を除く)。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
-        送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、そのまま外に出す。
+        送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、型を変えずにそのまま外に出す
+        (その操作は送っていない。結果は返さない)。
         press では、apply の直前と、その操作を終えた (離したことを確かめた、または上限に達した) 後に
         pad_output.timer_send_failures を読み、増えていれば (タイマーが送る離すレポートなどの送信が失敗した)
-        SystemOutputError (説明に pad_output.last_error を入れる) を出し、その後の操作は送らない。stop が立って待つのを
-        やめたときと、wait の操作では確かめない。SystemOutputError のときは、ブリッジ側でボタンが押されたまま残って
-        いるおそれがあるため、呼び出し側は PadOutput.neutral() で押下の状態をそろえてから次の入力を作る前提とする。
+        SystemOutputError を出し、その後の操作は送らない。終えた後なら、stop が立っていても確かめる。確かめないのは、
+        5 の待ちの間に stop が立って待つのをやめたときと、wait の操作だけ。SystemOutputError の説明には
+        pad_output.last_error を入れ、属性 result にそこまでの結果を持たせる: sent_count はその press を含めた数
+        (押すレポートは送ったため)、cut_index はその press の次の位置 (列の最後の操作なら None)、cut_reason は None、
+        blocked_buttons はその press までに外したボタン。呼び出し側は、この result で履歴 (送った操作の数と、この段階で
+        送った決定) を作る前提とする。また、ブリッジ側でボタンが押されたまま残っているおそれがあるため、呼び出し側は
+        PadOutput.neutral() で押下の状態をそろえてから次の入力を作る前提とする。
 
         先頭の操作は、渡された judged_screen とだけ比べて送り、新しいフレームの照合の結果を待たない。そのため呼び出し側は、
         次の列を決める入力の照合の結果を、前の列の最後の操作を終えた時刻 + SETTLE_S より後に撮ったフレームのものにする
@@ -212,14 +227,23 @@ class SystemOperationRunner:
                 except OutputStoppedError:
                     return _cut(index, SystemCutReason.STOPPED, blocked)
                 blocked.update(filtered.blocked_buttons)
-                end_t = self._finish_press(operation, stop)
+                end_t, interrupted = self._finish_press(operation, stop)
                 if (
-                    not stop.is_set()
+                    not interrupted
                     and self.pad_output.timer_send_failures > failures_before
                 ):
+                    sent_count = index + 1
                     raise SystemOutputError(
                         f"a timer report failed while finishing operation {index}: "
-                        f"{self.pad_output.last_error}"
+                        f"{self.pad_output.last_error}",
+                        SystemRunResult(
+                            sent_count=sent_count,
+                            cut_index=sent_count
+                            if sent_count < len(operations)
+                            else None,
+                            cut_reason=None,
+                            blocked_buttons=frozenset(blocked),
+                        ),
                     )
             else:
                 # wait は何も送らず、待ち始めた時刻 + 秒数まで待つ
@@ -261,25 +285,28 @@ class SystemOperationRunner:
             return SystemCutReason.SCREEN_MISMATCH
         return None
 
-    def _finish_press(self, operation: SystemOperation, stop: threading.Event) -> float:
-        """apply が戻った直後に呼び、press の operation を終えるまで待って、終えた時刻を返す (モジュールの docstring の
-        (a)〜(c))。
+    def _finish_press(
+        self, operation: SystemOperation, stop: threading.Event
+    ) -> tuple[float, bool]:
+        """apply が戻った直後に呼び、press の operation を終えるまで待つ (モジュールの docstring の (a)〜(c))。
 
-        stop が立ったら待つのをやめ、そのときの clock.now() を返す (呼び出し側は次の操作の前に STOPPED で打ち切る)。
+        (終えた時刻, stop で待つのをやめたか) を返す。離したことを確かめたか上限に達したら (終えた時刻, False)。
+        待つ間に stop が立って待つのをやめたら (そのときの clock.now(), True) (呼び出し側は送信の失敗を確かめず、
+        次の操作の前に STOPPED で打ち切る)。
         """
         press_s = TAP_PRESS_S if operation.seconds is None else operation.seconds
         release_due_t = self.clock.now() + press_s
         if self._wait_until(release_due_t, stop):
-            return self.clock.now()
+            return self.clock.now(), True
         limit_t = release_due_t + RELEASE_WAIT_S
         buttons = frozenset(operation.buttons)
         while buttons & self.pad_output.pressing_buttons():
             remaining_s = limit_t - self.clock.now()
             if remaining_s <= 0:
-                return limit_t
+                return limit_t, False
             if self.wait_or_stop(stop, min(RELEASE_POLL_S, remaining_s)):
-                return self.clock.now()
-        return self.clock.now()
+                return self.clock.now(), True
+        return self.clock.now(), False
 
     def _wait_until(self, target_t: float, stop: threading.Event) -> bool:
         """clock.now() が target_t になるまで wait_or_stop で待つ。stop が立っていれば True を返す。"""
