@@ -289,7 +289,9 @@ def parse_answers(
             nouls[name] = read_probability(answer.get("noul"), name)
         else:
             boxes[name] = read_box_answer(answer, name)
-    return JevAnswers(choices=choices, nouls=nouls, boxes=boxes)
+    return JevAnswers(
+        choices=choices, nouls=nouls, boxes=boxes, usage=body.get("usage")
+    )
 
 
 def _read_choice_probabilities(

@@ -103,7 +103,7 @@ class RunPaths:
     @property
     def surface_requests_log(self) -> Path:
         """root / SURFACE_REQUESTS_LOG_FILE"""
-        raise NotImplementedError
+        return self.root / SURFACE_REQUESTS_LOG_FILE
 
     @property
     def operations_log(self) -> Path:

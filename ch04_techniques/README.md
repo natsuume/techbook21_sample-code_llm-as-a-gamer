@@ -423,7 +423,8 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | ファイル | 内容 |
 |---|---|
 | `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
-| `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます |
+| `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
+| `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
 | `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |

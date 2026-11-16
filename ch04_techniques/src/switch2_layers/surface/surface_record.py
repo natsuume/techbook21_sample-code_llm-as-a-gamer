@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction, action_to_json
-from switch2_layers.surface.jev_client import JevAnswers
+from switch2_layers.surface.jev_client import JevAnswers, build_question_json
 from switch2_layers.surface.surface_questions import SurfaceQuestion
 from switch2_layers.surface.surface_types import (
     Box,
@@ -108,7 +108,12 @@ def answers_to_json(answers: JevAnswers) -> dict[str, object]:
     choices と nouls は answers の並びのまま入れる。box の問いの答え (answers.boxes) と usage は入れない
     (box は surface.jsonl の boxes に、usage は usage に書く)。
     """
-    raise NotImplementedError
+    return {
+        "choices": {
+            name: dict(probabilities) for name, probabilities in answers.choices.items()
+        },
+        "nouls": dict(answers.nouls),
+    }
 
 
 def surface_row(record: SurfaceRecord) -> dict[str, object]:
@@ -122,6 +127,7 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
     usage は record.answers.usage (answers が None なら null)。
     """
     documents = record.documents
+    answers = record.answers
     return {
         "t_sent": record.t_sent,
         "t_received": record.t_received,
@@ -140,6 +146,9 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
         "scene_changed": record.scene_changed,
         "wait_s": record.wait_s,
         "error": record.error,
+        "request": record.request,
+        "answers": None if answers is None else answers_to_json(answers),
+        "usage": None if answers is None else answers.usage,
     }
 
 
@@ -149,7 +158,7 @@ def question_to_json(question: SurfaceQuestion) -> dict[str, object]:
     id は question.name。続くキーと値は jev_client.build_question_json(question) と同じ (criteria は choice の
     問いだけで、選択肢の名前 → 説明を question.choices の順で持つ)。
     """
-    raise NotImplementedError
+    return {"id": question.name, **build_question_json(question)}
 
 
 def surface_request_row(request: SurfaceRequest, t_sent: float) -> dict[str, object]:
@@ -158,4 +167,10 @@ def surface_request_row(request: SurfaceRequest, t_sent: float) -> dict[str, obj
     request は request.request_index、t_sent は Jev に送った時刻 (送る直前に surface のループの時計で読んだ値)、
     model は request.model、state は request.state、questions は request.questions の順の question_to_json のリスト。
     """
-    raise NotImplementedError
+    return {
+        "request": request.request_index,
+        "t_sent": t_sent,
+        "model": request.model,
+        "state": request.state,
+        "questions": [question_to_json(question) for question in request.questions],
+    }

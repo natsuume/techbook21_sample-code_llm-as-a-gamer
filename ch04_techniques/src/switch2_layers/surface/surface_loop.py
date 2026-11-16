@@ -65,7 +65,12 @@ from switch2_layers.surface.middle_state_reader import (
     SurfaceContext,
     read_surface_context,
 )
-from switch2_layers.surface.surface_record import SentFrame, SurfaceRecord, surface_row
+from switch2_layers.surface.surface_record import (
+    SentFrame,
+    SurfaceRecord,
+    surface_request_row,
+    surface_row,
+)
 from switch2_layers.surface.surface_types import (
     Box,
     RecentAction,
@@ -196,7 +201,13 @@ class SurfaceRequestWriter:
 
         追記が例外 (Exception) を出したら、write_error にその例外を持ってから、そのまま出す (request_index は変えない)。
         """
-        raise NotImplementedError
+        row = surface_request_row(request, self.clock.now())
+        try:
+            append_json_line(self.path, row)
+        except Exception as error:
+            self.write_error = error
+            raise
+        self.request_index = request.request_index
 
 
 class SurfaceLoop:
@@ -296,6 +307,7 @@ class SurfaceLoop:
         frames, sent_frames = self._prepare_frames(
             selected, self._box_plan(documents.scene_id)
         )
+        writer = SurfaceRequestWriter(parts.paths.surface_requests_log, parts.clock)
         surface_input = SurfaceInput(
             t=now_t,
             frames=frames,
@@ -303,6 +315,7 @@ class SurfaceLoop:
             timeline=context.timeline,
             timeline_generated_t=context.generated_t,
             recent_actions=tuple(self._recent_actions),
+            request_sink=writer,
         )
         t_sent = parts.clock.now()
         try:
@@ -311,13 +324,22 @@ class SurfaceLoop:
             t_received = parts.clock.now()
             if _is_stopped(stop):
                 return _stopped_result()
+            _raise_write_error(writer)
             logger.debug("surface decide failed", exc_info=True)
             return self._handle_decide_error(
-                error, t_sent, t_received, sent_frames, documents, context, stop
+                error,
+                t_sent,
+                t_received,
+                sent_frames,
+                documents,
+                context,
+                writer.request_index,
+                stop,
             )
         t_received = parts.clock.now()
         if _is_stopped(stop):
             return _stopped_result()
+        _raise_write_error(writer)
         return self._handle_output(
             output, t_sent, t_received, sent_frames, documents, context, stop
         )
@@ -391,7 +413,7 @@ class SurfaceLoop:
                 frame.t, image, drawn_boxes_key(boxes, target_numbers)
             )
             frames.append(
-                SurfaceFrame(frame.t, image.jpeg, format_frame_label(frame.t))
+                SurfaceFrame(frame.t, image.jpeg, format_frame_label(frame.t), file)
             )
             sent_frames.append(SentFrame(frame.t, file))
         return tuple(frames), tuple(sent_frames)
@@ -404,10 +426,12 @@ class SurfaceLoop:
         sent_frames: Sequence[SentFrame],
         documents: SurfaceDocuments,
         context: SurfaceContext,
+        request_index: int | None,
         stop: threading.Event | None,
     ) -> SurfaceStepResult:
         """decide の例外を扱う (step の 6)。
 
+        request_index は surface_requests.jsonl に書いた要求の番号 (送る前に失敗して書いていなければ None)。
         neutral が戻った後と、surface.jsonl の行を書く直前に stop を確かめ、立っていれば STOPPED を返す。
         """
         parts = self.parts
@@ -434,6 +458,8 @@ class SurfaceLoop:
             scene_changed=False,
             wait_s=DECIDE_ERROR_WAIT_S,
             error=description,
+            request=request_index,
+            answers=None,
         )
         row = surface_row(record)
         if _is_stopped(stop):
@@ -480,6 +506,7 @@ class SurfaceLoop:
         if _is_stopped(stop):
             return _stopped_result()
         deep_kinds = [kind for kind in DOCUMENT_KINDS if kind in output.deep_kinds]
+        exchange = output.exchange
         record = SurfaceRecord(
             t_sent=t_sent,
             t_received=t_received,
@@ -494,6 +521,8 @@ class SurfaceLoop:
             scene_changed=output.scene_changed,
             wait_s=context.wait_s,
             error=error_text,
+            request=None if exchange is None else exchange.request.request_index,
+            answers=None if exchange is None else exchange.answers,
         )
         row = surface_row(record)
         if _is_stopped(stop):
@@ -530,6 +559,12 @@ class SurfaceLoop:
                     error=describe_exception(error),
                 )
         return True
+
+
+def _raise_write_error(writer: SurfaceRequestWriter) -> None:
+    """writer の surface_requests.jsonl への追記で例外が出ていれば、その例外を出す (SurfaceLoop.step の 5)。"""
+    if writer.write_error is not None:
+        raise writer.write_error
 
 
 def _is_stopped(stop: threading.Event | None) -> bool:

@@ -77,8 +77,10 @@ from switch2_layers.surface.surface_types import (
     BoxSource,
     RecentAction,
     SurfaceDocuments,
+    SurfaceExchange,
     SurfaceInput,
     SurfaceOutput,
+    SurfaceRequest,
 )
 
 NO_TIMELINE_TEXT = "まだ作られていない"  # 系列情報がまだ無いときの timeline の created
@@ -190,10 +192,29 @@ def build_surface_state(
     references は surface_input.frames と同じ順・同じ数の画像の参照文字列。frames の各要素は
     {"label": relative_time_label(frame.t, surface_input.t), "image": 参照文字列}。数が合わなければ ValueError。
     """
-    if len(references) != len(surface_input.frames):
-        raise ValueError(
-            f"{len(references)} references for {len(surface_input.frames)} frames"
-        )
+    return _state_with_images(surface_input, references)
+
+
+def build_recorded_state(surface_input: SurfaceInput) -> dict[str, object]:
+    """記録に書く state (SurfaceRequest.state) を返す。
+
+    build_surface_state と同じキー・同じ内容で、frames の各要素の image だけを、画像の参照文字列ではなく
+    そのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    """
+    return _state_with_images(
+        surface_input, [frame.file for frame in surface_input.frames]
+    )
+
+
+def _state_with_images(
+    surface_input: SurfaceInput, images: Sequence[str | None]
+) -> dict[str, object]:
+    """state (モジュールの docstring の形) を、frames の各要素の image を images の同じ位置の値にして返す。
+
+    images は surface_input.frames と同じ順・同じ数。数が合わなければ ValueError。
+    """
+    if len(images) != len(surface_input.frames):
+        raise ValueError(f"{len(images)} images for {len(surface_input.frames)} frames")
     request_t = surface_input.t
     return {
         "instructions": SURFACE_INSTRUCTIONS,
@@ -205,19 +226,10 @@ def build_surface_state(
             surface_input.recent_actions, request_t
         ),
         "frames": [
-            {"label": relative_time_label(frame.t, request_t), "image": reference}
-            for frame, reference in zip(surface_input.frames, references, strict=True)
+            {"label": relative_time_label(frame.t, request_t), "image": image}
+            for frame, image in zip(surface_input.frames, images, strict=True)
         ],
     }
-
-
-def build_recorded_state(surface_input: SurfaceInput) -> dict[str, object]:
-    """記録に書く state (SurfaceRequest.state) を返す。
-
-    build_surface_state と同じキー・同じ内容で、frames の各要素の image だけを、画像の参照文字列ではなく
-    そのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
-    """
-    raise NotImplementedError
 
 
 class JevSurfaceDecider:
@@ -329,9 +341,17 @@ class JevSurfaceDecider:
             planned.requery_names,
             len(frames),
         )
-        answers = self.client.ask(
-            build_surface_state(surface_input, references), questions, images
+        state = build_surface_state(surface_input, references)
+        request = SurfaceRequest(
+            request_index=request_index,
+            model=self.client.model,
+            state=build_recorded_state(surface_input),
+            questions=questions,
         )
+        # 送る直前に書く (書けなければ送らない)。送った後の失敗でも、この記録は残る
+        if surface_input.request_sink is not None:
+            surface_input.request_sink(request)
+        answers = self.client.ask(state, questions, images)
         return SurfaceOutput(
             action=decide_pad_action(answers.choices, answers.nouls, questions),
             deep_kinds=decide_deep_kinds(
@@ -340,6 +360,7 @@ class JevSurfaceDecider:
             info_labels=decide_info_labels(answers.nouls),
             boxes=self._decide_boxes(planned, answers, frames[-1].t),
             scene_changed=decide_scene_changed(answers.nouls),
+            exchange=SurfaceExchange(request=request, answers=answers),
         )
 
     def _select_targets(
