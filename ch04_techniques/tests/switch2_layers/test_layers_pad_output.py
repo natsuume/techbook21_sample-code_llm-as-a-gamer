@@ -405,6 +405,15 @@ def test_neutral_sends_neutral_report_and_clears_state():
     assert len(sender.reports) == count
 
 
+def test_output_stopped_is_true_only_after_stop_output():
+    output, _, _, _ = make_output()
+    assert output.output_stopped is False
+    output.neutral()
+    assert output.output_stopped is False
+    output.stop_output()
+    assert output.output_stopped is True
+
+
 def test_stop_output_blocks_later_apply():
     output, sender, _, events = make_output()
     output.apply(PadAction(held=frozenset({"A"})))

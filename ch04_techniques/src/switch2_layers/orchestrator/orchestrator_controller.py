@@ -37,8 +37,8 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
 監視:
     要求を出せるのは、次のすべてに当たるとき:
         - set_started の後で、監視があり、主ループの操作の残りが無く、監視の操作の列を実行していない
-        - 出力が止まっていない (ActionExecutor.output_stopped が False。PadOutput.stop_output の後に送ろうとして
-          OutputStoppedError を受けたら、以後は要求を送らない)
+        - 出力が止まっていない (ActionExecutor.output_stopped が False。PadOutput.stop_output の後は、操作を
+          送ろうとする前でも、要求を送らない)
         - 返っていない要求が無い (同時に送る要求は 1 つまで。監視を置き換えた後も、前の監視の要求が返るまで次を送らない)
         - latest_frame() がフレームを返し、そのフレームの時刻 (CapturedFrame.t) が、最後に操作を離した時刻
           (ActionExecutor.last_release_t。主ループの操作と監視の操作の両方) に MONITOR_FRAME_SETTLE_S を足した時刻
@@ -55,8 +55,8 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
         - 答えがあった: ActiveMonitor.record_answer (失敗の回数を 0 に戻す)。要求を送った後に、空でない actions を
           apply で受け付けていれば、ほかに何もしない (操作の前の画面への答えで操作しない)。当たった条件があれば、
           条件の操作の列 (ActiveMonitor.operations_of。展開した後の列) を監視の列 (source が monitor) として始め、
-          その場で 1 回進める (ActionExecutor.advance)。出力が止まっていて始められなければ (output_stopped)、当たりに
-          数えず、monitor.jsonl の hit も null にする。始められたら、その条件の CaseHit の回数を 1 足す。展開した後の
+          その場で 1 回進める (ActionExecutor.advance)。出力が止まっていて始められなければ (output_stopped。列の
+          最初の操作が wait で、まだ何も送っていないときも含む)、当たりに数えず、monitor.jsonl の hit も null にする。始められたら、その条件の CaseHit の回数を 1 足す。展開した後の
           列が空なら (条件の actions が空のときと、展開すると空になるマクロのとき)、CaseHit の回数を 1 足し、列を
           始めずに、その場で次の「実行し終えた」の扱いをする
         - 監視の列を最後まで実行し終えたら、ActiveMonitor.case_finished。MonitorEnd が返ったら (once の条件) 監視を

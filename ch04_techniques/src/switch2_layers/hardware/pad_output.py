@@ -458,6 +458,14 @@ class PadOutput:
         return self._allowed_buttons
 
     @property
+    def output_stopped(self) -> bool:
+        """stop_output を呼んだ後なら True (以後の apply は OutputStoppedError を出す)。
+
+        ロックを取らずに読む (bool の読み取りなので、on_operation の中など、ロックを持つ間に呼んでも止まらない)。
+        """
+        return self._output_stopped
+
+    @property
     def last_error(self) -> str | None:
         """start_due_taps・release_due_taps・start_due_holds・release_due_holds・neutral・stop_output の送信の
         最後の失敗の説明。無ければ None。"""

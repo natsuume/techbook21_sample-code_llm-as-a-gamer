@@ -32,7 +32,8 @@
     書く (このモジュールは記録の関数を持たず、行を書かない)。
     apply の送信の例外は外に出さない (PadOutput が ok=False の行を書く。その操作は時刻どおりに進める)。
     apply が OutputStoppedError を出したら (全体を止める処理が出力を止めた)、今の列とこの後に始める列をすべて捨てる
-    (以後は何も送らない)。
+    (以後は何も送らない)。start の時点で PadOutput.output_stopped が True なら、列を持たない (送る前に止まった
+    ことが分かるので、最初の操作が wait でも、押し直しの間を待つ押下でも、列を始めない)。
 OrchestratorController の run のループのスレッドからだけ呼ぶ (ロックを持たない)。
 """
 
@@ -170,7 +171,7 @@ class ActionExecutor:
         最初の操作は、この後の advance で送る。operations が空なら、列を持たない状態になる。
         """
         discarded = self.cancel()
-        if self._output_stopped or not operations:
+        if self.output_stopped or not operations:
             return discarded
         self._operations = list(operations)
         self._source = owner
@@ -225,8 +226,8 @@ class ActionExecutor:
 
     @property
     def output_stopped(self) -> bool:
-        """PadOutput.apply が OutputStoppedError を出した後なら True。"""
-        return self._output_stopped
+        """PadOutput.stop_output の後 (PadOutput.output_stopped が True か、apply が OutputStoppedError を出した後) なら True。"""
+        return self._output_stopped or self._pad_output.output_stopped
 
     @property
     def last_release_t(self) -> float | None:

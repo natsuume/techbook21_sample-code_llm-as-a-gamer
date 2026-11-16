@@ -1837,3 +1837,33 @@ def test_hit_returned_after_the_output_stopped_is_not_counted_or_recorded(
     assert events.monitor_ends == ()
     assert h.jev.request_count() == 1
     assert not any(sent.buttons for sent in h.sender.reports())
+
+
+def test_hit_of_a_case_starting_with_wait_after_the_output_stopped_is_not_counted(
+    tmp_path, cleanups
+):
+    # 列の最初の操作が wait だと、最初の advance では何も送らない。それでも止まった後の当たりには数えない
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(
+        monitor(case("c0", WaitAction(seconds=0.5), tap("A"), repeat="once"))
+    )
+    request = h.wait_request(1)
+    h.pad_output.stop_output()
+    h.jev.respond(hit(request, 0))
+    h.wait_until(lambda: len(h.monitor_rows()) == 1, "the answer is recorded")
+    h.wait_rounds()
+    [row] = h.monitor_rows()
+    assert row["hit"] is None
+    assert h.controller.take_events().case_hits == ()
+    h.drive(1.0)
+    assert not any(sent.buttons for sent in h.sender.reports())
+
+
+def test_no_request_after_stop_output_even_before_any_operation_is_sent(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.pad_output.stop_output()
+    h.controller.apply(monitor(case("c0", tap("B"))))
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
