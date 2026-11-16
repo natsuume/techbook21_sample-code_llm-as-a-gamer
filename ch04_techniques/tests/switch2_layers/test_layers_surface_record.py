@@ -100,7 +100,7 @@ def test_surface_row_has_the_keys_of_the_issue():
         ],
         documents=DOCUMENTS,
         middle_generated_t=8.5,
-        action=PadAction(held=frozenset({"A"})),
+        action=PadAction(held=frozenset({"A"}), hold_seconds={"A": 1.0}),
         blocked_buttons=["HOME"],
         deep_requests=[DocumentKind.TIPS, DocumentKind.ADVICE],
         info_labels=[InfoLabel("menu_open", 0.75)],
@@ -123,6 +123,7 @@ def test_surface_row_has_the_keys_of_the_issue():
         "middle_generated_t": 8.5,
         "action": {
             "held": ["A"],
+            "hold_seconds": {"A": 1.0},
             "taps": [],
             "sticks": {"LS": [0.0, 0.0], "RS": [0.0, 0.0]},
         },

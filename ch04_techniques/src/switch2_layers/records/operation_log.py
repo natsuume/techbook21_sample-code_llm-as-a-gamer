@@ -1,6 +1,7 @@
 """コントローラーに送った操作の記録 operations.jsonl。
 
-1 件を {"t", "source": "apply" | "neutral" | "stop", "held", "taps", "sticks", "ok", "error"} の 1 行で追記する。
+1 件を {"t", "source": "apply" | "neutral" | "stop", "held", "hold_seconds", "taps", "sticks", "ok", "error"} の
+1 行で追記する。
 hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent を on_operation に渡し、OperationLog.write が書く。
 surface のスレッド (apply) と終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
 """
@@ -37,14 +38,15 @@ class OperationEvent:
 def operation_row(t: float, event: OperationEvent) -> dict[str, object]:
     """operations.jsonl の 1 行の辞書を返す。
 
-    {"t": t, "source": event.source, "held": ..., "taps": ..., "sticks": ..., "ok": event.ok, "error": event.error}。
-    held・taps・sticks は pad_action.action_to_json(event.action) の値。
+    {"t": t, "source": event.source, "held": ..., "hold_seconds": ..., "taps": ..., "sticks": ..., "ok": event.ok,
+     "error": event.error}。held・hold_seconds・taps・sticks は pad_action.action_to_json(event.action) の値。
     """
     action = action_to_json(event.action)
     return {
         "t": t,
         "source": event.source,
         "held": action["held"],
+        "hold_seconds": action["hold_seconds"],
         "taps": action["taps"],
         "sticks": action["sticks"],
         "ok": event.ok,

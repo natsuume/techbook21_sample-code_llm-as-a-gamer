@@ -2,11 +2,11 @@
 
 ボタン名は switch2_remote.controller_state.BUTTON_ORDER の名前 (大文字) を使う。
 この型自体は値を検証しない。押せないボタンと知らない名前は buttons.filter_action が外し、
-スティックの範囲と十字キーの相反する方向は hardware.pad_output.PadOutput.apply が扱う。
+押し続けの秒数の範囲、スティックの範囲、十字キーの相反する方向は hardware.pad_output.PadOutput.apply が扱う。
 """
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 
 from switch2_remote.controller_state import BUTTON_ORDER
 
@@ -17,17 +17,21 @@ STICK_NEUTRAL: tuple[float, float] = (0.0, 0.0)
 class PadAction:
     """コントローラーの 1 回分の操作。
 
-    held          押し続けるボタン名の集合 (次の操作まで押したままにする)
-    taps          短押しするボタン名の集合 (hardware.pad_output.TAP_PRESS_S 秒だけ押して離す)
-    left_stick    左スティックの (x, y)。x は右、y は上を正とし、各 -1.0〜1.0。
-                  向きは (x, y) の向き、強さは (x, y) の長さで表す。(0, 0) は倒さない
-    right_stick   右スティックの (x, y)。表し方は left_stick と同じ
+    held           押し続けるボタン名の集合。hold_seconds に秒数があるボタンはその秒数で離し、
+                   無いボタンは次の操作まで押したままにする
+    taps           短押しするボタン名の集合 (hardware.pad_output.TAP_PRESS_S 秒だけ押して離す)
+    left_stick     左スティックの (x, y)。x は右、y は上を正とし、各 -1.0〜1.0。
+                   向きは (x, y) の向き、強さは (x, y) の長さで表す。(0, 0) は倒さない
+    right_stick    右スティックの (x, y)。表し方は left_stick と同じ
+    hold_seconds   押し続けの秒数 (ボタン名 → 秒)。既定は空。held に無いボタンの秒数は無視する。
+                   秒数の範囲は hardware.pad_output.PadOutput.apply が扱う
     """
 
     held: frozenset[str] = frozenset()
     taps: frozenset[str] = frozenset()
     left_stick: tuple[float, float] = STICK_NEUTRAL
     right_stick: tuple[float, float] = STICK_NEUTRAL
+    hold_seconds: Mapping[str, float] = field(default_factory=dict)
 
 
 # 何も押さず、スティックも倒さない操作
@@ -56,12 +60,21 @@ def sort_buttons(names: Iterable[str]) -> list[str]:
 
 
 def action_to_json(action: PadAction) -> dict[str, object]:
-    """action を記録 (surface.jsonl の action、operations.jsonl の held・taps・sticks) の形にする。
+    """action を記録 (surface.jsonl の action、operations.jsonl の held・hold_seconds・taps・sticks、
+    surface の要求の recent_actions) の形にする。
 
-    {"held": sort_buttons(held), "taps": sort_buttons(taps), "sticks": {"LS": [x, y], "RS": [x, y]}}
+    {"held": sort_buttons(held), "hold_seconds": {ボタン名: 秒}, "taps": sort_buttons(taps),
+     "sticks": {"LS": [x, y], "RS": [x, y]}}
+    hold_seconds には、held にあって秒数のあるボタンだけを held と同じ順に入れる (無ければ空の object)。
     """
+    held = sort_buttons(action.held)
     return {
-        "held": sort_buttons(action.held),
+        "held": held,
+        "hold_seconds": {
+            button: action.hold_seconds[button]
+            for button in held
+            if button in action.hold_seconds
+        },
         "taps": sort_buttons(action.taps),
         "sticks": {"LS": list(action.left_stick), "RS": list(action.right_stick)},
     }
