@@ -324,6 +324,105 @@ def test_user_message_history_has_operations_counts_and_cut_reason():
     assert "screen_mismatch" in joined
 
 
+# この段階で送った決定 (A) の節の見出し
+SENT_DECISIONS_TITLE = "この段階で送った決定 (A)"
+HISTORY_TITLE = "この段階のこれまでの呼び出し"
+
+
+def user_section(payload: dict, title: str) -> str:
+    """user メッセージのうち、見出し title の節の中身 (見出しの行を除く) を返す。"""
+    for text in user_texts(payload):
+        if text.startswith(f"## {title}\n"):
+            return text.removeprefix(f"## {title}\n")
+    raise AssertionError(f"no section {title!r}")
+
+
+def press_a(screen: str) -> SystemOperation:
+    return SystemOperation(screen=screen, kind="press", buttons=("A",), seconds=None)
+
+
+def test_sent_decisions_section_follows_the_history_section():
+    titles = [text.split("\n", 1)[0] for text in user_texts(sent_payload())]
+    assert titles.index(f"## {SENT_DECISIONS_TITLE}") == (
+        titles.index(f"## {HISTORY_TITLE}") + 1
+    )
+
+
+@pytest.mark.parametrize(
+    "history",
+    [(), (history_record(50.0),)],
+    ids=["no-history", "no-a-in-history"],
+)
+def test_sent_decisions_section_without_a(history):
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
+    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    assert section == "まだ送っていません"
+
+
+def test_sent_decisions_section_lists_each_sent_a_in_order():
+    history = (
+        history_record(
+            50.0,
+            judged_screen="controller_order",
+            operations=(press_a("controller_order"),),
+        ),
+        history_record(51.0),
+        history_record(
+            52.0,
+            judged_screen="home_menu",
+            operations=(
+                SystemOperation(
+                    screen="home_menu", kind="press", buttons=("L", "A"), seconds=0.5
+                ),
+            ),
+        ),
+        history_record(
+            53.0, judged_screen="user_select", operations=(press_a("user_select"),)
+        ),
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
+    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    assert section.split("\n") == [
+        "t=50.000 controller_order で A",
+        "t=52.000 home_menu で A",
+        "t=53.000 user_select で A",
+    ]
+
+
+def test_sent_decisions_section_includes_history_older_than_ten():
+    history = (
+        history_record(
+            40.0,
+            judged_screen="controller_order",
+            operations=(press_a("controller_order"),),
+        ),
+        *(history_record(41.0 + index) for index in range(11)),
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
+    payload = sent_payload(screen_input)
+    # 履歴の節には新しい方から 10 件だけが入り、t=40.000 の呼び出しは入らない
+    assert "t=40.000" not in user_section(payload, HISTORY_TITLE)
+    assert (
+        user_section(payload, SENT_DECISIONS_TITLE) == "t=40.000 controller_order で A"
+    )
+
+
+def test_sent_decisions_section_skips_a_that_was_not_sent():
+    record = history_record(
+        60.0,
+        operations=(PRESS_DOWN, press_a("home_menu")),
+        sent_count=1,
+        cut_reason=SystemCutReason.DECISION_NOT_FIRST,
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
+    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    assert section == "まだ送っていません"
+
+
+def test_developer_message_describes_the_sent_decisions_section():
+    assert SENT_DECISIONS_TITLE in developer_text(sent_payload())
+
+
 def test_details_after_success_have_usage_cost_and_response():
     body = response_body()
     middle, _ = make_middle(httpx.Response(200, json=body))

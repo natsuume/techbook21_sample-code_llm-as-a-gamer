@@ -143,6 +143,73 @@ def test_apply_records_the_given_source_on_send_failure():
     assert [(event.source, event.ok) for event in events] == [("system", False)]
 
 
+def test_pressing_buttons_is_empty_at_first():
+    output, _, _, _ = make_output()
+    assert output.pressing_buttons() == frozenset()
+
+
+def test_pressing_buttons_has_a_tap_until_the_timer_releases_it():
+    output, _, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert output.pressing_buttons() == frozenset({"A"})
+    clock.now += TAP_PRESS_S
+    output.release_due_taps()
+    assert output.pressing_buttons() == frozenset()
+
+
+def test_pressing_buttons_has_a_hold_until_the_timer_releases_it():
+    output, _, clock, _ = make_output()
+    output.apply(
+        PadAction(held=frozenset({"L", "R"}), hold_seconds={"L": 0.4, "R": 0.4})
+    )
+    assert output.pressing_buttons() == frozenset({"L", "R"})
+    clock.now += 0.4
+    # 期限を過ぎても、タイマーが離すまでは押している
+    assert output.pressing_buttons() == frozenset({"L", "R"})
+    output.release_due_holds()
+    assert output.pressing_buttons() == frozenset()
+
+
+def test_pressing_buttons_has_a_hold_without_seconds_until_the_next_apply():
+    output, _, _, _ = make_output()
+    output.apply(PadAction(held=frozenset({"B"}), left_stick=(1.0, 0.0)))
+    # スティックは含めない
+    assert output.pressing_buttons() == frozenset({"B"})
+    output.apply(PadAction(left_stick=(1.0, 0.0)))
+    assert output.pressing_buttons() == frozenset()
+
+
+def test_pressing_buttons_has_a_tap_waiting_to_start_again():
+    output, _, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    # 短押しの最中に同じボタンの短押しを求めると、いったん離して、始める予定の短押しになる
+    output.apply(PadAction(taps=frozenset({"A"})))
+    assert output.pressing_buttons() == frozenset({"A"})
+    clock.now += TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert output.pressing_buttons() == frozenset({"A"})
+    clock.now += TAP_PRESS_S
+    output.release_due_taps()
+    assert output.pressing_buttons() == frozenset()
+
+
+def test_pressing_buttons_has_a_hold_waiting_to_start():
+    output, _, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.2}))
+    clock.now += 0.2
+    output.release_due_holds()
+    # 期限で離した直後の押し続けは、間をあけてから始める予定の押し続けになる
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.2}))
+    assert output.pressing_buttons() == frozenset({"A"})
+
+
+def test_pressing_buttons_is_cleared_by_neutral():
+    output, _, _, _ = make_output()
+    output.apply(PadAction(held=frozenset({"B"}), taps=frozenset({"A"})))
+    output.neutral()
+    assert output.pressing_buttons() == frozenset()
+
+
 def test_apply_removes_home_right_before_sending():
     output, sender, _, events = make_output()
     result = output.apply(

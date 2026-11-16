@@ -18,6 +18,8 @@ from typing import Literal
 NO_SCREEN_NAME = "none"
 # 入力の履歴に入れる、これまでの呼び出しの最大の数 (新しい方から数える)
 MAX_HISTORY_ENTRIES = 10
+# 決定のボタン。操作の列の先頭の操作にだけ置ける。入力の「この段階で送った決定」には、このボタンを含む press を並べる
+DECISION_BUTTON = "A"
 
 # 操作の種類: press (ボタンを押す)、wait (何も送らずに待つ)
 SystemOperationKind = Literal["press", "wait"]
@@ -94,7 +96,8 @@ class SystemScreenInput:
     frame_t          今の画像のフレームの時刻
     judged_screen    照合の結果の画面の名前。見本のどの画面でもない (または照合の結果がまだ無い) なら None
     judged_frame_t   照合したフレームの時刻。照合の結果がまだ無ければ None
-    history          この段階でのこれまでの呼び出しの履歴 (古い順)。要求には新しい方から MAX_HISTORY_ENTRIES 件を入れる
+    history          この段階でのこれまでの呼び出しの履歴 (古い順)。要求の履歴の節には新しい方から MAX_HISTORY_ENTRIES 件を
+                     入れ、送った決定の節には履歴のすべてを使う
     """
 
     t: float

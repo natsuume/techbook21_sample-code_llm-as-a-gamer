@@ -5,7 +5,11 @@ from dataclasses import dataclass, field
 import pytest
 from switch2_remote.controller_state import BUTTON_ORDER
 
-from switch2_layers.hardware.pad_output import TAP_PRESS_S, PadOutput
+from switch2_layers.hardware.pad_output import (
+    TAP_PRESS_S,
+    TIMER_INTERVAL_S,
+    PadOutput,
+)
 from switch2_layers.middle.system_screen_types import (
     SystemCutReason,
     SystemOperation,
@@ -18,6 +22,8 @@ from switch2_layers.run_clock import RunClock
 from switch2_layers.system_screen.system_operation_runner import (
     DECISION_BUTTON,
     JUDGMENT_WAIT_S,
+    RELEASE_POLL_S,
+    RELEASE_WAIT_S,
     SETTLE_S,
     SystemOperationRunner,
     operation_pad_action,
@@ -42,6 +48,38 @@ class FakeMonotonic:
 
     def __call__(self) -> float:
         return self.now
+
+
+class FakeTimer:
+    """PadOutput のタイマースレッドの偽物。偽の時計を進める部品 (FakeWaits と FakeJudgments) が使う。
+
+    advance は偽の時計を TIMER_INTERVAL_S ずつ進め、進めるたびに、実際のタイマー (PadOutput._run_timer) と同じ順で
+    start_due_taps・release_due_taps・start_due_holds・release_due_holds を呼ぶ。running が False なら呼ばない
+    (ボタンが離れない場合を作る)。呼んだ処理が送るレポートでも、送信先が偽の時計を進める。
+    """
+
+    def __init__(self, monotonic: FakeMonotonic):
+        self.monotonic = monotonic
+        self.pad_output: PadOutput | None = None
+        self.running = True
+
+    def advance(self, seconds: float) -> None:
+        target = self.monotonic.now + seconds
+        while self.monotonic.now < target:
+            self.monotonic.now = min(self.monotonic.now + TIMER_INTERVAL_S, target)
+            self._tick()
+
+    def advance_to(self, monotonic_value: float) -> None:
+        if monotonic_value > self.monotonic.now:
+            self.advance(monotonic_value - self.monotonic.now)
+
+    def _tick(self) -> None:
+        if not self.running or self.pad_output is None:
+            return
+        self.pad_output.start_due_taps()
+        self.pad_output.release_due_taps()
+        self.pad_output.start_due_holds()
+        self.pad_output.release_due_holds()
 
 
 class FakeSender:
@@ -80,18 +118,20 @@ class FakeJudgments:
 
     届いた結果のうち frame_t がいちばん新しいものを持つ。wait_newer は、持っている結果の frame_t が after_frame_t より
     大きければすぐ返し、無ければ、そうなる結果が届く時刻まで (最大 timeout_s 秒。届かなくても少なくとも
-    MIN_FAKE_STEP_S 秒) 偽の時計を進める。渡された after_frame_t を after_values に記録する。
-    on_wait があれば、wait_newer の始めに呼ぶ。
+    MIN_FAKE_STEP_S 秒) 偽の時計を進める (timer で進めるので、その間も PadOutput のタイマーが動く)。渡された
+    after_frame_t を after_values に記録する。on_wait があれば、wait_newer の始めに呼ぶ。
     """
 
     def __init__(
         self,
         monotonic: FakeMonotonic,
         clock: RunClock,
+        timer: FakeTimer,
         arrivals: Iterable[tuple[float, FakeJudgment]],
     ):
         self.monotonic = monotonic
         self.clock = clock
+        self.timer = timer
         self.arrivals = sorted(arrivals, key=lambda item: item[0])
         self.after_values: list[float] = []
         self.on_wait: Callable[[], None] | None = None
@@ -101,7 +141,7 @@ class FakeJudgments:
         return max(arrived, key=lambda judgment: judgment.frame_t, default=None)
 
     def _advance_to(self, t: float) -> None:
-        self.monotonic.now = max(self.monotonic.now, ORIGIN + t)
+        self.timer.advance_to(ORIGIN + t)
 
     def latest(self) -> FakeJudgment | None:
         return self._held_at(self.clock.now())
@@ -126,23 +166,24 @@ class FakeJudgments:
 
 class FakeWaits:
     """wait_or_stop の偽物。stop が立っていればすぐ True を返し、立っていなければ偽の時計を seconds 秒
-    (正の秒数なら少なくとも MIN_FAKE_STEP_S 秒) 進めて stop.is_set() を返す。on_wait があれば始めに呼ぶ。"""
+    (正の秒数なら少なくとも MIN_FAKE_STEP_S 秒) timer で進めて stop.is_set() を返す。on_wait があれば始めに
+    on_wait(stop, seconds) を呼ぶ。"""
 
-    def __init__(self, monotonic: FakeMonotonic):
-        self.monotonic = monotonic
+    def __init__(self, timer: FakeTimer):
+        self.timer = timer
         self.calls = 0
-        self.on_wait: Callable[[threading.Event], None] | None = None
+        self.on_wait: Callable[[threading.Event, float], None] | None = None
 
     def __call__(self, stop: threading.Event, seconds: float) -> bool:
         self.calls += 1
         if self.calls > MAX_FAKE_CALLS:
             raise AssertionError("wait_or_stop was called too many times")
         if self.on_wait is not None:
-            self.on_wait(stop)
+            self.on_wait(stop, seconds)
         if stop.is_set():
             return True
         if seconds > 0:
-            self.monotonic.now += max(seconds, MIN_FAKE_STEP_S)
+            self.timer.advance(max(seconds, MIN_FAKE_STEP_S))
         return stop.is_set()
 
 
@@ -164,10 +205,13 @@ class Harness:
 def make_harness(
     arrivals: Iterable[tuple[float, FakeJudgment]] = (),
     allowed: frozenset[str] = ALLOWED_WITHOUT_HOME,
+    timer_running: bool = True,
 ) -> Harness:
     """偽の時計 (t = START_T から)・送信先・照合の結果・待ちを使う SystemOperationRunner を作る。
 
-    PadOutput は本物を使い (タイマースレッドは起動しない)、送った操作を OperationEvent で受け取る。
+    PadOutput は本物を使い (タイマースレッドは起動せず、FakeTimer が偽の時計を進めるたびに代わりに動かす)、送った
+    操作を OperationEvent で受け取る。timer_running が False なら FakeTimer は PadOutput を動かさない (ボタンが
+    離れない)。
     """
     monotonic = FakeMonotonic(ORIGIN + START_T)
     clock = RunClock(monotonic, origin=ORIGIN)
@@ -176,8 +220,11 @@ def make_harness(
     pad_output = PadOutput(
         sender, allowed, clock=monotonic, on_operation=events.append, start_timer=False
     )
-    judgments = FakeJudgments(monotonic, clock, arrivals)
-    waits = FakeWaits(monotonic)
+    timer = FakeTimer(monotonic)
+    timer.pad_output = pad_output
+    timer.running = timer_running
+    judgments = FakeJudgments(monotonic, clock, timer, arrivals)
+    waits = FakeWaits(timer)
     runner = SystemOperationRunner(pad_output, judgments, clock, wait_or_stop=waits)
     return Harness(
         monotonic=monotonic,
@@ -274,6 +321,11 @@ def test_constants():
     assert DECISION_BUTTON == "A"
 
 
+def test_release_constants():
+    assert RELEASE_POLL_S == 0.01
+    assert RELEASE_WAIT_S == 1.0
+
+
 def test_tap_becomes_taps():
     assert operation_pad_action(press("home_menu", "DOWN")) == PadAction(
         taps=frozenset({"DOWN"})
@@ -328,7 +380,17 @@ def test_wait_sends_nothing_and_waits_its_seconds():
 def test_returns_after_the_last_press_is_released():
     harness = make_harness(steady("home_menu"))
     assert run(harness, press("home_menu", "L", "R", seconds=0.4)) == sent_all(1)
-    assert harness.now() >= harness.sender.sent_t[0] + 0.4 - 1e-9
+    # 送信は 押す (0)・離す (1) の順。離すレポートの送信が戻った後に返る
+    assert harness.pad_output.pressing_buttons() == frozenset()
+    assert harness.now() >= harness.sender.sent_t[1] - 1e-9
+    assert harness.sender.sent_t[1] > harness.sender.sent_t[0] + 0.4
+
+
+def test_returns_after_the_last_tap_is_released():
+    harness = make_harness(steady("home_menu"))
+    assert run(harness, press("home_menu", "DOWN")) == sent_all(1)
+    assert harness.pad_output.pressing_buttons() == frozenset()
+    assert harness.now() >= harness.sender.sent_t[1] - 1e-9
 
 
 # --- 2 つ目以降の照合に使うフレーム ---
@@ -342,11 +404,14 @@ def test_judgment_frame_is_after_tap_release_plus_settle():
         press("home_menu", "RIGHT"),
         press("home_menu", "B"),
     )
-    first, second = harness.sender.sent_t[:2]
-    # 前の操作を離し終えた時刻 (apply が戻った時刻 + TAP_PRESS_S) + SETTLE_S
+    # 送信は 押す (0)・離す (1)・押す (2)・離す (3)・押す (4)・離す (5) の順
+    sent_t = harness.sender.sent_t
+    # 前の操作のボタンを離すレポートの送信が戻った時刻 + SETTLE_S
     assert distinct_after_values(harness) == pytest.approx(
-        [first + TAP_PRESS_S + SETTLE_S, second + TAP_PRESS_S + SETTLE_S]
+        [sent_t[1] + SETTLE_S, sent_t[3] + SETTLE_S]
     )
+    # 離すのは、apply が戻った時刻 + TAP_PRESS_S より後 (タイマーが離す)
+    assert sent_t[1] > sent_t[0] + TAP_PRESS_S
 
 
 def test_judgment_frame_is_after_hold_release_plus_settle():
@@ -357,8 +422,18 @@ def test_judgment_frame_is_after_hold_release_plus_settle():
         press("controller_order", "B"),
         judged="controller_order",
     )
+    sent_t = harness.sender.sent_t
+    assert distinct_after_values(harness) == pytest.approx([sent_t[1] + SETTLE_S])
+    assert sent_t[1] > sent_t[0] + 0.4
+
+
+def test_release_wait_stops_at_its_limit():
+    # タイマーが動かず、ボタンが離れないときは、上限の時刻を終えた時刻にして進む
+    harness = make_harness(steady("home_menu"), timer_running=False)
+    result = run(harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
+    assert result == sent_all(2)
     assert distinct_after_values(harness) == pytest.approx(
-        [harness.sender.sent_t[0] + 0.4 + SETTLE_S]
+        [harness.sender.sent_t[0] + TAP_PRESS_S + RELEASE_WAIT_S + SETTLE_S]
     )
 
 
@@ -381,8 +456,18 @@ def test_ignores_judgments_of_frames_before_settle():
     assert result == sent_all(2)
 
 
+def first_after_frame_t(*operations: SystemOperation) -> float:
+    """operations を、照合の結果がいつも home_menu の偽物で動かしたときの、最初の after_frame_t を返す。
+
+    偽の時計は決まった進み方をするので、同じ列の先頭の操作を終えた時刻は、照合の結果の届き方によらず同じになる。
+    """
+    probe = make_harness(steady("home_menu"))
+    run(probe, *operations)
+    return probe.judgments.after_values[0]
+
+
 def test_judgment_arriving_just_before_the_wait_limit_is_used():
-    after = START_T + SEND_DELAY_S + TAP_PRESS_S + SETTLE_S
+    after = first_after_frame_t(press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
     arrival = after + JUDGMENT_WAIT_S - 0.05
     harness = make_harness(
         [(arrival, FakeJudgment(frame_t=arrival - 0.1, screen="home_menu"))]
@@ -392,7 +477,7 @@ def test_judgment_arriving_just_before_the_wait_limit_is_used():
 
 
 def test_judgment_arriving_after_the_wait_limit_is_too_late():
-    after = START_T + SEND_DELAY_S + TAP_PRESS_S + SETTLE_S
+    after = first_after_frame_t(press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
     arrival = after + JUDGMENT_WAIT_S + 0.05
     harness = make_harness(
         [(arrival, FakeJudgment(frame_t=arrival - 0.1, screen="home_menu"))]
@@ -571,7 +656,13 @@ def test_stop_while_waiting_for_a_judgment_cuts_even_if_it_matches():
 def test_stop_while_waiting_for_the_settle_time_cuts_the_rest():
     harness = make_harness(steady("home_menu"))
     stop = threading.Event()
-    harness.waits.on_wait = lambda event: event.set()
+
+    def stop_after_release(event: threading.Event, seconds: float) -> None:
+        # 前の操作のボタンを離し終えた後の待ち (SETTLE_S の待ち) で止める
+        if not harness.pad_output.pressing_buttons():
+            event.set()
+
+    harness.waits.on_wait = stop_after_release
     result = run(
         harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"), stop=stop
     )
@@ -579,12 +670,49 @@ def test_stop_while_waiting_for_the_settle_time_cuts_the_rest():
     assert len(system_actions(harness)) == 1
 
 
+def test_stop_while_waiting_for_the_release_cuts_the_rest():
+    harness = make_harness(steady("home_menu"), timer_running=False)
+    stop = threading.Event()
+
+    def stop_while_polling(event: threading.Event, seconds: float) -> None:
+        # 離したかを確かめる待ち (RELEASE_POLL_S 以下の待ち) で止める
+        if seconds <= RELEASE_POLL_S + 1e-9:
+            event.set()
+
+    harness.waits.on_wait = stop_while_polling
+    result = run(
+        harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"), stop=stop
+    )
+    assert result == cut(1, SystemCutReason.STOPPED)
+    assert len(system_actions(harness)) == 1
+    # 離すのを待つ上限まで待たずに戻る
+    assert harness.now() < harness.sender.sent_t[0] + TAP_PRESS_S + RELEASE_WAIT_S
+
+
+def test_stop_while_waiting_for_the_last_release_is_not_a_cut():
+    harness = make_harness(steady("home_menu"), timer_running=False)
+    stop = threading.Event()
+    harness.waits.on_wait = lambda event, seconds: event.set()
+    result = run(harness, press("home_menu", "DOWN"), stop=stop)
+    assert result == sent_all(1)
+
+
 def test_stop_while_waiting_after_the_last_operation_is_not_a_cut():
     harness = make_harness(steady("home_menu"))
     stop = threading.Event()
-    harness.waits.on_wait = lambda event: event.set()
+    harness.waits.on_wait = lambda event, seconds: event.set()
     result = run(harness, press("home_menu", "DOWN"), stop=stop)
     assert result == sent_all(1)
+
+
+def test_stop_during_the_last_wait_is_not_a_cut():
+    harness = make_harness(steady("home_menu"))
+    stop = threading.Event()
+    harness.waits.on_wait = lambda event, seconds: event.set()
+    result = run(harness, wait("home_menu", 1.0), stop=stop)
+    assert result == sent_all(1)
+    # 待つのをやめて、すぐに戻る
+    assert harness.now() < START_T + 1.0
 
 
 def test_stopped_output_is_treated_as_stopped():

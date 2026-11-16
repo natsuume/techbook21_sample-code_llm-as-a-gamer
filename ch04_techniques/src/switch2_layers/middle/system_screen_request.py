@@ -11,7 +11,7 @@
           {"type": "input_text", "text": system_screen_instructions.SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 7>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 8>},
           {"type": "input_text", "text": luna_request.frame_label(frame_t)},
           {"type": "input_image", "image_url": luna_request.jpeg_data_url(frame_jpeg)}]}
       ]
@@ -27,8 +27,9 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     3. 指定のソフト           screen_input.software_name (書かれたまま)
     4. 指定のユーザー         screen_input.user_name (書かれたまま)
     5. 照合の結果             describe_judgment(judged_screen, judged_frame_t)
-    6. この段階のこれまでの呼び出し   describe_history(history)
-    7. 今の画像               IMAGE_SECTION_TEXT
+    6. この段階のこれまでの呼び出し   describe_history(history) (新しい方から MAX_HISTORY_ENTRIES 件)
+    7. この段階で送った決定 (A)       describe_sent_decisions(history) (履歴のすべてから)
+    8. 今の画像               IMAGE_SECTION_TEXT
 節の後ろに、今の画像の時刻のラベル (frame_label(frame_t)) と画像 (input_image) を 1 組置く。
 """
 
@@ -51,6 +52,7 @@ from switch2_layers.middle.system_screen_schema import (
     system_operation_to_json,
 )
 from switch2_layers.middle.system_screen_types import (
+    DECISION_BUTTON,
     MAX_HISTORY_ENTRIES,
     NO_SCREEN_NAME,
     SystemScreenInput,
@@ -65,9 +67,12 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "指定のユーザー",
     "照合の結果",
     "この段階のこれまでの呼び出し",
+    "この段階で送った決定 (A)",
     "今の画像",
 )
 EMPTY_TEXT = "(無い)"
+# この段階で送った決定 (A) が無いときの、その節の中身
+NO_SENT_DECISIONS_TEXT = "まだ送っていません"
 # 照合の結果がまだ無いとき (judged_frame_t が None) の、照合の結果の節の中身
 NO_JUDGMENT_TEXT = "照合の結果はまだ無い"
 # 照合の結果が None (見本のどの画面でもない) のときに、画面の名前の後ろに添える説明
@@ -127,8 +132,25 @@ def _describe_step(record: SystemStepRecord) -> str:
     )
 
 
+def describe_sent_decisions(history: Sequence[SystemStepRecord]) -> str:
+    """この段階で送った決定 (A) の節の中身を返す。
+
+    history のすべて (MAX_HISTORY_ENTRIES 件に削る前のもの) を古い順に見て、各履歴の操作の列の先頭から sent_count 個
+    (実際に送った操作) のうち、buttons に DECISION_BUTTON を含む press を、1 件 1 行「t=<その呼び出しの時刻> <その操作の
+    screen> で A」で並べる (行は改行 1 つでつなぎ、末尾に改行を付けない。t は format_frame_label の形)。
+    打ち切りで送らなかった操作は入れない。1 件も無ければ NO_SENT_DECISIONS_TEXT を返す。
+    """
+    lines = [
+        f"{format_frame_label(record.t)} {operation.screen} で {DECISION_BUTTON}"
+        for record in history
+        for operation in record.operations[: record.sent_count]
+        if operation.kind == "press" and DECISION_BUTTON in operation.buttons
+    ]
+    return "\n".join(lines) if lines else NO_SENT_DECISIONS_TEXT
+
+
 def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
-    """user メッセージの 7 つの節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 8 つの節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     goal = screen_input.goal
     bodies = [
         format_frame_label(screen_input.t),
@@ -137,6 +159,7 @@ def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
         screen_input.user_name,
         describe_judgment(screen_input.judged_screen, screen_input.judged_frame_t),
         describe_history(screen_input.history),
+        describe_sent_decisions(screen_input.history),
         IMAGE_SECTION_TEXT,
     ]
     return [

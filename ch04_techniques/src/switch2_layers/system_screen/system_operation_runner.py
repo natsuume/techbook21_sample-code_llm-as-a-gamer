@@ -1,12 +1,18 @@
 """本体の画面の middle が返した操作の列を、照合の結果を確かめながら hardware.pad_output.PadOutput で送る
 (SystemOperationRunner)。
 
-操作は前から順に 1 つずつ送り、次の操作は前の操作を終えてから始める。操作を終えた時刻 (end_t) は次のとおり:
-    press の短押し (seconds が None)   apply が戻った時刻 + hardware.pad_output.TAP_PRESS_S (離し終えた時刻)
-    press の押し続け                    apply が戻った時刻 + seconds (離し終えた時刻)
-    wait                                待ち始めた時刻 + seconds (何も送らない)
+操作は前から順に 1 つずつ送り、各操作は送った直後に「終える」まで待ってから次へ進む。操作を終える手順と、終えた時刻
+(end_t) は次のとおり:
+    press   (a) apply が戻った時刻 + 押す長さ (短押しは hardware.pad_output.TAP_PRESS_S、押し続けは seconds) まで待つ
+            (b) その操作のボタンが PadOutput.pressing_buttons() に無くなる (タイマースレッドが離す) まで、
+                RELEASE_POLL_S ずつ待つ。上限は (a) の時刻 + RELEASE_WAIT_S
+            (c) 離れたと確かめた時刻を end_t にする (上限に達したら、上限の時刻)
+    wait    待ち始めた時刻 + seconds まで待ち (何も送らない)、その時刻を end_t にする
+PadOutput は短押しと押し続けを、送信が戻ってから押す長さの後にタイマースレッド (hardware.pad_output.TIMER_INTERVAL_S
+ごと) で離すため、実際に離すのは (a) の時刻より遅れる。(b) で離したことを確かめてから、照合の起点にする。
 短押しは PadAction(taps=buttons)、押し続けは PadAction(held=buttons, hold_seconds={ボタン: seconds}) にして
-(operation_pad_action)、PadOutput.apply(..., source="system") で送る。押せないボタンは PadOutput.apply が外す。
+(operation_pad_action)、PadOutput.apply(..., source="system") で送る。押せないボタンは PadOutput.apply が外す
+(外したボタンは押されないので、(b) では待たない)。
 
 各操作を送る前に、照合の結果 (どの本体の画面か) を確かめる:
     先頭の操作      run に渡された照合の結果 (middle に渡したもの) の画面と、操作の screen を比べる
@@ -28,6 +34,7 @@ from switch2_layers.hardware.pad_output import (
     PadOutput,
 )
 from switch2_layers.middle.system_screen_types import (
+    DECISION_BUTTON,
     NO_SCREEN_NAME,
     SystemCutReason,
     SystemOperation,
@@ -43,8 +50,10 @@ SETTLE_S = 0.5
 JUDGMENT_WAIT_S = 3.0
 # 照合の結果を待つ間に、止める合図を確かめる間隔 (秒)。JudgmentSource.wait_newer の 1 回の timeout_s の上限
 JUDGMENT_POLL_S = 0.1
-# 決定のボタン。操作の列の先頭の操作にだけ置ける
-DECISION_BUTTON = "A"
+# press のボタンを離したかを確かめる間隔 (秒)。PadOutput のタイマースレッドの間隔と同じ
+RELEASE_POLL_S = 0.01
+# press のボタンを離すのを待つ最大の秒数 (apply が戻った時刻 + 押す長さから数える)。過ぎたら、離したものとして進む
+RELEASE_WAIT_S = 1.0
 
 # 止める合図 stop が立つか seconds 秒たつまで待ち、stop が立っていれば True を返す関数 (既定は threading.Event.wait)
 WaitOrStop = Callable[[threading.Event, float], bool]
@@ -146,9 +155,7 @@ class SystemOperationRunner:
             2. i が 0 なら、操作の screen と judged_screen の名前を比べ、違えば SCREEN_MISMATCH で打ち切る
             3. i が 1 以上なら:
                a. 操作の buttons に DECISION_BUTTON があれば、照合の結果を待たずに DECISION_NOT_FIRST で打ち切る
-                  (押し続けと同時押しの中の A も同じ)。返す前に、clock.now() が前の操作を終えた時刻になるまで
-                  wait_or_stop で待つ (押し続けと wait を終えてから戻るため。stop が立ったら待つのをやめ、理由は
-                  DECISION_NOT_FIRST のまま)
+                  (押し続けと同時押しの中の A も同じ)
                b. after_frame_t = 前の操作を終えた時刻 + SETTLE_S とする。clock.now() が after_frame_t になるまで
                   wait_or_stop(stop, 残りの秒) で待つ。stop が立ったら STOPPED で打ち切る
                c. clock.now() が after_frame_t + JUDGMENT_WAIT_S を過ぎるまで、judgments.wait_newer(after_frame_t,
@@ -158,16 +165,16 @@ class SystemOperationRunner:
                d. 結果が届かなければ NO_JUDGMENT、届いた結果の画面の名前が操作の screen と違えば SCREEN_MISMATCH で
                   打ち切る
             4. press なら pad_output.apply(operation_pad_action(操作), source="system") で送り、戻り値の blocked_buttons を
-               結果の blocked_buttons に足す。wait なら何も送らない。どちらも、モジュールの docstring の時刻を、この操作を
-               終えた時刻にする
-        最後の操作まで送ったら、clock.now() が最後の操作を終えた時刻になるまで wait_or_stop で待ってから
-        SystemRunResult(sent_count=操作の数, cut_index=None, cut_reason=None, blocked_buttons) を返す。この待ちの間に
-        stop が立ったら、待つのをやめてすぐに同じ結果を返す (送っていない操作は無いため、打ち切りにしない)。
-        操作が 0 個なら、何も送らず待たずに SystemRunResult(0, None, None, frozenset()) を返す。
+               結果の blocked_buttons に足す。wait なら何も送らない
+            5. モジュールの docstring の手順で、この操作を終えるまで wait_or_stop で待ち、終えた時刻を記録する。この待ちの
+               間に stop が立ったら、待つのをやめる。その操作は送ったものとして数え、次の操作の 1 で STOPPED で打ち切る
+               (最後の操作なら、打ち切りにしない)
+        最後の操作まで送って終えたら、SystemRunResult(sent_count=操作の数, cut_index=None, cut_reason=None,
+        blocked_buttons) を返す。操作が 0 個なら、何も送らず待たずに SystemRunResult(0, None, None, frozenset()) を返す。
 
         位置 i で打ち切ったら、SystemRunResult(sent_count=i, cut_index=i, cut_reason=理由, blocked_buttons) を返す (その
-        操作から後は送らない)。どの理由でも、送った操作を終えた後に返す (DECISION_NOT_FIRST は 3a の待ちで、
-        SCREEN_MISMATCH と NO_JUDGMENT は 3b の待ちで、前の操作を終えている)。STOPPED は待たずに返す。
+        操作から後は送らない)。各操作は 5 で終えているので、どの理由でも、送った操作を終えた後に返す (stop が立って
+        待つのをやめた場合を除く)。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
         送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、そのまま外に出す。
 
@@ -191,15 +198,11 @@ class SystemOperationRunner:
                 except OutputStoppedError:
                     return _cut(index, SystemCutReason.STOPPED, blocked)
                 blocked.update(filtered.blocked_buttons)
-                press_s = (
-                    TAP_PRESS_S if operation.seconds is None else operation.seconds
-                )
-                end_t = self.clock.now() + press_s
+                end_t = self._finish_press(operation, stop)
             else:
-                # wait は何も送らない。秒数は、次の操作の前 (または最後の待ち) で待つ
+                # wait は何も送らず、待ち始めた時刻 + 秒数まで待つ
                 end_t = self.clock.now() + (operation.seconds or 0.0)
-        if operations:
-            self._wait_until(end_t, stop)
+                self._wait_until(end_t, stop)
         return SystemRunResult(
             sent_count=len(operations),
             cut_index=None,
@@ -223,7 +226,6 @@ class SystemOperationRunner:
                 return SystemCutReason.SCREEN_MISMATCH
             return None
         if DECISION_BUTTON in operation.buttons:
-            self._wait_until(previous_end_t, stop)
             return SystemCutReason.DECISION_NOT_FIRST
         after_frame_t = previous_end_t + SETTLE_S
         if self._wait_until(after_frame_t, stop):
@@ -236,6 +238,26 @@ class SystemOperationRunner:
         if operation.screen != _screen_name(judgment.screen):
             return SystemCutReason.SCREEN_MISMATCH
         return None
+
+    def _finish_press(self, operation: SystemOperation, stop: threading.Event) -> float:
+        """apply が戻った直後に呼び、press の operation を終えるまで待って、終えた時刻を返す (モジュールの docstring の
+        (a)〜(c))。
+
+        stop が立ったら待つのをやめ、そのときの clock.now() を返す (呼び出し側は次の操作の前に STOPPED で打ち切る)。
+        """
+        press_s = TAP_PRESS_S if operation.seconds is None else operation.seconds
+        release_due_t = self.clock.now() + press_s
+        if self._wait_until(release_due_t, stop):
+            return self.clock.now()
+        limit_t = release_due_t + RELEASE_WAIT_S
+        buttons = frozenset(operation.buttons)
+        while buttons & self.pad_output.pressing_buttons():
+            remaining_s = limit_t - self.clock.now()
+            if remaining_s <= 0:
+                return limit_t
+            if self.wait_or_stop(stop, min(RELEASE_POLL_S, remaining_s)):
+                return self.clock.now()
+        return self.clock.now()
 
     def _wait_until(self, target_t: float, stop: threading.Event) -> bool:
         """clock.now() が target_t になるまで wait_or_stop で待つ。stop が立っていれば True を返す。"""

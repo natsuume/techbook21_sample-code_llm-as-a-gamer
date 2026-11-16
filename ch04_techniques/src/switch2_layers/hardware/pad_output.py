@@ -457,6 +457,22 @@ class PadOutput:
             self._output_stopped = True
             self._send_neutral_locked("stop")
 
+    def pressing_buttons(self) -> frozenset[str]:
+        """押している、または押す予定のボタンの集合を返す。
+
+        ロックの中で、held (押し続けているボタン。期限を過ぎてタイマーがまだ離していないものを含む)・tapping
+        (短押しの最中のボタン)・pending_taps (いったん離してから始める短押しのボタン)・pending_holds (間をあけてから
+        始める押し続けのボタン) の和集合を返す。スティックは含めない。どのボタンも押していなければ空の集合。
+        送ったボタンを実際に離し終えたか (タイマースレッドが離すレポートを送ったか) を確かめるのに使う。
+        """
+        with self._lock:
+            return (
+                self._held.buttons
+                | frozenset(self._tapping)
+                | frozenset(self._pending_taps)
+                | frozenset(self._pending_holds)
+            )
+
     @property
     def allowed_buttons(self) -> frozenset[str]:
         """押せるボタンの集合 (作るときに受け取ったもの)。"""
