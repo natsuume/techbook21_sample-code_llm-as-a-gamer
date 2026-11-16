@@ -8,9 +8,11 @@ from switch2_layers.notes.grid_route import (
     RouteStep,
     RouteTarget,
     RouteTargetKind,
+    UnknownTileRoute,
     connection_from_tiles,
     find_grid_place,
     find_grid_route,
+    find_unknown_tile_route,
     list_route_targets,
     tile_at,
 )
@@ -557,3 +559,144 @@ def test_connection_from_tiles_of_the_place():
         {TilePosition(4, 2), TilePosition(20, 1)}
     )
     assert connection_from_tiles(grid_document(house), house) == frozenset()
+
+
+# --- 未確認のマス (?) も通れるとみなした経路 ---
+
+
+def unknown_route(
+    unknown_tiles: int, *steps: tuple[MoveDirection, int]
+) -> UnknownTileRoute:
+    return UnknownTileRoute(route=route(*steps), unknown_tiles=unknown_tiles)
+
+
+def test_unknown_tiles_are_passed_when_no_passable_route():
+    # (1, 0) の ? は、通れるマスだけの経路では通れないが、? も通れるとみなせば通る
+    corridor = place([".?."])
+    assert find_grid_route(corridor, TilePosition(0, 0), TilePosition(2, 0)) is None
+    assert find_unknown_tile_route(
+        corridor, TilePosition(0, 0), TilePosition(2, 0)
+    ) == unknown_route(1, (RIGHT, 2))
+
+
+def test_unknown_tile_route_is_the_passable_route_when_one_exists():
+    # 通れるマスだけの経路 (下 1 → 右 2 → 上 1。4 マス) があれば、? を通る短い経路 (右 2。2 マス) より、
+    # ? の数が 0 の経路を選ぶ。find_grid_route と同じ経路になる
+    detour = place([".?.", "..."])
+    passable = find_grid_route(detour, TilePosition(0, 0), TilePosition(2, 0))
+    assert passable == route((DOWN, 1), (RIGHT, 2), (UP, 1))
+    assert find_unknown_tile_route(
+        detour, TilePosition(0, 0), TilePosition(2, 0)
+    ) == UnknownTileRoute(route=passable, unknown_tiles=0)
+    # 机 (4, 1) が blocked の家でも同じ
+    found = find_unknown_tile_route(HOUSE, TilePosition(7, 1), TilePosition(1, 2))
+    assert found == unknown_route(0, (DOWN, 1), (LEFT, 6))
+
+
+def test_fewer_unknown_tiles_win_over_a_shorter_route():
+    # (0, 0) から (3, 0) へ。右 3 は ? を 2 つ通る (3 マス)。下 2 → 右 3 → 上 2 は ? を 1 つ (3, 1) だけ通る (7 マス)。
+    # 目標の隣は (2, 0) と (3, 1) の ? だけなので、通れるマスだけの経路は無い
+    tiles = place([".??.", ".##?", "...."])
+    assert find_grid_route(tiles, TilePosition(0, 0), TilePosition(3, 0)) is None
+    assert find_unknown_tile_route(
+        tiles, TilePosition(0, 0), TilePosition(3, 0)
+    ) == unknown_route(1, (DOWN, 2), (RIGHT, 3), (UP, 2))
+
+
+def test_shorter_route_wins_over_fewer_turns_with_the_same_unknown_tiles():
+    # (0, 0) から (2, 2) へ、どちらも ? を 1 つ通る経路:
+    #   下 1 → 右 1 → 下 1 → 右 1 ((1, 1) の ?。4 マス、向きを 3 回変える)
+    #   右 3 → 下 2 → 左 1 ((1, 0) の ?。6 マス、向きを 2 回変える)
+    # ? の数が同じなら、向きを変える回数より先に長さで比べ、短い方を選ぶ
+    tiles = place([".?..", ".?#.", "#..."])
+    assert find_grid_route(tiles, TilePosition(0, 0), TilePosition(2, 2)) is None
+    assert find_unknown_tile_route(
+        tiles, TilePosition(0, 0), TilePosition(2, 2)
+    ) == unknown_route(1, (DOWN, 1), (RIGHT, 1), (DOWN, 1), (RIGHT, 1))
+
+
+def test_fewer_turns_win_over_the_direction_order_with_the_same_unknown_tiles():
+    # (0, 0) から (2, 2) へ、? を 1 つ通る 4 マスの経路のうち、右 2 → 下 2 ((2, 0) の ?) だけが向きを 1 回しか
+    # 変えない。下で始まる経路 (下 1 → 右 2 → 下 1 など、(1, 1) の ?) は向きを 2 回以上変えるため選ばない
+    tiles = place(["..?", ".?.", "#.."])
+    assert find_grid_route(tiles, TilePosition(0, 0), TilePosition(2, 2)) is None
+    assert find_unknown_tile_route(
+        tiles, TilePosition(0, 0), TilePosition(2, 2)
+    ) == unknown_route(1, (RIGHT, 2), (DOWN, 2))
+
+
+def test_unknown_tile_route_ties_are_broken_by_the_direction_order():
+    # 上 1 → 右 2 → 下 1 と、下 1 → 右 2 → 上 1 は、どちらも ? を 1 つ通り、4 マスで向きを 2 回変える。
+    # 向きの並び (上・下・左・右) で上を先にする
+    tiles = place([".?.", ".#.", ".?."])
+    assert find_unknown_tile_route(
+        tiles, TilePosition(0, 1), TilePosition(2, 1)
+    ) == unknown_route(1, (UP, 1), (RIGHT, 2), (DOWN, 1))
+
+
+@pytest.mark.parametrize(
+    "corridor, avoided",
+    [
+        (place([".?."], blocked=(TileMark(TilePosition(1, 0), "岩"),)), ()),
+        (place([".?."], exits=(TileMark(TilePosition(1, 0), "扉"),)), ()),
+        (place([".?."]), (TilePosition(1, 0),)),
+        (place([".#."]), ()),
+    ],
+    ids=["blocked", "exit-coordinates", "avoided", "wall"],
+)
+def test_unknown_tile_route_does_not_pass_blocked_exit_avoided_or_wall(
+    corridor, avoided
+):
+    # blocked の座標のマス、出口のマス、避けるマスは、文字が ? でも途中で通らない。# は通らない
+    assert (
+        find_unknown_tile_route(
+            corridor, TilePosition(0, 0), TilePosition(2, 0), avoided
+        )
+        is None
+    )
+
+
+def test_unknown_tile_route_is_none_when_even_unknown_tiles_do_not_reach():
+    enclosed = place(["#####", "#.?.#", "##?##", "#.#.#", "#####"])
+    assert (
+        find_unknown_tile_route(enclosed, TilePosition(1, 1), TilePosition(1, 3))
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "start, goal",
+    [
+        (TilePosition(3, 0), TilePosition(0, 0)),
+        (TilePosition(0, 0), TilePosition(3, 0)),
+        (TilePosition(0, -1), TilePosition(0, 0)),
+    ],
+)
+def test_unknown_tile_route_outside_the_tiles_is_none(start, goal):
+    assert find_unknown_tile_route(place([".?."]), start, goal) is None
+
+
+def test_unknown_tile_route_of_empty_tiles_is_none():
+    assert (
+        find_unknown_tile_route(place([]), TilePosition(0, 0), TilePosition(0, 0))
+        is None
+    )
+
+
+def test_unknown_tile_route_of_the_same_tile_is_zero_tiles():
+    assert find_unknown_tile_route(
+        place(["?"]), TilePosition(0, 0), TilePosition(0, 0)
+    ) == UnknownTileRoute(route=GridRoute(steps=()), unknown_tiles=0)
+
+
+def test_unknown_tile_route_does_not_count_the_start_tile():
+    # 開始のマスの文字は問わず、? でも数えない。途中の (1, 0) の ? だけを数える
+    assert find_unknown_tile_route(
+        place(["??."]), TilePosition(0, 0), TilePosition(2, 0)
+    ) == unknown_route(1, (RIGHT, 2))
+
+
+def test_unknown_tile_route_counts_every_unknown_tile_on_the_way():
+    assert find_unknown_tile_route(
+        place([".???."]), TilePosition(0, 0), TilePosition(4, 0)
+    ) == unknown_route(3, (RIGHT, 4))

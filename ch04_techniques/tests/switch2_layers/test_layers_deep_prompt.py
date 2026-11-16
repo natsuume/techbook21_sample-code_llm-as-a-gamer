@@ -815,6 +815,14 @@ def test_map_prompt_draws_blocked_tiles_as_walls():
     assert "`blocked` に入れたマスは、`tiles` でも `#` で描く" in text
 
 
+def test_map_prompt_rereads_everything_when_the_layout_changes():
+    # 型を書き換えるときは (コードが前回の時刻を渡さない)、記録のすべての行と最初からのフレームを読み、記録と
+    # フレームに出てくるすべての場所のマスの図を、その場所が映っているフレームから描かせる
+    text = raw_prompt_file("map.md")
+    for phrase in ["型を書き換える", "最初からのフレーム", "映っているフレーム"]:
+        assert phrase in text, phrase
+
+
 # --- 画面の停滞の計測 (progress/state.json) ---
 
 

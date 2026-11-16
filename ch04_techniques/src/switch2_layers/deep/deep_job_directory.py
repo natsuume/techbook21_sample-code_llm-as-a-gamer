@@ -11,7 +11,9 @@
   作業用のディレクトリーを作らない。ジョブの実行で、DeepRunner が記録のファイルを足す)
 - ジョブの用意では文書の中身を読まない
 - 次のジョブの previous_latest_frame_t は、同じ文書の前回の正常に終わったジョブ (deep_job_success) の
-  job.json の latest_frame_t から取る (find_previous_latest_frame_t)
+  job.json の latest_frame_t から取る (find_previous_latest_frame_t)。ただし map の文書で、notes/map/map.json の
+  layout がゲームの性質の文書 (notes/game.md) から読んだ型と違う (deep がマップの型を書き換える) ときは None にし、
+  deep に記録とフレームを最初から読ませる
 """
 
 import json
@@ -127,6 +129,12 @@ def find_previous_latest_frame_t(paths: RunPaths, key: DocumentKey) -> float | N
     連番の大きい順に見て、最初に見つかったジョブの job.json の latest_frame_t (数でなければ None) を返す。
     失敗・起動の拒否・stop・kill で終わったジョブと、まだ実行中のジョブは飛ばす (そのジョブに渡した期間は、次のジョブが
     読み直す)。正常に終わった同じ文書のジョブが無ければ None。
+    key.kind が map のときは、先に型の違いを確かめる: notes.map_document.read_map_document(paths.notes_dir) が
+    マップを返し、その layout が notes.game_map_layout.read_game_map_layout(paths.notes_dir) と違えば、前回のジョブを
+    見ずに None を返す (deep がマップの型を書き換えるときに、記録とフレームを最初から読ませるため)。
+    map.json が無い・読めない・形に合わない (read_map_document が None) ときと、型が同じときは、上の規則で決める。
+    map 以外の種類では、map.json とゲームの性質の文書を読まない。
+    request と deep-once (deep.deep_scheduler) の両方が、この関数で previous_latest_frame_t を決める。
     """
     same_kind = sorted(
         (

@@ -12,12 +12,19 @@
     - 場所の landmarks の座標は使わない
     - 最短の経路のうち、向きを変える回数の少ないものを選ぶ。それも同じなら、1 マスずつの移動の向きの列を
       MoveDirection の並び (上・下・左・右) の順で先頭から比べ、最も前のものを選ぶ (同じ入力なら同じ経路になる)
+未確認のマス (?) も通れるとみなした経路の決め方 (find_unknown_tile_route):
+    - 動き方は find_grid_route と同じ。ただし、文字が TILE_UNKNOWN (?) のマスも、途中で通れるマスに含める。
+      blocked の座標のマス、出口のマス、避けるマスは、文字が ? でも途中で通らない
+    - 通る ? のマスの数が少ない経路を選ぶ。? の数が同じなら短い経路、長さも同じなら向きを変える回数の少ない経路を
+      選ぶ。それも同じなら、find_grid_route と同じく、1 マスずつの移動の向きの列を MoveDirection の並びの順で先頭から
+      比べ、最も前のものを選ぶ
+    - 通れるマスだけで経路があれば、? を通らない (数が 0 の) 経路になり、find_grid_route と同じ経路を返す
 経路を求める目標の並べ方 (list_route_targets):
     1. 場所の exits のうち、座標が tiles の範囲の中にあるもの (exits の順)
     2. from が場所の name か aliases (前後の空白を除いて比べる) で、from_tile が tiles の範囲の中にあるつながり
        (connections の順)。from_tile が 1 の出口のどれかと同じマスのつながりは目標にせず、その出口の行き先として添える
     合わせて最大 MAX_ROUTE_TARGETS 件 (先頭から)。
-場所をまたぐ経路 (つながりをたどる経路) は計算しない。
+場所をまたぐ経路 (つながりをたどる道筋) は notes.cross_place_route が求める。
 """
 
 from collections import deque
@@ -75,6 +82,18 @@ class GridRoute:
     def total_tiles(self) -> int:
         """合計のマス数 (steps の tiles の和。steps が空なら 0)。"""
         return sum(step.tiles for step in self.steps)
+
+
+@dataclass(frozen=True)
+class UnknownTileRoute:
+    """未確認のマス (?) も通れるとみなした経路 (find_unknown_tile_route の結果)。
+
+    route           経路
+    unknown_tiles   経路で通る ? のマスの数 (0 以上。開始のマスは数えない)
+    """
+
+    route: GridRoute
+    unknown_tiles: int
 
 
 class RouteTargetKind(StrEnum):
@@ -174,6 +193,27 @@ def find_grid_route(
         _, last, cell = best
         moves.append(directions[last])
     return GridRoute(steps=_merge_moves(tuple(moves)))
+
+
+def find_unknown_tile_route(
+    place: GridMapPlace,
+    start: TilePosition,
+    goal: TilePosition,
+    avoided: Collection[TilePosition] = (),
+) -> UnknownTileRoute | None:
+    """場所 place の中で、未確認のマス (?) も途中で通れるとみなして、マス start からマス goal までの経路を返す
+    (経路の決め方はモジュールの docstring)。
+
+    avoided は find_grid_route と同じ (出口のマスのほかに、経路の途中で通らないマス)。既定は無し。
+    次のときは None (経路なし) を返す:
+        - start か goal が tiles の範囲の外 (tiles が空のときを含む)
+        - 途中で通れるマス (文字が PASSABLE_TILES か TILE_UNKNOWN で、blocked の座標に無く、出口のマスでも avoided の
+          マスでもないマス) だけを通っては goal にたどり着けない
+    start と goal が同じマスなら、手順が空 (0 マス) で unknown_tiles が 0 の経路を返す。
+    開始のマスの文字と blocked と avoided は問わず、目標のマスには文字と blocked と avoided によらず入る
+    (find_grid_route と同じ)。
+    """
+    raise NotImplementedError
 
 
 def list_route_targets(
