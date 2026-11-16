@@ -41,8 +41,10 @@ from switch2_layers.settings import DeepRunnerChoice, RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_client import DEFAULT_JEV_MODEL, IMAGES_HEADER
+from switch2_layers.surface.jev_surface import ADVISOR_STATUS_UNAVAILABLE_TEXT
 from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
+from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
@@ -874,6 +876,59 @@ def test_jev_surface_records_requests_and_answers_with_mock_jev(tmp_path):
         }
         # usage は受け取った形のまま (偽の Jev は空の object を返す)
         assert row["usage"] == {}
+
+
+def test_jev_surface_sends_and_records_deep_status_with_mock_jev(tmp_path):
+    sent_states: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent_states.append(json.loads(request.content)["state"])
+        return mock_jev_answers(request)
+
+    sender = FakeSender()
+    http = httpx.Client(transport=httpx.MockTransport(respond))
+    run_settings = settings(tmp_path)
+    surface = build_surface_assembly(run_settings, "test-key", http_client=http)
+    app = LayersApp(
+        run_settings,
+        dataclasses.replace(
+            parts(sender, surface=surface.decider),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            surface_plan_boxes=surface.plan_boxes,
+            on_run_directory=surface.on_run_directory,
+        ),
+    )
+    try:
+        reason, root = run_app(app, stop_after=1.5)
+    finally:
+        surface.close()
+    assert reason == REASON_INTERRUPTED
+    request_rows = read_rows(root / "surface_requests.jsonl")
+    assert sent_states
+    # 要求の行は送る直前に書くので、送った要求より 1 行多いことがある
+    assert len(sent_states) <= len(request_rows) <= len(sent_states) + 1
+    for row, sent_state in zip(
+        request_rows[: len(sent_states)], sent_states, strict=True
+    ):
+        recorded = row["state"]
+        assert list(recorded) == [
+            "instructions",
+            "documents",
+            "timeline",
+            "recent_actions",
+            "advisor",
+            "frames",
+        ]
+        # 記録の state には、送った state と同じ advisor が入る
+        assert recorded["advisor"] == sent_state["advisor"]
+        assert list(recorded["advisor"]) == [kind.value for kind in ADVISOR_KINDS]
+        for text in recorded["advisor"].values():
+            # フェイクの deep でも、deep のスケジューラーから状況を読める
+            assert text != ADVISOR_STATUS_UNAVAILABLE_TEXT
+            assert text.startswith("実行中のジョブ: ")
+            # 偽の Jev は advisor 判定の確率を 0.0 にするので、surface は deep を求めない
+            assert text.endswith("surface はまだ求めていない")
 
 
 # --- 安全の監視 ---

@@ -11,6 +11,6 @@ class FakeSurfaceDecider:
         """SurfaceOutput(action=pad_action.NEUTRAL_ACTION) を返す。
 
         deep_kinds・info_labels・boxes は空、scene_changed は False、exchange は None。surface_input は使わない
-        (request_sink も呼ばない)。
+        (advisor_statuses の状況も読まず、request_sink も呼ばない)。
         """
         return SurfaceOutput(action=NEUTRAL_ACTION)

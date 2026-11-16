@@ -190,13 +190,15 @@ SURFACE_INSTRUCTIONS = (
     "`documents` は、今の場面の短期タスクリスト (tasks)・攻略情報 (tips)・操作説明 (controls)・"
     "詰まったときの助言 (advice) です。`timeline` は上位の層がまとめた系列情報とその作成時刻、"
     "`recent_actions` は直近に送った操作 (古い順) です。\n"
+    "`advisor` は、deep (文書をまとめる上位のモデル) の文書の種類ごとの呼び出しの状況 (実行中のジョブ、前回の終了、"
+    "今求めると捨てられるか、surface が最後に求めた結果) です。\n"
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
     "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
     "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
 
-# advisor 判定の問いの文 (文書の種類 → 文)
+# advisor 判定の問いの文 (文書の種類 → 文)。build_advisor_questions が、末尾に ADVISOR_STATUS_RULE_TEXT の文を足す
 ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
     DocumentKind.CONTROLS: (
         "今、deep (文書をまとめる上位のモデル) に、操作説明 (`documents.controls`) の更新を求めるべきか。"
@@ -218,6 +220,11 @@ ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
         "何をすればよいか分からないときに真にする。"
     ),
 }
+# advisor 判定のすべての問いの文の末尾に足す共通の文。{kind} は文書の種類の値 (DocumentKind.value) に置き換える
+ADVISOR_STATUS_RULE_TEXT = (
+    "ただし、`advisor.{kind}` に実行中のジョブがあるとき、"
+    "または今求めると捨てられると書かれているときは偽にする。"
+)
 
 # 情報ラベルの問いの文 (名前 → 文)。{frame} は latest_frame_path の値に置き換える
 INFO_LABEL_QUESTION_TEXTS: dict[str, str] = {
@@ -335,14 +342,19 @@ def build_stick_strength_questions() -> list[SurfaceQuestion]:
 
 
 def build_advisor_questions() -> list[SurfaceQuestion]:
-    """advisor 判定の問い 4 問を ADVISOR_KINDS の順で返す。
+    """advisor 判定の問いを ADVISOR_KINDS の種類ごとに (ADVISOR_KINDS の順で) 返す。
 
-    name は advisor_<種類の値>、target は種類の値、型は noul、文は ADVISOR_QUESTION_TEXTS[種類]。
+    name は advisor_<種類の値>、target は種類の値、型は noul。文は ADVISOR_QUESTION_TEXTS[種類] の末尾に、
+    ADVISOR_STATUS_RULE_TEXT の {kind} を種類の値に置き換えた共通の文を、間を空けずに足したもの
+    (ADVISOR_KINDS に種類が増えても、同じ共通の文が付く)。
     """
     return [
         SurfaceQuestion(
             name=f"advisor_{kind.value}",
-            instructions=ADVISOR_QUESTION_TEXTS[kind],
+            instructions=(
+                ADVISOR_QUESTION_TEXTS[kind]
+                + ADVISOR_STATUS_RULE_TEXT.format(kind=kind.value)
+            ),
             kind=QuestionKind.ADVISOR,
             target=kind.value,
             question_type=QuestionType.NOUL,
