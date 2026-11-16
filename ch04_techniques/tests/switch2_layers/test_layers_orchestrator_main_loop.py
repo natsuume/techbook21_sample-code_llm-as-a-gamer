@@ -110,7 +110,7 @@ class Reply:
     calls        API の呼び出しごとの使用量 (トークン)。1 つの呼び出しは、内容のブロックごとの複数の行に分かれ、
                  どの行も同じ usage を持つ。空なら usage の無い文の行だけを出す
     extra        result の前に足す行
-    before       行を出す前に呼ぶ関数 (Claude が notes/ に書く代わりなど)。主ループのスレッドから呼ばれる
+    before       行を出す前に呼ぶ関数 (Claude が notes/ に書く代わりなど)。入力の書き込み用のスレッドから呼ばれる
     exit_after   result の後に、この終了コードで終わる
     """
 

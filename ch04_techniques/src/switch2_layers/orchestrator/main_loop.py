@@ -104,7 +104,8 @@ DEFAULT_TURN_TIMEOUT_S = 120.0  # --turn-timeout の既定値 (秒)
 DEFAULT_MAX_DECISION_ERRORS = 3  # --max-decision-errors の既定値
 # 新しいセッションが最初のターンの result を受け取る前に終わることが、続けてこの回数になったら実行全体を止める
 MAX_SESSION_FAILURES = 3
-# 標準出力の行を待つ 1 回の上限 (秒)。この間隔で、停止の合図と --turn-timeout を確かめる
+# 標準出力の行を待つ 1 回の上限と、標準入力への書き込みが終わるのを待つ 1 回の上限 (秒)。
+# この間隔で、停止の合図と --turn-timeout を確かめる
 READ_POLL_S = 0.05
 # set_started を待つ間に、停止の合図を確かめる間隔 (秒)
 START_POLL_S = 0.05
@@ -154,7 +155,8 @@ class OrchestratorMainLoopSettings:
     """主ループのしきい値と上限。
 
     rotate_tokens         セッションの使用量がこれを超えたら、引き継ぎの依頼を送って入れ替える (--rotate-tokens)
-    turn_timeout_s        1 ターン (入力を送ってから result まで) の上限の秒数 (--turn-timeout)
+    turn_timeout_s        1 ターン (入力を作った時刻から result まで。標準入力への書き込みを待つ時間を含む) の上限の
+                          秒数 (--turn-timeout)
     max_decision_errors   JSON の誤りが続けてこの回数になったら、実行全体を止める (--max-decision-errors)
     close_grace_s         セッションを終えるときに、標準入力を閉じてから SIGTERM まで・SIGTERM から SIGKILL までに
                           待つ秒数 (既定 claude_stream_session.SESSION_CLOSE_GRACE_S)
