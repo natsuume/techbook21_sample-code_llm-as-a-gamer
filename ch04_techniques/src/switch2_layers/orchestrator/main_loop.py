@@ -128,7 +128,12 @@ def main_loop_failure_reason(description: str) -> str:
 
 
 class DecisionParser(Protocol):
-    """応答の本文から JSON を読み、検証した結果を返す関数 (操作の実行と監視の部品の parse_decision)。"""
+    """応答の本文から JSON を読み、検証した結果を返す関数。
+
+    組み立て (app) は、今登録しているマクロの名前を decision_parser.parse_decision に渡す関数を渡す
+    (lambda text: parse_decision(text, controller.macro_names()))。parse_decision をそのまま渡すと、登録の照合に
+    空の集合を使うため、前のターンまでに登録したマクロを呼ぶ JSON がすべて誤りになる。
+    """
 
     def __call__(self, text: str) -> Decision | DecisionError:
         """text の最後の ```json のブロックを読み、Decision か DecisionError を返す。"""
@@ -175,7 +180,7 @@ class OrchestratorMainLoopParts:
     paths                  実行ディレクトリー
     clock                  実行の経過秒の時計。記録の時刻と --turn-timeout は、すべてこの時計で測る
     claude                 Claude Code の起動の設定 (claude のパス・モデル・effort・隠す環境変数)
-    parse_decision         応答の本文から JSON を読む関数 (テストではフェイク)
+    parse_decision         応答の本文から JSON を読む関数 (DecisionParser の渡し方。テストではフェイク)
     controller             操作の実行と監視の部品 (テストではフェイク)
     initial_instruction    人の初期指示。無ければ None (各セッションの最初の入力に入れる)
     run_log                run.jsonl (orchestrator_session_start・orchestrator_session_end・
