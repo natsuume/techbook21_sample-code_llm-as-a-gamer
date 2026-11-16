@@ -24,25 +24,54 @@
 戻り値を扱う)。テストでは step を 1 回ずつ呼ぶ。
 """
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from switch2_layers.error_text import describe_exception
+from switch2_layers.file_io import append_json_line
 from switch2_layers.frames.frame_buffer import CapturedFrame
-from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
+from switch2_layers.frames.image_encoding import (
+    DEFAULT_JPEG_QUALITY,
+    encode_jpeg,
+    nv12_to_bgr,
+    shrink_to_width,
+)
 from switch2_layers.hardware.pad_output import PadOutput
-from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
+from switch2_layers.middle.middle_call_record import take_analyzer_call_details
+from switch2_layers.middle.middle_loop import middle_failure_reason
+from switch2_layers.middle.system_call_record import (
+    SystemCallRecord,
+    system_call_row,
+    system_run_row,
+)
+from switch2_layers.middle.system_screen_middle import (
+    SystemScreenMiddle,
+    SystemScreenMiddleError,
+)
 from switch2_layers.middle.system_screen_types import (
     SystemGoal,
     SystemRunResult,
+    SystemScreenInput,
     SystemScreenOutput,
+    SystemStepRecord,
 )
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.system_screen.run_phase import RunPhase
-from switch2_layers.system_screen.system_operation_runner import JudgmentSource
+from switch2_layers.system_screen.system_operation_runner import (
+    JUDGMENT_POLL_S,
+    SETTLE_S,
+    JudgmentResult,
+    JudgmentSource,
+    SystemOutputError,
+)
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # 本体の画面の middle を呼ばない間 (段階が play・ブリッジの復旧を待つ間) に、確かめ直すまで待つ秒数
 SYSTEM_LOOP_POLL_S = 0.05
@@ -199,12 +228,22 @@ class SystemScreenLoop:
         self, parts: SystemScreenLoopParts, settings: SystemScreenLoopSettings
     ) -> None:
         """続けた失敗 0 回、履歴が空、送信の失敗の後の待ちが無い状態で作る。"""
-        raise NotImplementedError
+        self.parts = parts
+        self.settings = settings
+        self._consecutive_errors = 0
+        # この段階のこれまでの呼び出しの履歴
+        self._history: list[SystemStepRecord] = []
+        # 履歴を持っている段階に入った時刻 (段階が変わったかを見分ける)。まだ読んでいなければ None
+        self._phase_started_t: float | None = None
+        # 次の照合の結果に求める frame_t の下限。None なら、段階に入った時刻
+        self._next_after_t: float | None = None
+        # 操作の送信の失敗の後で、ブリッジが ok に戻るのを待っているなら True
+        self._waiting_for_bridge = False
 
     @property
     def consecutive_errors(self) -> int:
         """本体の画面の middle の失敗が続いている回数 (成功で 0 に戻る。段階が変わっても戻さない)。"""
-        raise NotImplementedError
+        return self._consecutive_errors
 
     def step(self, stop: threading.Event) -> SystemScreenStepResult:
         """1 回分を処理し、結果を返す (モジュールの docstring の 1〜8)。stop は止める合図。
@@ -245,7 +284,64 @@ class SystemScreenLoop:
         stop が立っていたら、そこで STOPPED を返し、それより後の記録・段階の判定への入力・送信をしない。
         middle/system_calls.jsonl に書くのはこのスレッドだけ。
         """
-        raise NotImplementedError
+        parts = self.parts
+        phases = parts.phases
+        if not phases.wants_system_middle:
+            return SystemScreenStepResult(
+                SystemScreenStepOutcome.IDLE, SYSTEM_LOOP_POLL_S
+            )
+        phase = phases.phase
+        phase_started_t = phases.phase_started_t
+        if phase_started_t != self._phase_started_t:
+            self._phase_started_t = phase_started_t
+            self._history = []
+            self._next_after_t = None
+            self._waiting_for_bridge = False
+        if self._waiting_for_bridge:
+            if parts.bridge_state() != BRIDGE_OK:
+                return SystemScreenStepResult(
+                    SystemScreenStepOutcome.BRIDGE_NOT_READY, SYSTEM_LOOP_POLL_S
+                )
+            self._waiting_for_bridge = False
+        after_t = phase_started_t if self._next_after_t is None else self._next_after_t
+        judgment = parts.judgments.wait_newer(after_t, JUDGMENT_POLL_S)
+        if judgment is None:
+            return _result(SystemScreenStepOutcome.NO_JUDGMENT)
+        frame = parts.latest_frame()
+        if frame is None or frame.t < judgment.frame_t:
+            return _result(SystemScreenStepOutcome.NO_JUDGMENT)
+        screen_input = self._screen_input(phase, frame, judgment)
+        t_sent = parts.clock.now()
+        output: SystemScreenOutput | None = None
+        error_text: str | None = None
+        try:
+            output = parts.middle.decide(screen_input)
+        except SystemScreenMiddleError as error:
+            logger.debug("system screen middle failed", exc_info=True)
+            error_text = describe_exception(error)
+        finally:
+            details = take_analyzer_call_details(parts.middle)
+        t_received = parts.clock.now()
+        if stop.is_set():
+            return _result(SystemScreenStepOutcome.STOPPED)
+        append_json_line(
+            parts.paths.system_calls,
+            system_call_row(
+                SystemCallRecord(
+                    t_sent=t_sent,
+                    t_received=t_received,
+                    screen_input=screen_input,
+                    output=output,
+                    error=error_text,
+                    details=details,
+                )
+            ),
+        )
+        if phases.phase_started_t != phase_started_t:
+            return _result(SystemScreenStepOutcome.DISCARDED)
+        if output is None:
+            return self._handle_middle_error(judgment, t_received)
+        return self._send(screen_input, output, judgment, t_received, stop)
 
     def run(self, stop: threading.Event) -> None:
         """stop が立つまで step を繰り返し、各 step の後に stop.wait(wait_s) で待つ (スレッドの本体)。
@@ -253,4 +349,101 @@ class SystemScreenLoop:
         step が STOPPED を返したら、待たずに戻る。step の想定外の例外 (Exception) は外に出さず、
         on_stop(`system screen loop failed: <例外の説明>`) を呼んでから戻る。
         """
-        raise NotImplementedError
+        while not stop.is_set():
+            try:
+                result = self.step(stop)
+            except Exception as error:
+                logger.warning("system screen loop failed", exc_info=True)
+                self.parts.on_stop(
+                    f"system screen loop failed: {describe_exception(error)}"
+                )
+                return
+            if result.outcome is SystemScreenStepOutcome.STOPPED:
+                return
+            if result.wait_s > 0:
+                stop.wait(result.wait_s)
+
+    def _screen_input(
+        self, phase: RunPhase, frame: CapturedFrame, judgment: JudgmentResult
+    ) -> SystemScreenInput:
+        """step の 6 の入力 (frame を縮小した JPEG と、judgment の照合の結果と、この段階の履歴) を作る。"""
+        settings = self.settings
+        jpeg = encode_jpeg(
+            shrink_to_width(nv12_to_bgr(frame.nv12), settings.image_width),
+            settings.jpeg_quality,
+        ).jpeg
+        return SystemScreenInput(
+            t=self.parts.clock.now(),
+            goal=PHASE_GOALS[phase],
+            software_name=settings.software_name,
+            user_name=settings.user_name,
+            frame_jpeg=jpeg,
+            frame_t=frame.t,
+            judged_screen=judgment.screen,
+            judged_frame_t=judgment.frame_t,
+            history=tuple(self._history),
+        )
+
+    def _handle_middle_error(
+        self, judgment: JudgmentResult, t_received: float
+    ) -> SystemScreenStepResult:
+        """middle の失敗を数え、段階の判定に渡してから、上限に達していれば on_stop を呼ぶ (step の 8)。"""
+        self._consecutive_errors += 1
+        # 次は、この回より新しい照合の結果を待って呼ぶ
+        self._next_after_t = judgment.frame_t
+        self.parts.phases.on_system_middle_failed(t_received)
+        if self._consecutive_errors >= self.settings.max_errors:
+            self.parts.on_stop(middle_failure_reason(self._consecutive_errors))
+        return _result(SystemScreenStepOutcome.MIDDLE_ERROR)
+
+    def _send(
+        self,
+        screen_input: SystemScreenInput,
+        output: SystemScreenOutput,
+        judgment: JudgmentResult,
+        t_received: float,
+        stop: threading.Event,
+    ) -> SystemScreenStepResult:
+        """成功した出力の列を送り、記録して履歴に足す (step の 9 と 10)。"""
+        parts = self.parts
+        phases = parts.phases
+        self._consecutive_errors = 0
+        phases.on_system_output(t_received, output.done)
+        # 何も送らない列では、送り始めと送り終えを渡さない (recover の照合の結果の続けた数を 0 に戻さない)
+        has_operations = bool(output.operations)
+        if has_operations:
+            phases.on_operations_started(parts.clock.now())
+        send_failed = False
+        try:
+            result = parts.runner.run(output, judgment.screen, stop)
+        except SystemOutputError as error:
+            logger.warning("sending the system screen operations failed: %s", error)
+            # ブリッジ側でボタンが押されたまま残っているおそれがあるため、押下の状態をそろえる
+            parts.pad_output.neutral()
+            result = error.result
+            send_failed = True
+        finished_t = parts.clock.now()
+        if stop.is_set():
+            return _result(SystemScreenStepOutcome.STOPPED)
+        if has_operations:
+            phases.on_operations_finished(finished_t)
+        append_json_line(parts.paths.system_calls, system_run_row(finished_t, result))
+        self._history.append(
+            SystemStepRecord(
+                t=screen_input.t,
+                judged_screen=judgment.screen,
+                operations=output.operations,
+                sent_count=result.sent_count,
+                cut_reason=result.cut_reason,
+            )
+        )
+        self._next_after_t = finished_t + SETTLE_S
+        if send_failed:
+            self._waiting_for_bridge = True
+            return _result(SystemScreenStepOutcome.SEND_FAILED)
+        return _result(SystemScreenStepOutcome.SENT)
+
+
+def _result(outcome: SystemScreenStepOutcome) -> SystemScreenStepResult:
+    """待たずに次の step に進む結果 (wait_s = 0.0) を返す。"""
+    return SystemScreenStepResult(outcome, 0.0)

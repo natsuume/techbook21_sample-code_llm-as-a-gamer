@@ -240,6 +240,7 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
         "current_tile": None
         if state.current_tile is None
         else tile_position_to_json(state.current_tile),
+        "press_home": state.press_home,
     }
 
 
@@ -281,6 +282,8 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
     current_tile = (
         _optional_tile(value, "current_tile") if "current_tile" in value else None
     )
+    # press_home も省けるキー: 無ければ False にする
+    press_home = _boolean(value, "press_home") if "press_home" in value else False
     return MiddleState(
         generated_t=_number(value, "generated_t"),
         based_on_t=_number(value, "based_on_t"),
@@ -296,6 +299,7 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         first_task_since_t=first_task_since_t,
         place_name=place_name,
         current_tile=current_tile,
+        press_home=press_home,
     )
 
 

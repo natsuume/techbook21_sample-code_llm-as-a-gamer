@@ -152,17 +152,29 @@ class PhaseTracker:
 
         timings は判定の回数と秒数。
         """
-        raise NotImplementedError
+        self.timings = timings
+        self._phase = RunPhase.PREPARE
+        self._phase_started_t = start_t
+        # 照合の結果を続けて数えた回数 (段階ごとに、数える結果の種類が違う)
+        self._streak = 0
+        # prepare で、middle が done を真で返した後の待ちの間なら True
+        self._waiting_after_done = False
+        # 操作の列を送っている間なら True
+        self._sending = False
+        # 最新の照合の結果 (片付けの終わりの判定に使う)
+        self._latest_screen: str | None = None
+        # 片付けの終わりを返したら True
+        self._clean_up_ended = False
 
     @property
     def phase(self) -> RunPhase:
         """今の段階。"""
-        raise NotImplementedError
+        return self._phase
 
     @property
     def phase_started_t(self) -> float:
         """今の段階に入った時刻。"""
-        raise NotImplementedError
+        return self._phase_started_t
 
     @property
     def wants_system_middle(self) -> bool:
@@ -171,7 +183,9 @@ class PhaseTracker:
         PREPARE・RECOVER・CLEAN_UP のとき True。ただし、PREPARE で done の後の待ちの間と、片付けを終えた後は False。
         PLAY では False。
         """
-        raise NotImplementedError
+        if self._phase is RunPhase.PLAY or self._clean_up_ended:
+            return False
+        return not (self._phase is RunPhase.PREPARE and self._waiting_after_done)
 
     def on_judgment(self, t: float, screen: str | None) -> PhaseEvent:
         """照合の結果 1 件 (t は照合したフレームの時刻、screen は見本の名前か None) を受け取る。
@@ -184,7 +198,35 @@ class PhaseTracker:
                    None 以外で数え直す。列を送っている間の結果は数えず、続けた数を 0 に戻す
         CLEAN_UP   段階を変えず、最新の結果として覚える (片付けの終わりの判定に使う)
         """
-        raise NotImplementedError
+        if self._clean_up_ended:
+            return NO_EVENT
+        self._latest_screen = screen
+        exit_streak = self.timings.exit_streak
+        if self._phase is RunPhase.PREPARE:
+            if not self._waiting_after_done:
+                return NO_EVENT
+            if screen is not None:
+                # 本体の画面が出たので、done を取り消して middle をもう一度呼ぶ
+                self._waiting_after_done = False
+                self._streak = 0
+                return NO_EVENT
+            return self._count(t, exit_streak, RunPhase.PLAY, PHASE_REASON_PREPARED)
+        if self._phase is RunPhase.PLAY:
+            if screen is None:
+                self._streak = 0
+                return NO_EVENT
+            return self._count(
+                t,
+                self.timings.enter_streak,
+                RunPhase.RECOVER,
+                PHASE_REASON_SYSTEM_SCREEN,
+            )
+        if self._phase is RunPhase.RECOVER:
+            if self._sending or screen is not None:
+                self._streak = 0
+                return NO_EVENT
+            return self._count(t, exit_streak, RunPhase.PLAY, PHASE_REASON_RECOVERED)
+        return NO_EVENT
 
     def on_system_output(self, t: float, done: bool) -> PhaseEvent:
         """本体の画面の middle の出力 1 件 (done は出力の done) を受け取る。
@@ -193,34 +235,54 @@ class PhaseTracker:
         CLEAN_UP で done が真で、最新の照合の結果が CLEAN_UP_DONE_SCREEN なら、片付けの終わり (CleanUpResult.DONE)。
         それ以外は何もしない。
         """
-        raise NotImplementedError
+        if self._clean_up_ended or not done:
+            return NO_EVENT
+        if self._phase is RunPhase.PREPARE:
+            self._waiting_after_done = True
+            self._streak = 0
+        elif (
+            self._phase is RunPhase.CLEAN_UP
+            and self._latest_screen == CLEAN_UP_DONE_SCREEN
+        ):
+            return self._end_clean_up(CleanUpResult.DONE)
+        return NO_EVENT
 
     def on_operations_started(self, t: float) -> PhaseEvent:
         """操作の列を送り始めた。RECOVER では、続けた数を 0 にし、送り終えるまで照合の結果を数えない。
 
         本体の画面のループは、操作が 0 個の列では呼ばない (on_operations_finished も同じ)。
         """
-        raise NotImplementedError
+        self._sending = True
+        if self._phase is RunPhase.RECOVER:
+            self._streak = 0
+        return NO_EVENT
 
     def on_operations_finished(self, t: float) -> PhaseEvent:
         """操作の列を送り終えた (打ち切り・送信の失敗を含む)。この後の照合の結果を、また数える。"""
-        raise NotImplementedError
+        self._sending = False
+        return NO_EVENT
 
     def on_press_home(self, t: float) -> PhaseEvent:
         """middle のゲーム用の出力の press_home で HOME を短押しした。PLAY のときだけ RECOVER に移る
         (PHASE_REASON_PRESS_HOME)。ほかの段階では何もしない。"""
-        raise NotImplementedError
+        if self._phase is not RunPhase.PLAY:
+            return NO_EVENT
+        return self._change_to(t, RunPhase.RECOVER, PHASE_REASON_PRESS_HOME)
 
     def on_system_middle_failed(self, t: float) -> PhaseEvent:
         """本体の画面の middle が失敗した。CLEAN_UP なら片付けの終わり (CleanUpResult.MIDDLE_FAILED)。
 
         ほかの段階では何もしない (続けた失敗は呼び出し側が数える)。
         """
-        raise NotImplementedError
+        if self._phase is not RunPhase.CLEAN_UP or self._clean_up_ended:
+            return NO_EVENT
+        return self._end_clean_up(CleanUpResult.MIDDLE_FAILED)
 
     def begin_clean_up(self, t: float, reason: str) -> PhaseEvent:
         """どの段階からでも CLEAN_UP に移る (変化の理由は reason。片付けを始めた理由)。既に CLEAN_UP なら何もしない。"""
-        raise NotImplementedError
+        if self._phase is RunPhase.CLEAN_UP:
+            return NO_EVENT
+        return self._change_to(t, RunPhase.CLEAN_UP, reason)
 
     def check_time(self, t: float) -> PhaseEvent:
         """時刻 t の時間切れを確かめる (今の段階に入ってから、それぞれの秒数がたったら時間切れとする)。
@@ -231,4 +293,34 @@ class PhaseTracker:
         PLAY       時間切れは無い
         prepare と recover の止める理由は、時間切れの間は呼ぶたびに返す (止めるのは呼び出し側)。
         """
-        raise NotImplementedError
+        if self._clean_up_ended:
+            return NO_EVENT
+        elapsed = t - self._phase_started_t
+        timings = self.timings
+        if self._phase is RunPhase.PREPARE and elapsed >= timings.prepare_timeout_s:
+            return PhaseEvent(stop_reason=REASON_PREPARATION_TIMED_OUT)
+        if self._phase is RunPhase.RECOVER and elapsed >= timings.recover_timeout_s:
+            return PhaseEvent(stop_reason=REASON_RECOVERY_TIMED_OUT)
+        if self._phase is RunPhase.CLEAN_UP and elapsed >= timings.clean_up_timeout_s:
+            return self._end_clean_up(CleanUpResult.TIMEOUT)
+        return NO_EVENT
+
+    def _count(self, t: float, streak: int, phase: RunPhase, reason: str) -> PhaseEvent:
+        """続けた数を 1 増やし、streak 回に達したら phase に移る (理由 reason)。達しなければ NO_EVENT。"""
+        self._streak += 1
+        if self._streak < streak:
+            return NO_EVENT
+        return self._change_to(t, phase, reason)
+
+    def _change_to(self, t: float, phase: RunPhase, reason: str) -> PhaseEvent:
+        """時刻 t に phase に移り、続けた数と done の後の待ちを数え直して、段階の変化を返す。"""
+        self._phase = phase
+        self._phase_started_t = t
+        self._streak = 0
+        self._waiting_after_done = False
+        return PhaseEvent(change=PhaseChange(phase, reason))
+
+    def _end_clean_up(self, result: CleanUpResult) -> PhaseEvent:
+        """片付けの終わり result を 1 回だけ返す (この後の入力には NO_EVENT を返す)。"""
+        self._clean_up_ended = True
+        return PhaseEvent(clean_up_end=result)

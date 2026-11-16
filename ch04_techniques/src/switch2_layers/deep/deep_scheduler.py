@@ -493,6 +493,8 @@ class DeepScheduler:
         with self._lock:
             if self._closed:
                 return []
+        if not self.parts.is_play():
+            return []
         scene_id = self.parts.current_scene_id()
         results: list[DeepRequestResult] = []
         for kind in DOCUMENT_KINDS:
@@ -537,6 +539,8 @@ class DeepScheduler:
         with self._lock:
             if self._closed:
                 return None
+        if not self.parts.is_play():
+            return None
         state = self.parts.progress_state()
         now = self.parts.clock.now()
         if state is not None and now - state.t > PROGRESS_STATE_MAX_AGE_S:

@@ -123,6 +123,7 @@ def write_middle_output(
         ),
         place_name=place_name,
         current_tile=None if place_name is None else output.current_tile,
+        press_home=output.press_home,
     )
     if _is_stopped(stop):
         return None

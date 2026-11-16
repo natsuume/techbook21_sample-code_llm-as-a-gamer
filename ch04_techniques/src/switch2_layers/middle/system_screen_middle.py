@@ -140,6 +140,7 @@ class FakeSystemScreenMiddle:
     ) -> None:
         """outputs を、返す順の列として持つ (作るときに一度だけ読む)。exhausted_output は使い切った後に返す出力。"""
         self._outputs: deque[SystemScreenOutput] = deque(outputs)
+        self._exhausted_output = exhausted_output
 
     def decide(self, screen_input: SystemScreenInput) -> SystemScreenOutput:
         """持っている列の次の出力を返す。列を使い切ったら exhausted_output を返す (何度呼んでも同じ)。
@@ -148,4 +149,4 @@ class FakeSystemScreenMiddle:
         """
         if self._outputs:
             return self._outputs.popleft()
-        return FAKE_EXHAUSTED_OUTPUT
+        return self._exhausted_output

@@ -56,13 +56,14 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
 """
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from switch2_layers.buttons import ALL_BUTTONS, allowed_buttons
+from switch2_layers.buttons import ALL_BUTTONS, HOME_BUTTON, allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
     DeepScheduler,
     DeepSchedulerParts,
@@ -74,21 +75,31 @@ from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
-from switch2_layers.hardware.capture_watcher import CaptureWatcher
+from switch2_layers.hardware.capture_watcher import (
+    REASON_CAPTURE_ENDED,
+    REASON_NO_FIRST_FRAME,
+    REASON_STALE_FRAME,
+    CaptureWatcher,
+)
 from switch2_layers.hardware.pad_output import PadOutput, ReportSender
+from switch2_layers.middle.middle_input_builder import has_recorded_frame
 from switch2_layers.middle.middle_loop import (
+    FIRST_FRAME_POLL_S,
     MiddleLoop,
     MiddleLoopParts,
     MiddleLoopSettings,
 )
 from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
+from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_loop import ProgressLoop
 from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.progress.screen_progress import ScreenProgressTracker
 from switch2_layers.records.operation_log import OperationLog
 from switch2_layers.records.run_log import (
+    EVENT_CLEAN_UP_END,
     EVENT_FRAMES_DROPPED,
+    EVENT_PHASE,
     EVENT_START,
     EVENT_STOP,
     RunLog,
@@ -111,11 +122,32 @@ from switch2_layers.surface.surface_loop import (
     SurfaceLoop,
     SurfaceLoopParts,
     SurfaceLoopSettings,
+    SurfaceStepOutcome,
 )
 from switch2_layers.surface.surface_output_gate import SurfaceOutputGate
 from switch2_layers.surface.surface_types import Box, SurfaceDecider
-from switch2_layers.system_screen.run_phase import DEFAULT_PHASE_TIMINGS, PhaseTimings
-from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
+from switch2_layers.system_screen.run_phase import (
+    DEFAULT_PHASE_TIMINGS,
+    PHASE_REASON_START_CHECK_PASSED,
+    CleanUpResult,
+    PhaseEvent,
+    PhaseTimings,
+    PhaseTracker,
+    RunPhase,
+)
+from switch2_layers.system_screen.screen_judgment import (
+    LatestSystemScreen,
+    SystemScreenJudgment,
+)
+from switch2_layers.system_screen.system_operation_runner import (
+    JUDGMENT_WAIT_S,
+    SystemOperationRunner,
+)
+from switch2_layers.system_screen.system_screen_loop import (
+    SystemScreenLoop,
+    SystemScreenLoopParts,
+    SystemScreenLoopSettings,
+)
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -127,9 +159,19 @@ MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
 # 終了時に surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッドの終わりを待つ
 # 上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
-# surface と middle のループのスレッドが、実行を始めるときの確かめを終えた合図を確かめ直す間隔 (秒)
-START_CHECK_POLL_S = 0.05
+# surface と middle のゲーム用のループが、段階が play でない間に、段階を確かめ直す間隔 (秒)
+PLAY_POLL_S = 0.05
 BRIDGE_FAILED = "failed"  # bridge_state が返す、ブリッジの復旧が失敗した状態
+# 本体の画面の操作で、2 つ目以降の操作の前に照合の結果を待つ上限に、安全の監視の間隔へ足す秒数
+JUDGMENT_WAIT_MARGIN_S = 2.0
+# 片付けを行う止まる理由のうち、回数を含む形 (surface_loop.surface_failure_reason・middle_loop.middle_failure_reason)
+_CLEAN_UP_REASON_PATTERN = re.compile(r"(surface|middle) failed \d+ times in a row")
+# 安全の監視の止まる理由の書き出し (safety.safety_judge・safety_monitor の理由)
+_SAFETY_REASON_PREFIXES = (
+    "unsafe screen",
+    "safety check failed",
+    "safety monitor failed",
+)
 
 
 @dataclass(frozen=True)
@@ -182,6 +224,7 @@ class _StartedParts:
     """start で組み立てた部品 (close で後片付けするもの)。"""
 
     paths: RunPaths
+    clock: RunClock
     run_log: RunLog
     pad_output: PadOutput
     frame_store: FrameStore
@@ -230,6 +273,87 @@ def _run_cleanup_step(step: Callable[[], object], description: str) -> None:
         )
 
 
+def _needs_clean_up(reason: str) -> bool:
+    """止まる理由 reason が片付けを行う理由 (REASON_INTERRUPTED・surface か middle が続けて失敗した) なら True。"""
+    return (
+        reason == REASON_INTERRUPTED
+        or _CLEAN_UP_REASON_PATTERN.fullmatch(reason) is not None
+    )
+
+
+def _clean_up_end_for(reason: str) -> CleanUpResult | None:
+    """片付けの間に来た止まる理由 reason で片付けを終えるときの終わり方を返す。終えない理由なら None。
+
+    安全の監視の理由なら UNSAFE、キャプチャー・ブリッジの理由なら STOPPED。
+    """
+    if reason.startswith(_SAFETY_REASON_PREFIXES):
+        return CleanUpResult.UNSAFE
+    if reason in (
+        REASON_CAPTURE_ENDED,
+        REASON_NO_FIRST_FRAME,
+        REASON_STALE_FRAME,
+        REASON_BRIDGE_FAILED,
+    ):
+        return CleanUpResult.STOPPED
+    return None
+
+
+@dataclass(frozen=True)
+class _PhaseSnapshot:
+    """段階の判定の読み取り (段階に入る前は PREPARE・0.0・False)。"""
+
+    phase: RunPhase
+    phase_started_t: float
+    wants_system_middle: bool
+
+
+class _SystemScreenPhases:
+    """本体の画面のループに渡す段階 (system_screen_loop.SystemScreenPhases の実装)。
+
+    読み取りは snapshot、入力は give (段階の判定をロックの中で呼び、戻り値を扱う LayersApp の関数) で行う。
+    """
+
+    def __init__(
+        self,
+        snapshot: Callable[[], _PhaseSnapshot],
+        give: Callable[[Callable[[PhaseTracker], PhaseEvent]], None],
+    ) -> None:
+        """読み取りと入力の関数を持つ。"""
+        self._snapshot = snapshot
+        self._give = give
+
+    @property
+    def phase(self) -> RunPhase:
+        """今の段階。"""
+        return self._snapshot().phase
+
+    @property
+    def phase_started_t(self) -> float:
+        """今の段階に入った時刻。"""
+        return self._snapshot().phase_started_t
+
+    @property
+    def wants_system_middle(self) -> bool:
+        """本体の画面の middle を呼んでよいなら True。"""
+        return self._snapshot().wants_system_middle
+
+    def on_system_output(self, t: float, done: bool) -> None:
+        """本体の画面の middle の出力を渡す。"""
+        self._give(lambda tracker: tracker.on_system_output(t, done))
+
+    def on_operations_started(self, t: float) -> None:
+        """操作の列を送り始めたことを渡す。"""
+        self._give(lambda tracker: tracker.on_operations_started(t))
+
+    def on_operations_finished(self, t: float) -> None:
+        """操作の列を送り終えたことを渡す。"""
+        self._give(lambda tracker: tracker.on_operations_finished(t))
+
+    def on_system_middle_failed(self, t: float) -> None:
+        """本体の画面の middle の失敗を渡す。"""
+        self._give(lambda tracker: tracker.on_system_middle_failed(t))
+
+
 class LayersApp:
     """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
@@ -255,8 +379,6 @@ class LayersApp:
         self._lock = threading.Lock()
         # ループの停止の合図 (surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループが見る)
         self._stop_event = threading.Event()
-        # 実行を始めるときの安全の確かめで、止まる条件に当たらなかった合図 (surface と middle のループが見る)
-        self._start_check_passed = threading.Event()
         self._stop_reason: str | None = None
         # 停止の処理 (PadOutput.stop_output) を終えたか。理由が決まっただけで処理の途中に割り込まれた場合
         # (Ctrl+C など) に、close でやり直すために理由とは別に持つ
@@ -264,8 +386,14 @@ class LayersApp:
         self._start_called = False
         self._closed = False
         self._started: _StartedParts | None = None
-        # 段階の判定 (PhaseTracker) を読み書きするときと、surface の操作の関門が「play か」を確かめて送るときのロック
-        self._phase_lock = threading.Lock()
+        # 段階の判定 (PhaseTracker) を読み書きするときと、surface の操作の関門が「play か」を確かめて送るときのロック。
+        # 段階の変化を扱う途中で request_stop を呼ぶため、同じスレッドから重ねて取れるロックにする
+        self._phase_lock = threading.RLock()
+        # 段階の判定。prepare に入る (実行を始めるときの確かめが通る) までは None
+        self._tracker: PhaseTracker | None = None
+        # 片付けを始めたか、終えたか (clean_up_end を 1 回だけ書くため)
+        self._clean_up_started = False
+        self._clean_up_ended = False
 
     def start(self) -> RunPaths:
         """実行ディレクトリーを作り、部品を組み立ててスレッドを起動し、実行ディレクトリーの RunPaths を返す。
@@ -391,6 +519,7 @@ class LayersApp:
                 ),
                 latest_frame_t=lambda: latest_frame_t(paths),
                 progress_state=lambda: read_progress_state(paths.progress_state),
+                is_play=self._playing,
             ),
             DeepSchedulerSettings(
                 min_start_interval_s=settings.deep_min_start_interval_s,
@@ -430,6 +559,7 @@ class LayersApp:
                 run_log=run_log,
                 deep_requests=deep_scheduler,
                 on_stop=self.request_stop,
+                on_press_home=self._press_home,
             ),
             MiddleLoopSettings(
                 interval_s=settings.middle_interval_s,
@@ -437,8 +567,15 @@ class LayersApp:
                 max_errors=settings.max_middle_errors,
             ),
         )
-        # 8: 安全の監視 (照合の結果は LatestSystemScreen に渡す)
+        # 8: 安全の監視 (照合の結果は段階の判定と LatestSystemScreen に渡す)
         latest_system_screen = LatestSystemScreen()
+
+        def on_system_screen(judgment: SystemScreenJudgment) -> None:
+            self._phase_input(
+                lambda tracker: tracker.on_judgment(judgment.frame_t, judgment.screen)
+            )
+            latest_system_screen.update(judgment)
+
         safety_monitor = SafetyMonitor(
             SafetyMonitorParts(
                 checker=parts.safety,
@@ -446,8 +583,8 @@ class LayersApp:
                 clock=clock,
                 safety_log=paths.safety_log,
                 on_stop=self.request_stop,
-                on_start_passed=self._start_check_passed.set,
-                on_system_screen=latest_system_screen.update,
+                on_start_passed=self._enter_prepare,
+                on_system_screen=on_system_screen,
             ),
             SafetyMonitorSettings(
                 interval_s=settings.safety_interval_s,
@@ -455,21 +592,49 @@ class LayersApp:
                 max_errors=settings.max_safety_errors,
             ),
         )
-        # 9: 画面の停滞の計測 (操作を送らないため、実行を始めるときの確かめを待たない)
+        # 9: 本体の画面のループ (段階が prepare・recover・clean_up の間、本体の画面の middle を呼ぶ)
+        system_screen_loop = SystemScreenLoop(
+            SystemScreenLoopParts(
+                paths=paths,
+                middle=parts.system_middle,
+                runner=SystemOperationRunner(
+                    pad_output,
+                    latest_system_screen,
+                    clock,
+                    judgment_wait_s=max(
+                        JUDGMENT_WAIT_S,
+                        settings.safety_interval_s + JUDGMENT_WAIT_MARGIN_S,
+                    ),
+                ),
+                judgments=latest_system_screen,
+                latest_frame=frame_buffer.latest,
+                pad_output=pad_output,
+                phases=_SystemScreenPhases(self._phase_snapshot, self._phase_input),
+                clock=clock,
+                bridge_state=parts.bridge_state,
+                on_stop=self.request_stop,
+            ),
+            SystemScreenLoopSettings(
+                software_name=settings.software_name,
+                user_name=settings.user_name,
+                max_errors=settings.max_middle_errors,
+            ),
+        )
+        # 10: 画面の停滞の計測 (操作を送らないため、段階に依らず動く)
         progress_loop = ProgressLoop(
             paths, ScreenProgressTracker(settings.progress_window_s)
         )
-        # surface と middle のループは、実行を始めるときの確かめを終えてから始める
+        # surface と middle のゲーム用のループは、段階が play の間だけ 1 回分ずつ進める
         loop_threads = (
             threading.Thread(
-                target=self._run_after_start_check,
-                args=(surface_loop.run,),
+                target=self._run_surface_while_playing,
+                args=(surface_loop,),
                 name="surface-loop",
                 daemon=True,
             ),
             threading.Thread(
-                target=self._run_after_start_check,
-                args=(middle_loop.run,),
+                target=self._run_middle_while_playing,
+                args=(middle_loop, paths),
                 name="middle-loop",
                 daemon=True,
             ),
@@ -477,6 +642,12 @@ class LayersApp:
                 target=safety_monitor.run,
                 args=(self._stop_event,),
                 name="safety-monitor",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=system_screen_loop.run,
+                args=(self._stop_event,),
+                name="system-screen-loop",
                 daemon=True,
             ),
             threading.Thread(
@@ -490,6 +661,7 @@ class LayersApp:
         with self._lock:
             self._started = _StartedParts(
                 paths=paths,
+                clock=clock,
                 run_log=run_log,
                 pad_output=pad_output,
                 frame_store=frame_store,
@@ -504,20 +676,159 @@ class LayersApp:
 
     def _is_play(self) -> bool:
         """段階が play なら True を返す (段階のロックを持っているときに呼ぶ)。prepare に入る前は False。"""
-        raise NotImplementedError
+        tracker = self._tracker
+        return tracker is not None and tracker.phase is RunPhase.PLAY
 
-    def _run_after_start_check(
-        self, loop_run: Callable[[threading.Event], None]
-    ) -> None:
-        """実行を始めるときの確かめを終えた合図が立ってから、loop_run(停止の合図) を呼ぶ (スレッドの本体)。
+    def _playing(self) -> bool:
+        """段階のロックを取って、段階が play なら True を返す (ロックを持っていないスレッドから呼ぶ)。"""
+        with self._phase_lock:
+            return self._is_play()
 
-        START_CHECK_POLL_S ごとに、確かめを終えた合図と停止の合図を確かめる。停止の合図が先に立ったら、loop_run を
-        呼ばずに戻る (surface と middle は要求を 1 つも送らない)。
+    def _phase_snapshot(self) -> _PhaseSnapshot:
+        """段階のロックの中で、段階の判定の読み取りをまとめて返す (段階に入る前は PREPARE・0.0・False)。"""
+        with self._phase_lock:
+            tracker = self._tracker
+            if tracker is None or self._stop_event.is_set():
+                return _PhaseSnapshot(RunPhase.PREPARE, 0.0, False)
+            return _PhaseSnapshot(
+                tracker.phase, tracker.phase_started_t, tracker.wants_system_middle
+            )
+
+    def _enter_prepare(self) -> None:
+        """実行を始めるときの確かめが通ったら呼ぶ (安全の監視のスレッド)。prepare に入る (start の 8)。
+
+        先に止める理由が決まっていたら、どの段階にも入らない。
         """
-        while not self._stop_event.is_set():
-            if self._start_check_passed.wait(START_CHECK_POLL_S):
-                loop_run(self._stop_event)
+        with self._phase_lock:
+            with self._lock:
+                started = self._started
+                if started is None or self._stop_reason is not None:
+                    return
+            self._tracker = PhaseTracker(started.clock.now(), self.parts.phase_timings)
+            started.run_log.write(
+                EVENT_PHASE,
+                phase=RunPhase.PREPARE.value,
+                reason=PHASE_REASON_START_CHECK_PASSED,
+            )
+
+    def _phase_input(self, call: Callable[[PhaseTracker], PhaseEvent]) -> None:
+        """段階のロックの中で、段階の判定に入力を渡して (call(tracker))、戻り値を扱う。"""
+        with self._phase_lock:
+            self._phase_input_locked(call)
+
+    def _phase_input_locked(self, call: Callable[[PhaseTracker], PhaseEvent]) -> None:
+        """段階の判定に入力を渡し、戻り値を扱う (start の docstring)。段階のロックを持っているときに呼ぶ。
+
+        段階に入る前と、全体を止めた後は何もしない。
+        """
+        tracker = self._tracker
+        with self._lock:
+            started = self._started
+        if tracker is None or started is None or self._stop_event.is_set():
+            return
+        was_play = tracker.phase is RunPhase.PLAY
+        event = call(tracker)
+        if event.change is not None:
+            started.run_log.write(
+                EVENT_PHASE,
+                phase=event.change.phase.value,
+                reason=event.change.reason,
+            )
+            if was_play and event.change.phase is not RunPhase.PLAY:
+                # play から離れるので、surface の操作を中立にする
+                started.pad_output.neutral()
+        if event.stop_reason is not None:
+            self.request_stop(event.stop_reason)
+        if event.clean_up_end is not None:
+            self._end_clean_up_locked(event.clean_up_end)
+
+    def _press_home(self) -> None:
+        """middle のゲーム用の出力の press_home が真のときに呼ぶ (middle のスレッド。start の 7)。
+
+        段階のロックの中で、play のときだけ、recover に移して (phase の行と中立のレポート) から HOME を短押しする。
+        HOME の送信の失敗は、logging で警告を書いて続ける。
+        """
+        with self._phase_lock:
+            with self._lock:
+                started = self._started
+            if started is None or not self._is_play() or self._stop_event.is_set():
                 return
+            now = started.clock.now()
+            self._phase_input_locked(lambda tracker: tracker.on_press_home(now))
+            try:
+                started.pad_output.apply(
+                    PadAction(taps=frozenset({HOME_BUTTON})), source="system"
+                )
+            except Exception:
+                logger.warning("pressing HOME for press_home failed", exc_info=True)
+
+    def _end_clean_up_locked(self, result: CleanUpResult) -> None:
+        """片付けを result で終える (段階のロックを持っているときに呼ぶ)。2 回目以降は何もしない。
+
+        run.jsonl に clean_up_end を書き、ループの停止の合図を立ててから出力を止める。
+        """
+        with self._lock:
+            if self._clean_up_ended:
+                return
+            self._clean_up_ended = True
+            started = self._started
+        if started is not None:
+            started.run_log.write(EVENT_CLEAN_UP_END, result=result.value)
+        self._stop_output_now(started)
+
+    def _stop_output_now(self, started: _StartedParts | None) -> None:
+        """ループの停止の合図を立ててから、PadOutput.stop_output() で操作を中立にして出力を止める。"""
+        self._stop_event.set()
+        if started is not None:
+            started.pad_output.stop_output()
+            with self._lock:
+                self._output_stopped = True
+
+    def _run_surface_while_playing(self, surface_loop: SurfaceLoop) -> None:
+        """surface のループのスレッドの本体。段階が play の間だけ SurfaceLoop.step を 1 回ずつ進める。
+
+        play でなければ PLAY_POLL_S ごとに確かめ直す。step の想定外の例外 (Exception) は外に出さず、
+        request_stop(`surface loop failed: <例外の説明>`) を呼んでから戻る (SurfaceLoop.run と同じ扱い)。
+        """
+        stop = self._stop_event
+        while not stop.is_set():
+            if not self._playing():
+                stop.wait(PLAY_POLL_S)
+                continue
+            try:
+                result = surface_loop.step(stop)
+            except Exception as error:
+                logger.warning("surface loop failed", exc_info=True)
+                self.request_stop(f"surface loop failed: {describe_exception(error)}")
+                return
+            if result.outcome is SurfaceStepOutcome.STOPPED:
+                return
+            stop.wait(result.wait_s)
+
+    def _run_middle_while_playing(
+        self, middle_loop: MiddleLoop, paths: RunPaths
+    ) -> None:
+        """middle のゲーム用のループのスレッドの本体。段階が play の間だけ MiddleLoop.run_once を呼ぶ。
+
+        最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。呼んだ後は --middle-interval 秒待つ。
+        run_once の想定外の例外 (Exception) は外に出さず、request_stop(`middle loop failed: <例外の説明>`) を
+        呼んでから戻る (MiddleLoop.run と同じ扱い)。
+        """
+        stop = self._stop_event
+        try:
+            while not stop.is_set() and not has_recorded_frame(paths):
+                stop.wait(FIRST_FRAME_POLL_S)
+            while not stop.is_set():
+                if not self._playing():
+                    stop.wait(PLAY_POLL_S)
+                    continue
+                result = middle_loop.run_once(stop)
+                if result.stopped:
+                    return
+                stop.wait(self.settings.middle_interval_s)
+        except Exception as error:
+            logger.warning("middle loop failed", exc_info=True)
+            self.request_stop(f"middle loop failed: {describe_exception(error)}")
 
     def _clean_up_failed_start(
         self, built: _PartsBuiltSoFar, error: BaseException
@@ -600,16 +911,49 @@ class LayersApp:
         後片付けは close で行う。合図を先に立てるのは、出力を止めた後に surface が判断の応答を受け取ったとき、合図を
         見て記録を書かずに抜けられるようにするため (surface_loop.SurfaceLoop.step)。
         """
-        with self._lock:
-            if self._stop_reason is not None:
-                return
-            self._stop_reason = reason
-            started = self._started
-        self._stop_event.set()
-        if started is not None:
-            started.pad_output.stop_output()
+        with self._phase_lock:
             with self._lock:
-                self._output_stopped = True
+                started = self._started
+                in_clean_up = self._clean_up_started and not self._clean_up_ended
+                if not in_clean_up:
+                    if self._stop_reason is not None:
+                        return
+                    self._stop_reason = reason
+                begin_clean_up = (
+                    not in_clean_up
+                    and started is not None
+                    and self._tracker is not None
+                    and _needs_clean_up(reason)
+                )
+                if begin_clean_up:
+                    self._clean_up_started = True
+            if in_clean_up:
+                result = _clean_up_end_for(reason)
+                if result is not None:
+                    self._end_clean_up_locked(result)
+                return
+            if begin_clean_up and started is not None:
+                now = started.clock.now()
+                self._phase_input_locked(
+                    lambda tracker: tracker.begin_clean_up(now, reason)
+                )
+                return
+        self._stop_output_now(started)
+
+    def _in_clean_up(self) -> bool:
+        """片付けの途中 (始めて、まだ終えていない) なら True。"""
+        with self._lock:
+            return self._clean_up_started and not self._clean_up_ended
+
+    def _end_clean_up_by_interrupt(self) -> None:
+        """片付けの間の 2 回目の Ctrl+C で、片付けを interrupted で終える。"""
+        with self._phase_lock:
+            self._end_clean_up_locked(CleanUpResult.INTERRUPTED)
+
+    def _check_phase_time(self, started: _StartedParts) -> None:
+        """段階の判定の時間切れを確かめる (wait の見張りの 1 回分)。"""
+        now = started.clock.now()
+        self._phase_input(lambda tracker: tracker.check_time(now))
 
     def wait(self) -> str:
         """止まるまで待ち、止まった理由を返す。
@@ -627,17 +971,21 @@ class LayersApp:
             started = self._started
         if started is None:
             raise RuntimeError("LayersApp.wait must be called after start")
-        try:
-            while not self._stop_event.is_set():
+        while not self._stop_event.is_set():
+            try:
                 capture_reason = started.capture_watcher.check_once()
                 if capture_reason is not None:
                     self.request_stop(capture_reason)
                 elif self.parts.bridge_state() == BRIDGE_FAILED:
                     self.request_stop(REASON_BRIDGE_FAILED)
                 else:
+                    self._check_phase_time(started)
                     self.sleep(MONITOR_INTERVAL_S)
-        except KeyboardInterrupt:
-            self.request_stop(REASON_INTERRUPTED)
+            except KeyboardInterrupt:
+                if self._in_clean_up():
+                    self._end_clean_up_by_interrupt()
+                else:
+                    self.request_stop(REASON_INTERRUPTED)
         return self._current_reason()
 
     def close(self) -> None:

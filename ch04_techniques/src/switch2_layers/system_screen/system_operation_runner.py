@@ -166,6 +166,7 @@ class SystemOperationRunner:
         self.judgments = judgments
         self.clock = clock
         self.wait_or_stop = wait_or_stop
+        self.judgment_wait_s = judgment_wait_s
 
     def run(
         self,
@@ -339,7 +340,7 @@ class SystemOperationRunner:
 
         届かないか、stop が立ったら None を返す (呼び出し側が stop を確かめ直して理由を決める)。
         """
-        deadline_t = after_frame_t + JUDGMENT_WAIT_S
+        deadline_t = after_frame_t + self.judgment_wait_s
         while not stop.is_set():
             remaining_s = deadline_t - self.clock.now()
             judgment = self.judgments.wait_newer(

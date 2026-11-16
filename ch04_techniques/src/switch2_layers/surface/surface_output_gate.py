@@ -10,7 +10,7 @@ surface のループ (surface_loop) は hardware.pad_output.PadOutput を直接�
 import threading
 from collections.abc import Callable
 
-from switch2_layers.buttons import FilteredAction
+from switch2_layers.buttons import FilteredAction, allowed_buttons, filter_action
 from switch2_layers.hardware.pad_output import OutputStoppedError, PadOutput
 from switch2_layers.pad_action import PadAction
 
@@ -37,7 +37,10 @@ class SurfaceOutputGate:
         lock: threading.Lock,
     ) -> None:
         """部品を持つ。ここでは何も送らない。"""
-        raise NotImplementedError
+        self._pad_output = pad_output
+        self._is_play = is_play
+        self._lock = lock
+        self._allowed_buttons = allowed_buttons()
 
     def apply(self, action: PadAction) -> FilteredAction:
         """action を buttons.filter_action(action, allowed_buttons) で絞り、段階が play なら送る。
@@ -49,13 +52,24 @@ class SurfaceOutputGate:
         blocked_buttons=1 の絞り込みで外したボタン)。pad_output.apply の例外 (OutputStoppedError・送信の失敗) は
         そのまま出す。
         """
-        raise NotImplementedError
+        filtered = filter_action(action, self._allowed_buttons)
+        with self._lock:
+            if not self._is_play():
+                raise SurfaceOutputBlockedError(
+                    "the surface action was not sent outside the play phase"
+                )
+            sent = self._pad_output.apply(filtered.action, source="apply")
+        return FilteredAction(
+            action=sent.action, blocked_buttons=filtered.blocked_buttons
+        )
 
     def neutral(self) -> None:
         """lock の中で、段階が play なら pad_output.neutral() を送る。play でなければ何もしない。"""
-        raise NotImplementedError
+        with self._lock:
+            if self._is_play():
+                self._pad_output.neutral()
 
     @property
     def allowed_buttons(self) -> frozenset[str]:
         """surface の押せるボタンの集合 (buttons.allowed_buttons() の 16 個)。"""
-        raise NotImplementedError
+        return self._allowed_buttons

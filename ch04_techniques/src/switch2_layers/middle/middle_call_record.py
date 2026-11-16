@@ -70,6 +70,7 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
         "new_scene": record.write_result is not None
         and record.write_result.new_scene is not None,
         "surface_wait_s": None if state is None else state.surface_wait_s,
+        "press_home": None if state is None else state.press_home,
         "deep_requests": [kind.value for kind in record.deep_requests],
         "deep_requests_sent": record.deep_requests_sent,
         "error": record.error,

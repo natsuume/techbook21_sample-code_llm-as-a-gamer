@@ -248,6 +248,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
         scene_name=scene_name if scene_name.strip() else None,
         is_stuck=_boolean(value, "is_stuck"),
         stuck_description=_string(value, "stuck_description"),
+        press_home=_boolean(value, "press_home"),
         surface_wait_s=_surface_wait(value["surface_wait_s"]),
         timeline=_string(value, "timeline"),
         tasks=_string(value, "tasks"),

@@ -374,6 +374,13 @@ class MiddleLoop:
                 scene_id=scene_id,
                 error=description,
             )
+        if (
+            result.ok
+            and result.state is not None
+            and result.state.press_home
+            and parts.on_press_home is not None
+        ):
+            parts.on_press_home()
         return result
 
     def run(self, stop: threading.Event) -> None:

@@ -56,7 +56,12 @@ from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
-from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
+from switch2_layers.middle.system_screen_middle import (
+    FAKE_DONE_OUTPUT,
+    FakeSystemScreenMiddle,
+    LunaSystemScreenMiddle,
+    SystemScreenMiddle,
+)
 from switch2_layers.safety.safety_assembly import build_safety_assembly
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import (
@@ -110,6 +115,7 @@ from switch2_layers.surface.surface_assembly import (
     SurfaceAssembly,
     build_surface_assembly,
 )
+from switch2_layers.system_screen.system_screen_references import SYSTEM_SCREEN_NAMES
 
 PROG = "switch2-layers"
 # 範囲の誤りで返す終了コード (argparse の使い方の誤りと同じ)
@@ -158,12 +164,14 @@ def add_run_parser(
     parser.add_argument(
         "--software",
         metavar="NAME",
+        type=_non_blank_name,
         required=True,
         help="起動するソフトの名前 (HOME メニューの絵の上に出る名前。必須)",
     )
     parser.add_argument(
         "--user",
         metavar="NAME",
+        type=_non_blank_name,
         required=True,
         help="ソフトを遊ぶユーザーの名前 (ユーザー選択に出る名前。必須)",
     )
@@ -333,6 +341,13 @@ def add_run_parser(
         ),
     )
     parser.set_defaults(handler=run_command)
+
+
+def _non_blank_name(value: str) -> str:
+    """--software と --user の値を、書かれたまま返す。空か空白だけなら argparse.ArgumentTypeError にする。"""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty or blank")
+    return value
 
 
 def add_middle_kind_argument(parser: argparse.ArgumentParser) -> None:
@@ -522,7 +537,12 @@ def create_system_screen_middle(
       確かめておく)
     run_command は、environ に os.environ を渡してこの関数で作る。
     """
-    raise NotImplementedError
+    if kind is MiddleKind.FAKE:
+        return FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT)
+    api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
+    return LunaSystemScreenMiddle(api_key=api_key, screen_names=SYSTEM_SCREEN_NAMES)
 
 
 def run_command(args: argparse.Namespace) -> int:
