@@ -1,9 +1,10 @@
 """コントローラーに送った操作の記録 operations.jsonl。
 
-1 件を {"t", "source": "apply" | "neutral" | "stop", "held", "hold_seconds", "taps", "sticks", "ok", "error"} の
-1 行で追記する。
+1 件を {"t", "source": "apply" | "system" | "neutral" | "stop", "held", "hold_seconds", "taps", "sticks", "ok", "error"}
+の 1 行で追記する。
 hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent を on_operation に渡し、OperationLog.write が書く。
-surface のスレッド (apply) と終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
+surface のスレッド (apply)、本体の画面の操作のスレッド (system)、終了処理 (neutral・stop) から書くため、追記は 1 つの
+ロックの中で行う。
 """
 
 import threading
@@ -15,8 +16,11 @@ from switch2_layers.file_io import append_json_line
 from switch2_layers.pad_action import PadAction, action_to_json
 from switch2_layers.run_clock import RunClock
 
-# 操作を送った処理: apply (surface の操作)、neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)
-OperationSource = Literal["apply", "neutral", "stop"]
+# 操作を送った処理: apply (surface の操作)、system (本体の画面の操作。system_screen.system_operation_runner)、
+# neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)
+OperationSource = Literal["apply", "system", "neutral", "stop"]
+# hardware.pad_output.PadOutput.apply で送った操作の処理 (OperationSource のうち apply と system)
+ApplySource = Literal["apply", "system"]
 
 
 @dataclass(frozen=True)

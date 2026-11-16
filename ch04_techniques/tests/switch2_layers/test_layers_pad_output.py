@@ -115,6 +115,34 @@ def test_apply_sends_held_buttons_and_sticks():
     ]
 
 
+def test_apply_records_the_given_source():
+    output, sender, _, events = make_output()
+    action = PadAction(taps=frozenset({"DOWN"}))
+    result = output.apply(action, source="system")
+    assert result == FilteredAction(action=action, blocked_buttons=())
+    assert len(sender.reports) == 1
+    assert events == [
+        OperationEvent(source="system", action=action, ok=True, error=None)
+    ]
+
+
+def test_apply_with_source_sends_the_same_report_as_default():
+    action = PadAction(held=frozenset({"L", "R"}), hold_seconds={"L": 0.4, "R": 0.4})
+    default_output, default_sender, _, _ = make_output()
+    default_output.apply(action)
+    system_output, system_sender, _, _ = make_output()
+    system_output.apply(action, source="system")
+    assert system_sender.reports == default_sender.reports
+
+
+def test_apply_records_the_given_source_on_send_failure():
+    output, sender, _, events = make_output()
+    sender.fail_with = OSError("bridge is down")
+    with pytest.raises(OSError):
+        output.apply(PadAction(taps=frozenset({"A"})), source="system")
+    assert [(event.source, event.ok) for event in events] == [("system", False)]
+
+
 def test_apply_removes_home_right_before_sending():
     output, sender, _, events = make_output()
     result = output.apply(

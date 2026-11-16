@@ -38,9 +38,9 @@ apply まで押したままにする。押し続けている (held にある) �
 方向は、例外にせず両方とも外して送る。
 
 送信先は set_report(report) を持つもの (ReportSender)。run では switch2_remote.bridge_supervisor.BridgeSupervisor、
-テストでは偽物を渡す。apply は surface のスレッド、start_due_taps・release_due_taps・start_due_holds・
-release_due_holds はタイマースレッド、neutral と stop_output は終了処理のスレッドから呼ぶため、状態の変更と送信は
-1 つのロックの中で行う。
+テストでは偽物を渡す。apply は surface のスレッドと本体の画面の操作のスレッド (system_screen.system_operation_runner)、
+start_due_taps・release_due_taps・start_due_holds・release_due_holds はタイマースレッド、neutral と stop_output は
+終了処理のスレッドから呼ぶため、状態の変更と送信は 1 つのロックの中で行う。
 """
 
 import logging
@@ -61,7 +61,11 @@ from switch2_remote.controller_state import (
 from switch2_layers.buttons import FilteredAction, filter_action
 from switch2_layers.error_text import describe_exception
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
-from switch2_layers.records.operation_log import OperationEvent, OperationSource
+from switch2_layers.records.operation_log import (
+    ApplySource,
+    OperationEvent,
+    OperationSource,
+)
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -185,8 +189,14 @@ class PadOutput:
             )
             self._timer_thread.start()
 
-    def apply(self, action: PadAction) -> FilteredAction:
+    def apply(
+        self, action: PadAction, *, source: ApplySource = "apply"
+    ) -> FilteredAction:
         """action をボタンの制限に通してから、押下状態を置き換えて送る。送った操作と、制限で外したボタンを返す。
+
+        source は記録 (OperationEvent と operations.jsonl の行の source) に入れる、送った処理の名前。surface の操作は
+        "apply" (既定)、本体の画面の操作 (system_screen.system_operation_runner) は "system"。source は記録だけに使い、
+        送り方は変えない。
 
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す
@@ -224,13 +234,15 @@ class PadOutput:
                sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、7 で tapping から
                外したもの) の最後に離した時刻を sent_at にする。held の各ボタンの期限は、秒数があれば sent_at + 秒数に
                置き換え、無ければ外す (次の apply まで押し続ける)
-            10. on_operation に OperationEvent(source="apply", action=2〜5 の後の操作, ok, error) を渡す
+            10. on_operation に OperationEvent(source=source, action=2〜5 の後の操作, ok, error) を渡す
         戻り値は FilteredAction(action=2〜5 の後の操作, blocked_buttons=2 で外したボタン)。操作の hold_seconds は、
         3 と 4 で整えた後の秒数 (held のボタンのうち秒数のあるものだけ)。
         送信の例外は、on_operation に ok=False で渡してからそのまま出す。状態は 6・7 で変えたままにし、9 の時刻は
         送信の前の clock() から決める。
         変化が無くても送る。
         """
+        if source != "apply":
+            raise NotImplementedError
         with self._lock:
             if self._output_stopped:
                 raise OutputStoppedError("pad output was stopped")
