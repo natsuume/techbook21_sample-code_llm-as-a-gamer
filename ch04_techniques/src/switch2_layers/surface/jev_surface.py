@@ -242,20 +242,26 @@ def recent_actions_to_state(
 def deep_status_text(status: DeepDocumentStatus | None, request_t: float) -> str:
     """文書 1 つの deep の呼び出しの状況を、state の advisor の文にする。
 
-    status が None (状況を読めなかった) なら ADVISOR_STATUS_UNAVAILABLE_TEXT。そうでなければ次の 4 つの文を
+    status が None (状況を読めなかった) なら ADVISOR_STATUS_UNAVAILABLE_TEXT。そうでなければ次の 5 つの部分を
     この順に「。」でつないだもの (最後には「。」を付けない)。<時刻> は relative_time_label(その t, request_t):
-        1. 実行中: running_count が 1 以上なら「実行中のジョブ: <running_count> 件 (最も新しい起動 <latest_running_start_t の時刻>)」、
-           0 なら「実行中のジョブ: なし」
-        2. 前回の終了: last_end があれば「前回の終了: <last_end.t の時刻>、<DEEP_JOB_STATUS_TEXTS[last_end.status]>」、
+        1. 実行中のジョブ: running_count が 1 以上なら「実行中のジョブ: <running_count> 件 (最も新しい起動
+           <latest_running_start_t の時刻>)」、0 なら「実行中のジョブ: なし」
+        2. 保留中の要求: pending_request_t があれば「保留中の要求: <pending_request_t の時刻>」、None なら
+           「保留中の要求: なし」
+        3. 前回の終了: last_end があれば「前回の終了: <last_end.t の時刻>、<DEEP_JOB_STATUS_TEXTS[last_end.status]>」、
            None なら「前回の終了: まだ無い」
-        3. 最小間隔: min_interval_remaining_s が 0 より大きければ「今求めると捨てられる (あと <残りを小数第 1 位まで> 秒)」、
-           そうでなければ「今求めれば起動する」
-        4. surface の最後の要求: last_surface_request が None なら「surface はまだ求めていない」。そうでなければ
-           「surface が最後に求めた: <t の時刻>、<結果>」で、結果は、起動したら「起動した」、捨てた理由が
-           deep_scheduler.SKIP_MIN_START_INTERVAL なら「前回の起動から間もないため捨てられた」、ほかの理由なら
-           「捨てられた (<理由>)」
-    例: 「実行中のジョブ: なし。前回の終了: t=120.300 秒 (15.2 秒前)、正常に終了。今求めれば起動する。
-    surface が最後に求めた: t=100.000 秒 (35.5 秒前)、起動した」
+        4. 今求めたときの扱い (上から順に確かめ、最初に当たったもの):
+           - min_interval_remaining_s が 0 より大きければ「今求めると捨てられる (あと <残りを小数第 1 位まで> 秒)」
+           - pending_request_t があれば「今求めると保留中の要求を置き換える」
+           - running_count が 1 以上なら「今求めると保留され、実行中のジョブの終了後に起動する」
+           - どれでもなければ「今求めれば起動する」
+        5. surface の最後の要求: last_surface_request が None なら「surface はまだ求めていない」。そうでなければ
+           「surface が最後に求めた: <t の時刻>、<結果>」で、結果は、起動したら「起動した」、理由が
+           deep_scheduler.SKIP_MIN_START_INTERVAL なら「前回の起動から間もないため捨てられた」、
+           deep_scheduler.REQUEST_PENDING なら「保留した」、ほかの理由なら「捨てられた (<理由>)」
+    例: 「実行中のジョブ: 1 件 (最も新しい起動 t=120.300 秒 (15.2 秒前))。保留中の要求: なし。
+    前回の終了: t=100.000 秒 (35.5 秒前)、正常に終了。今求めると保留され、実行中のジョブの終了後に起動する。
+    surface が最後に求めた: t=120.300 秒 (15.2 秒前)、起動した」
     """
     if status is None:
         return ADVISOR_STATUS_UNAVAILABLE_TEXT
@@ -270,7 +276,7 @@ def deep_status_text(status: DeepDocumentStatus | None, request_t: float) -> str
 
 
 def _running_jobs_text(status: DeepDocumentStatus, request_t: float) -> str:
-    """deep_status_text の 1 の文 (実行中のジョブ) を返す。"""
+    """deep_status_text の 1 の部分 (実行中のジョブ) を返す。"""
     latest = status.latest_running_start_t
     if status.running_count <= 0 or latest is None:
         return "実行中のジョブ: なし"
@@ -278,8 +284,18 @@ def _running_jobs_text(status: DeepDocumentStatus, request_t: float) -> str:
     return f"実行中のジョブ: {status.running_count} 件 (最も新しい起動 {label})"
 
 
+def _pending_request_text(pending_request_t: float | None, request_t: float) -> str:
+    """deep_status_text の 2 の部分 (保留中の要求) を返す。"""
+    raise NotImplementedError
+
+
+def _request_now_text(status: DeepDocumentStatus) -> str:
+    """deep_status_text の 4 の部分 (今求めたときの扱い) を返す。"""
+    raise NotImplementedError
+
+
 def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
-    """deep_status_text の 2 の文 (前回の終了) を返す。"""
+    """deep_status_text の 3 の部分 (前回の終了) を返す。"""
     if last_end is None:
         return "前回の終了: まだ無い"
     label = relative_time_label(last_end.t, request_t)
@@ -287,7 +303,7 @@ def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
 
 
 def _min_interval_text(remaining_s: float) -> str:
-    """deep_status_text の 3 の文 (最小間隔) を返す。"""
+    """最小間隔の残り remaining_s だけで決めた、今求めると捨てられるかの文を返す。"""
     if remaining_s > 0:
         return f"今求めると捨てられる (あと {remaining_s:.1f} 秒)"
     return "今求めれば起動する"
@@ -296,7 +312,7 @@ def _min_interval_text(remaining_s: float) -> str:
 def _last_surface_request_text(
     outcome: DeepRequestOutcome | None, request_t: float
 ) -> str:
-    """deep_status_text の 4 の文 (surface の最後の要求) を返す。"""
+    """deep_status_text の 5 の部分 (surface の最後の要求) を返す。"""
     if outcome is None:
         return "surface はまだ求めていない"
     if outcome.started:

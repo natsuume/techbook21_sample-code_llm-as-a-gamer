@@ -129,10 +129,27 @@ def test_instructions_explain_advisor_as_deep_status_per_document_kind():
     assert "状況" in advisor_part
 
 
+def test_instructions_list_the_five_parts_of_advisor_status_in_order():
+    # advisor の説明 (`advisor` で始まる行) に、状況の文の 5 つの部分を、文の部分と同じ順に書く
+    advisor_line = SURFACE_INSTRUCTIONS[SURFACE_INSTRUCTIONS.index("`advisor`") :]
+    advisor_line = advisor_line[: advisor_line.index("\n")]
+    parts = [
+        "実行中のジョブ",
+        "保留中の要求",
+        "前回の終了",
+        "今求めたときの扱い",
+        "surface が最後に求めた結果",
+    ]
+    for part in parts:
+        assert part in advisor_line, part
+    positions = [advisor_line.index(part) for part in parts]
+    assert positions == sorted(positions)
+
+
 def advisor_rule(kind_value: str) -> str:
     """種類の値 kind_value の advisor 判定の問いの文の末尾に足す共通の文を、定数を使わずに書いたもの。"""
     return (
-        f"ただし、`advisor.{kind_value}` に実行中のジョブがあるとき、"
+        f"ただし、`advisor.{kind_value}` に保留中の要求があるとき、"
         "または今求めると捨てられると書かれているときは偽にする。"
     )
 

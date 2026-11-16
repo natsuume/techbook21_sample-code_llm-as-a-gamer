@@ -131,9 +131,10 @@ class DeepRunner(Protocol):
 class DeepRequestResult:
     """deep を呼ぶ要求の扱いの結果。
 
-    started   ジョブを起動したら True、捨てたら False
-    job_dir   起動したジョブのディレクトリー。捨てたら None
-    reason    捨てた理由 (run.jsonl の deep_skipped の reason)。起動したら None
+    started   ジョブを起動したら True、捨てたか保留したら False
+    job_dir   起動したジョブのディレクトリー。捨てたか保留したら None
+    reason    捨てた理由 (run.jsonl の deep_skipped の reason)、または同じ文書のジョブが実行中のため保留したときの
+              "pending" (deep_scheduler.REQUEST_PENDING)。起動したら None
     """
 
     started: bool

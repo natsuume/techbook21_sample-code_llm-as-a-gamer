@@ -10,6 +10,7 @@ from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
 from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
+    DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MIDDLE_KIND,
@@ -41,6 +42,11 @@ from switch2_layers.settings import (
 
 def test_default_run_settings_are_valid():
     assert run_settings_errors(RunSettings()) == []
+
+
+def test_deep_min_start_interval_default_follows_the_issue():
+    assert RunSettings().deep_min_start_interval_s == 30.0
+    assert DEFAULT_DEEP_MIN_START_INTERVAL_S == 30.0
 
 
 @pytest.mark.parametrize(

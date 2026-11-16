@@ -12,6 +12,7 @@ import pytest
 
 from switch2_layers.buttons import allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
+    REQUEST_PENDING,
     SKIP_CLOSED,
     SKIP_MIN_START_INTERVAL,
     DeepDocumentStatus,
@@ -326,18 +327,25 @@ def test_recent_actions_to_state():
 IDLE_STATUS = DeepDocumentStatus(
     running_count=0,
     latest_running_start_t=None,
+    pending_request_t=None,
     last_end=None,
     min_interval_remaining_s=0.0,
     last_surface_request=None,
 )
 IDLE_TEXT = (
-    "実行中のジョブ: なし。前回の終了: まだ無い。今求めれば起動する。"
+    "実行中のジョブ: なし。保留中の要求: なし。前回の終了: まだ無い。今求めれば起動する。"
     "surface はまだ求めていない"
 )
+# 「今求めたときの扱い」の 4 通りの文 (捨てられるときは、残りの秒数を後ろに足す)
+REQUEST_NOW_DISCARDED = "今求めると捨てられる"
+REQUEST_NOW_REPLACES = "今求めると保留中の要求を置き換える"
+REQUEST_NOW_HELD = "今求めると保留され、実行中のジョブの終了後に起動する"
+REQUEST_NOW_STARTS = "今求めれば起動する"
 
 
 def sentences(*parts: str) -> str:
-    """4 つの文を「。」でつないだ文 (最後に「。」を付けない)。"""
+    """5 つの部分を「。」でつないだ文 (最後に「。」を付けない)。"""
+    assert len(parts) == 5
     return "。".join(parts)
 
 
@@ -352,17 +360,21 @@ def test_deep_status_text_of_unreadable_status():
 
 def test_deep_status_text_with_every_part():
     status = DeepDocumentStatus(
-        running_count=2,
+        running_count=1,
         latest_running_start_t=120.3,
+        pending_request_t=130.3,
         last_end=DeepJobEnd(100.0, DeepJobStatus.OK),
-        min_interval_remaining_s=4.27,
-        last_surface_request=DeepRequestOutcome(120.3, started=True),
+        min_interval_remaining_s=0.0,
+        last_surface_request=DeepRequestOutcome(
+            130.3, started=False, reason=REQUEST_PENDING
+        ),
     )
     assert deep_status_text(status, 135.5) == sentences(
-        "実行中のジョブ: 2 件 (最も新しい起動 t=120.300 秒 (15.2 秒前))",
+        "実行中のジョブ: 1 件 (最も新しい起動 t=120.300 秒 (15.2 秒前))",
+        "保留中の要求: t=130.300 秒 (5.2 秒前)",
         "前回の終了: t=100.000 秒 (35.5 秒前)、正常に終了",
-        "今求めると捨てられる (あと 4.3 秒)",
-        "surface が最後に求めた: t=120.300 秒 (15.2 秒前)、起動した",
+        REQUEST_NOW_REPLACES,
+        "surface が最後に求めた: t=130.300 秒 (5.2 秒前)、保留した",
     )
 
 
@@ -372,8 +384,9 @@ def test_deep_status_text_with_one_running_job():
     )
     assert deep_status_text(status, 10.0) == sentences(
         "実行中のジョブ: 1 件 (最も新しい起動 t=9.000 秒 (1.0 秒前))",
+        "保留中の要求: なし",
         "前回の終了: まだ無い",
-        "今求めれば起動する",
+        REQUEST_NOW_HELD,
         "surface はまだ求めていない",
     )
 
@@ -397,26 +410,74 @@ def test_deep_status_text_says_how_the_last_job_ended(job_status, text):
     status = dataclasses.replace(IDLE_STATUS, last_end=DeepJobEnd(8.0, job_status))
     assert deep_status_text(status, 10.0) == sentences(
         "実行中のジョブ: なし",
+        "保留中の要求: なし",
         f"前回の終了: t=8.000 秒 (2.0 秒前)、{text}",
-        "今求めれば起動する",
+        REQUEST_NOW_STARTS,
+        "surface はまだ求めていない",
+    )
+
+
+def test_deep_status_text_says_when_the_pending_request_was_made():
+    status = dataclasses.replace(
+        IDLE_STATUS,
+        running_count=1,
+        latest_running_start_t=2.0,
+        pending_request_t=7.25,
+    )
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: 1 件 (最も新しい起動 t=2.000 秒 (8.0 秒前))",
+        "保留中の要求: t=7.250 秒 (2.8 秒前)",
+        "前回の終了: まだ無い",
+        REQUEST_NOW_REPLACES,
         "surface はまだ求めていない",
     )
 
 
 @pytest.mark.parametrize(
-    "remaining, text",
+    "remaining, running_count, pending_request_t, text",
     [
-        (0.0, "今求めれば起動する"),
-        (0.04, "今求めると捨てられる (あと 0.0 秒)"),
-        (0.5, "今求めると捨てられる (あと 0.5 秒)"),
-        (11.5, "今求めると捨てられる (あと 11.5 秒)"),
+        (0.0, 0, None, REQUEST_NOW_STARTS),
+        (0.04, 0, None, f"{REQUEST_NOW_DISCARDED} (あと 0.0 秒)"),
+        (0.5, 0, None, f"{REQUEST_NOW_DISCARDED} (あと 0.5 秒)"),
+        (0.0, 1, None, REQUEST_NOW_HELD),
+        (0.0, 1, 8.0, REQUEST_NOW_REPLACES),
+        # 最小の起動間隔の中なら、実行中のジョブや保留中の要求があっても捨てられる
+        (11.5, 1, None, f"{REQUEST_NOW_DISCARDED} (あと 11.5 秒)"),
+        (2.0, 1, 8.0, f"{REQUEST_NOW_DISCARDED} (あと 2.0 秒)"),
     ],
-    ids=["zero", "tiny", "half", "remaining"],
+    ids=[
+        "starts",
+        "tiny",
+        "half",
+        "held",
+        "replaces",
+        "discarded_while_running",
+        "discarded_before_replacing",
+    ],
 )
-def test_deep_status_text_says_whether_a_request_now_is_discarded(remaining, text):
-    status = dataclasses.replace(IDLE_STATUS, min_interval_remaining_s=remaining)
+def test_deep_status_text_says_what_a_request_now_would_do(
+    remaining, running_count, pending_request_t, text
+):
+    status = dataclasses.replace(
+        IDLE_STATUS,
+        running_count=running_count,
+        latest_running_start_t=5.0 if running_count else None,
+        pending_request_t=pending_request_t,
+        min_interval_remaining_s=remaining,
+    )
+    running = (
+        "実行中のジョブ: 1 件 (最も新しい起動 t=5.000 秒 (5.0 秒前))"
+        if running_count
+        else "実行中のジョブ: なし"
+    )
+    pending = (
+        "保留中の要求: なし"
+        if pending_request_t is None
+        else "保留中の要求: t=8.000 秒 (2.0 秒前)"
+    )
     assert deep_status_text(status, 10.0) == sentences(
-        "実行中のジョブ: なし",
+        running,
+        pending,
         "前回の終了: まだ無い",
         text,
         "surface はまだ求めていない",
@@ -432,18 +493,23 @@ def test_deep_status_text_says_whether_a_request_now_is_discarded(remaining, tex
             "、前回の起動から間もないため捨てられた",
         ),
         (
+            DeepRequestOutcome(7.5, started=False, reason=REQUEST_PENDING),
+            "、保留した",
+        ),
+        (
             DeepRequestOutcome(7.5, started=False, reason=SKIP_CLOSED),
             "、捨てられた (closed)",
         ),
     ],
-    ids=["started", "min_interval", "other_reason"],
+    ids=["started", "min_interval", "pending", "other_reason"],
 )
 def test_deep_status_text_says_the_result_of_last_surface_request(outcome, text):
     status = dataclasses.replace(IDLE_STATUS, last_surface_request=outcome)
     assert deep_status_text(status, 10.0) == sentences(
         "実行中のジョブ: なし",
+        "保留中の要求: なし",
         "前回の終了: まだ無い",
-        "今求めれば起動する",
+        REQUEST_NOW_STARTS,
         f"surface が最後に求めた: t=7.500 秒 (2.5 秒前){text}",
     )
 
@@ -453,13 +519,17 @@ def test_deep_status_text_times_after_the_request_are_zero_seconds_ago():
         IDLE_STATUS,
         running_count=1,
         latest_running_start_t=10.2,
-        last_surface_request=DeepRequestOutcome(10.2, started=True),
+        pending_request_t=10.4,
+        last_surface_request=DeepRequestOutcome(
+            10.4, started=False, reason=REQUEST_PENDING
+        ),
     )
     assert deep_status_text(status, 10.0) == sentences(
         "実行中のジョブ: 1 件 (最も新しい起動 t=10.200 秒 (0.0 秒前))",
+        "保留中の要求: t=10.400 秒 (0.0 秒前)",
         "前回の終了: まだ無い",
-        "今求めれば起動する",
-        "surface が最後に求めた: t=10.200 秒 (0.0 秒前)、起動した",
+        REQUEST_NOW_REPLACES,
+        "surface が最後に求めた: t=10.400 秒 (0.0 秒前)、保留した",
     )
 
 
@@ -469,8 +539,9 @@ CONTROLS_STATUS = dataclasses.replace(
 )
 CONTROLS_TEXT = sentences(
     "実行中のジョブ: 1 件 (最も新しい起動 t=6.000 秒 (4.0 秒前))",
+    "保留中の要求: なし",
     "前回の終了: まだ無い",
-    "今求めれば起動する",
+    REQUEST_NOW_HELD,
     "surface はまだ求めていない",
 )
 STRATEGY_STATUS = dataclasses.replace(
@@ -480,8 +551,9 @@ STRATEGY_STATUS = dataclasses.replace(
 )
 STRATEGY_TEXT = sentences(
     "実行中のジョブ: なし",
+    "保留中の要求: なし",
     "前回の終了: t=9.500 秒 (0.5 秒前)、強制終了した",
-    "今求めると捨てられる (あと 3.0 秒)",
+    f"{REQUEST_NOW_DISCARDED} (あと 3.0 秒)",
     "surface はまだ求めていない",
 )
 ADVISOR_STATUSES: dict[DocumentKind, DeepDocumentStatus | None] = {
