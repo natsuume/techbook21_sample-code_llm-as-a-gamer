@@ -10,6 +10,7 @@
     surface_requests.jsonl                  surface が Jev に送った要求の記録 (surface.surface_record)
     safety.jsonl                            安全の確かめの 1 回ごとの記録 (safety.safety_record)
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
+    tasks.jsonl                             短期タスクのキューの出来事の記録 (tasks.task_events)
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
@@ -63,6 +64,8 @@ SURFACE_LOG_FILE = "surface.jsonl"
 SURFACE_REQUESTS_LOG_FILE = "surface_requests.jsonl"
 SAFETY_LOG_FILE = "safety.jsonl"
 OPERATIONS_LOG_FILE = "operations.jsonl"
+# 短期タスクのキューの出来事の記録 (tasks.task_events)
+TASKS_LOG_FILE = "tasks.jsonl"
 NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
@@ -142,6 +145,11 @@ class RunPaths:
     def operations_log(self) -> Path:
         """root / OPERATIONS_LOG_FILE"""
         return self.root / OPERATIONS_LOG_FILE
+
+    @property
+    def tasks_log(self) -> Path:
+        """root / TASKS_LOG_FILE"""
+        return self.root / TASKS_LOG_FILE
 
     @property
     def notes_dir(self) -> Path:

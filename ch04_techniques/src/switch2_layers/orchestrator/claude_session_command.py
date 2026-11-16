@@ -85,6 +85,7 @@ from switch2_layers.run_directory import (
     SAFETY_LOG_FILE,
     SURFACE_LOG_FILE,
     SURFACE_REQUESTS_LOG_FILE,
+    TASKS_LOG_FILE,
     RunPaths,
 )
 
@@ -162,6 +163,7 @@ ROOT_ENTRY_ACCESS: dict[str, RootEntryAccess] = {
     SURFACE_REQUESTS_LOG_FILE: RootEntryAccess.HIDDEN_FILE,
     SAFETY_LOG_FILE: RootEntryAccess.HIDDEN_FILE,
     OPERATIONS_LOG_FILE: RootEntryAccess.HIDDEN_FILE,
+    TASKS_LOG_FILE: RootEntryAccess.HIDDEN_FILE,
     MIDDLE_DIR: RootEntryAccess.HIDDEN_DIRECTORY,
     DEEP_DIR: RootEntryAccess.HIDDEN_DIRECTORY,
     PROGRESS_DIR: RootEntryAccess.HIDDEN_DIRECTORY,

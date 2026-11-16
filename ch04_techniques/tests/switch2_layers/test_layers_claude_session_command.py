@@ -69,6 +69,7 @@ VERIFIED_DISALLOWED_RULES = [
     f"Read(/{R}/surface_requests.jsonl)",
     f"Read(/{R}/safety.jsonl)",
     f"Read(/{R}/operations.jsonl)",
+    f"Read(/{R}/tasks.jsonl)",
     f"Read(/{R}/middle/**)",
     f"Read(/{R}/deep/**)",
     f"Read(/{R}/progress/**)",
