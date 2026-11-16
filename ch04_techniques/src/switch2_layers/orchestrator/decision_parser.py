@@ -3,6 +3,8 @@
 コードブロック:
     行頭の ```json (後ろに空白だけを許す) の行から、次の行頭の ``` (後ろに空白だけを許す) の行までの間の文字列。
     本文に複数あれば、最後のものだけを読む。閉じていないブロックは数えない。改行は \\n か \\r\\n
+    最後の閉じたブロックより後に (閉じたブロックが無ければ本文のどこかに)、閉じていない ```json の開きの行があれば、
+    応答が途中で切れたとみなして誤りにする (前の閉じたブロックは読まない。古い案の指示を実行しないため)
 JSON の形 (どのキーも省ける。どの object も、ここに無いキーがあれば誤り):
     {
       "actions": [<操作>, ...],
@@ -18,8 +20,9 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
     条件:
         {"condition": <文字列>, "actions": [<操作>, ...], "repeat": "every" | "once"}
 誤りにするもの:
-    - コードブロックが無い、JSON として読めない (json.loads の NaN・Infinity・-Infinity と、1e999 のように float で
-      無限大になる数は読めるが、下の秒数・スティックの規則で誤りになる)、最上位が object でない
+    - コードブロックが無い、最後の閉じたブロックより後に閉じていない ```json の開きの行がある、JSON として読めない
+      (json.loads の NaN・Infinity・-Infinity と、1e999 のように float で無限大になる数は読めるが、下の秒数・スティックの
+      規則で誤りになる)、最上位が object でない
     - object に知らないキーがある。値の型が違う (actions・buttons・cases・delete が配列でない、sticks・args・set が
       object でない、名前や文が文字列でない、数が int か float でない (bool も誤り) など)。actions と macros は null も誤り
     - type が press・wait・procedure・macro のどれでもない (type が無いときも誤り)
@@ -58,7 +61,8 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         マクロの中の macro                    その操作の type のパス (`macros.set.next_message[0].type`)
         手順の引数                           args の下のパス (`actions[0].args.count`。args が object でなければ
                                              `actions[0].args`)
-    コードブロックが無い・JSON として読めない・最上位が object でないときは、パスを付けない文にする。
+    コードブロックが無い・最後のブロックが閉じていない・JSON として読めない・最上位が object でないときは、パスを
+    付けない文にする。
     説明の文は英語にする。
 """
 
@@ -85,7 +89,16 @@ REPEAT_MODES: tuple[str, ...] = ("every", "once")
 def find_last_json_block(text: str) -> str | None:
     """text の最後の ```json のコードブロックの中身 (開きと閉じの行を除いた行) を返す。無ければ None。
 
-    ブロックの見つけ方はモジュールの docstring の「コードブロック」のとおり。
+    ブロックの見つけ方はモジュールの docstring の「コードブロック」のとおり。最後の閉じたブロックより後の閉じていない
+    開きの行は、この関数では見ない (has_unclosed_json_block_at_end で確かめる)。
+    """
+    raise NotImplementedError
+
+
+def has_unclosed_json_block_at_end(text: str) -> bool:
+    """text の最後の閉じた ```json のブロックより後に (閉じたブロックが無ければ text のどこかに)、閉じていない
+    ```json の開きの行があれば True を返す。開きと閉じの行の見分け方は、モジュールの docstring の「コードブロック」の
+    とおり。
     """
     raise NotImplementedError
 

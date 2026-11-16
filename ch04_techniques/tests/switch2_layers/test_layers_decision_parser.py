@@ -216,6 +216,40 @@ def test_text_without_a_json_block_is_an_error(text):
 
 
 @pytest.mark.parametrize(
+    "tail",
+    [
+        '```json\n{"actions": [{"type": "press", "butt',
+        "```json\n",
+        "```json  \r\n{",
+    ],
+    ids=["cut_in_the_middle", "only_the_opening_line", "crlf_opening_line"],
+)
+def test_unclosed_json_block_after_the_last_closed_block_is_an_error(tail):
+    # 前の閉じたブロックは正しくても、途中で切れた応答として誤りにする (前の案を実行しない)
+    text = (
+        "最初の案:\n```json\n"
+        '{"actions": [{"type": "press", "buttons": ["A"]}]}\n'
+        "```\n直した案:\n" + tail
+    )
+    messages_of(parse_decision(text))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "以上。\n",
+        "本文の途中の ```json は開きの行ではない\n",
+        "```python\nprint('not json')\n",
+    ],
+    ids=["plain_text", "fence_not_at_line_start", "unclosed_other_language"],
+)
+def test_text_after_the_last_closed_block_without_a_json_opening_line_is_valid(tail):
+    text = '```json\n{"actions": [{"type": "press", "buttons": ["A"]}]}\n```\n' + tail
+    result = assert_decision(parse_decision(text))
+    assert result.actions == (PressAction(buttons=("A",)),)
+
+
+@pytest.mark.parametrize(
     "body",
     ["", "{", '{"actions": [}', "not json", "{'actions': []}"],
     ids=["empty", "open_brace", "broken_array", "words", "single_quotes"],

@@ -16,13 +16,13 @@ MonitorEndReason = Literal["completed", "failed"]
 
 @dataclass(frozen=True)
 class CaseHit:
-    """前回の取り出し以降に、監視の条件 1 つに当たった回数。
+    """前回の取り出し以降に、監視の条件 1 つに当たった回数 (監視の世代と条件の位置の組ごとに 1 つ)。
 
     monitor      監視の名前
     case_index   条件の位置 (0 始まり。Jev の選択肢 C<case_index>)
-    condition    条件の文
+    condition    条件の文 (当たった世代の監視の条件のもの)
     count        当たって操作を実行した回数 (1 以上)
-    actions      実行した操作の列 (条件に書かれたまま。procedure と macro は展開しない)
+    actions      実行した操作の列 (当たった世代の監視の条件に書かれたまま。procedure と macro は展開しない)
     """
 
     monitor: str
@@ -50,7 +50,8 @@ class MonitorEnd:
 class OrchestratorEvents:
     """主ループへの知らせ。
 
-    case_hits                前回の取り出し以降に当たった条件 (最初に当たった順。同じ監視の同じ条件は 1 つにまとめる)
+    case_hits                前回の取り出し以降に当たった条件 (最初に当たった順)。監視の世代と条件の位置の組ごとに
+                             1 つにまとめる (同じ名前の監視でも、作り直した監視の条件は別の CaseHit にする)
     monitor_ends             前回の取り出し以降に終わった監視 (終わった順)
     discarded_action_count   前回の取り出し以降に、新しい actions で捨てた主ループの操作の数 (procedure と macro を
                              展開した後の数。捨てたときに実行中だった操作を含む)

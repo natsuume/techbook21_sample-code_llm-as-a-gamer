@@ -43,6 +43,7 @@ from switch2_layers.orchestrator.decision_types import (
 )
 from switch2_layers.orchestrator.monitor_questions import MONITOR_INSTRUCTIONS
 from switch2_layers.orchestrator.orchestrator_controller import (
+    MONITOR_FRAME_SETTLE_S,
     OrchestratorController,
     OrchestratorParts,
     OrchestratorSettings,
@@ -78,6 +79,10 @@ WIDE_FRAME = CapturedFrame(
 )
 NEUTRAL_STICK = (128, 128)
 HAT_DIRECTIONS = {hat: directions for directions, hat in DPAD_HAT.items()}
+
+
+# NV12 として読めない形 (高さが 3 の倍数でなく、幅が奇数) のフレーム。監視の要求のスレッドで画像の作成が例外を出す
+BROKEN_FRAME = CapturedFrame(t=LATEST_FRAME_T, nv12=np.zeros((5, 7), dtype=np.uint8))
 
 
 def frame_at(t: float) -> CapturedFrame:
@@ -176,6 +181,25 @@ class RecordingSender:
                 releases.append(sent.t)
             pressed = now_pressed
         return releases
+
+    def tilt_starts(self, stick: str) -> list[float]:
+        """スティック stick (left・right) が中立から倒された状態に変わったレポートの時刻の並び。"""
+        return self._stick_changes(stick, to_tilted=True)
+
+    def neutral_times(self, stick: str) -> list[float]:
+        """スティック stick (left・right) が倒された状態から中立に戻ったレポートの時刻の並び。"""
+        return self._stick_changes(stick, to_tilted=False)
+
+    def _stick_changes(self, stick: str, to_tilted: bool) -> list[float]:
+        read = left_stick if stick == "left" else right_stick
+        times: list[float] = []
+        tilted_before = False
+        for sent in self.reports():
+            tilted_now = read(sent.report) != NEUTRAL_STICK
+            if tilted_now != tilted_before and tilted_now == to_tilted:
+                times.append(sent.t)
+            tilted_before = tilted_now
+        return times
 
 
 # --- Jev ---
@@ -672,6 +696,24 @@ def test_no_extra_wait_when_the_wait_is_longer_than_the_release_gap(tmp_path, cl
     h.wait_until(lambda: len(h.sender.press_starts("A")) == 2, "A is pressed again")
 
 
+def test_tilting_the_same_stick_again_waits_the_release_gap(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    stick_only = PressAction(sticks={"left": (0.0, 1.0)})
+    h.controller.apply(act(stick_only, WaitAction(seconds=0.0), stick_only))
+    h.wait_until(lambda: h.sender.tilt_starts("left") == [0.0], "the stick is tilted")
+    h.set_time(TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: h.sender.neutral_times("left"), "the stick is back")
+    returned_at = h.sender.neutral_times("left")[0]
+    h.set_time(returned_at + TAP_RELEASE_GAP_S - 0.01)
+    h.wait_rounds()
+    assert len(h.sender.tilt_starts("left")) == 1
+    h.set_time(returned_at + TAP_RELEASE_GAP_S + 0.001)
+    h.wait_until(
+        lambda: len(h.sender.tilt_starts("left")) == 2, "the stick is tilted again"
+    )
+    assert left_stick(h.sender.last_report()) == tilted(0.0, 1.0)
+
+
 def test_main_loop_operations_are_recorded_once_with_the_orchestrator_source(
     tmp_path, cleanups
 ):
@@ -1045,7 +1087,11 @@ def test_no_request_while_monitor_actions_run(tmp_path, cleanups):
 # --- 監視: 問いに使うフレームの新しさ ---
 
 
-def test_no_request_until_a_frame_newer_than_the_monitor_actions_arrives(
+def test_monitor_frame_settle_time_is_0_3_seconds():
+    assert MONITOR_FRAME_SETTLE_S == 0.3
+
+
+def test_no_request_until_a_frame_after_the_settle_time_of_monitor_actions(
     tmp_path, cleanups
 ):
     h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
@@ -1059,17 +1105,17 @@ def test_no_request_until_a_frame_newer_than_the_monitor_actions_arrives(
     assert h.sender.release_times("B") == [10.2]
     h.wait_rounds()
     assert h.jev.request_count() == 1
-    # 離した時刻より前と、ちょうど同じ時刻のフレームでは問わない
-    for frame_t in (10.1, 10.2):
+    # 離した時刻より前のフレームと、離してから MONITOR_FRAME_SETTLE_S の内側のフレームでは問わない
+    for frame_t in (10.1, 10.2 + 0.05, 10.2 + MONITOR_FRAME_SETTLE_S - 0.05):
         h.frames.frame = frame_at(frame_t)
         h.wait_rounds()
         assert h.jev.request_count() == 1
-    h.frames.frame = frame_at(10.25)
+    h.frames.frame = frame_at(10.2 + MONITOR_FRAME_SETTLE_S + 0.05)
     request = h.wait_request(2)
     assert len(request.images) == 1
 
 
-def test_no_request_until_a_frame_newer_than_the_main_actions_arrives(
+def test_no_request_until_a_frame_after_the_settle_time_of_main_actions(
     tmp_path, cleanups
 ):
     h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
@@ -1085,11 +1131,14 @@ def test_no_request_until_a_frame_newer_than_the_main_actions_arrives(
     h.wait_neutral()
     h.wait_rounds()
     assert h.jev.request_count() == 0
-    h.frames.frame = frame_at(10.3)
+    h.frames.frame = frame_at(10.2 + MONITOR_FRAME_SETTLE_S - 0.05)
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(10.2 + MONITOR_FRAME_SETTLE_S + 0.05)
     h.wait_request(1)
 
 
-def test_frame_must_be_newer_than_a_cancel_too(tmp_path, cleanups):
+def test_frame_must_be_after_the_settle_time_of_a_cancel_too(tmp_path, cleanups):
     h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
     h.set_time(10.0)
     h.controller.apply(
@@ -1107,7 +1156,10 @@ def test_frame_must_be_newer_than_a_cancel_too(tmp_path, cleanups):
     h.wait_rounds()
     assert h.controller.take_events().running is False
     assert h.jev.request_count() == 0
-    h.frames.frame = frame_at(10.6)
+    h.frames.frame = frame_at(10.5 + MONITOR_FRAME_SETTLE_S - 0.05)
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(10.5 + MONITOR_FRAME_SETTLE_S + 0.05)
     h.wait_request(1)
 
 
@@ -1194,6 +1246,26 @@ def test_case_hits_are_counted_per_case_in_the_order_of_the_first_hit(
     assert h.controller.take_events().case_hits == ()
 
 
+def test_case_hits_of_a_recreated_monitor_with_the_same_name_are_separate(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(monitor(case("old condition", tap("A"))))
+    h.jev.respond(hit(h.wait_request(1), 0))
+    h.wait_pressed({"A"})
+    h.set_time(0.3)
+    old_request = h.wait_request(2)
+    # 取り出す前に、同じ名前で条件の違う監視に作り直す
+    h.controller.apply(monitor(case("new condition", tap("B"))))
+    h.jev.respond(nothing(old_request))
+    h.jev.respond(hit(h.wait_request(3), 0))
+    h.wait_pressed({"B"})
+    assert h.controller.take_events().case_hits == (
+        CaseHit("dialog", 0, "old condition", 1, (tap("A"),)),
+        CaseHit("dialog", 0, "new condition", 1, (tap("B"),)),
+    )
+
+
 def test_once_case_completes_the_monitor_after_its_actions(tmp_path, cleanups):
     h = make_harness(tmp_path, cleanups)
     h.controller.apply(
@@ -1220,6 +1292,34 @@ def test_once_case_with_empty_actions_completes_at_once(tmp_path, cleanups):
     h.controller.apply(monitor(case("c0", repeat="once")))
     h.jev.respond(hit(h.wait_request(1), 0))
     h.wait_until(lambda: h.controller.take_events().monitor is None, "the monitor ends")
+    h.wait_rounds()
+    assert h.jev.request_count() == 1
+    assert h.sender.reports() == []
+
+
+def test_once_case_whose_macro_expands_to_nothing_completes_at_once(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(
+        Decision(
+            macros_set={"noop": ()},
+            monitor=MonitorCreate(
+                "dialog", (case("c0", MacroAction(name="noop"), repeat="once"),)
+            ),
+        )
+    )
+    h.jev.respond(hit(h.wait_request(1), 0))
+    collected: list[OrchestratorEvents] = []
+
+    def monitor_ended() -> bool:
+        collected.append(h.controller.take_events())
+        return collected[-1].monitor is None
+
+    h.wait_until(monitor_ended, "the monitor ends")
+    ends = [end for events in collected for end in events.monitor_ends]
+    assert [(end.name, end.reason) for end in ends] == [("dialog", "completed")]
+    assert [case_hit for events in collected for case_hit in events.case_hits] == [
+        CaseHit("dialog", 0, "c0", 1, (MacroAction(name="noop"),))
+    ]
     h.wait_rounds()
     assert h.jev.request_count() == 1
     assert h.sender.reports() == []
@@ -1475,6 +1575,27 @@ def test_other_failures_also_count(tmp_path, cleanups, make_result):
     [row] = h.monitor_rows()
     assert row["probabilities"] is None
     assert row["error"]
+
+
+def test_exception_in_the_request_thread_counts_as_a_failure(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups, max_errors=3, frame=BROKEN_FRAME)
+    h.controller.apply(monitor(case("c0", tap("A"))))
+    # 画像の作成の例外を失敗にし、返っていない要求の状態を消して、次の要求を送り直す
+    h.wait_until(
+        lambda: len(h.monitor_rows()) == 3, "three failed requests are recorded"
+    )
+    h.wait_rounds()
+    rows = h.monitor_rows()
+    assert len(rows) == 3
+    assert all(row["probabilities"] is None and row["error"] for row in rows)
+    assert all(row["hit"] is None for row in rows)
+    assert h.jev.request_count() == 0
+    events = h.controller.take_events()
+    assert events.monitor is None
+    [end] = events.monitor_ends
+    assert (end.name, end.reason) == ("dialog", "failed")
+    assert "3" in end.detail
+    h.check_run()
 
 
 def test_new_monitor_starts_counting_errors_from_zero(tmp_path, cleanups):

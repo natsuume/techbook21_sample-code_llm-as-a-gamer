@@ -26,7 +26,10 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
        set_started の前は何も送らない (受け付けた列は持っておき、set_started の後の回りで始める)
     2. 返った Jev の応答を処理する (下の「監視」)
     3. 実行中の列を、clock の今の時刻まで進める (ActionExecutor.advance)
-    4. 監視の要求を出せるなら、別のスレッド (daemon) で monitor_loop.ask_monitor を 1 回呼ぶ
+    4. 監視の要求を出せるなら、別のスレッド (daemon) で monitor_loop.ask_monitor を 1 回呼ぶ。そのスレッドの中で
+       例外 (Exception。画像の作成の失敗など、jev_client.JevError 以外を含む) が出たら、error を
+       error_text.describe_exception(例外) にした失敗の結果 (MonitorRequestResult) に変えてループに返す (スレッドの外に
+       例外を出さない)。結果を返したら、例外のときも含めて必ず「返っていない要求」の状態を消す
     5. parts.wait(wake, timeout) を 1 回呼んで待つ。timeout は settings.poll_interval_s 以下。wake は apply・
        set_started・Jev の応答が返ったときに立て、待ち終えたら下ろす
     stop が立ったら、PadOutput.neutral で中立に戻して戻る。返っていない Jev の要求は待たない (後で返った応答は、
@@ -36,25 +39,30 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
         - set_started の後で、監視があり、主ループの操作の残りが無く、監視の操作の列を実行していない
         - 返っていない要求が無い (同時に送る要求は 1 つまで。監視を置き換えた後も、前の監視の要求が返るまで次を送らない)
         - latest_frame() がフレームを返し、そのフレームの時刻 (CapturedFrame.t) が、最後に操作を離した時刻
-          (ActionExecutor.last_release_t。主ループの操作と監視の操作の両方) より後である。まだ何も離していなければ、
-          時刻は問わない。後のフレームが無ければ、届くまで要求を送らない (操作がまだ画面に出ていないフレームで問い、
-          every の条件を二重に実行しないため)
+          (ActionExecutor.last_release_t。主ループの操作と監視の操作の両方) に MONITOR_FRAME_SETTLE_S を足した時刻
+          より後である。まだ何も離していなければ、時刻は問わない。後のフレームが無ければ、届くまで要求を送らない
+          (キャプチャーとゲームの反応の遅れの分、操作の前の画面が映ったフレームで問い、every の条件を二重に実行
+          しないため)
     前の応答を処理した回りのうちに、出せるなら次の要求を送る。要求には、その時点の監視の世代を付ける。
     応答の処理:
         - orchestrator/monitor.jsonl に 1 行書く (monitor_record。hit は下で操作を始めた条件)
         - 要求を送った監視の世代 (MonitorRequestResult.generation) が今の監視の世代と違えば (止めたか置き換えた。
           同じ内容の監視を作り直した場合を含む)、ほかに何もしない (当たりにも失敗の回数にも入れない)
-        - 失敗 (MonitorRequestResult.error がある): ActiveMonitor.record_failure。MonitorEnd が返ったら監視を止め、
-          知らせに入れる (実行全体は止めない)
+        - 失敗 (MonitorRequestResult.error がある。要求のスレッドの例外を変えた結果を含む): ActiveMonitor.record_failure。
+          MonitorEnd が返ったら監視を止め、知らせに入れる (実行全体は止めない)
         - 答えがあった: ActiveMonitor.record_answer (失敗の回数を 0 に戻す)。要求を送った後に、空でない actions を
           apply で受け付けていれば、ほかに何もしない (操作の前の画面への答えで操作しない)。当たった条件があれば、
-          その条件の CaseHit の回数を 1 足し、条件の操作の列を監視の列 (source が monitor) として始める
+          その条件の CaseHit の回数を 1 足し、条件の操作の列 (ActiveMonitor.operations_of。展開した後の列) を監視の列
+          (source が monitor) として始める。展開した後の列が空なら (条件の actions が空のときと、展開すると空になる
+          マクロのとき)、列を始めずに、その場で次の「実行し終えた」の扱いをする
         - 監視の列を最後まで実行し終えたら、ActiveMonitor.case_finished。MonitorEnd が返ったら (once の条件) 監視を
           止め、知らせに入れる。主ループの列か監視の停止・置き換えで途中で捨てた列は、実行し終えたことにしない
 take_events:
     前回の呼び出し以降の case_hits・monitor_ends・discarded_action_count・blocked_buttons (主ループと監視の両方の操作で
     外したボタン) を返して空にし、running・remaining_action_count・macros・monitor は呼んだ時点の値を返す
     (orchestrator_events.OrchestratorEvents の欄の説明)。
+    case_hits は、監視の世代と条件の位置の組ごとに 1 つにまとめる。同じ名前の監視でも、世代が違えば別の CaseHit に
+    する。CaseHit の condition と actions は、当たった世代の監視の条件のもの。
 操作の記録:
     PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor を渡す (action_executor の
     「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では OperationLog.write) が 1 回の送信に
@@ -82,6 +90,9 @@ DEFAULT_MONITOR_THRESHOLD = 0.5
 DEFAULT_MAX_MONITOR_ERRORS = 5
 # run のループが 1 回の回りで待つ秒数の上限 (操作の秒数の期限と、apply・stop を確かめ直す間隔)
 POLL_INTERVAL_S = 0.01
+# 操作を離してから、監視の要求に使うフレームを撮るまでに置く最小の間 (秒)。キャプチャーの遅れとゲームが操作に
+# 反応して画面を変えるまでの遅れを見込む値で、実機では測っていない
+MONITOR_FRAME_SETTLE_S = 0.3
 
 
 def wait_for_wake(wake: threading.Event, timeout: float) -> None:

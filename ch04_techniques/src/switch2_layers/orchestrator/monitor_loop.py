@@ -78,9 +78,10 @@ def ask_monitor(
        [monitor_questions.build_monitor_question(monitor)], [JevImage(reference, jpeg)]) を呼び、戻ったら (例外でも)
        t_received = clock.now()
     3. 答えの choices[MONITOR_QUESTION_NAME] から、選択肢の順の確率を取り出す
-    ask の例外 (Exception。jev_client.JevError を含む) と、答えに問いか選択肢の確率が無いことは失敗とし、例外を出さずに
-    probabilities と usage を None、error を error_text.describe_exception(例外) にした結果を返す。
-    画像の作成の例外は、そのまま出す。
+    1〜3 のどこで出た例外 (Exception。画像の作成と参照文字列の作成の失敗、jev_client.JevError、それ以外の ask の例外を
+    含む) も、答えに問いか選択肢の確率が無いことも失敗とし、例外を出さずに、probabilities と usage を None、error を
+    error_text.describe_exception(例外) にした結果を返す。ask を呼ぶ前に失敗したときは、t_sent と t_received を、
+    失敗したときの clock.now() にする。
     """
     raise NotImplementedError
 
@@ -137,7 +138,11 @@ class ActiveMonitor:
         raise NotImplementedError
 
     def operations_of(self, case_index: int) -> tuple[PrimitiveAction, ...]:
-        """条件 case_index の展開した操作の列を返す。"""
+        """条件 case_index の展開した操作の列を返す。
+
+        空のこともある (条件の actions が空のときと、展開すると空になるマクロのとき)。空なら、呼び出し側は列を始めずに、
+        その場で case_finished を呼ぶ。
+        """
         raise NotImplementedError
 
     def case_finished(self, case_index: int) -> MonitorEnd | None:
