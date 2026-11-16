@@ -1,10 +1,11 @@
 """surface 層の型: SurfaceDecider の入力 (SurfaceInput) と出力 (SurfaceOutput)、その部品と Protocol。"""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction
 from switch2_layers.surface.jev_client import JevAnswers
@@ -103,6 +104,11 @@ class SurfaceInput:
     timeline               系列情報 (middle/state.json の timeline)。ファイルが無ければ空文字列
     timeline_generated_t   系列情報を作った時刻 (middle/state.json の generated_t)。ファイルが無ければ None
     recent_actions         直近に送った操作 (古い順。最大 surface_loop.RECENT_ACTIONS_COUNT 件)
+    advisor_statuses       advisor 判定で問う文書の種類 (surface_questions.ADVISOR_KINDS) → その種類の、現在の場面の
+                           文書の deep の呼び出しの状況 (surface のループが要求ごとに DeepStatusReader で読む。
+                           ADVISOR_KINDS の順)。状況を読めなかった種類は None。Jev を呼ぶ実装は state の advisor に文にして
+                           入れ (jev_surface.advisor_to_state。ここに無い種類は None と同じに扱う)、フェイクは使わない。
+                           既定は空 (どの種類も状況が無い)
     request_sink           送る要求の書き込み先 (surface のループが要求ごとに渡す)。Jev を呼ぶ実装は、Jev に要求を
                            送る直前に 1 回だけ SurfaceRequest を渡して呼ぶ。要求を作る前に失敗したら呼ばない。
                            呼んだ書き込み先が例外を出したら、要求を送らずにその例外をそのまま出す。
@@ -115,6 +121,9 @@ class SurfaceInput:
     timeline: str
     timeline_generated_t: float | None
     recent_actions: tuple[RecentAction, ...]
+    advisor_statuses: Mapping[DocumentKind, DeepDocumentStatus | None] = field(
+        default_factory=dict
+    )
     request_sink: Callable[[SurfaceRequest], None] | None = None
 
 
@@ -177,6 +186,20 @@ class SurfaceOutput:
     boxes: tuple[Box, ...] = ()
     scene_changed: bool = False
     exchange: SurfaceExchange | None = None
+
+
+class DeepStatusReader(Protocol):
+    """deep の文書ごとの呼び出しの状況を読むもの。run では deep.deep_scheduler.DeepScheduler を使う。"""
+
+    def document_status(
+        self, kind: DocumentKind, scene_id: str | None
+    ) -> DeepDocumentStatus:
+        """種類 kind の、場面 scene_id のときに対象になる文書 (notes.note_paths.document_key と同じ) の状況を返す。
+
+        読み取りだけで、deep のジョブを起動せず、記録も書かない。読めなければ例外を出す (surface のループが、その種類の
+        状況を None にする)。
+        """
+        ...
 
 
 class SurfaceDecider(Protocol):

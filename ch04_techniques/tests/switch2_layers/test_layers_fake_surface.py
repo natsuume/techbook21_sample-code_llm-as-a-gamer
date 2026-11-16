@@ -1,5 +1,8 @@
 import dataclasses
+from collections.abc import Iterator, Mapping
 
+from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
+from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import NEUTRAL_ACTION
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.surface_types import (
@@ -37,6 +40,26 @@ def test_fake_surface_returns_neutral_action_without_deep_requests():
     assert output.info_labels == ()
     assert output.boxes == ()
     assert output.scene_changed is False
+
+
+class UntouchableStatuses(Mapping[DocumentKind, DeepDocumentStatus | None]):
+    """advisor_statuses の偽物。読まれたらテストを失敗させる。"""
+
+    def __getitem__(self, kind: DocumentKind) -> DeepDocumentStatus | None:
+        raise AssertionError("the fake surface read advisor_statuses")
+
+    def __iter__(self) -> Iterator[DocumentKind]:
+        raise AssertionError("the fake surface read advisor_statuses")
+
+    def __len__(self) -> int:
+        raise AssertionError("the fake surface read advisor_statuses")
+
+
+def test_fake_surface_does_not_use_advisor_statuses():
+    surface = dataclasses.replace(
+        surface_input(), advisor_statuses=UntouchableStatuses()
+    )
+    assert FakeSurfaceDecider().decide(surface) == SurfaceOutput(action=NEUTRAL_ACTION)
 
 
 def test_fake_surface_records_no_request():

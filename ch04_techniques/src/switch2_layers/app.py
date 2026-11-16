@@ -220,8 +220,8 @@ class LayersApp:
            on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            timeout_s は deep_timeout_s) を作って start する (タイムアウトと自動の呼び出しの判定のスレッド)
-        7. SurfaceLoop (max_errors = max_surface_errors、boxes_at = parts.surface_boxes_at、
-           plan_boxes = parts.surface_plan_boxes) と
+        7. SurfaceLoop (deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
+           boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
            MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
            on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
@@ -319,6 +319,7 @@ class LayersApp:
                 frame_store=frame_store,
                 pad_output=pad_output,
                 deep_requests=deep_scheduler,
+                deep_status=deep_scheduler,
                 run_log=run_log,
                 clock=clock,
                 bridge_state=parts.bridge_state,
