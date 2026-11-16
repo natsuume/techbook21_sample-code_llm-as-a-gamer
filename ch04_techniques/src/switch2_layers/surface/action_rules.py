@@ -130,6 +130,18 @@ def remove_opposite_dpad(
     return kept
 
 
+def keep_single_dpad_direction(
+    adopted: Mapping[str, tuple[str, float]],
+) -> dict[str, tuple[str, float]]:
+    """adopt_buttons の結果から、十字キーの方向を 1 つに絞った新しい辞書を返す。adopted は変えない。
+
+    十字キーの 4 方向 (UP・DOWN・LEFT・RIGHT) のうち adopted にある方向が 2 つ以上あれば、押す側の合計が最も高い
+    1 方向だけを残す。最も高い合計の方向が 2 つ以上 (同じ値かは probabilities_equal で判定する) なら、十字キーの方向を
+    すべて外す。十字キー以外のボタンは変えない。
+    """
+    raise NotImplementedError
+
+
 def choose_direction(question: SurfaceQuestion, values: Mapping[str, float]) -> str:
     """スティックの向きの問いの答え values から、確率が最も高い選択肢の名前を返す (操作の決め方の 3)。
 

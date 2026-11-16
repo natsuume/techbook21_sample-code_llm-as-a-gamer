@@ -33,6 +33,13 @@ FRAMES_STATE_KEY = "frames"
 NONE_CHOICE = "none"
 HOLD_CHOICE = "hold"
 TAP_CHOICE = "tap"
+HOLD_SHORT_CHOICE = "hold_short"
+HOLD_LONG_CHOICE = "hold_long"
+# ボタンの問いの押す側の選択肢 (押す時間の短い順。確率の最大が同率なら、先にあるものを選ぶ)
+PRESS_CHOICES = (TAP_CHOICE, HOLD_SHORT_CHOICE, HOLD_LONG_CHOICE)
+# hold_short と hold_long で押し続ける秒数
+HOLD_SHORT_SECONDS = 0.3
+HOLD_LONG_SECONDS = 1.0
 # スティック名と軸。並びは問いの順でもある
 STICKS = ("LS", "RS")
 STICK_AXES = ("x", "y")

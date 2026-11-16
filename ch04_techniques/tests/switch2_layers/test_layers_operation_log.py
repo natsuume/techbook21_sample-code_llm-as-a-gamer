@@ -24,13 +24,17 @@ def read_rows(path: Path) -> list[dict]:
 
 def test_operation_row():
     action = PadAction(
-        held=frozenset({"A"}), taps=frozenset({"B"}), left_stick=(0.5, 0.0)
+        held=frozenset({"A", "X"}),
+        taps=frozenset({"B"}),
+        left_stick=(0.5, 0.0),
+        hold_seconds={"A": 0.3},
     )
     row = operation_row(2.5, OperationEvent(source="apply", action=action, ok=True))
     assert row == {
         "t": 2.5,
         "source": "apply",
-        "held": ["A"],
+        "held": ["A", "X"],
+        "hold_seconds": {"A": 0.3},
         "taps": ["B"],
         "sticks": {"LS": [0.5, 0.0], "RS": [0.0, 0.0]},
         "ok": True,
@@ -55,4 +59,14 @@ def test_operation_log_appends_rows(tmp_path):
     assert rows[0]["ok"] is False
     assert rows[0]["error"] == "failed"
     assert rows[1]["held"] == []
-    assert list(rows[0]) == ["t", "source", "held", "taps", "sticks", "ok", "error"]
+    assert rows[1]["hold_seconds"] == {}
+    assert list(rows[0]) == [
+        "t",
+        "source",
+        "held",
+        "hold_seconds",
+        "taps",
+        "sticks",
+        "ok",
+        "error",
+    ]

@@ -33,7 +33,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
 from typing import Protocol
 
@@ -59,6 +59,8 @@ TAP_RELEASE_GAP_S = 0.1
 TIMER_INTERVAL_S = 0.01
 # 十字キーの方向 → 反対の方向
 OPPOSITE_DIRECTION = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
+# 押し続けの秒数の上限 (秒)。これを超えた秒数は、この値として扱う
+MAX_HOLD_SECONDS = 60.0
 
 
 class ReportSender(Protocol):
@@ -81,6 +83,20 @@ def remove_conflicting_directions(buttons: frozenset[str]) -> frozenset[str]:
         if direction in buttons and opposite in buttons
     }
     return buttons - removed
+
+
+def normalize_hold_seconds(
+    held: Collection[str], hold_seconds: Mapping[str, float]
+) -> tuple[frozenset[str], dict[str, float]]:
+    """押し続けるボタン held と秒数 hold_seconds を、送れる形にして (held, 秒数) を返す。引数は変えない。
+
+    - 秒数が有限の正の値でない (0 以下・nan・無限大) ボタンは、held から外す (例外にしない)
+    - MAX_HOLD_SECONDS を超えた秒数は MAX_HOLD_SECONDS にする
+    - held に無いボタンの秒数は捨てる
+    秒数の無い held のボタンは held に残す (次の apply まで押し続ける)。戻り値の秒数は、残した held のボタンのうち
+    秒数のあるものだけを持つ。
+    """
+    raise NotImplementedError
 
 
 def clamp_stick(value: tuple[float, float]) -> tuple[float, float]:
@@ -288,6 +304,28 @@ class PadOutput:
             for button in due:
                 if button not in self._held.buttons:
                     self._last_released[button] = released_at
+
+    def start_due_holds(self) -> None:
+        """始める時刻を過ぎた (始める時刻 <= clock())、間をあけて待っている押し続けを始める。
+
+        待っている押し続けは、期限で離したボタンを、離してから TAP_RELEASE_GAP_S 秒たつ前に apply が押し続けに
+        指定したもの。始める時刻は「期限で離した時刻 + TAP_RELEASE_GAP_S」。
+        始めたボタンがあるときだけ、held と tapping を合わせたレポートを送る。秒数のあるボタンの期限 (離す時刻) は、
+        送信が戻った後の clock() + 秒数にし、秒数の無いボタンは次の apply まで押し続ける。送信の例外 (Exception) は
+        外に出さず、説明を last_error に記録する (このときの期限は、送信の前の clock() から決める)。on_operation は
+        呼ばない。タイマースレッドから呼ぶ。テストから直接呼べるよう公開している。
+        """
+        raise NotImplementedError
+
+    def release_due_holds(self) -> None:
+        """期限 (離す時刻) を過ぎた (期限 <= clock()) 押し続けを held から外し、外したものがあるときだけレポートを送る。
+
+        ほかのボタンとスティックは変えない (スティックは次の apply まで倒したまま)。外したボタンの最後に離した時刻を、
+        送信が戻った後の clock() にする (送信に失敗したら送信の前の clock())。期限で離したボタンの短押しと押し続けは、
+        離してから TAP_RELEASE_GAP_S 秒たつまで始めない。送信の例外 (Exception) は外に出さず、説明を last_error に
+        記録する。on_operation は呼ばない。タイマースレッドから呼ぶ。テストから直接呼べるよう公開している。
+        """
+        raise NotImplementedError
 
     def neutral(self) -> None:
         """held・tapping・pending_taps を空にし、中立のレポート (controller_state.NEUTRAL_REPORT) を送る。

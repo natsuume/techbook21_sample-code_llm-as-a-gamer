@@ -232,19 +232,23 @@ def test_timeline_to_state():
 
 def test_recent_actions_to_state():
     actions = (
-        RecentAction(9.2, PadAction(held=frozenset({"A"}))),
+        RecentAction(
+            9.2, PadAction(held=frozenset({"A", "B"}), hold_seconds={"A": 0.3})
+        ),
         RecentAction(9.8, PadAction(taps=frozenset({"B"}), left_stick=(0.5, 0.0))),
     )
     assert recent_actions_to_state(actions, 10.0) == [
         {
             "time": "t=9.200 秒 (0.8 秒前)",
-            "held": ["A"],
+            "held": ["A", "B"],
+            "hold_seconds": {"A": 0.3},
             "taps": [],
             "sticks": {"LS": [0.0, 0.0], "RS": [0.0, 0.0]},
         },
         {
             "time": "t=9.800 秒 (0.2 秒前)",
             "held": [],
+            "hold_seconds": {},
             "taps": ["B"],
             "sticks": {"LS": [0.5, 0.0], "RS": [0.0, 0.0]},
         },
@@ -424,7 +428,7 @@ def test_request_json_through_mock_transport(tmp_path):
 def test_output_follows_answers(tmp_path):
     asker = FakeAsker(
         {
-            "button_A": {"none": 0.1, "hold": 0.8, "tap": 0.1},
+            "button_A": {"none": 0.1, "tap": 0.1, "hold_short": 0.0, "hold_long": 0.8},
             "stick_LS_x": {"none": 0.0, "left": 0.0, "right": 1.0},
             "advisor_tips": 0.6,
             "advisor_advice": 0.5,
@@ -434,7 +438,9 @@ def test_output_follows_answers(tmp_path):
     )
     decider, _ = make_decider(tmp_path, asker)
     output = decider.decide(surface_input())
-    assert output.action == PadAction(held=frozenset({"A"}), left_stick=(0.25, 0.0))
+    assert output.action == PadAction(
+        held=frozenset({"A"}), hold_seconds={"A": 1.0}, left_stick=(0.25, 0.0)
+    )
     assert output.deep_kinds == frozenset({DocumentKind.TIPS})
     assert output.info_labels == (
         InfoLabel("controls", 0.0),
