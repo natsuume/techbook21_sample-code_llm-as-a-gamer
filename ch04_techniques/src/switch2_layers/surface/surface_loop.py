@@ -33,6 +33,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from switch2_layers.buttons import filter_action
+from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import (
     DOCUMENT_KINDS,
     DeepRequestSink,
@@ -66,6 +67,7 @@ from switch2_layers.surface.middle_state_reader import (
     SurfaceContext,
     read_surface_context,
 )
+from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_record import (
     SentFrame,
     SurfaceRecord,
@@ -316,6 +318,7 @@ class SurfaceLoop:
         frames, sent_frames = self._prepare_frames(
             selected, self._box_plan(documents.scene_id)
         )
+        advisor_statuses = self._read_advisor_statuses(context.scene_id)
         writer = SurfaceRequestWriter(parts.paths.surface_requests_log, parts.clock)
         surface_input = SurfaceInput(
             t=now_t,
@@ -324,6 +327,7 @@ class SurfaceLoop:
             timeline=context.timeline,
             timeline_generated_t=context.generated_t,
             recent_actions=tuple(self._recent_actions),
+            advisor_statuses=advisor_statuses,
             request_sink=writer,
         )
         t_sent = parts.clock.now()
@@ -383,6 +387,24 @@ class SurfaceLoop:
         except Exception:
             logger.warning("planning the surface boxes failed", exc_info=True)
             return BoxDrawingPlan(target_numbers={})
+
+    def _read_advisor_statuses(
+        self, scene_id: str | None
+    ) -> dict[DocumentKind, DeepDocumentStatus | None]:
+        """advisor 判定で問う種類ごとの deep の呼び出しの状況を、ADVISOR_KINDS の順に読む (step の 5)。
+
+        document_status が例外を出した種類は None にし、警告を書いて残りの種類を続ける。
+        """
+        statuses: dict[DocumentKind, DeepDocumentStatus | None] = {}
+        for kind in ADVISOR_KINDS:
+            try:
+                statuses[kind] = self.parts.deep_status.document_status(kind, scene_id)
+            except Exception:
+                logger.warning(
+                    "reading the deep status of %s failed", kind.value, exc_info=True
+                )
+                statuses[kind] = None
+        return statuses
 
     def _boxes_at(self, t: float) -> Sequence[Box]:
         """時刻 t のフレームの box を boxes_at で求める (step の 4)。

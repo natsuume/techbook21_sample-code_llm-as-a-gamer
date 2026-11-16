@@ -184,6 +184,8 @@ SURFACE_INSTRUCTIONS = (
     "`documents` は、今の場面の短期タスクリスト (tasks)・攻略情報 (tips)・操作説明 (controls)・"
     "詰まったときの助言 (advice) です。`timeline` は上位の層がまとめた系列情報とその作成時刻、"
     "`recent_actions` は直近に送った操作 (古い順) です。\n"
+    "`advisor` は、deep (文書をまとめる上位のモデル) の文書の種類ごとの呼び出しの状況 (実行中のジョブ、前回の終了、"
+    "今求めると捨てられるか、surface が最後に求めた結果) です。\n"
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
     "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
@@ -343,7 +345,10 @@ def build_advisor_questions() -> list[SurfaceQuestion]:
     return [
         SurfaceQuestion(
             name=f"advisor_{kind.value}",
-            instructions=ADVISOR_QUESTION_TEXTS[kind],
+            instructions=(
+                ADVISOR_QUESTION_TEXTS[kind]
+                + ADVISOR_STATUS_RULE_TEXT.format(kind=kind.value)
+            ),
             kind=QuestionKind.ADVISOR,
             target=kind.value,
             question_type=QuestionType.NOUL,

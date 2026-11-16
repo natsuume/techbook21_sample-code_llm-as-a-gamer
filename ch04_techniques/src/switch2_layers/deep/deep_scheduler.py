@@ -267,9 +267,11 @@ class DeepScheduler:
         self._created_t = parts.clock.now()
         # 実行中のジョブ (起動した順)
         self._running: list[_RunningJob] = []
-        # 文書ごとの前回の起動の t と、前回の終了の t (request の失敗を含む)
+        # 文書ごとの前回の起動の t と、前回の終了 (request の失敗を含む)
         self._last_start_t: dict[DocumentKey, float] = {}
-        self._last_end_t: dict[DocumentKey, float] = {}
+        self._last_end: dict[DocumentKey, DeepJobEnd] = {}
+        # 文書ごとの、きっかけが surface の要求の最後の扱い
+        self._last_surface_request: dict[DocumentKey, DeepRequestOutcome] = {}
         # 種類ごとに、前回の check_auto で見た対象の文書と、それが対象になった t
         self._auto_targets: dict[DocumentKind, tuple[DocumentKey, float]] = {}
         self._closed = False
@@ -317,6 +319,9 @@ class DeepScheduler:
             now = parts.clock.now()
             if self._closed:
                 self._write_skipped_locked(key, trigger, SKIP_CLOSED)
+                self._note_surface_request_locked(
+                    key, trigger, DeepRequestOutcome(now, False, SKIP_CLOSED)
+                )
                 return DeepRequestResult(started=False, reason=SKIP_CLOSED)
             last_start = self._last_start_t.get(key)
             if (
@@ -328,6 +333,11 @@ class DeepScheduler:
                     trigger,
                     SKIP_MIN_START_INTERVAL,
                     since_last_start_s=round_to_milliseconds(now - last_start),
+                )
+                self._note_surface_request_locked(
+                    key,
+                    trigger,
+                    DeepRequestOutcome(now, False, SKIP_MIN_START_INTERVAL),
                 )
                 return DeepRequestResult(started=False, reason=SKIP_MIN_START_INTERVAL)
             job = DeepJob(
@@ -342,12 +352,15 @@ class DeepScheduler:
                 job_dir = parts.prepare_job_directory(parts.paths, job)
             except Exception:
                 # 失敗を前回の終了と同じに扱い、自動の呼び出しが同じ失敗をすぐ繰り返さないようにする
-                self._last_end_t[key] = now
+                self._last_end[key] = DeepJobEnd(now, DeepJobStatus.ERROR)
                 raise
             running = _RunningJob(job, job_dir, parts.paths.relative(job_dir), now)
             self._last_start_t[key] = now
             self._running.append(running)
             parts.run_log.write(EVENT_DEEP_START, **running.fields())
+            self._note_surface_request_locked(
+                key, trigger, DeepRequestOutcome(now, True)
+            )
         try:
             parts.start_job_thread(partial(self._run_job, running))
         except Exception as error:
@@ -459,7 +472,26 @@ class DeepScheduler:
         ジョブを起動せず、run.jsonl にも書かない。close の後も読める。
         controls・tips で scene_id が場面 ID の形でなければ ValueError (document_key と同じ)。
         """
-        raise NotImplementedError
+        key = document_key(kind, scene_id)
+        with self._lock:
+            now = self.parts.clock.now()
+            running_starts = [
+                running.started_t for running in self._running if running.job.key == key
+            ]
+            remaining = 0.0
+            last_start = self._last_start_t.get(key)
+            if last_start is not None:
+                # request の最小間隔の判定 (now - last_start < min_start_interval_s) と同じ境界にする
+                left = self.settings.min_start_interval_s - (now - last_start)
+                if left > 0:
+                    remaining = left
+            return DeepDocumentStatus(
+                running_count=len(running_starts),
+                latest_running_start_t=max(running_starts) if running_starts else None,
+                last_end=self._last_end.get(key),
+                min_interval_remaining_s=remaining,
+                last_surface_request=self._last_surface_request.get(key),
+            )
 
     def start(self) -> None:
         """CHECK_INTERVAL_S ごとに check_timeouts を呼んでから check_auto を呼ぶスレッド (daemon) を起動する。
@@ -532,11 +564,11 @@ class DeepScheduler:
     def _finish_locked(
         self, running: _RunningJob, status: DeepJobStatus, message: str, now: float
     ) -> None:
-        """ジョブを終わったものにする: 実行中から外し、前回の終了の t を now にして、deep_end を書く。"""
+        """ジョブを終わったものにする: 実行中から外し、前回の終了を (now, status) にして、deep_end を書く。"""
         running.ended = True
         if running in self._running:
             self._running.remove(running)
-        self._last_end_t[running.job.key] = now
+        self._last_end[running.job.key] = DeepJobEnd(now, status)
         self.parts.run_log.write(
             EVENT_DEEP_END,
             **running.fields(),
@@ -580,6 +612,13 @@ class DeepScheduler:
             **extra,
         )
 
+    def _note_surface_request_locked(
+        self, key: DocumentKey, trigger: DeepTrigger, outcome: DeepRequestOutcome
+    ) -> None:
+        """trigger が surface なら、key の surface の最後の要求を outcome にする。ほかのきっかけでは何もしない。"""
+        if trigger is DeepTrigger.SURFACE:
+            self._last_surface_request[key] = outcome
+
     def _auto_due_locked(
         self, kind: DocumentKind, key: DocumentKey, now: float
     ) -> bool:
@@ -594,7 +633,8 @@ class DeepScheduler:
         self._auto_targets[kind] = (key, since)
         if any(running.job.key == key for running in self._running):
             return False
-        base_t = self._last_end_t.get(key, since)
+        last_end = self._last_end.get(key)
+        base_t = since if last_end is None else last_end.t
         return now - base_t >= self.settings.auto_seconds
 
     def _has_running_jobs(self) -> bool:

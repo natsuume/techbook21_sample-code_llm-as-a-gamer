@@ -44,7 +44,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from switch2_layers.deep.deep_scheduler import DeepDocumentStatus, DeepJobStatus
+from switch2_layers.deep.deep_scheduler import (
+    SKIP_MIN_START_INTERVAL,
+    DeepDocumentStatus,
+    DeepJobEnd,
+    DeepJobStatus,
+    DeepRequestOutcome,
+)
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.pad_action import action_to_json
@@ -72,6 +78,7 @@ from switch2_layers.surface.jev_client import (
     new_asset_reference,
 )
 from switch2_layers.surface.surface_questions import (
+    ADVISOR_KINDS,
     SURFACE_INSTRUCTIONS,
     SurfaceQuestion,
     box_question_name,
@@ -218,7 +225,56 @@ def deep_status_text(status: DeepDocumentStatus | None, request_t: float) -> str
     例: 「実行中のジョブ: なし。前回の終了: t=120.300 秒 (15.2 秒前)、正常に終了。今求めれば起動する。
     surface が最後に求めた: t=100.000 秒 (35.5 秒前)、起動した」
     """
-    raise NotImplementedError
+    if status is None:
+        return ADVISOR_STATUS_UNAVAILABLE_TEXT
+    return "。".join(
+        (
+            _running_jobs_text(status, request_t),
+            _last_end_text(status.last_end, request_t),
+            _min_interval_text(status.min_interval_remaining_s),
+            _last_surface_request_text(status.last_surface_request, request_t),
+        )
+    )
+
+
+def _running_jobs_text(status: DeepDocumentStatus, request_t: float) -> str:
+    """deep_status_text の 1 の文 (実行中のジョブ) を返す。"""
+    latest = status.latest_running_start_t
+    if status.running_count <= 0 or latest is None:
+        return "実行中のジョブ: なし"
+    label = relative_time_label(latest, request_t)
+    return f"実行中のジョブ: {status.running_count} 件 (最も新しい起動 {label})"
+
+
+def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
+    """deep_status_text の 2 の文 (前回の終了) を返す。"""
+    if last_end is None:
+        return "前回の終了: まだ無い"
+    label = relative_time_label(last_end.t, request_t)
+    return f"前回の終了: {label}、{DEEP_JOB_STATUS_TEXTS[last_end.status]}"
+
+
+def _min_interval_text(remaining_s: float) -> str:
+    """deep_status_text の 3 の文 (最小間隔) を返す。"""
+    if remaining_s > 0:
+        return f"今求めると捨てられる (あと {remaining_s:.1f} 秒)"
+    return "今求めれば起動する"
+
+
+def _last_surface_request_text(
+    outcome: DeepRequestOutcome | None, request_t: float
+) -> str:
+    """deep_status_text の 4 の文 (surface の最後の要求) を返す。"""
+    if outcome is None:
+        return "surface はまだ求めていない"
+    if outcome.started:
+        result = "起動した"
+    elif outcome.reason == SKIP_MIN_START_INTERVAL:
+        result = "前回の起動から間もないため捨てられた"
+    else:
+        result = f"捨てられた ({outcome.reason})"
+    label = relative_time_label(outcome.t, request_t)
+    return f"surface が最後に求めた: {label}、{result}"
 
 
 def advisor_to_state(
@@ -230,7 +286,10 @@ def advisor_to_state(
     deep_status_text(statuses の値, request_t)。statuses に無い種類は None (状況を読めなかった) と同じに扱い、
     ADVISOR_KINDS に無い種類は無視する。
     """
-    raise NotImplementedError
+    return {
+        kind.value: deep_status_text(statuses.get(kind), request_t)
+        for kind in ADVISOR_KINDS
+    }
 
 
 def build_surface_state(
@@ -274,6 +333,7 @@ def _state_with_images(
         "recent_actions": recent_actions_to_state(
             surface_input.recent_actions, request_t
         ),
+        "advisor": advisor_to_state(surface_input.advisor_statuses, request_t),
         "frames": [
             {"label": relative_time_label(frame.t, request_t), "image": image}
             for frame, image in zip(surface_input.frames, images, strict=True)
