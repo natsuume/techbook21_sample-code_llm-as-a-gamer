@@ -25,6 +25,9 @@ from switch2_layers.deep.deep_scheduler import (
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
+from switch2_layers.safety.fake_safety import FakeSafetyChecker
+from switch2_layers.safety.jev_safety import JevSafetyChecker
+from switch2_layers.safety.safety_assembly import SafetyAssembly
 from switch2_layers.settings import (
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
@@ -38,6 +41,7 @@ from switch2_layers.settings import (
     DeepRunnerChoice,
     MiddleKind,
     RunSettings,
+    SafetyKind,
     SurfaceKind,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
@@ -248,7 +252,7 @@ def test_run_box_requery_every_range_error(no_hardware, capsys):
 
 def test_run_with_fake_surface_does_not_need_api_key(no_hardware, monkeypatch, capsys):
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--surface", "fake", "--middle", "fake"])
+    code = main(["run", "--surface", "fake", "--middle", "fake", "--safety", "fake"])
     # API キーの確かめを通り、ブリッジの起動 (偽物) まで進んだ
     assert code == 1
     assert "stub bridge failed" in capsys.readouterr().err
@@ -467,7 +471,19 @@ def test_run_with_fake_middle_does_not_need_api_key(monkeypatch, capsys):
 
     # API キーの確かめを通り、ブリッジの起動 (ここでは失敗させる) まで進む
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
-    code = main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"])
+    code = main(
+        [
+            "run",
+            "--middle",
+            "fake",
+            "--surface",
+            "fake",
+            "--deep",
+            "fake",
+            "--safety",
+            "fake",
+        ]
+    )
     assert code == 1
     assert "no bridge in test" in capsys.readouterr().err
 
@@ -505,7 +521,7 @@ def stub_hardware_and_app(monkeypatch) -> list:
 def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
     monkeypatch.setenv(API_KEY_ENV, "sk-test")
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--surface", "fake", "--deep", "fake"]) == 0
+    assert main(["run", "--surface", "fake", "--deep", "fake", "--safety", "fake"]) == 0
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.LUNA
     assert isinstance(parts.middle, LunaMiddleAnalyzer)
@@ -514,7 +530,22 @@ def test_run_passes_luna_middle_to_app_by_default(monkeypatch):
 
 def test_run_passes_fake_middle_to_app(monkeypatch):
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
+    assert (
+        main(
+            [
+                "run",
+                "--middle",
+                "fake",
+                "--surface",
+                "fake",
+                "--deep",
+                "fake",
+                "--safety",
+                "fake",
+            ]
+        )
+        == 0
+    )
     [(settings, parts)] = created
     assert settings.middle is MiddleKind.FAKE
     assert isinstance(parts.middle, FakeMiddleAnalyzer)
@@ -523,7 +554,9 @@ def test_run_passes_fake_middle_to_app(monkeypatch):
 def test_run_passes_fake_surface_to_app_without_hooks(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    assert (
+        main(["run", "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
+    )
     [(settings, parts)] = created
     assert settings.surface is SurfaceKind.FAKE
     assert isinstance(parts.surface, FakeSurfaceDecider)
@@ -564,7 +597,9 @@ def test_run_closes_surface_parts_after_app_stops(monkeypatch):
 
     monkeypatch.setattr(cli, "build_surface_assembly", fake_build)
     stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake"]) == 0
+    assert (
+        main(["run", "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
+    )
     assert closed == [True]
 
 
@@ -940,7 +975,12 @@ def test_run_passes_the_deep_choice_in_settings(
     monkeypatch, extra, choice, runner_type
 ):
     created = stub_hardware_and_app(monkeypatch)
-    assert main(["run", "--middle", "fake", "--surface", "fake", *extra]) == 0
+    assert (
+        main(
+            ["run", "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+        )
+        == 0
+    )
     [(settings, parts)] = created
     # 起動引数 (run.jsonl の start の args) の deep と、実際に渡す DeepRunner がそろう
     assert settings.deep is choice
@@ -965,7 +1005,188 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
     monkeypatch.setattr(cli, "BridgeSupervisor", FakeBridgeSupervisor)
     monkeypatch.setattr(cli, "Capture", FakeCapture)
     monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
-    # middle と surface は API キーの要らないフェイクにする
-    assert main(["run", "--middle", "fake", "--surface", "fake", *extra]) == 0
+    # middle・surface・安全の監視は API キーの要らないフェイクにする
+    assert (
+        main(
+            ["run", "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+        )
+        == 0
+    )
     assert len(parts_seen) == 1
     assert isinstance(parts_seen[0].deep, runner_type)
+
+
+# --- --safety (安全の監視) ---
+
+
+def test_run_safety_defaults_follow_the_issue():
+    args = build_parser().parse_args(["run"])
+    assert args.safety == "jev"
+    assert args.safety_interval == 1.0
+    assert args.threshold_safety == 0.7
+    assert args.max_safety_errors == 3
+    assert run_settings_from_args(args).safety is SafetyKind.JEV
+
+
+def test_run_accepts_safety_options():
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--safety",
+            "fake",
+            "--safety-interval",
+            "0.5",
+            "--threshold-safety",
+            "0.8",
+            "--max-safety-errors",
+            "2",
+        ]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.safety is SafetyKind.FAKE
+    assert settings.safety_interval_s == 0.5
+    assert settings.threshold_safety == 0.8
+    assert settings.max_safety_errors == 2
+
+
+def test_run_rejects_unknown_safety():
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["run", "--safety", "luna"])
+    assert exit_info.value.code == 2
+
+
+ALL_FAKE = [
+    "--middle",
+    "fake",
+    "--surface",
+    "fake",
+    "--safety",
+    "fake",
+    "--deep",
+    "fake",
+]
+
+
+@pytest.mark.parametrize(
+    "extra, option",
+    [
+        (["--safety-interval", "0.19"], "--safety-interval"),
+        (["--safety-interval", "10.01"], "--safety-interval"),
+        (["--threshold-safety", "0"], "--threshold-safety"),
+        (["--threshold-safety", "1"], "--threshold-safety"),
+        (["--max-safety-errors", "0"], "--max-safety-errors"),
+    ],
+)
+def test_run_safety_range_errors_exit_before_hardware(
+    no_hardware, tmp_path, capsys, extra, option
+):
+    runs_dir = tmp_path / "runs"
+    code = main(["run", "--runs-dir", str(runs_dir), *ALL_FAKE, *extra])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert option in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize("key", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_run_with_jev_safety_without_api_key_exits_before_hardware(
+    no_hardware, monkeypatch, tmp_path, capsys, key
+):
+    # surface をフェイクにしても、既定の --safety jev には TYPESAFE_API_KEY が要る
+    if key is not None:
+        monkeypatch.setenv("TYPESAFE_API_KEY", key)
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [
+            "run",
+            "--runs-dir",
+            str(runs_dir),
+            "--middle",
+            "fake",
+            "--surface",
+            "fake",
+            "--deep",
+            "fake",
+        ]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "TYPESAFE_API_KEY" in captured.err
+    assert "--safety fake" in captured.err
+    assert not runs_dir.exists()
+
+
+def test_run_without_typesafe_api_key_reports_both_surface_and_safety(
+    no_hardware, capsys
+):
+    code = main(["run", "--middle", "fake", "--deep", "fake"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--surface fake" in err
+    assert "--safety fake" in err
+
+
+def test_run_passes_fake_safety_to_app(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", *ALL_FAKE, "--threshold-safety", "0.9"]) == 0
+    [(settings, parts)] = created
+    # run.jsonl の start に書く起動引数 (settings) と、動かす安全の監視が一致する
+    assert settings.safety is SafetyKind.FAKE
+    assert settings.threshold_safety == 0.9
+    assert isinstance(parts.safety, FakeSafetyChecker)
+
+
+def test_run_passes_jev_safety_to_app_by_default(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "  ts-test  ")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
+    [(settings, parts)] = created
+    assert settings.safety is SafetyKind.JEV
+    assert isinstance(parts.safety, JevSafetyChecker)
+    assert parts.safety.client.api_key == "ts-test"
+
+
+def test_run_uses_separate_jev_clients_for_surface_and_safety(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--deep", "fake"]) == 0
+    [(_, parts)] = created
+    assert isinstance(parts.surface, JevSurfaceDecider)
+    assert isinstance(parts.safety, JevSafetyChecker)
+    assert parts.safety.client is not parts.surface.client
+
+
+def test_run_builds_safety_with_api_key_and_closes_it_after_app_stops(monkeypatch):
+    built: list[tuple[SafetyKind, str | None]] = []
+    closed: list[bool] = []
+    checker = FakeSafetyChecker()
+
+    def fake_build(kind: SafetyKind, api_key: str | None) -> SafetyAssembly:
+        built.append((kind, api_key))
+        return SafetyAssembly(checker=checker, close=lambda: closed.append(True))
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", " ts-test ")
+    monkeypatch.setattr(cli, "build_safety_assembly", fake_build)
+    created = stub_hardware_and_app(monkeypatch)
+    assert main(["run", "--middle", "fake", "--surface", "fake", "--deep", "fake"]) == 0
+    assert built == [(SafetyKind.JEV, "ts-test")]
+    [(_, parts)] = created
+    assert parts.safety is checker
+    assert closed == [True]
+
+
+def test_run_closes_safety_parts_when_the_bridge_fails(no_hardware, monkeypatch):
+    closed: list[bool] = []
+
+    def fake_build(kind: SafetyKind, api_key: str | None) -> SafetyAssembly:
+        return SafetyAssembly(
+            checker=FakeSafetyChecker(), close=lambda: closed.append(True)
+        )
+
+    monkeypatch.setattr(cli, "build_safety_assembly", fake_build)
+    monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
+    assert main(["run", *ALL_FAKE]) == 1
+    assert closed == [True]

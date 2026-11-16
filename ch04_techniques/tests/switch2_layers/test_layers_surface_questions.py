@@ -5,6 +5,7 @@ from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.buttons import allowed_buttons
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, BoxTarget
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
@@ -73,6 +74,11 @@ def test_instructions_say_that_action_and_other_questions_are_independent():
     assert "独立" in SURFACE_INSTRUCTIONS
     for key in ["`frames`", "`documents`", "`timeline`", "`recent_actions`"]:
         assert key in SURFACE_INSTRUCTIONS
+
+
+def test_instructions_include_the_safety_rules():
+    # 安全のための規則を、要求のたびに state の instructions で渡す
+    assert SAFETY_RULES in SURFACE_INSTRUCTIONS
 
 
 def test_latest_frame_path():

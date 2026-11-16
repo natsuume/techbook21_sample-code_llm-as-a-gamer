@@ -3,7 +3,8 @@
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep) は LayersParts で受け取る。
 cli の run は実機の部品と各層 (surface は --surface で選ぶ。middle と deep はフェイク) を渡し、テストはフェイクの
 キャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点 (on_frame・surface_boxes_at・
-surface_plan_boxes・on_run_directory) も LayersParts で受け取る。
+surface_plan_boxes・on_run_directory) も LayersParts で受け取る。安全の監視 (safety.safety_monitor) が画面を
+確かめるもの (SafetyChecker) も LayersParts で受け取る (cli の run は --safety で選ぶ)。
 
 止まる条件 (どれも、操作を中立にして出力を止め、全体を止めて、run.jsonl の stop に理由を書く):
     - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED
@@ -11,14 +12,18 @@ surface_plan_boxes・on_run_directory) も LayersParts で受け取る。
                                                                     hardware.capture_watcher の理由
     - ブリッジの復旧が失敗した (bridge_state() が "failed")             REASON_BRIDGE_FAILED
     - surface か middle が続けて失敗した                                surface_loop・middle_loop の理由
-ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。
+    - 安全の確かめで HOME メニューなどの画面を見つけたか、確かめが失敗した
+                                                                    safety.safety_judge・safety_monitor の理由
+ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。安全の監視は続ける。
+surface と middle のループは、安全の監視のスレッドが実行を始めるときの確かめ (最初のフレームが届いた後に 1 回) で
+止まる条件に当たらなかったと分かるまで、ループを始めずに待つ (それまで操作を 1 つも送らない)。
 start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら、それまでに作った部品と起動したスレッドだけを
 止めて閉じ、run.jsonl の stop に理由を書いてから、その例外を外に出す (LayersApp.start)。後片付けの 1 段階が例外を
 出しても、logging で警告を書いて残りの段階を続ける。
 
 スレッド:
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
-    surface のループ、middle のループ、deep の自動の呼び出し (DeepScheduler) とジョブ。
+    surface のループ、middle のループ、安全の監視 (SafetyMonitor)、deep の自動の呼び出し (DeepScheduler) とジョブ。
     wait を呼んだスレッド (run ではメインスレッド) が、止まる条件を MONITOR_INTERVAL_S ごとに確かめる。
 """
 
@@ -62,6 +67,7 @@ from switch2_layers.run_directory import (
     create_run_directory,
     write_initial_notes,
 )
+from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import RunSettings, run_settings_to_json
 from switch2_layers.surface.middle_state_reader import read_surface_context
 from switch2_layers.surface.surface_loop import (
@@ -93,6 +99,7 @@ class LayersParts:
     surface         surface の判断
     middle          middle の分析
     deep            deep のジョブの実行
+    safety          安全の監視が画面を確かめるもの (run では --safety の safety.safety_assembly の checker)
     monotonic       単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
     local_now       実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
     on_frame        キャプチャーの新しいフレームを受け取る関数 (CaptureSource の on_frame。キャプチャーのスレッドから
@@ -113,6 +120,7 @@ class LayersParts:
     surface: SurfaceDecider
     middle: MiddleAnalyzer
     deep: DeepRunner
+    safety: SafetyChecker
     monotonic: Callable[[], float] = time.monotonic
     local_now: Callable[[], datetime] = datetime.now
     on_frame: Callable[[CapturedFrame], None] | None = None
@@ -224,6 +232,12 @@ class LayersApp:
            plan_boxes = parts.surface_plan_boxes) と
            MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
            on_stop には request_stop を渡す
+        8. SafetyMonitor (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
+           on_stop = request_stop、on_start_passed = 実行を始めるときの確かめを終えた合図を立てる関数。
+           interval_s = safety_interval_s、threshold = threshold_safety、max_errors = max_safety_errors、
+           allow_home = allow_home) を作り、そのスレッドを 7 の 2 つの後に start_thread で起動する
+        7 の surface と middle のスレッドは、8 の確かめを終えた合図か、ループの停止の合図が立つまで待ってから、
+        ループを始める (停止の合図が先に立ったら、ループを始めずに終わる)。
         2 回目以降の呼び出しは RuntimeError にする。
 
         途中で例外 (KeyboardInterrupt などの BaseException を含む) が出たら、次の後片付けをしてから、その例外を
@@ -481,7 +495,8 @@ class LayersApp:
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。
 
-        1. ループの停止の合図を立て、surface と middle のループのスレッドの終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
+        1. ループの停止の合図を立て、surface と middle のループと安全の監視のスレッドの終わりを
+           最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
         2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)
         3. CaptureSource.close()、FrameStore.close()
         4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書いて、

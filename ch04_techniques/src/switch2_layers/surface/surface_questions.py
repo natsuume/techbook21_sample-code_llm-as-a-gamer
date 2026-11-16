@@ -85,7 +85,10 @@ class QuestionType(StrEnum):
 
 
 class QuestionKind(StrEnum):
-    """surface の問いの種類 (モジュールの docstring の表)。"""
+    """Jev に送る問いの種類。SAFETY のほかは surface の問い (モジュールの docstring の表)。
+
+    SAFETY は安全の監視の問い (safety.safety_questions) で、surface の要求には入れない。
+    """
 
     BUTTON = "button"
     STICK_DIRECTION = "stick_direction"
@@ -95,6 +98,7 @@ class QuestionKind(StrEnum):
     SCENE_CHANGE = "scene_change"
     BOX_EXISTS = "box_exists"
     BOX = "box"
+    SAFETY = "safety"
 
 
 @dataclass(frozen=True)
@@ -118,7 +122,8 @@ class SurfaceQuestion:
     kind            問いの種類
     target          button はボタン名、stick_direction は `LS_x` の形、stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
-                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)
+                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
+                    safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素)
     question_type   Jev の問いの型。button と stick_direction は choice、box は box、ほかは noul
     choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE)。ほかの型では空のタプル
     """

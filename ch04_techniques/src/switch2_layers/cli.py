@@ -4,10 +4,12 @@
                        [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
-                       [--deep claude|fake]
+                       [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
+                       [--max-safety-errors N]
         実機で 3 層を動かす。surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
         middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep は --deep で選ぶ
-        (既定 claude = Claude Code、fake = deep.fake_deep)
+        (既定 claude = Claude Code、fake = deep.fake_deep)。安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、
+        fake は safety.fake_safety)
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude|fake]
@@ -20,6 +22,9 @@ fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境
 --surface (run) は surface の実装を選ぶ。既定の jev は TypeSafe Jev を呼び (surface.jev_surface)、fake は骨組みの
 フェイク (surface.fake_surface) を使う。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、実機と実行
 ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
+--safety (run) は安全の監視の実装を選ぶ。既定の jev は TypeSafe Jev に問い (safety.jev_safety)、fake はすべての
+確率を 0 として返す (safety.fake_safety)。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、--surface jev と
+同じく終了コード 2 を返す。
 
 引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値など) は argparse が使い方とともに
 表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブコマンドの処理が標準エラー出力に書いて
@@ -48,6 +53,7 @@ from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
+from switch2_layers.safety.fake_safety import FakeSafetyChecker
 from switch2_layers.settings import (
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
@@ -59,25 +65,32 @@ from switch2_layers.settings import (
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
     DEFAULT_MAX_MIDDLE_ERRORS,
+    DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
     DEFAULT_RUNS_DIR,
+    DEFAULT_SAFETY,
+    DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_SURFACE,
     DEFAULT_THRESHOLD_ADVISOR,
+    DEFAULT_THRESHOLD_SAFETY,
     INTERVAL_FPS_MAX,
     INTERVAL_WIDTH_MAX,
     INTERVAL_WIDTH_MIN,
     MIDDLE_INTERVAL_MAX_S,
     MIDDLE_INTERVAL_MIN_S,
     OPENAI_API_KEY_ENV,
+    SAFETY_INTERVAL_MAX_S,
+    SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
     RunSettings,
+    SafetyKind,
     SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
@@ -121,6 +134,8 @@ def add_run_parser(
 
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
     --box-requery-every は int (既定 5)。
+    --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
+    --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
     """
     parser = commands.add_parser(
         "run",
@@ -245,6 +260,43 @@ def add_run_parser(
         ),
     )
     add_deep_runner_argument(parser)
+    parser.add_argument(
+        "--safety",
+        choices=[kind.value for kind in SafetyKind],
+        default=DEFAULT_SAFETY.value,
+        help=(
+            "安全の監視の実装。jev は TypeSafe Jev に問い、環境変数 TYPESAFE_API_KEY が要る。"
+            f"fake はすべての確率を 0 として返すフェイク (既定 {DEFAULT_SAFETY.value})"
+        ),
+    )
+    parser.add_argument(
+        "--safety-interval",
+        type=float,
+        default=DEFAULT_SAFETY_INTERVAL_S,
+        help=(
+            "安全の監視が最新のフレームを確かめる間隔 (秒) "
+            f"({SAFETY_INTERVAL_MIN_S:g}〜{SAFETY_INTERVAL_MAX_S:g}。"
+            f"既定 {DEFAULT_SAFETY_INTERVAL_S:g})"
+        ),
+    )
+    parser.add_argument(
+        "--threshold-safety",
+        type=float,
+        default=DEFAULT_THRESHOLD_SAFETY,
+        help=(
+            "安全の問いのしきい値。確率がこれを超えた画面で止まる "
+            f"(0 より大きく 1 より小さい値。既定 {DEFAULT_THRESHOLD_SAFETY:g})"
+        ),
+    )
+    parser.add_argument(
+        "--max-safety-errors",
+        type=int,
+        default=DEFAULT_MAX_SAFETY_ERRORS,
+        help=(
+            "安全の監視の失敗がこの回数続いたら全体を止める "
+            f"(1 以上。既定 {DEFAULT_MAX_SAFETY_ERRORS})"
+        ),
+    )
     parser.set_defaults(handler=run_command)
 
 
@@ -357,7 +409,7 @@ def add_deep_once_parser(
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
-    --middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice にする。
+    --middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice に、--safety は SafetyKind にする。
     """
     return RunSettings(
         runs_dir=args.runs_dir,
@@ -376,6 +428,10 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
         deep=DeepRunnerChoice(args.deep),
+        safety=SafetyKind(args.safety),
+        safety_interval_s=args.safety_interval,
+        threshold_safety=args.threshold_safety,
+        max_safety_errors=args.max_safety_errors,
     )
 
 
@@ -421,22 +477,27 @@ def run_command(args: argparse.Namespace) -> int:
        (実機には触れない)
     2. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
        (実機にも実行ディレクトリーにも触れない)
-    3. settings.typesafe_api_key_errors(settings.surface, os.environ)。誤りがあれば (jev で環境変数 TYPESAFE_API_KEY が
-       無いか空)、その変数名を含むメッセージを標準エラー出力に書いて EXIT_USAGE を返す (実機には触れない)。
-       jev なら API キーは環境変数 TYPESAFE_API_KEY の前後の空白を除いたもの、fake なら None (読まない)
+    3. settings.typesafe_api_key_errors(settings.surface, os.environ) と
+       settings.safety_api_key_errors(settings.safety, os.environ)。どちらかに誤りがあれば (jev で環境変数
+       TYPESAFE_API_KEY が無いか空)、両方のメッセージをこの順に標準エラー出力に書いて EXIT_USAGE を返す
+       (実機にも実行ディレクトリーにも触れない)。
+       surface と安全の監視のそれぞれについて、jev なら API キーは環境変数 TYPESAFE_API_KEY の前後の空白を除いたもの、
+       fake なら None (読まない)
     4. middle = create_middle_analyzer(settings.middle, os.environ)
-    5. surface.surface_assembly.build_surface_assembly(settings, API キー) で surface の部品を作る
+    5. surface.surface_assembly.build_surface_assembly(settings, surface の API キー) で surface の部品を作り、
+       safety.safety_assembly.build_safety_assembly(settings.safety, 安全の監視の API キー) で安全の監視の部品を作る
     6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
     7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
        bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
-       deep=build_deep_runner(settings.deep), on_frame=部品の on_frame, surface_boxes_at=部品の boxes_at,
-       on_run_directory=部品の on_run_directory, surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
+       deep=build_deep_runner(settings.deep), safety=安全の監視の部品の checker, on_frame=部品の on_frame,
+       surface_boxes_at=部品の boxes_at, on_run_directory=部品の on_run_directory,
+       surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
        (settings.deep は --deep の値。run.jsonl の start の args にも deep として書く)
-    9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close() の順に閉じる
-       (5 の後に 6 で失敗しても、surface の部品は閉じる)
+    9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close()、安全の監視の部品の close()
+       の順に閉じる (5 の後に 6 で失敗しても、surface と安全の監視の部品は閉じる)
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
     settings = run_settings_from_args(args)
@@ -489,6 +550,7 @@ def _run_with_hardware(
             surface=surface.decider,
             middle=middle,
             deep=build_deep_runner(settings.deep),
+            safety=FakeSafetyChecker(),
             on_frame=surface.on_frame,
             surface_boxes_at=surface.boxes_at,
             on_run_directory=surface.on_run_directory,
