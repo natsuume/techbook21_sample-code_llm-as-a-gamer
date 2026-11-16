@@ -10,8 +10,8 @@ surface_rows_offset と operations_rows_offset は、次の middle の入力で 
 バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
 docstring)。
 first_task は出力の短期タスクリストの最初のタスクの文、first_task_since_t は最初のタスクが今の文になった時刻
-(記録が無ければ null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを伝えるのに使う
-(middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
+(最初のタスクが無いときと記録が無いときは null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを
+伝えるのに使う (middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
 """
 
 from collections.abc import Mapping
@@ -79,7 +79,7 @@ class MiddleState:
     first_task               この出力の短期タスクリストの最初のタスクの文 (middle.task_progress.first_task_of の値)。
                              無ければ空文字列
     first_task_since_t       最初のタスクが今の文になった時刻 (middle.task_progress.first_task_since の値)。
-                             None は記録なし
+                             最初のタスクが無いときと記録が無いときは None
     first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
     記録しない値 (テストなど) のため。
     """

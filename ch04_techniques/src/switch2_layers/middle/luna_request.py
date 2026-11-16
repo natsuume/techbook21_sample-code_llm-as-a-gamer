@@ -143,6 +143,7 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
         止まっているか: はい | いいえ
         詰まり方: <stuck_description>          空なら EMPTY_TEXT
         surface の待ち時間: <surface_wait_s> 秒        surface_wait_s は書式 g (例: 0.4)
+        最初のタスク: <first_task>             空なら EMPTY_TEXT
         最初のタスクが今の文になった時刻: t=<first_task_since_t> (入力の時刻まで <経過> 秒)
                                                経過は max(0.0, now_t - first_task_since_t) を小数 1 桁 (書式 .1f。
                                                例: 35.2)。first_task_since_t が None なら

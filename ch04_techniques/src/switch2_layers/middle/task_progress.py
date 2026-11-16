@@ -5,6 +5,8 @@ middle は、出力の短期タスクリスト (tasks) の最初のタスクの�
 gpt-6-luna に渡し (luna_request)、詰まりの判定と待ち時間の決め方に使わせる (luna_instructions)。
 最初のタスクの文は、空白文字の違いだけなら同じ文とみなす (gpt-6-luna が引き継いだ文の空白だけを変えても、
 タスクが進んだことにしない)。
+最初のタスクが無い (文が空の) 回は時刻を記録しない (タスクが無いまま続いた秒数を、同じタスクが続いた秒数として
+渡さないため)。
 """
 
 from switch2_layers.middle.middle_types import MiddleState
@@ -30,12 +32,14 @@ def is_same_task_text(a: str, b: str) -> bool:
 
 def first_task_since(
     previous_state: MiddleState | None, first_task: str, written_t: float
-) -> float:
-    """最初のタスクが今の文 first_task になった時刻を返す。
+) -> float | None:
+    """最初のタスクが今の文 first_task になった時刻を返す。最初のタスクが無ければ None を返す。
 
     previous_state は前回の middle/state.json、written_t は今回の出力を書いた時刻 (MiddleState.generated_t)。
-    previous_state が None でなく、previous_state.first_task_since_t が None でなく、
-    is_same_task_text(previous_state.first_task, first_task) なら previous_state.first_task_since_t を返す
-    (最初のタスクが前回と同じ文のまま)。それ以外は written_t を返す (今回、最初のタスクが今の文になった)。
+    - first_task が空 (空白文字だけの場合を含む) なら None (最初のタスクが無いので、時刻を記録しない)
+    - previous_state が None でなく、previous_state.first_task_since_t が None でなく、
+      is_same_task_text(previous_state.first_task, first_task) なら previous_state.first_task_since_t
+      (最初のタスクが前回と同じ文のまま)
+    - それ以外は written_t (今回、最初のタスクが今の文になった)
     """
     raise NotImplementedError

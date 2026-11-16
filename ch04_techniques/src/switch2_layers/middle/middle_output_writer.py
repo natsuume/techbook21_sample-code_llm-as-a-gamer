@@ -76,8 +76,8 @@ def write_middle_output(
        stuck_description, surface_wait_s, timeline, surface_rows_offset=middle_input.surface_rows_offset,
        operations_rows_offset=middle_input.operations_rows_offset, first_task, first_task_since_t) を
        middle/state.json に置き換えて書く。first_task は middle.task_progress.first_task_of(output.tasks)、
-       first_task_since_t は middle.task_progress.first_task_since(middle_input.previous_state, first_task, generated_t)。
-       場面が決まらない (tasks.md を書かない) 回も同じに計算する
+       first_task_since_t は middle.task_progress.first_task_since(middle_input.previous_state, first_task, generated_t)
+       (first_task が空なら None)。場面が決まらない (tasks.md を書かない) 回も同じに計算する
     4. 新しい場面なら、notes.scene_labels.add_scene_label(notes/scene_labels.json, 新しい場面) で一覧に足す。
        足した場面が戻り値の new_scene
     2〜4 のそれぞれのファイルを書く直前に stop を確かめ、立っていれば残りを書かずに None を返す

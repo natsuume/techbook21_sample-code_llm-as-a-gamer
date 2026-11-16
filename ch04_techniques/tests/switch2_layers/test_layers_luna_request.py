@@ -316,14 +316,15 @@ def test_section_contents_of_full_input():
     )
 
 
-def test_previous_state_section_has_first_task_time_from_input_time():
-    # 経過秒は今回の入力の時刻 (t=15.25) から数える (前回の出力の作成時刻 t=10.6 や、前回の入力の時刻 t=10.0
-    # からではない)
+def test_previous_state_section_has_first_task_and_its_time_from_input_time():
+    # 最初のタスクの文と、その文になった時刻を載せる。経過秒は今回の入力の時刻 (t=15.25) から数える
+    # (前回の出力の作成時刻 t=10.6 や、前回の入力の時刻 t=10.0 からではない)
     lines = section_body(build_user_sections(FULL_INPUT), "前回の middle の出力").split(
         "\n"
     )
-    assert lines[4:7] == [
+    assert lines[4:8] == [
         "surface の待ち時間: 0.4 秒",
+        "最初のタスク: 宿屋に入る",
         "最初のタスクが今の文になった時刻: t=4.750 (入力の時刻まで 10.5 秒)",
         "系列情報:",
     ]
@@ -401,6 +402,7 @@ def test_describe_previous_state():
             "止まっているか: いいえ",
             "詰まり方: (無い)",
             "surface の待ち時間: 0.4 秒",
+            "最初のタスク: 宿屋に入る",
             "最初のタスクが今の文になった時刻: t=4.750 (入力の時刻まで 10.5 秒)",
             "系列情報:",
             "## 操作のまとめ",
@@ -428,6 +430,7 @@ def test_describe_previous_state_without_scene_and_timeline():
             "止まっているか: はい",
             "詰まり方: 壁に向かって歩き続けている",
             "surface の待ち時間: 1.25 秒",
+            "最初のタスク: (無い)",
             "最初のタスクが今の文になった時刻: (無い)",
             "系列情報:",
             "(無い)",
@@ -436,10 +439,21 @@ def test_describe_previous_state_without_scene_and_timeline():
     assert describe_previous_state(None, 15.25) == "(無い)"
 
 
+def first_task_line(first_task: str) -> str:
+    """describe_previous_state の「最初のタスク」の行 (6 行目) を返す。"""
+    state = dataclasses.replace(PREVIOUS_STATE, first_task=first_task)
+    return describe_previous_state(state, 15.25).split("\n")[5]
+
+
+def test_first_task_line_shows_the_text_or_empty_text():
+    assert first_task_line("宿屋に入る") == "最初のタスク: 宿屋に入る"
+    assert first_task_line("") == "最初のタスク: (無い)"
+
+
 def first_task_time_line(first_task_since_t: float | None, now_t: float) -> str:
-    """describe_previous_state の「最初のタスクが今の文になった時刻」の行 (6 行目) を返す。"""
+    """describe_previous_state の「最初のタスクが今の文になった時刻」の行 (7 行目) を返す。"""
     state = dataclasses.replace(PREVIOUS_STATE, first_task_since_t=first_task_since_t)
-    return describe_previous_state(state, now_t).split("\n")[5]
+    return describe_previous_state(state, now_t).split("\n")[6]
 
 
 def test_first_task_time_is_counted_to_input_time_with_one_decimal():
@@ -507,11 +521,11 @@ def test_instructions_cover_the_map():
         assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase
 
 
-def test_instructions_describe_first_task_time_in_previous_output():
+def test_instructions_describe_first_task_and_its_time_in_previous_output():
     assert (
         "\n- 前回の middle の出力: 前回あなたが書いた場面・詰まり・待ち時間・系列情報と、"
-        "それを作った時刻。最初のタスクが今の文になった時刻と、そこから入力の時刻までの秒数も"
-        "含みます\n"
+        "それを作った時刻。最初のタスクの文と、その文になった時刻と、そこから入力の時刻までの"
+        "秒数も含みます\n"
     ) in LUNA_DEVELOPER_INSTRUCTIONS
     assert (
         "前回あなたが書いた場面・詰まり・待ち時間・系列情報と、それを作った時刻\n"

@@ -309,15 +309,36 @@ def test_first_task_is_recorded_without_scene(tmp_path):
     assert not (root / "notes" / "scenes").exists()
 
 
-def test_tasks_without_bullet_record_empty_first_task(tmp_path):
+@pytest.mark.parametrize(
+    "previous",
+    [None, previous_state("宿屋に入る", 3.0), previous_state("", 3.0)],
+)
+@pytest.mark.parametrize("scene_name", ["町", None])
+def test_tasks_without_bullet_record_no_first_task_time(tmp_path, previous, scene_name):
+    # 最初のタスクが無い回は、文を空文字列、時刻を None (state.json では null) にする
     root = make_run(tmp_path)
     result = write_middle_output(
         RunPaths(root),
-        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
-        output("町", tasks="タスクは無い\n"),
+        middle_input(12.0, previous_state=previous),
+        output(scene_name, tasks="タスクは無い\n"),
         12.8,
     )
     assert result.state.first_task == ""
+    assert result.state.first_task_since_t is None
+    state = read_json(root / "middle" / "state.json")
+    assert state["first_task"] == ""
+    assert state["first_task_since_t"] is None
+
+
+def test_first_task_after_tasks_without_bullet_starts_at_generated_t(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("", None)),
+        output("町", tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.first_task == "宿屋に入る"
     assert result.state.first_task_since_t == 12.8
 
 

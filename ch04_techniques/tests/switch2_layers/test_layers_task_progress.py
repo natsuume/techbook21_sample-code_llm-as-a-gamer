@@ -123,6 +123,24 @@ def test_previous_state_without_time_starts_at_written_t():
     )
 
 
-def test_empty_first_task_that_stays_empty_keeps_the_previous_time():
-    # どちらも空 (タスクの行が無い) なら同じ文とみなす
-    assert first_task_since(previous_state("", 3.0), "", 12.8) == 3.0
+@pytest.mark.parametrize(
+    "previous",
+    [
+        None,
+        previous_state("", None),
+        # 前回も空 (時刻が残っていても引き継がない)
+        previous_state("", 3.0),
+        previous_state("宿屋に入る", 3.0),
+    ],
+)
+@pytest.mark.parametrize("first_task", ["", " 　\t"])
+def test_empty_first_task_has_no_time(previous, first_task):
+    # 最初のタスクが無い (タスクの行が無い) 回は時刻を記録しない
+    assert first_task_since(previous, first_task, 12.8) is None
+
+
+@pytest.mark.parametrize("previous_time", [None, 3.0])
+def test_first_task_after_empty_one_starts_at_written_t(previous_time):
+    assert (
+        first_task_since(previous_state("", previous_time), "宿屋に入る", 12.8) == 12.8
+    )
