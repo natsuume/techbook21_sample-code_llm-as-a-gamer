@@ -270,6 +270,22 @@ def test_press_sends_args_unchanged(paths, clock, action, args):
 
 
 @pytest.mark.parametrize(
+    ("action", "args", "tokens"),
+    [
+        ("tap", ["RIGHT RIGHT"], ["RIGHT", "RIGHT"]),
+        ("tap", ["  A ", "B+RIGHT"], ["A", "B+RIGHT"]),
+        ("hold", ["A 500"], ["A", "500"]),
+        ("down", ["LS:0,1  A"], ["LS:0,1", "A"]),
+    ],
+)
+def test_press_sends_args_split_on_spaces(paths, clock, action, args, tokens):
+    daemon = FakeDaemon(clock)
+    handle_press(paths, action, args, send=daemon, clock=clock)
+    assert daemon.sent == [[action, *tokens]]
+    assert read_events(paths.events_file)[0].args == (action, *tokens)
+
+
+@pytest.mark.parametrize(
     ("action", "args"),
     [
         ("tap", ["HOME"]),
@@ -296,6 +312,37 @@ def test_press_rejects_home_without_sending(paths, clock, action, args):
             frame=None,
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("action", "args", "tokens"),
+    [
+        ("tap", ["A HOME"], ("A", "HOME")),
+        ("down", ["B+HOME"], ("B+HOME",)),
+        ("down", ["LS:0,1 B+HOME"], ("LS:0,1", "B+HOME")),
+        ("hold", ["HOME 500"], ("HOME", "500")),
+        ("up", ["LS HOME"], ("LS", "HOME")),
+    ],
+)
+def test_press_rejects_home_hidden_behind_spaces(paths, clock, action, args, tokens):
+    daemon = FakeDaemon(clock)
+    result = handle_press(paths, action, args, send=daemon, clock=clock)
+    assert daemon.sent == []
+    assert result == CommandResult(exit_code=1, stderr_lines=(HOME_ERROR,))
+    [event] = read_events(paths.events_file)
+    assert event.args == (action, *tokens)
+    assert event.reply == HOME_ERROR
+    assert event.ok is False
+
+
+def test_press_rejects_action_with_spaces(paths, clock):
+    daemon = FakeDaemon(clock)
+    result = handle_press(paths, "tap A", ["HOME"], send=daemon, clock=clock)
+    assert daemon.sent == []
+    assert result == CommandResult(
+        exit_code=1,
+        stderr_lines=("error press accepts tap / hold / down / up: tap A",),
+    )
 
 
 def test_press_rejects_other_actions_without_sending(paths, clock):
@@ -396,8 +443,17 @@ def prepare_report_records(paths: WorkspacePaths) -> None:
     write_png(paths.frames_dir / "000002.png", 0)
     write_png(paths.frames_dir / "000003.png", 255)
     for event in [
+        CommandEvent(99.0, "run", ("start",), "launched claude launch=1", True, 0.0),
         CommandEvent(100.0, "look", (), "ok", True, 0.2, "frames/000001.png"),
         CommandEvent(102.0, "press", ("tap", "A"), "ok tap A", True, 0.4),
+        CommandEvent(
+            103.0,
+            "run",
+            ("resume", "s1"),
+            "launched claude launch=2 resume=s1",
+            True,
+            0.0,
+        ),
         CommandEvent(104.0, "look", (), "ok", True, 0.2, "frames/000002.png"),
         CommandEvent(107.0, "look", (), "ok", True, 0.2, "frames/000003.png"),
     ]:
@@ -406,6 +462,8 @@ def prepare_report_records(paths: WorkspacePaths) -> None:
         "\n".join(
             [
                 json.dumps({"type": "system", "session_id": "s1"}),
+                json.dumps({"type": "assistant", "message": {"id": "m1"}}),
+                json.dumps({"type": "assistant", "message": {"id": "m1"}}),
                 json.dumps(
                     {
                         "type": "result",
@@ -415,6 +473,7 @@ def prepare_report_records(paths: WorkspacePaths) -> None:
                         "duration_ms": 1000,
                     }
                 ),
+                json.dumps({"type": "assistant", "message": {"id": "m2"}}),
                 json.dumps(
                     {
                         "type": "result",
@@ -424,6 +483,7 @@ def prepare_report_records(paths: WorkspacePaths) -> None:
                         "duration_ms": 500,
                     }
                 ),
+                json.dumps({"type": "assistant", "message": {"id": "m3"}}),
                 '{"type": "result", "sess',
             ]
         )
@@ -438,8 +498,8 @@ def test_report_json(paths):
     assert result.exit_code == 0
     assert len(result.stdout_lines) == 1
     assert json.loads(result.stdout_lines[0]) == {
-        "duration_s": 7.0,
-        "command_counts": {"look": 3, "press": 1},
+        "duration_s": 8.0,
+        "command_counts": {"run": 2, "look": 3, "press": 1},
         "error_count": 0,
         "look_interval": {"median_s": 3.5, "mean_s": 3.5, "max_s": 4.0},
         "static_pairs": 1,
@@ -449,9 +509,11 @@ def test_report_json(paths):
         "pressed_pairs": 1,
         "agent": {
             "launches": 2,
+            "results": 2,
             "total_cost_usd": 0.75,
             "num_turns": 5,
             "duration_ms": 1500,
+            "responses": 3,
         },
     }
 
@@ -461,14 +523,15 @@ def test_report_text(paths):
     result = handle_report(paths, as_json=False)
     assert result.exit_code == 0
     assert result.stdout_lines == (
-        "記録の時間: 7.0 秒",
-        "コマンドの回数: look=3 press=1",
+        "記録の時間: 8.0 秒",
+        "コマンドの回数: run=2 look=3 press=1",
         "error の数: 0",
         "look の間隔: 中央値 3.5 秒 / 平均 3.5 秒 / 最大 4.0 秒",
         "変化なしの look の組: 1 / 2",
         "変化なしが続いた最長の時間: 4.0 秒",
         "press の後も変化なしの組: 1 / 1",
-        "エージェント: 起動 2 回 / 費用 0.7500 USD / ターン 5 / 時間 1.5 秒",
+        "エージェント: 起動 2 回 / 応答 3 回 / result 2 回",
+        "result を出した起動の分: 費用 0.7500 USD / ターン 5 / 時間 1.5 秒",
     )
 
 
@@ -538,6 +601,41 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
     assert "Bash(uv run switch2-harness note *)" in args
     assert "Bash(uv run switch2-harness notes *)" in args
     assert "Bash(uv run switch2-harness history *)" not in args
+
+
+def test_run_reports_budget_exhausted(paths, clock):
+    write_harness_json(paths, [])
+    plan = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(
+            json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_max_budget_usd",
+                    "session_id": "s1",
+                }
+            ),
+        ),
+    )
+    starter, daemon, sleep = make_run_parts(clock, [plan])
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(max_budget_usd=1.0),
+        start_process=starter,
+        clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    expected = (
+        f"ok run finished reason=budget_exhausted launches=1 log={paths.agent_log_file}"
+    )
+    assert result == CommandResult(exit_code=0, stdout_lines=(expected,))
+    assert len(starter.launches) == 1
+    assert daemon.sent == [["up", "ALL"]]
 
 
 @pytest.mark.parametrize("minutes", [0.0, -5.0])

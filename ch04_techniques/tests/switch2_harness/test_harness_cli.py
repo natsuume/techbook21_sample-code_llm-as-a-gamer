@@ -234,6 +234,19 @@ def test_press_home_is_rejected(workspace, harness, capsys):
     assert harness.daemon.sent == []
 
 
+def test_press_home_in_a_quoted_argument_is_rejected(workspace, harness, capsys):
+    argv = ["press", "tap", "A HOME", "--workspace", str(workspace)]
+    assert harness.run(*argv) == 1
+    assert capsys.readouterr().err == HOME_ERROR + "\n"
+    assert harness.daemon.sent == []
+
+
+def test_press_sends_quoted_argument_split_on_spaces(workspace, harness):
+    argv = ["press", "tap", "RIGHT RIGHT", "--workspace", str(workspace)]
+    assert harness.run(*argv) == 0
+    assert harness.daemon.sent == [["tap", "RIGHT", "RIGHT"]]
+
+
 def test_status_dispatch(workspace, harness, capsys):
     assert harness.run("status", "--workspace", str(workspace)) == 0
     assert harness.daemon.sent == [["status"]]

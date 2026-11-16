@@ -191,6 +191,11 @@ class FakeAgentProcess:
         if self.returncode is None:
             self.returncode = -signal.SIGKILL
 
+    def exit_now(self, returncode: int = 0) -> None:
+        """テストから、プロセスが自分で終わったことにする (calls には記録しない)。"""
+        if self.returncode is None:
+            self.returncode = returncode
+
 
 @dataclass(frozen=True)
 class LaunchRecord:

@@ -3,6 +3,7 @@ import math
 import os
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from harness_fakes import (
 )
 
 from switch2_harness.agent_launcher import (
+    BUDGET_EXHAUSTED_SUBTYPE,
     CLAUDE_ENV_OVERRIDES,
     DEFAULT_MODEL,
     MAX_RESUMES,
@@ -32,13 +34,16 @@ from switch2_harness.agent_launcher import (
     build_claude_args,
     build_claude_env,
     first_prompt,
+    last_result_subtype,
     last_session_id,
+    read_last_result_subtype,
     read_last_session_id,
     run_agent_until,
     start_claude_process,
     stop_process,
     validate_minutes,
 )
+from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.features import BASE_AGENT_COMMANDS
 from switch2_harness.workspace import WorkspacePaths
@@ -51,9 +56,14 @@ def session_line(session_id: str) -> str:
     return json.dumps({"type": "system", "subtype": "init", "session_id": session_id})
 
 
-def result_line(session_id: str) -> str:
+def result_line(session_id: str, subtype: str = "success") -> str:
     return json.dumps(
-        {"type": "result", "session_id": session_id, "total_cost_usd": 0.1}
+        {
+            "type": "result",
+            "subtype": subtype,
+            "session_id": session_id,
+            "total_cost_usd": 0.1,
+        }
     )
 
 
@@ -68,6 +78,7 @@ def test_constants():
     assert TERMINATE_GRACE_S == 10.0
     assert MIN_REMAINING_S == 30.0
     assert MAX_RESUMES == 20
+    assert BUDGET_EXHAUSTED_SUBTYPE == "error_max_budget_usd"
 
 
 def test_launch_options_defaults():
@@ -232,6 +243,48 @@ def test_read_last_session_id_of_missing_file_is_none(tmp_path):
     assert read_last_session_id(tmp_path / "agent.jsonl") is None
 
 
+# --- 最後の result の subtype の読み取り ---
+
+
+def test_last_result_subtype_returns_the_last_result_subtype():
+    lines = [
+        session_line("s1"),
+        result_line("s1", subtype="success"),
+        result_line("s1", subtype="error_max_budget_usd"),
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "result", "subtype": 5}),
+        json.dumps({"type": "result"}),
+        "not json",
+        "",
+        json.dumps(["result", "success"]),
+        '{"type": "result", "subtype": "succ',
+    ]
+    assert last_result_subtype(lines) == "error_max_budget_usd"
+
+
+def test_last_result_subtype_ignores_subtype_of_other_messages():
+    lines = [result_line("s1", subtype="success"), session_line("s1")]
+    assert last_result_subtype(lines) == "success"
+
+
+def test_last_result_subtype_without_result_is_none():
+    assert last_result_subtype([]) is None
+    assert last_result_subtype([session_line("s1"), "not json"]) is None
+
+
+def test_read_last_result_subtype_from_file(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    path.write_text(
+        result_line("s1") + "\n" + result_line("s1", "error_max_budget_usd") + "\n",
+        "utf-8",
+    )
+    assert read_last_result_subtype(path) == "error_max_budget_usd"
+
+
+def test_read_last_result_subtype_of_missing_file_is_none(tmp_path):
+    assert read_last_result_subtype(tmp_path / "agent.jsonl") is None
+
+
 # --- --minutes の検証 ---
 
 
@@ -335,7 +388,10 @@ def run_scenario(
     scenario: Scenario,
     minutes: float = 1.0,
     options: LaunchOptions | None = None,
+    send: SendCommand | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> RunOutcome:
+    """scenario の fake で run_agent_until を呼ぶ。send と sleep は渡したときだけ置き換える。"""
     return run_agent_until(
         minutes,
         scenario.paths,
@@ -344,8 +400,8 @@ def run_scenario(
         options if options is not None else LaunchOptions(),
         start_process=scenario.starter,
         clock=scenario.clock,
-        sleep=scenario.sleep,
-        send=scenario.daemon,
+        sleep=sleep if sleep is not None else scenario.sleep,
+        send=send if send is not None else scenario.daemon,
         record=scenario.events.append,
         base_env={"PATH": "/usr/bin"},
     )
@@ -509,12 +565,94 @@ def test_run_does_not_resume_with_less_than_min_remaining(tmp_path):
     assert scenario.daemon.sent == [["up", "ALL"]]
 
 
-def test_run_releases_buttons_on_keyboard_interrupt(tmp_path):
+def test_run_stops_when_budget_is_exhausted(tmp_path):
+    plan = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(
+            session_line("s1"),
+            result_line("s1", subtype="error_max_budget_usd"),
+        ),
+    )
+    scenario = make_scenario(tmp_path, [plan, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(scenario, minutes=1.0)
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=1)
+    assert len(scenario.starter.launches) == 1
+    assert scenario.starter.processes[0].calls == []
+    assert event_kinds(scenario.events) == ["start", "stop", "release"]
+    stop = scenario.events[1]
+    assert stop.args == ("stop", "budget_exhausted")
+    assert stop.reply == "stopped reason=budget_exhausted launches=1"
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_checks_budget_before_session_id(tmp_path):
+    budget_result = json.dumps({"type": "result", "subtype": "error_max_budget_usd"})
+    plan = ProcessPlan(runs_for_s=10.0, output_lines=(budget_result,))
+    scenario = make_scenario(tmp_path, [plan])
+    outcome = run_scenario(scenario, minutes=1.0)
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=1)
+
+
+def test_run_resumes_after_a_successful_result(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", subtype="success")),
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(scenario, minutes=1.0)
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    assert scenario.starter.launches[1].args[-2:] == ["--resume", "s1"]
+
+
+def test_run_looks_at_the_last_result_for_the_budget(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", subtype="success")),
+    )
+    second = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(result_line("s1", subtype="error_max_budget_usd"),),
+    )
+    scenario = make_scenario(tmp_path, [first, second])
+    outcome = run_scenario(scenario, minutes=1.0)
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=2)
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_stops_running_process_before_release_on_keyboard_interrupt(tmp_path):
     scenario = make_scenario(
         tmp_path, [ProcessPlan(runs_for_s=None)], interrupt_at_call=3
     )
+    calls_when_sent: list[list[tuple[object, ...]]] = []
+
+    def send(args: list[str]) -> str:
+        calls_when_sent.append(list(scenario.starter.processes[0].calls))
+        return scenario.daemon(args)
+
     with pytest.raises(KeyboardInterrupt):
-        run_scenario(scenario, minutes=1.0)
+        run_scenario(scenario, minutes=1.0, send=send)
+    stopped = [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert scenario.starter.processes[0].calls == stopped
+    assert calls_when_sent == [stopped]  # up ALL を送る前に止め終わっている
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["start", "release"]
+
+
+def test_run_does_not_stop_finished_process_on_keyboard_interrupt(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 2:
+            # 待っている間に claude が自分で終わり、続けて Ctrl-C が届いた
+            scenario.starter.processes[0].exit_now()
+            raise KeyboardInterrupt
+        scenario.clock.advance(seconds)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_scenario(scenario, minutes=1.0, sleep=sleep)
+    assert scenario.starter.processes[0].calls == []
     assert scenario.daemon.sent == [["up", "ALL"]]
     assert event_kinds(scenario.events) == ["start", "release"]
 

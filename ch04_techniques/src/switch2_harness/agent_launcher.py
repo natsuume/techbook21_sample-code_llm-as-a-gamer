@@ -1,8 +1,8 @@
 """Claude Code を headless (claude -p) で起動し、決めた時間がたったら止める。
 
-起動引数 (build_claude_args) と環境変数 (build_claude_env) の組み立て、agent.jsonl からの session_id の読み取り
-(last_session_id) は純粋関数。時間を区切った起動 (run_agent_until) は、プロセスの起動・時計・待機・
-デーモンへの送信・記録をすべて引数で受け取る。
+起動引数 (build_claude_args) と環境変数 (build_claude_env) の組み立て、agent.jsonl からの session_id と
+最後の result の subtype の読み取り (last_session_id・last_result_subtype) は純粋関数。
+時間を区切った起動 (run_agent_until) は、プロセスの起動・時計・待機・デーモンへの送信・記録をすべて引数で受け取る。
 
 プレイ中のエージェントには、ユーザー設定の plugin・hook・MCP・~/.claude/CLAUDE.md と、
 親ディレクトリーの .claude/skills (既存の第4章の Skill) を混ぜない。そのために
@@ -46,9 +46,13 @@ CLAUDE_ENV_OVERRIDES: Mapping[str, str] = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 
+# claude -p が --max-budget-usd の上限に達して終わったときの、result メッセージの subtype
+BUDGET_EXHAUSTED_SUBTYPE = "error_max_budget_usd"
+
 # run が止まった理由。deadline: 期限 (または残りが MIN_REMAINING_S 未満)、
+# budget_exhausted: agent.jsonl の最後の result の subtype が error_max_budget_usd だった (予算の上限で終わった)、
 # no_session: 起動し直すための session_id が agent.jsonl に無い、resumes_exhausted: 起動し直した回数が MAX_RESUMES に達した
-StopReason = Literal["deadline", "no_session", "resumes_exhausted"]
+StopReason = Literal["deadline", "budget_exhausted", "no_session", "resumes_exhausted"]
 
 
 @dataclass(frozen=True)
@@ -170,6 +174,21 @@ def read_last_session_id(path: Path) -> str | None:
     raise NotImplementedError
 
 
+def last_result_subtype(lines: Iterable[str]) -> str | None:
+    """agent.jsonl の行のうち、JSON のオブジェクトで "type" が "result" の行にある "subtype" (文字列) の最後のものを返す。
+
+    JSON として読めない行、JSON のオブジェクトでない行、"type" が "result" でない行、
+    "subtype" が無いか文字列でない行は読み飛ばす。見つからなければ None。
+    例: subtype が "success" の result の後に "error_max_budget_usd" の result があれば "error_max_budget_usd"。
+    """
+    raise NotImplementedError
+
+
+def read_last_result_subtype(path: Path) -> str | None:
+    """path (agent.jsonl) を UTF-8 で読み、last_result_subtype を返す。path が無ければ None。"""
+    raise NotImplementedError
+
+
 def validate_minutes(minutes: float) -> None:
     """run の --minutes を検証する。正の数でなければ (0 以下と NaN) ValueError にする。
 
@@ -225,9 +244,11 @@ def run_agent_until(
         - プロセスが動いていて、clock() が期限以上なら stop_process で止め、理由 "deadline" で終える
         - プロセスが終わっていたら、次の順に判定する:
             1. 期限までの残りが MIN_REMAINING_S 未満なら、理由 "deadline" で終える
-            2. 起動し直した回数が MAX_RESUMES なら、理由 "resumes_exhausted" で終える
-            3. read_last_session_id(paths.agent_log_file) が None なら、理由 "no_session" で終える
-            4. RESUME_PROMPT と --resume <session_id> で起動し直す
+            2. read_last_result_subtype(paths.agent_log_file) が BUDGET_EXHAUSTED_SUBTYPE なら、
+               理由 "budget_exhausted" で終える (予算の上限で終わったプロセスは起動し直さない)
+            3. 起動し直した回数が MAX_RESUMES なら、理由 "resumes_exhausted" で終える
+            4. read_last_session_id(paths.agent_log_file) が None なら、理由 "no_session" で終える
+            5. RESUME_PROMPT と --resume <session_id> で起動し直す
     終えるときは (例外・KeyboardInterrupt で抜けるときも finally で) send(["up", "ALL"]) を送る。
     例外・KeyboardInterrupt で抜けるときにプロセスがまだ動いていれば、up ALL の前に stop_process で止める
     (止めないと、up ALL の後もエージェントが入力を送り続けるため)。

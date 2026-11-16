@@ -89,10 +89,12 @@ def handle_press(
 ) -> CommandResult:
     """press: ボタン入力をデーモンに送る。
 
-    press_args.press_args_error(action, args) が error 行を返したら、送らずにその行を stderr に出し、終了コード 1。
+    まず args を press_args.split_press_args で分け直す (デーモンと同じく空白で分けたトークン列 tokens にする)。
+    press_args.press_args_error(action, tokens) が error 行を返したら、送らずにその行を stderr に出し、終了コード 1。
     このときもイベントを記録する (reply=<その error 行>、ok=False、time=clock() を 1 回呼んだ値、elapsed_s=0.0)。
-    通れば send([action, *args]) を送り、応答を stdout に出す。応答が error で始まれば終了コード 1。
-    イベント: command="press"、args=(action, *args)。
+    通れば send([action, *tokens]) を送り、応答を stdout に出す。応答が error で始まれば終了コード 1。
+    イベント: command="press"、args=(action, *tokens) (拒否したときも同じ)。
+    例: args が ["RIGHT RIGHT"] なら send(["tap", "RIGHT", "RIGHT"]) を送る (action が "tap" のとき)。
     """
     raise NotImplementedError
 
@@ -122,9 +124,9 @@ def handle_finish(
 def handle_report(paths: WorkspacePaths, as_json: bool) -> CommandResult:
     """report: 実験の集計を stdout に出し、終了コード 0。
 
-    event_log.read_events(paths.events_file) のイベントと、paths.agent_log_file の行
-    (ファイルが無ければ空) から session_report.result_messages_from_lines で取り出した result メッセージを、
-    session_report.summarize_session で集計する。look の画像は screen_change.load_gray(paths.root / frame) で読む。
+    event_log.read_events(paths.events_file) のイベントと、paths.agent_log_file のすべての行
+    (UTF-8 で読む。ファイルが無ければ空の列) を、session_report.summarize_session で集計する。
+    look の画像は screen_change.load_gray(paths.root / frame) で読む。
     as_json が False なら session_report.format_summary の各行を、
     True なら json.dumps(session_report.summary_to_dict(summary), ensure_ascii=False) の 1 行を出す。
     """
@@ -152,6 +154,7 @@ def handle_run(
     3. agent_launcher.run_agent_until を、game=config.game、
        agent_commands=features.agent_commands(config.features, available)、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で呼ぶ
-    4. `ok run finished reason=<理由> launches=<起動した回数> log=<paths.agent_log_file>` を stdout に出し、終了コード 0
+    4. `ok run finished reason=<理由> launches=<起動した回数> log=<paths.agent_log_file>` を stdout に出し、終了コード 0。
+       理由は agent_launcher.StopReason のいずれか (deadline / budget_exhausted / no_session / resumes_exhausted)
     """
     raise NotImplementedError
