@@ -22,8 +22,14 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from switch2_layers.hardware.pad_output import PadOutput
+from switch2_layers.hardware.pad_output import (
+    TAP_PRESS_S,
+    OutputStoppedError,
+    PadOutput,
+)
 from switch2_layers.middle.system_screen_types import (
+    NO_SCREEN_NAME,
+    SystemCutReason,
     SystemOperation,
     SystemRunResult,
     SystemScreenOutput,
@@ -87,7 +93,19 @@ def operation_pad_action(operation: SystemOperation) -> PadAction:
     PadAction(held=frozenset(buttons), hold_seconds={各ボタン: seconds})。スティックは倒さない。
     operation が wait なら ValueError にする (wait は何も送らない)。
     """
-    raise NotImplementedError
+    if operation.kind != "press":
+        raise ValueError(f"only a press becomes a pad action: {operation!r}")
+    buttons = frozenset(operation.buttons)
+    if operation.seconds is None:
+        return PadAction(taps=buttons)
+    return PadAction(
+        held=buttons, hold_seconds={button: operation.seconds for button in buttons}
+    )
+
+
+def _screen_name(screen: str | None) -> str:
+    """照合の結果の画面 screen を、操作の screen と比べる名前にする (None は NO_SCREEN_NAME)。"""
+    return NO_SCREEN_NAME if screen is None else screen
 
 
 class SystemOperationRunner:
@@ -107,7 +125,10 @@ class SystemOperationRunner:
         wait_or_stop: WaitOrStop = threading.Event.wait,
     ) -> None:
         """部品を持つ。ここでは何も送らず、待たない。"""
-        raise NotImplementedError
+        self.pad_output = pad_output
+        self.judgments = judgments
+        self.clock = clock
+        self.wait_or_stop = wait_or_stop
 
     def run(
         self,
@@ -146,5 +167,104 @@ class SystemOperationRunner:
         返す (その操作から後は送らない)。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
         送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、そのまま外に出す。
+
+        先頭の操作は、渡された judged_screen とだけ比べて送り、新しいフレームの照合の結果を待たない。そのため呼び出し側は、
+        次の列を決める入力の照合の結果を、前の列の最後の操作を終えた時刻 + SETTLE_S より後に撮ったフレームのものにする
+        前提とする (反映前の画面の照合の結果と一致しただけで、先頭の A を送らないため)。
         """
-        raise NotImplementedError
+        operations = output.operations
+        blocked: set[str] = set()
+        # 前の操作を終えた時刻 (先頭の操作の確かめでは使わない)
+        end_t = 0.0
+        for index, operation in enumerate(operations):
+            reason = self._check_before(index, operation, judged_screen, end_t, stop)
+            if reason is not None:
+                return _cut(index, reason, blocked)
+            if operation.kind == "press":
+                try:
+                    filtered = self.pad_output.apply(
+                        operation_pad_action(operation), source="system"
+                    )
+                except OutputStoppedError:
+                    return _cut(index, SystemCutReason.STOPPED, blocked)
+                blocked.update(filtered.blocked_buttons)
+                press_s = (
+                    TAP_PRESS_S if operation.seconds is None else operation.seconds
+                )
+                end_t = self.clock.now() + press_s
+            else:
+                # wait は何も送らない。秒数は、次の操作の前 (または最後の待ち) で待つ
+                end_t = self.clock.now() + (operation.seconds or 0.0)
+        if operations:
+            self._wait_until(end_t, stop)
+        return SystemRunResult(
+            sent_count=len(operations),
+            cut_index=None,
+            cut_reason=None,
+            blocked_buttons=frozenset(blocked),
+        )
+
+    def _check_before(
+        self,
+        index: int,
+        operation: SystemOperation,
+        judged_screen: str | None,
+        previous_end_t: float,
+        stop: threading.Event,
+    ) -> SystemCutReason | None:
+        """位置 index の操作を送る前の確かめ (run の 1〜3) を行い、打ち切るならその理由、送るなら None を返す。"""
+        if stop.is_set():
+            return SystemCutReason.STOPPED
+        if index == 0:
+            if operation.screen != _screen_name(judged_screen):
+                return SystemCutReason.SCREEN_MISMATCH
+            return None
+        if DECISION_BUTTON in operation.buttons:
+            return SystemCutReason.DECISION_NOT_FIRST
+        after_frame_t = previous_end_t + SETTLE_S
+        if self._wait_until(after_frame_t, stop):
+            return SystemCutReason.STOPPED
+        judgment = self._wait_judgment(after_frame_t, stop)
+        if stop.is_set():
+            return SystemCutReason.STOPPED
+        if judgment is None:
+            return SystemCutReason.NO_JUDGMENT
+        if operation.screen != _screen_name(judgment.screen):
+            return SystemCutReason.SCREEN_MISMATCH
+        return None
+
+    def _wait_until(self, target_t: float, stop: threading.Event) -> bool:
+        """clock.now() が target_t になるまで wait_or_stop で待つ。stop が立っていれば True を返す。"""
+        remaining_s = target_t - self.clock.now()
+        if remaining_s <= 0:
+            return stop.is_set()
+        return self.wait_or_stop(stop, remaining_s)
+
+    def _wait_judgment(
+        self, after_frame_t: float, stop: threading.Event
+    ) -> JudgmentResult | None:
+        """frame_t が after_frame_t より大きい照合の結果を、after_frame_t + JUDGMENT_WAIT_S まで待って返す (run の 3c)。
+
+        届かないか、stop が立ったら None を返す (呼び出し側が stop を確かめ直して理由を決める)。
+        """
+        deadline_t = after_frame_t + JUDGMENT_WAIT_S
+        while not stop.is_set():
+            remaining_s = deadline_t - self.clock.now()
+            judgment = self.judgments.wait_newer(
+                after_frame_t, max(0.0, min(JUDGMENT_POLL_S, remaining_s))
+            )
+            if judgment is not None or stop.is_set():
+                return judgment
+            if remaining_s <= 0 or self.clock.now() >= deadline_t:
+                return None
+        return None
+
+
+def _cut(index: int, reason: SystemCutReason, blocked: set[str]) -> SystemRunResult:
+    """位置 index で、理由 reason で打ち切ったときの結果を返す (blocked は、それまでに外したボタン)。"""
+    return SystemRunResult(
+        sent_count=index,
+        cut_index=index,
+        cut_reason=reason,
+        blocked_buttons=frozenset(blocked),
+    )

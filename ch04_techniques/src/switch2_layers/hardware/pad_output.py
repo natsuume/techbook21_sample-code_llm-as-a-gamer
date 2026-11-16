@@ -241,8 +241,6 @@ class PadOutput:
         送信の前の clock() から決める。
         変化が無くても送る。
         """
-        if source != "apply":
-            raise NotImplementedError
         with self._lock:
             if self._output_stopped:
                 raise OutputStoppedError("pad output was stopped")
@@ -306,7 +304,7 @@ class PadOutput:
             self._set_hold_deadlines_locked(
                 pressed_held, sent_action.hold_seconds, sent_at
             )
-            self._report_operation_locked("apply", sent_action, error)
+            self._report_operation_locked(source, sent_action, error)
             if error is not None:
                 raise error
             return FilteredAction(

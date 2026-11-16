@@ -16,12 +16,24 @@ luna_middle.build_call_details の形 (usage・cost_usd・response・error_body_
 (incomplete・拒否・決まりに合わない出力) でも、usage・cost_usd・response を記録する。
 """
 
+from collections import deque
 from collections.abc import Iterable, Sequence
 from typing import Protocol
 
 import httpx
 
-from switch2_layers.middle.luna_client import LUNA_TIMEOUT_S
+from switch2_layers.middle.luna_client import (
+    LUNA_TIMEOUT_S,
+    LunaCallError,
+    post_responses,
+    read_output_text,
+)
+from switch2_layers.middle.luna_middle import build_call_details
+from switch2_layers.middle.system_screen_request import build_system_screen_payload
+from switch2_layers.middle.system_screen_schema import (
+    build_system_screen_schema,
+    parse_system_screen_output,
+)
 from switch2_layers.middle.system_screen_types import (
     SystemScreenInput,
     SystemScreenOutput,
@@ -67,7 +79,15 @@ class LunaSystemScreenMiddle:
 
         ここでは要求を送らない。screen_names に "none" があるか、同じ名前が 2 つ以上あれば ValueError にする。
         """
-        raise NotImplementedError
+        names = tuple(screen_names)
+        # 出力のスキーマを作れるかで、一覧の誤りを確かめる (Client を作る前に)
+        build_system_screen_schema(names)
+        self.api_key = api_key
+        self.screen_names = names
+        self.client = httpx.Client() if client is None else client
+        self.timeout_s = timeout_s
+        # 直前の decide の記録。decide を呼んでいないか、渡した後なら空
+        self._call_details: dict[str, object] = {}
 
     def decide(self, screen_input: SystemScreenInput) -> SystemScreenOutput:
         """screen_input から gpt-6-luna の出力を得て SystemScreenOutput を返す (モジュールの docstring の 1〜4)。
@@ -76,14 +96,32 @@ class LunaSystemScreenMiddle:
         応答の本文を受け取ったら build_call_details(本文, None)、LunaCallError なら
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、SystemScreenMiddleError を出す。
         """
-        raise NotImplementedError
+        self._call_details = build_call_details(None, None)
+        payload = build_system_screen_payload(screen_input, self.screen_names)
+        try:
+            body = post_responses(self.client, self.api_key, payload, self.timeout_s)
+            # 出力を読めなくても (決まりに合わない出力を含む)、費用のかかった応答を記録に残す
+            self._call_details = build_call_details(body, None)
+            text = read_output_text(body)
+        except LunaCallError as error:
+            self._call_details = build_call_details(
+                error.response_body, error.error_body_head
+            )
+            raise SystemScreenMiddleError(str(error)) from error
+        try:
+            return parse_system_screen_output(text, self.screen_names)
+        except ValueError as error:
+            raise SystemScreenMiddleError(
+                f"system screen middle output does not follow the rules: {error}"
+            ) from error
 
     def take_call_details(self) -> dict[str, object]:
         """直前の decide の記録 (luna_middle.build_call_details の形) を返し、持っている記録を消す。
 
         decide を呼んでいないか、記録を渡した後なら空の辞書を返す。
         """
-        raise NotImplementedError
+        details, self._call_details = self._call_details, {}
+        return details
 
 
 class FakeSystemScreenMiddle:
@@ -91,11 +129,13 @@ class FakeSystemScreenMiddle:
 
     def __init__(self, outputs: Iterable[SystemScreenOutput] = ()) -> None:
         """outputs を、返す順の列として持つ (作るときに一度だけ読む)。"""
-        raise NotImplementedError
+        self._outputs: deque[SystemScreenOutput] = deque(outputs)
 
     def decide(self, screen_input: SystemScreenInput) -> SystemScreenOutput:
         """持っている列の次の出力を返す。列を使い切ったら FAKE_EXHAUSTED_OUTPUT を返す (何度呼んでも同じ)。
 
         screen_input は使わない。例外は出さない。
         """
-        raise NotImplementedError
+        if self._outputs:
+            return self._outputs.popleft()
+        return FAKE_EXHAUSTED_OUTPUT

@@ -19,11 +19,14 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from switch2_layers.middle.luna_middle import CALL_DETAIL_KEYS
+from switch2_layers.middle.system_screen_schema import system_output_to_json
 from switch2_layers.middle.system_screen_types import (
     SystemRunResult,
     SystemScreenInput,
     SystemScreenOutput,
 )
+from switch2_layers.pad_action import sort_buttons
 
 CALL_ROW_KIND = "call"
 RUN_ROW_KIND = "run"
@@ -56,7 +59,23 @@ def system_call_row(record: SystemCallRecord) -> dict[str, object]:
     goal は screen_input.goal の値 (文字列)、frame_t・judged_screen・judged_frame_t は screen_input の値。
     usage・cost_usd・response・error_body_head は details の値 (キーが無ければ None)。details のほかのキーは入れない。
     """
-    raise NotImplementedError
+    screen_input = record.screen_input
+    row: dict[str, object] = {
+        "kind": CALL_ROW_KIND,
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "goal": screen_input.goal.value,
+        "frame_t": screen_input.frame_t,
+        "judged_screen": screen_input.judged_screen,
+        "judged_frame_t": screen_input.judged_frame_t,
+        "output": None
+        if record.output is None
+        else system_output_to_json(record.output),
+        "error": record.error,
+    }
+    for key in CALL_DETAIL_KEYS:
+        row[key] = record.details.get(key)
+    return row
 
 
 def system_run_row(t: float, result: SystemRunResult) -> dict[str, object]:
@@ -65,4 +84,11 @@ def system_run_row(t: float, result: SystemRunResult) -> dict[str, object]:
     t は行の時刻 (送り終えた時刻)。cut_reason は値 (文字列) か None、blocked_buttons は
     pad_action.sort_buttons(result.blocked_buttons) のリスト。
     """
-    raise NotImplementedError
+    return {
+        "kind": RUN_ROW_KIND,
+        "t": t,
+        "sent_count": result.sent_count,
+        "cut_index": result.cut_index,
+        "cut_reason": None if result.cut_reason is None else result.cut_reason.value,
+        "blocked_buttons": sort_buttons(result.blocked_buttons),
+    }

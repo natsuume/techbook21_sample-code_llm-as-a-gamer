@@ -32,9 +32,27 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
 節の後ろに、今の画像の時刻のラベル (frame_label(frame_t)) と画像 (input_image) を 1 組置く。
 """
 
+import json
 from collections.abc import Sequence
 
+from switch2_layers.frames.surface_frames import format_frame_label
+from switch2_layers.middle.luna_request import (
+    LUNA_MODEL,
+    REASONING_EFFORT,
+    frame_label,
+    jpeg_data_url,
+)
+from switch2_layers.middle.system_screen_instructions import (
+    SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS,
+    goal_text,
+)
+from switch2_layers.middle.system_screen_schema import (
+    build_system_screen_text_format,
+    system_operation_to_json,
+)
 from switch2_layers.middle.system_screen_types import (
+    MAX_HISTORY_ENTRIES,
+    NO_SCREEN_NAME,
     SystemScreenInput,
     SystemStepRecord,
 )
@@ -64,7 +82,14 @@ def describe_judgment(judged_screen: str | None, judged_frame_t: float | None) -
         画面: <judged_screen>                 judged_screen が None なら「画面: none (<NO_SCREEN_NOTE>)」
         照合したフレーム: t=<judged_frame_t>  t は format_frame_label の形
     """
-    raise NotImplementedError
+    if judged_frame_t is None:
+        return NO_JUDGMENT_TEXT
+    screen = (
+        f"{NO_SCREEN_NAME} ({NO_SCREEN_NOTE})"
+        if judged_screen is None
+        else judged_screen
+    )
+    return f"画面: {screen}\n照合したフレーム: {format_frame_label(judged_frame_t)}"
 
 
 def describe_history(history: Sequence[SystemStepRecord]) -> str:
@@ -77,19 +102,63 @@ def describe_history(history: Sequence[SystemStepRecord]) -> str:
     t は format_frame_label の形。操作の列の JSON は、system_screen_schema.system_operation_to_json の値のリストを
     json.dumps(..., ensure_ascii=False) にしたもの (出力の operations と同じ形)。
     """
-    raise NotImplementedError
+    if not history:
+        return EMPTY_TEXT
+    return "\n".join(
+        _describe_step(record) for record in list(history)[-MAX_HISTORY_ENTRIES:]
+    )
+
+
+def _describe_step(record: SystemStepRecord) -> str:
+    """履歴の 1 件を、describe_history の 1 行の形にする。"""
+    screen = NO_SCREEN_NAME if record.judged_screen is None else record.judged_screen
+    operations = json.dumps(
+        [system_operation_to_json(operation) for operation in record.operations],
+        ensure_ascii=False,
+    )
+    result = (
+        "最後まで送った"
+        if record.cut_reason is None
+        else f"打ち切った理由 {record.cut_reason.value}"
+    )
+    return (
+        f"- {format_frame_label(record.t)}: 照合の結果 {screen}、操作の列 {operations}、"
+        f"送った操作 {record.sent_count}/{len(record.operations)}、{result}"
+    )
 
 
 def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
     """user メッセージの 7 つの節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
-    raise NotImplementedError
+    goal = screen_input.goal
+    bodies = [
+        format_frame_label(screen_input.t),
+        f"{goal.value}\n{goal_text(goal)}",
+        screen_input.software_name,
+        screen_input.user_name,
+        describe_judgment(screen_input.judged_screen, screen_input.judged_frame_t),
+        describe_history(screen_input.history),
+        IMAGE_SECTION_TEXT,
+    ]
+    return [
+        f"## {title}\n{body}"
+        for title, body in zip(USER_SECTION_TITLES, bodies, strict=True)
+    ]
 
 
 def build_developer_message() -> dict[str, object]:
     """developer メッセージ {"role": "developer", "content": [{"type": "input_text",
     "text": SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS, "prompt_cache_breakpoint": {"mode": "explicit"}}]} を返す。
     """
-    raise NotImplementedError
+    return {
+        "role": "developer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS,
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }
+        ],
+    }
 
 
 def build_user_message(screen_input: SystemScreenInput) -> dict[str, object]:
@@ -98,7 +167,15 @@ def build_user_message(screen_input: SystemScreenInput) -> dict[str, object]:
     content は、build_user_sections の各節の input_text、続けて frame_label(frame_t) の input_text と
     jpeg_data_url(frame_jpeg) の input_image。prompt_cache_breakpoint は置かない。
     """
-    raise NotImplementedError
+    content: list[dict[str, object]] = [
+        {"type": "input_text", "text": text}
+        for text in build_user_sections(screen_input)
+    ]
+    content.append({"type": "input_text", "text": frame_label(screen_input.frame_t)})
+    content.append(
+        {"type": "input_image", "image_url": jpeg_data_url(screen_input.frame_jpeg)}
+    )
+    return {"role": "user", "content": content}
 
 
 def build_system_screen_payload(
@@ -109,4 +186,10 @@ def build_system_screen_payload(
     screen_names の誤り ("none" がある・同じ名前が 2 つ以上ある) は、build_system_screen_text_format と同じく
     ValueError にする。
     """
-    raise NotImplementedError
+    return {
+        "model": LUNA_MODEL,
+        "reasoning": {"effort": REASONING_EFFORT},
+        "text": {"format": build_system_screen_text_format(screen_names)},
+        "prompt_cache_options": {"mode": "explicit"},
+        "input": [build_developer_message(), build_user_message(screen_input)],
+    }

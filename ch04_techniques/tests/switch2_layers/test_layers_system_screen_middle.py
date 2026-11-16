@@ -236,6 +236,14 @@ def test_developer_message_describes_each_reference_screen():
         assert name in text
 
 
+def test_developer_message_has_the_procedure_of_every_goal():
+    # 目的ごとの手順は、その回の目的によらず 3 つすべてを変わらない指示に載せる
+    text = developer_text(sent_payload())
+    for goal in SystemGoal:
+        assert goal.value in text
+        assert goal_text(goal) in text
+
+
 def test_user_message_has_goal_and_its_procedure():
     for goal in SystemGoal:
         joined = "\n".join(
