@@ -11,11 +11,16 @@ from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
     ADVISOR_QUESTION_TEXTS,
     BUTTON_CHOICES,
+    HOLD_LONG_CHOICE,
+    HOLD_LONG_SECONDS,
+    HOLD_SHORT_CHOICE,
+    HOLD_SHORT_SECONDS,
     INFO_LABEL_NAMES,
     NONE_CHOICE,
     SCENE_CHANGE_QUESTION_NAME,
     STICK_DIRECTION_CHOICES,
     SURFACE_INSTRUCTIONS,
+    TAP_CHOICE,
     QuestionKind,
     QuestionType,
     box_exists_question_name,
@@ -56,7 +61,12 @@ def test_question_lists_follow_the_issue():
 
 
 def test_choices_put_none_first():
-    assert [choice.name for choice in BUTTON_CHOICES] == ["none", "hold", "tap"]
+    assert [choice.name for choice in BUTTON_CHOICES] == [
+        "none",
+        "tap",
+        "hold_short",
+        "hold_long",
+    ]
     # スティックの向きは none・負の向き・正の向き
     assert [choice.name for choice in STICK_DIRECTION_CHOICES["x"]] == [
         "none",
@@ -68,6 +78,25 @@ def test_choices_put_none_first():
         "down",
         "up",
     ]
+
+
+def test_button_choice_names_and_hold_seconds_are_constants():
+    assert (TAP_CHOICE, HOLD_SHORT_CHOICE, HOLD_LONG_CHOICE) == (
+        "tap",
+        "hold_short",
+        "hold_long",
+    )
+    assert HOLD_SHORT_SECONDS == 0.3
+    assert HOLD_LONG_SECONDS == 1.0
+
+
+def test_hold_choices_describe_seconds_and_that_holding_again_continues():
+    descriptions = {choice.name: choice.description for choice in BUTTON_CHOICES}
+    assert "0.3 秒" in descriptions["hold_short"]
+    assert "1.0 秒" in descriptions["hold_long"]
+    # 次の判断でも同じボタンの押し続けを選ぶと、離さずに続くこと
+    for name in ["hold_short", "hold_long"]:
+        assert "離さず" in descriptions[name]
 
 
 def test_instructions_say_that_action_and_other_questions_are_independent():

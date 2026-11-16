@@ -11,6 +11,7 @@ from switch2_layers.run_directory import (
     INITIAL_COMMON_TIPS,
     INITIAL_STRATEGY,
     MIDDLE_MAP_RECORDS_FILE,
+    SURFACE_REQUESTS_LOG_FILE,
     RunPaths,
     create_run_directory,
     frame_file_name,
@@ -100,6 +101,12 @@ def test_run_paths_follow_the_layout():
     assert paths.middle_state == root / "middle" / "state.json"
     assert paths.middle_calls == root / "middle" / "calls.jsonl"
     assert paths.deep_dir == root / "deep"
+
+
+def test_surface_requests_log_path():
+    root = Path("/runs/20261115-142233")
+    assert SURFACE_REQUESTS_LOG_FILE == "surface_requests.jsonl"
+    assert RunPaths(root).surface_requests_log == root / "surface_requests.jsonl"
 
 
 def test_middle_map_records_path():

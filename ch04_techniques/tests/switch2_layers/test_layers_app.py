@@ -40,6 +40,7 @@ from switch2_layers.safety.safety_types import SafetyAnswer
 from switch2_layers.settings import DeepRunnerChoice, RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.jev_client import DEFAULT_JEV_MODEL, IMAGES_HEADER
 from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
@@ -821,6 +822,58 @@ def test_jev_surface_parts_run_together_with_mock_jev(tmp_path):
     saved = {row["file"] for row in read_rows(root / "frames.jsonl")}
     assert {frame["file"] for frame in rows[0]["frames"]} <= saved
     assert read_rows(root / "run.jsonl")[0]["args"]["surface"] == "jev"
+
+
+def test_jev_surface_records_requests_and_answers_with_mock_jev(tmp_path):
+    sender = FakeSender()
+    http = httpx.Client(transport=httpx.MockTransport(mock_jev_answers))
+    run_settings = settings(tmp_path)
+    surface = build_surface_assembly(run_settings, "test-key", http_client=http)
+    app = LayersApp(
+        run_settings,
+        dataclasses.replace(
+            parts(sender, surface=surface.decider),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            surface_plan_boxes=surface.plan_boxes,
+            on_run_directory=surface.on_run_directory,
+        ),
+    )
+    try:
+        reason, root = run_app(app, stop_after=1.5)
+    finally:
+        surface.close()
+    assert reason == REASON_INTERRUPTED
+    request_text = (root / "surface_requests.jsonl").read_text(encoding="utf-8")
+    request_rows = read_rows(root / "surface_requests.jsonl")
+    surface_rows = read_rows(root / "surface.jsonl")
+    assert request_rows
+    assert surface_rows
+    assert [row["request"] for row in request_rows] == list(
+        range(1, len(request_rows) + 1)
+    )
+    assert all(row["model"] == DEFAULT_JEV_MODEL for row in request_rows)
+    # API キーと HTTP のヘッダーは書かない
+    assert "test-key" not in request_text
+    assert "Authorization" not in request_text
+    assert IMAGES_HEADER not in request_text
+    sent = {row["request"]: row for row in request_rows}
+    for row in surface_rows:
+        request = sent[row["request"]]
+        # 送った state の画像は、surface.jsonl と同じ、保存を予約したファイル名
+        assert [frame["image"] for frame in request["state"]["frames"]] == [
+            frame["file"] for frame in row["frames"]
+        ]
+        # 要求したすべての choice と noul の問いの答えを書き、box の問いの答えは書かない
+        types = {question["id"]: question["type"] for question in request["questions"]}
+        assert set(row["answers"]["choices"]) == {
+            name for name, kind in types.items() if kind == "choice"
+        }
+        assert set(row["answers"]["nouls"]) == {
+            name for name, kind in types.items() if kind == "noul"
+        }
+        # usage は受け取った形のまま (偽の Jev は空の object を返す)
+        assert row["usage"] == {}
 
 
 # --- 安全の監視 ---

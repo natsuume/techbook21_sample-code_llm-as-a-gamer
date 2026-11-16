@@ -1,7 +1,7 @@
 """Jev を呼ぶ SurfaceDecider。Jev は偽物 (FakeAsker) か、httpx の MockTransport で受け、外部には送らない。"""
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import httpx
@@ -17,6 +17,7 @@ from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS
 from switch2_layers.surface.box_tracker import NormalizedBox, TrackingFrame, TrackResult
 from switch2_layers.surface.box_tracking_state import BoxTrackingState
 from switch2_layers.surface.jev_client import (
+    DEFAULT_JEV_MODEL,
     IMAGES_HEADER,
     JevAnswers,
     JevBox,
@@ -28,6 +29,7 @@ from switch2_layers.surface.jev_surface import (
     NO_TIMELINE_TEXT,
     JevSurfaceDecider,
     JevSurfaceSettings,
+    build_recorded_state,
     build_surface_state,
     documents_to_state,
     recent_actions_to_state,
@@ -48,6 +50,7 @@ from switch2_layers.surface.surface_types import (
     SurfaceDocuments,
     SurfaceFrame,
     SurfaceInput,
+    SurfaceRequest,
 )
 
 FRAME_TIMES = (9.0, 9.5, 10.0)
@@ -63,14 +66,23 @@ DOCUMENTS = SurfaceDocuments(
 )
 JEV_BOX = JevBox(top=0.2, bottom=0.4, left=0.1, right=0.3, confidence=None)
 ALLOWED = allowed_buttons(allow_home=False)
+FAKE_MODEL = "jev-test"
+# FRAME_TIMES の画像の保存を予約したファイル (2 枚目は保存を捨てた)
+FILES = ("frames/surface/000009000.jpg", None, "frames/surface/000010000-2.jpg")
 
 
 class FakeAsker:
-    """JevAsker の偽物。問いごとに中立の答え (none 1.0、noul 0.0、box は JEV_BOX) を返し、overrides で置き換える。"""
+    """JevAsker の偽物。問いごとに中立の答え (none 1.0、noul 0.0、box は JEV_BOX) を返し、overrides で置き換える。
+
+    答えの usage は usage 属性の値。
+    """
+
+    model = FAKE_MODEL
 
     def __init__(self, overrides: Mapping[str, object] | None = None):
         self.overrides = dict(overrides or {})
         self.error: Exception | None = None
+        self.usage: object | None = None
         self.calls: list[
             tuple[Mapping[str, object], list[SurfaceQuestion], list[JevImage]]
         ] = []
@@ -105,7 +117,7 @@ class FakeAsker:
                 boxes[question.name] = self.overrides[question.name]
             else:
                 boxes[question.name] = JEV_BOX
-        return JevAnswers(choices=choices, nouls=nouls, boxes=boxes)
+        return JevAnswers(choices=choices, nouls=nouls, boxes=boxes, usage=self.usage)
 
     def questions_of(self, call: int) -> list[SurfaceQuestion]:
         return self.calls[call][1]
@@ -147,9 +159,14 @@ def surface_input(
     timeline: str = "",
     timeline_generated_t: float | None = None,
     recent_actions: tuple[RecentAction, ...] = (),
+    files: Sequence[str | None] | None = None,
+    request_sink: Callable[[SurfaceRequest], None] | None = None,
 ) -> SurfaceInput:
+    """files は times と同じ順の、画像の保存を予約したファイル (None なら、どの画像も file を持たない)。"""
+    frame_files = files if files is not None else [None] * len(times)
     frames = tuple(
-        SurfaceFrame(t=t, jpeg=f"jpeg-{t}".encode(), label=f"t={t:.3f}") for t in times
+        SurfaceFrame(t=t, jpeg=f"jpeg-{t}".encode(), label=f"t={t:.3f}", file=file)
+        for t, file in zip(times, frame_files, strict=True)
     )
     return SurfaceInput(
         t=request_t,
@@ -158,6 +175,7 @@ def surface_input(
         timeline=timeline,
         timeline_generated_t=timeline_generated_t,
         recent_actions=recent_actions,
+        request_sink=request_sink,
     )
 
 
@@ -232,19 +250,23 @@ def test_timeline_to_state():
 
 def test_recent_actions_to_state():
     actions = (
-        RecentAction(9.2, PadAction(held=frozenset({"A"}))),
+        RecentAction(
+            9.2, PadAction(held=frozenset({"A", "B"}), hold_seconds={"A": 0.3})
+        ),
         RecentAction(9.8, PadAction(taps=frozenset({"B"}), left_stick=(0.5, 0.0))),
     )
     assert recent_actions_to_state(actions, 10.0) == [
         {
             "time": "t=9.200 秒 (0.8 秒前)",
-            "held": ["A"],
+            "held": ["A", "B"],
+            "hold_seconds": {"A": 0.3},
             "taps": [],
             "sticks": {"LS": [0.0, 0.0], "RS": [0.0, 0.0]},
         },
         {
             "time": "t=9.800 秒 (0.2 秒前)",
             "held": [],
+            "hold_seconds": {},
             "taps": ["B"],
             "sticks": {"LS": [0.5, 0.0], "RS": [0.0, 0.0]},
         },
@@ -424,7 +446,7 @@ def test_request_json_through_mock_transport(tmp_path):
 def test_output_follows_answers(tmp_path):
     asker = FakeAsker(
         {
-            "button_A": {"none": 0.1, "hold": 0.8, "tap": 0.1},
+            "button_A": {"none": 0.1, "tap": 0.1, "hold_short": 0.0, "hold_long": 0.8},
             "stick_LS_x": {"none": 0.0, "left": 0.0, "right": 1.0},
             "advisor_tips": 0.6,
             "advisor_advice": 0.5,
@@ -434,7 +456,9 @@ def test_output_follows_answers(tmp_path):
     )
     decider, _ = make_decider(tmp_path, asker)
     output = decider.decide(surface_input())
-    assert output.action == PadAction(held=frozenset({"A"}), left_stick=(0.25, 0.0))
+    assert output.action == PadAction(
+        held=frozenset({"A"}), hold_seconds={"A": 1.0}, left_stick=(0.25, 0.0)
+    )
     assert output.deep_kinds == frozenset({DocumentKind.TIPS})
     assert output.info_labels == (
         InfoLabel("controls", 0.0),
@@ -656,3 +680,186 @@ def test_plan_boxes_before_run_directory_is_an_error(tmp_path):
     decider, _ = make_decider(tmp_path, asker, with_notes=False)
     with pytest.raises(RuntimeError):
         decider.plan_boxes(None)
+
+
+# --- 送る要求の記録 (request_sink) と、記録のための情報 (exchange) ---
+
+
+class RequestSink:
+    """request_sink の偽物。受け取った要求と、受け取ったときまでに Jev に送った回数を記録する。"""
+
+    def __init__(self, asker: FakeAsker, error: Exception | None = None):
+        self.asker = asker
+        self.error = error
+        self.requests: list[SurfaceRequest] = []
+        self.sent_before: list[int] = []
+
+    def __call__(self, request: SurfaceRequest) -> None:
+        self.requests.append(request)
+        self.sent_before.append(len(self.asker.calls))
+        if self.error is not None:
+            raise self.error
+
+
+def without_frames(state: Mapping[str, object]) -> dict[str, object]:
+    return {key: value for key, value in state.items() if key != "frames"}
+
+
+def test_recorded_state_replaces_image_references_with_files():
+    surface = surface_input(
+        timeline="系列",
+        timeline_generated_t=8.5,
+        recent_actions=(RecentAction(9.8, PadAction(held=frozenset({"A"}))),),
+        files=FILES,
+    )
+    sent = build_surface_state(surface, ["a", "b", "c"])
+    recorded = build_recorded_state(surface)
+    # 送る state と同じキー・同じ内容で、画像だけを保存したファイル (保存を捨てた画像は None) にする
+    assert list(recorded) == list(sent)
+    assert without_frames(recorded) == without_frames(sent)
+    assert recorded["frames"] == [
+        {"label": "t=9.000 秒 (1.0 秒前)", "image": "frames/surface/000009000.jpg"},
+        {"label": "t=9.500 秒 (0.5 秒前)", "image": None},
+        {"label": "t=10.000 秒 (0.0 秒前)", "image": "frames/surface/000010000-2.jpg"},
+    ]
+
+
+def test_request_is_passed_to_sink_once_just_before_sending(tmp_path):
+    asker = FakeAsker()
+    decider, tracking = make_decider(tmp_path, asker)
+    feed(tracking, FRAME_TIMES)
+    sink = RequestSink(asker)
+    surface = surface_input(files=FILES, request_sink=sink)
+    decider.decide(surface)
+    # 1 回だけ、Jev に送る前に渡す
+    assert sink.sent_before == [0]
+    assert len(asker.calls) == 1
+    request = sink.requests[0]
+    state, questions, _ = asker.calls[0]
+    assert request.request_index == 1
+    assert request.model == FAKE_MODEL
+    assert request.questions == tuple(questions)
+    # 記録の state は、送った state と同じ内容で、画像の参照文字列だけを保存したファイルに置き換えたもの
+    assert request.state == build_recorded_state(surface)
+    assert without_frames(request.state) == without_frames(state)
+    assert [frame["image"] for frame in request.state["frames"]] == list(FILES)
+    assert "ref-" not in json.dumps(request.state, ensure_ascii=False)
+
+
+def test_output_exchange_has_the_sent_request_and_the_answers(tmp_path):
+    button_a = {"none": 0.1, "tap": 0.05, "hold_short": 0.8, "hold_long": 0.05}
+    asker = FakeAsker({"button_A": button_a, "scene_changed": 0.8})
+    asker.usage = {"input_tokens": 100, "output_tokens": 2}
+    decider, _ = make_decider(tmp_path, asker)
+    sink = RequestSink(asker)
+    output = decider.decide(surface_input(request_sink=sink))
+    exchange = output.exchange
+    assert exchange is not None
+    # 書き込み先に渡したものと同じ要求
+    assert exchange.request == sink.requests[0]
+    assert exchange.answers.choices["button_A"] == button_a
+    assert exchange.answers.nouls["scene_changed"] == 0.8
+    assert exchange.answers.usage == {"input_tokens": 100, "output_tokens": 2}
+
+
+def test_output_exchange_without_sink(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    output = decider.decide(surface_input())
+    assert output.exchange is not None
+    assert output.exchange.request.request_index == 1
+    assert output.exchange.request.questions == tuple(asker.questions_of(0))
+    assert output.exchange.answers.usage is None
+
+
+def test_request_failing_after_sending_is_recorded_and_numbers_continue(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    sink = RequestSink(asker)
+    asker.error = JevError("HTTP 500")
+    with pytest.raises(JevError):
+        decider.decide(surface_input(request_sink=sink))
+    asker.error = None
+    output = decider.decide(surface_input(request_sink=sink))
+    # 送った後に失敗した要求も書き込み先に渡す。番号は decide の回数と同じに数える
+    assert [request.request_index for request in sink.requests] == [1, 2]
+    assert sink.sent_before == [0, 1]
+    assert output.exchange is not None
+    assert output.exchange.request.request_index == decider.request_count == 2
+
+
+def test_request_failing_before_sending_is_not_passed_to_sink(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker, with_notes=False)
+    sink = RequestSink(asker)
+    with pytest.raises(RuntimeError):
+        decider.decide(surface_input(request_sink=sink))
+    assert sink.requests == []
+    assert asker.calls == []
+
+
+def test_sink_error_is_raised_without_sending(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    sink = RequestSink(asker, error=OSError("disk full"))
+    with pytest.raises(OSError, match="disk full"):
+        decider.decide(surface_input(request_sink=sink))
+    assert len(sink.requests) == 1
+    assert asker.calls == []
+
+
+def test_recorded_request_through_mock_transport(tmp_path):
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        payload = json.loads(request.content)
+        answers: dict[str, object] = {}
+        for name, question in payload["questions"].items():
+            if question["type"] == "choice":
+                answers[name] = {
+                    "type": "choice",
+                    "probabilities": {
+                        choice: 1.0 if choice == "none" else 0.0
+                        for choice in question["criteria"]
+                    },
+                }
+            elif question["type"] == "noul":
+                answers[name] = {"type": "noul", "noul": 0.0}
+            else:
+                answers[name] = {
+                    "type": "box",
+                    "box": {"top": 0.2, "bottom": 0.4, "left": 0.1, "right": 0.3},
+                    "confidence": None,
+                }
+        usage = {"input_tokens": 7, "images": [1, 2, 3]}
+        return httpx.Response(
+            200, json={"model": DEFAULT_JEV_MODEL, "answers": answers, "usage": usage}
+        )
+
+    client = JevClient(
+        "secret-key", client=httpx.Client(transport=httpx.MockTransport(respond))
+    )
+    (tmp_path / "notes").mkdir()
+    decider = JevSurfaceDecider(
+        client,
+        BoxTrackingState(tracker_factory=StillTracker),
+        JevSurfaceSettings(allowed_buttons=ALLOWED),
+        notes_dir=tmp_path / "notes",
+        make_reference=references(),
+    )
+    received: list[SurfaceRequest] = []
+    output = decider.decide(surface_input(files=FILES, request_sink=received.append))
+    assert len(seen) == 1
+    payload = json.loads(seen[0].content)
+    request = received[0]
+    assert request.model == DEFAULT_JEV_MODEL
+    assert [question.name for question in request.questions] == list(
+        payload["questions"]
+    )
+    assert without_frames(request.state) == without_frames(payload["state"])
+    assert [frame["image"] for frame in request.state["frames"]] == list(FILES)
+    # 応答の usage を受け取った形のまま持つ
+    assert output.exchange is not None
+    assert output.exchange.request == request
+    assert output.exchange.answers.usage == {"input_tokens": 7, "images": [1, 2, 3]}
