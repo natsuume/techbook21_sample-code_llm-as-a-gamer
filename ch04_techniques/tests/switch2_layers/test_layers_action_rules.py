@@ -192,6 +192,15 @@ def test_press_style_tie_picks_the_shorter_press():
     assert action.hold_seconds == {"B": 0.3}
 
 
+def test_press_style_compares_probabilities_exactly():
+    # 押し方の比較は確率をそのまま比べる (丸めの差でも大きい方を選ぶ)
+    assert 0.1 + 0.2 > 0.3
+    action = decide({"button_A": button(0.1, tap=0.3, hold_short=0.1 + 0.2)})
+    assert action.taps == frozenset()
+    assert action.held == frozenset({"A"})
+    assert action.hold_seconds == {"A": 0.3}
+
+
 def test_each_button_is_decided_by_its_own_question():
     action = decide(
         {

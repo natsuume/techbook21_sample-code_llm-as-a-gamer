@@ -2,7 +2,7 @@
 
 ボタン名は switch2_remote.controller_state.BUTTON_ORDER の名前 (大文字) を使う。
 この型自体は値を検証しない。押せないボタンと知らない名前は buttons.filter_action が外し、
-スティックの範囲と十字キーの相反する方向は hardware.pad_output.PadOutput.apply が扱う。
+押し続けの秒数の範囲、スティックの範囲、十字キーの相反する方向は hardware.pad_output.PadOutput.apply が扱う。
 """
 
 from collections.abc import Iterable, Mapping
@@ -60,12 +60,21 @@ def sort_buttons(names: Iterable[str]) -> list[str]:
 
 
 def action_to_json(action: PadAction) -> dict[str, object]:
-    """action を記録 (surface.jsonl の action、operations.jsonl の held・taps・sticks) の形にする。
+    """action を記録 (surface.jsonl の action、operations.jsonl の held・hold_seconds・taps・sticks、
+    surface の要求の recent_actions) の形にする。
 
-    {"held": sort_buttons(held), "taps": sort_buttons(taps), "sticks": {"LS": [x, y], "RS": [x, y]}}
+    {"held": sort_buttons(held), "hold_seconds": {ボタン名: 秒}, "taps": sort_buttons(taps),
+     "sticks": {"LS": [x, y], "RS": [x, y]}}
+    hold_seconds には、held にあって秒数のあるボタンだけを held と同じ順に入れる (無ければ空の object)。
     """
+    held = sort_buttons(action.held)
     return {
-        "held": sort_buttons(action.held),
+        "held": held,
+        "hold_seconds": {
+            button: action.hold_seconds[button]
+            for button in held
+            if button in action.hold_seconds
+        },
         "taps": sort_buttons(action.taps),
         "sticks": {"LS": list(action.left_stick), "RS": list(action.right_stick)},
     }

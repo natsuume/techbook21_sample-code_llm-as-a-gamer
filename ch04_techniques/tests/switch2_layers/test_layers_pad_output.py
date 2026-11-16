@@ -627,6 +627,102 @@ def test_waiting_hold_is_cancelled_when_next_apply_does_not_hold():
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
+def test_waiting_hold_held_again_keeps_start_time_and_takes_new_seconds():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = 0.3
+    output.release_due_holds()
+    clock.now = 0.33
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = 0.36
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 1.0}))
+    assert sender.reports[-1][0] & A_BIT == 0
+    # 始める時刻は「期限で離した時刻 + 間隔」のまま (0.36 + 間隔に延ばさない)
+    started_at = 0.3 + TAP_RELEASE_GAP_S
+    clock.now = started_at
+    output.start_due_holds()
+    assert sender.reports[-1][0] & A_BIT
+    # 秒数は後の apply の 1.0 秒
+    count = len(sender.reports)
+    clock.now = started_at + 0.3
+    output.release_due_holds()
+    assert len(sender.reports) == count
+    clock.now = started_at + 1.0
+    output.release_due_holds()
+    assert sender.reports[-1][0] & A_BIT == 0
+
+
+def test_waiting_hold_held_again_without_seconds_stays_after_start():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = 0.3
+    output.release_due_holds()
+    clock.now = 0.33
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = 0.36
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 0.3 + TAP_RELEASE_GAP_S
+    output.start_due_holds()
+    assert sender.reports[-1][0] & A_BIT
+    count = len(sender.reports)
+    clock.now = 100.0
+    output.release_due_holds()
+    assert len(sender.reports) == count
+
+
+def test_hold_after_gap_from_deadline_release_starts_in_that_apply():
+    output, sender, clock, _ = make_slow_output(delay=0.05)
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = clock.now + 0.3
+    output.release_due_holds()
+    assert sender.reports[-1][0] & A_BIT == 0
+    # 期限で離してから TAP_RELEASE_GAP_S 以上たっていれば、この apply のレポートですぐ押す
+    clock.now = clock.now + TAP_RELEASE_GAP_S + 0.05
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    assert sender.reports[-1][0] & A_BIT
+    # 期限は、この apply の送信が戻った時刻 + 秒数から数え直す
+    deadline = clock.now + 0.3
+    count = len(sender.reports)
+    clock.now = deadline - 0.01
+    output.start_due_holds()
+    output.release_due_holds()
+    assert len(sender.reports) == count
+    clock.now = deadline
+    output.release_due_holds()
+    assert sender.reports[-1][0] & A_BIT == 0
+
+
+def test_timed_hold_dropped_before_deadline_is_not_released_again():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    clock.now = 0.1
+    output.apply(PadAction(held=frozenset({"B"})))
+    assert sender.reports[-1][0] & A_BIT == 0
+    count = len(sender.reports)
+    clock.now = 0.5
+    output.release_due_holds()
+    # 期限の前に apply で離したので、期限では何も送らない
+    assert len(sender.reports) == count
+    assert sender.reports[-1][0] & B_BIT
+
+
+def test_holding_again_after_deadline_before_timer_release_extends_without_release():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    # 期限 (0.3) を過ぎたが、タイマーがまだ離していない
+    clock.now = 0.31
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.3}))
+    # 離さずに押し続け、期限を「この apply の送信が戻った時刻 + 秒数」に延ばす
+    assert all(report[0] & A_BIT for report in sender.reports)
+    count = len(sender.reports)
+    clock.now = 0.31 + 0.3 - 0.01
+    output.release_due_holds()
+    assert len(sender.reports) == count
+    clock.now = 0.31 + 0.3
+    output.release_due_holds()
+    assert sender.reports[-1][0] & A_BIT == 0
+
+
 @pytest.mark.parametrize("seconds", [0.0, -1.0, math.nan, math.inf, -math.inf])
 def test_hold_with_invalid_seconds_is_removed_without_error(seconds):
     output, sender, _, events = make_output()
@@ -666,6 +762,56 @@ def test_seconds_of_buttons_not_held_are_ignored():
     clock.now = 5.0
     output.release_due_holds()
     assert len(sender.reports) == count
+
+
+def test_returned_and_reported_action_has_normalized_hold_seconds():
+    output, _, _, events = make_output()
+    result = output.apply(
+        PadAction(
+            held=frozenset({"A", "B", "X", "UP", "DOWN"}),
+            taps=frozenset({"Y"}),
+            hold_seconds={
+                "A": 120.0,
+                "B": 0.3,
+                "X": math.nan,
+                "Y": 1.0,
+                "UP": 0.3,
+                "DOWN": 0.3,
+            },
+        )
+    )
+    # 無効な秒数のボタン (X) と相反する方向 (UP・DOWN) を外し、上限を超えた秒数 (A) は上限にし、
+    # held に無いボタン (Y) の秒数は捨てる
+    expected = PadAction(
+        held=frozenset({"A", "B"}),
+        taps=frozenset({"Y"}),
+        hold_seconds={"A": MAX_HOLD_SECONDS, "B": 0.3},
+    )
+    assert result == FilteredAction(action=expected, blocked_buttons=())
+    assert events[-1].action == expected
+
+
+def test_invalid_seconds_are_removed_before_conflicting_directions():
+    output, sender, _, _ = make_output()
+    result = output.apply(
+        PadAction(held=frozenset({"UP", "DOWN"}), hold_seconds={"UP": math.nan})
+    )
+    # 秒数が無効な UP を先に外すので、DOWN は相反せずに残る
+    assert result.action.held == frozenset({"DOWN"})
+    assert sender.reports[-1][2] == HAT_DOWN
+
+
+def test_button_with_invalid_hold_seconds_and_tap_is_only_removed_from_held():
+    output, sender, clock, _ = make_output()
+    result = output.apply(
+        PadAction(held=frozenset({"A"}), taps=frozenset({"A"}), hold_seconds={"A": 0.0})
+    )
+    # 押し続けからだけ外し、短押しは残す
+    assert result.action == PadAction(taps=frozenset({"A"}))
+    assert sender.reports[-1][0] & A_BIT
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    assert sender.reports[-1] == NEUTRAL_REPORT
 
 
 @pytest.mark.parametrize("stop", ["neutral", "stop_output"])

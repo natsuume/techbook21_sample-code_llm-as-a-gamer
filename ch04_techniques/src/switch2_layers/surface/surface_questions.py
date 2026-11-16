@@ -13,7 +13,8 @@
 <番号> は対象の一覧 (surface.box_targets) の中の 1 始まりの位置。
 選択肢の問いは「なし」(NONE_CHOICE) を先頭に置く。公式ドキュメント
 (https://docs.typesafe.ai/model-jaggedness.md の "Choice option order") に、Jev は先頭の選択肢に寄ることがあると
-書かれているため、寄ったときに何もしない側に倒す。スティックの向きの選択肢は none・負の向き・正の向きの順。
+書かれているため、寄ったときに何もしない側に倒す。ボタンの選択肢は none・tap・hold_short・hold_long の順
+(押す時間の短い順)、スティックの向きの選択肢は none・負の向き・正の向きの順。
 最新のフレームを指す問いの文には、画像の参照文字列ではなく state の中のパス (latest_frame_path) を書く
 (参照文字列は書くたびに同じ画像が足されるため)。
 """
@@ -31,7 +32,6 @@ from switch2_layers.surface.box_targets import BoxTarget
 FRAMES_STATE_KEY = "frames"
 
 NONE_CHOICE = "none"
-HOLD_CHOICE = "hold"
 TAP_CHOICE = "tap"
 HOLD_SHORT_CHOICE = "hold_short"
 HOLD_LONG_CHOICE = "hold_long"
@@ -40,6 +40,11 @@ PRESS_CHOICES = (TAP_CHOICE, HOLD_SHORT_CHOICE, HOLD_LONG_CHOICE)
 # hold_short と hold_long で押し続ける秒数
 HOLD_SHORT_SECONDS = 0.3
 HOLD_LONG_SECONDS = 1.0
+# 押し続けの選択肢の名前 → 押し続ける秒数
+HOLD_CHOICE_SECONDS = {
+    HOLD_SHORT_CHOICE: HOLD_SHORT_SECONDS,
+    HOLD_LONG_CHOICE: HOLD_LONG_SECONDS,
+}
 # スティック名と軸。並びは問いの順でもある
 STICKS = ("LS", "RS")
 STICK_AXES = ("x", "y")
@@ -138,11 +143,23 @@ class SurfaceQuestion:
     choices: tuple[Choice, ...] = ()
 
 
+# 押し続けの選択肢の説明の、秒数の後に続く文
+_HOLD_CONTINUES_TEXT = (
+    "次の判断でもこのボタンの押し続け (hold_short か hold_long) を選ぶと、"
+    "離さずに続けて押し、その選択肢の秒数を数え直す"
+)
 # ボタンの問いの選択肢 (この順)
 BUTTON_CHOICES = (
     Choice(NONE_CHOICE, "押さない"),
-    Choice(HOLD_CHOICE, "押した状態にする。押した状態は次の判断まで続く"),
     Choice(TAP_CHOICE, "1 回だけ短く押す"),
+    Choice(
+        HOLD_SHORT_CHOICE,
+        f"{HOLD_SHORT_SECONDS} 秒押し続けてから離す。{_HOLD_CONTINUES_TEXT}",
+    ),
+    Choice(
+        HOLD_LONG_CHOICE,
+        f"{HOLD_LONG_SECONDS} 秒押し続けてから離す。{_HOLD_CONTINUES_TEXT}",
+    ),
 )
 # スティックの軸 → その軸の向きの問いの選択肢 (none・負の向き・正の向きの順)
 STICK_DIRECTION_CHOICES = {

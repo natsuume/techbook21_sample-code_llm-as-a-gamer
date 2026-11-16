@@ -1,11 +1,19 @@
 """PadAction を 8 バイトのレポートにして、コントローラーのブリッジに送る。
 
-押下状態の 3 層:
-    held           apply で置き換える、押し続けるボタンとスティック
-    tapping        短押しの最中のボタンと、離す時刻 (clock の値)
-    pending_taps   いったん離してから始める短押しのボタンと、始める時刻 (clock の値)。レポートには含めない
+押下状態:
+    held             apply で置き換える、押し続けている (レポートで押す) ボタンとスティック
+    hold_deadlines   held のうち秒数を指定したボタンと、離す時刻 (期限。clock の値)
+    pending_holds    間をあけてから始める押し続けのボタンと、始める時刻 (clock の値) と秒数。レポートには含めない
+    tapping          短押しの最中のボタンと、離す時刻 (clock の値)
+    pending_taps     いったん離してから始める短押しのボタンと、始める時刻 (clock の値)。レポートには含めない
 送るレポートは held と tapping を合わせた押下状態を switch2_remote.controller_state.build_report にしたもの。
 短押しは、押すレポートの送信が戻ってから TAP_PRESS_S 秒後に、タイマースレッドが release_due_taps で離す。
+
+押し続け (PadAction.held) は、秒数 (PadAction.hold_seconds) を指定したボタンなら、押すレポートの送信が戻ってから
+その秒数後に、次の apply を待たずにタイマースレッドが release_due_holds で離す。秒数を指定していないボタンは、次の
+apply まで押したままにする。押し続けている (held にある) ボタンを次の apply も押し続けに指定したら、離さずに、期限を
+「その apply の送信が戻った時刻 + 新しい秒数」に置き換える (新しい指定に秒数が無ければ期限を外す)。期限を過ぎても
+タイマーがまだ離していないボタンは、held にある間は押し続けているものとして扱う。スティックは次の apply まで倒したままにする。
 
 同じボタンを押し直すときは、離してから TAP_RELEASE_GAP_S 秒の間をあける。間をあけずに押し直すと、ゲームから見て
 新しい押下にならず、短押しが失われるため。ボタンごとに最後に離した時刻 (last_released。離すレポートの送信が戻った
@@ -13,8 +21,11 @@
     - 直前に送ったレポートで押されていたボタン (held か、まだ離していない短押し) の短押しは、すぐには押さない。
       まずそのボタンを離したレポートを送り、送信が戻ってから TAP_RELEASE_GAP_S 秒後に、タイマースレッドが
       start_due_taps で短押しを始める
-    - 離してから TAP_RELEASE_GAP_S 秒たっていないボタン (タイマーが短押しを離した直後など) の短押しは、
+    - 離してから TAP_RELEASE_GAP_S 秒たっていないボタン (タイマーが短押しや押し続けを離した直後など) の短押しは、
       「最後に離した時刻 + TAP_RELEASE_GAP_S」に start_due_taps で始める
+期限で離したボタン (release_due_holds) は、押し続けも同じく間をあける。離してから TAP_RELEASE_GAP_S 秒たっていない
+押し続けは、「期限で離した時刻 + TAP_RELEASE_GAP_S」にタイマースレッドが start_due_holds で始め、その送信が戻った
+時刻から秒数を数える。
 例 (A を押し続けた後に、A の短押しを求めた場合。s は各レポートの送信が戻った時刻):
     apply(held={A})              → A を押したレポート
     apply(taps={A}) (s1 に戻る)   → A を離したレポート (ほかのボタンとスティックは、この apply の値)
@@ -22,11 +33,14 @@
     release_due_taps (s2 + 0.12 以降) → A を離したレポート
 短押しの最中に同じボタンの短押しをもう一度求めた場合も、同じく、いったん離してから押し直す。
 
-ボタンの制限 (buttons.filter_action) は apply の中で、送る直前に行う。十字キーの相反する方向は、例外にせず両方とも外して送る。
+ボタンの制限 (buttons.filter_action) は apply の中で、送る直前に行う。秒数が有限の正の値でない押し続けのボタンは
+押さずに外し、MAX_HOLD_SECONDS を超えた秒数は MAX_HOLD_SECONDS にする (normalize_hold_seconds)。十字キーの相反する
+方向は、例外にせず両方とも外して送る。
 
 送信先は set_report(report) を持つもの (ReportSender)。run では switch2_remote.bridge_supervisor.BridgeSupervisor、
-テストでは偽物を渡す。apply は surface のスレッド、start_due_taps と release_due_taps はタイマースレッド、neutral と
-stop_output は終了処理のスレッドから呼ぶため、状態の変更と送信は 1 つのロックの中で行う。
+テストでは偽物を渡す。apply は surface のスレッド、start_due_taps・release_due_taps・start_due_holds・
+release_due_holds はタイマースレッド、neutral と stop_output は終了処理のスレッドから呼ぶため、状態の変更と送信は
+1 つのロックの中で行う。
 """
 
 import logging
@@ -55,7 +69,7 @@ logger = logging.getLogger(__name__)
 TAP_PRESS_S = 0.12  # 短押しで押している時間 (秒)
 # 同じボタンを離してから押し直すまでの間隔 (秒)
 TAP_RELEASE_GAP_S = 0.1
-# タイマースレッドが、始める時刻と離す時刻を過ぎた短押しを確かめる間隔 (秒)
+# タイマースレッドが、始める時刻と離す時刻を過ぎた短押しと押し続けを確かめる間隔 (秒)
 TIMER_INTERVAL_S = 0.01
 # 十字キーの方向 → 反対の方向
 OPPOSITE_DIRECTION = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
@@ -96,7 +110,18 @@ def normalize_hold_seconds(
     秒数の無い held のボタンは held に残す (次の apply まで押し続ける)。戻り値の秒数は、残した held のボタンのうち
     秒数のあるものだけを持つ。
     """
-    raise NotImplementedError
+    kept: set[str] = set()
+    seconds_of_kept: dict[str, float] = {}
+    for button in held:
+        if button not in hold_seconds:
+            kept.add(button)
+            continue
+        seconds = float(hold_seconds[button])
+        if not math.isfinite(seconds) or seconds <= 0.0:
+            continue
+        kept.add(button)
+        seconds_of_kept[button] = min(seconds, MAX_HOLD_SECONDS)
+    return frozenset(kept), seconds_of_kept
 
 
 def clamp_stick(value: tuple[float, float]) -> tuple[float, float]:
@@ -116,12 +141,13 @@ class PadOutput:
 
     sender            レポートの送信先
     allowed_buttons   押せるボタンの集合 (buttons.allowed_buttons の値)。apply が送る直前にこれで制限する
-    clock             短押しの離す時刻に使う単調な時計 (秒。既定 time.monotonic)
+    clock             短押しと押し続けの始める時刻・離す時刻に使う単調な時計 (秒。既定 time.monotonic)
     on_operation      apply・neutral・stop_output で送ろうとするたびに、送信の成否が決まった後で OperationEvent を
                       受け取る関数 (run では records.operation_log.OperationLog.write)。None なら呼ばない。
-                      タイマースレッドが送るレポート (start_due_taps・release_due_taps) では呼ばない
-    start_timer       True (既定) なら TIMER_INTERVAL_S ごとに start_due_taps と release_due_taps をこの順に呼ぶ
-                      タイマースレッド (daemon) を起動する。False ならテストから直接呼ぶ
+                      タイマースレッドが送るレポート (start_due_taps・release_due_taps・start_due_holds・
+                      release_due_holds) では呼ばない
+    start_timer       True (既定) なら TIMER_INTERVAL_S ごとに start_due_taps・release_due_taps・start_due_holds・
+                      release_due_holds をこの順に呼ぶタイマースレッド (daemon) を起動する。False ならテストから直接呼ぶ
     作るときにはレポートを送らない。
     """
 
@@ -140,9 +166,15 @@ class PadOutput:
         self.on_operation = on_operation
         self._lock = threading.Lock()
         self._held = PadState()
+        # 押し続けのボタン → 離す時刻 (期限)
+        self._hold_deadlines: dict[str, float] = {}
+        # 間をあけてから始める押し続けのボタン → (始める時刻, 秒数。無ければ None)
+        self._pending_holds: dict[str, tuple[float, float | None]] = {}
         self._tapping: dict[str, float] = {}
         self._pending_taps: dict[str, float] = {}
         self._last_released: dict[str, float] = {}
+        # 期限で離したボタン → 離した時刻 (押し続けを始める前に間をあけるため)
+        self._deadline_released: dict[str, float] = {}
         self._last_error: str | None = None
         self._output_stopped = False
         self._stop_timer = threading.Event()
@@ -159,30 +191,43 @@ class PadOutput:
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す
             2. buttons.filter_action(action, allowed_buttons) で押せないボタンを外す
-            3. 十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) は、held と taps のそれぞれで、両方あれば両方とも外す
-               (例外にしない。外した方向は blocked_buttons に入れない)
-            4. スティックの各値は -1.0〜1.0 に収める (nan は 0.0 にする)
-            5. 直前に送ったレポートで押されていたボタン (古い held と、tapping にあるボタン) を pressed_before とし、
-               held を 2〜4 の後の held とスティックに置き換える。新しい held にあるボタンの pending_taps は取り消す
-            6. taps の各ボタンを名前の順に扱う (now = clock()):
-               - 新しい held にあるボタンは何もしない (押し続ける)
+            3. normalize_hold_seconds で押し続けを整える。秒数が有限の正の値でない (0 以下・nan・無限大) ボタンは
+               held から外し (例外にしない。blocked_buttons に入れない。taps にもあれば短押しは残す)、
+               MAX_HOLD_SECONDS を超えた秒数は MAX_HOLD_SECONDS にし、held に無いボタンの秒数は捨てる
+            4. 十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) は、held と taps のそれぞれで、両方あれば両方とも外す
+               (例外にしない。外した方向は blocked_buttons に入れない。held から外した方向の秒数も捨てる)
+            5. スティックの各値は -1.0〜1.0 に収める (nan は 0.0 にする)
+            6. 直前に送ったレポートで押されていたボタン (古い held と、tapping にあるボタン) を pressed_before とする。
+               2〜5 の後の held (新しい held) の各ボタンを次のように扱う (now = clock()):
+               - 古い held にあるボタン (期限を過ぎてタイマーがまだ離していないものを含む): 離さずに押し続ける
+                 (期限は 9 で決め直す)
+               - 既に pending_holds にあるボタン: 始める時刻は変えず、秒数をこの操作の値にする
+               - 期限で離してから TAP_RELEASE_GAP_S 秒たっていないボタン: pending_holds に入れ、始める時刻を
+                 「期限で離した時刻 + TAP_RELEASE_GAP_S」にする (このレポートでは押さない)
+               - それ以外のボタンは、このレポートで押す
+               新しい held に無いボタンの pending_holds と期限は取り消す。held を、新しい held のうち pending_holds に
+               入れなかったボタンとスティックに置き換える。新しい held にあるボタンの pending_taps は取り消す
+            7. taps の各ボタンを名前の順に扱う:
+               - 新しい held にあるボタン (pending_holds に入れたものを含む) は何もしない (押し続ける)
                - 既に pending_taps にあるボタンは何もしない (始める時刻は変えない)
                - pressed_before にあるボタン (押し続けから短押しへの切り替えと、短押しの最中の再度の短押し):
-                 tapping にあれば外し (このレポートで離す)、pending_taps に入れる (始める時刻は 8 で決める)
+                 tapping にあれば外し (このレポートで離す)、pending_taps に入れる (始める時刻は 9 で決める)
                - 最後に離した時刻から TAP_RELEASE_GAP_S 秒たっていないボタン: pending_taps に入れ、始める時刻を
                  「最後に離した時刻 + TAP_RELEASE_GAP_S」にする
                - 十字キーの方向で、反対の方向が tapping か pending_taps にあるボタンは捨てる (始めない)
-               - それ以外のボタンは、すぐに短押しとして始める (tapping に入れる。離す時刻は 8 で決める)
-            7. held と tapping のボタンとスティックを合わせたレポートを送る (pending_taps は含めない。6 で離すと決めた
-               ボタンは、このレポートで離れる)。短押しの十字キーの方向と held の反対の方向が重なったら、短押しを優先し、
-               送るレポートからだけ held の方向を外す
-            8. 送信が成功したら、送信が戻った時刻 sent_at = clock() として、この apply で始めた短押しの離す時刻を
+               - それ以外のボタンは、すぐに短押しとして始める (tapping に入れる。離す時刻は 9 で決める)
+            8. held と tapping のボタンとスティックを合わせたレポートを送る (pending_holds と pending_taps は含めない。
+               7 で離すと決めたボタンは、このレポートで離れる)。短押しの十字キーの方向と held の反対の方向が重なったら、
+               短押しを優先し、送るレポートからだけ held の方向を外す
+            9. 送信が成功したら、送信が戻った時刻 sent_at = clock() として、この apply で始めた短押しの離す時刻を
                sent_at + TAP_PRESS_S、pressed_before から pending_taps に入れたボタンの始める時刻を
-               sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、6 で tapping から
-               外したもの) の最後に離した時刻を sent_at にする
-            9. on_operation に OperationEvent(source="apply", action=2〜4 の後の操作, ok, error) を渡す
-        戻り値は FilteredAction(action=2〜4 の後の操作, blocked_buttons=2 で外したボタン)。
-        送信の例外は、on_operation に ok=False で渡してからそのまま出す。状態は 5・6 で変えたままにし、8 の時刻は
+               sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、7 で tapping から
+               外したもの) の最後に離した時刻を sent_at にする。held の各ボタンの期限は、秒数があれば sent_at + 秒数に
+               置き換え、無ければ外す (次の apply まで押し続ける)
+            10. on_operation に OperationEvent(source="apply", action=2〜5 の後の操作, ok, error) を渡す
+        戻り値は FilteredAction(action=2〜5 の後の操作, blocked_buttons=2 で外したボタン)。操作の hold_seconds は、
+        3 と 4 で整えた後の秒数 (held のボタンのうち秒数のあるものだけ)。
+        送信の例外は、on_operation に ok=False で渡してからそのまま出す。状態は 6・7 で変えたままにし、9 の時刻は
         送信の前の clock() から決める。
         変化が無くても送る。
         """
@@ -190,18 +235,27 @@ class PadOutput:
             if self._output_stopped:
                 raise OutputStoppedError("pad output was stopped")
             filtered = filter_action(action, self._allowed_buttons)
+            valid_held, hold_seconds = normalize_hold_seconds(
+                filtered.action.held, filtered.action.hold_seconds
+            )
+            new_held = remove_conflicting_directions(valid_held)
             sent_action = replace(
                 filtered.action,
-                held=remove_conflicting_directions(frozenset(filtered.action.held)),
+                held=new_held,
                 taps=remove_conflicting_directions(frozenset(filtered.action.taps)),
                 left_stick=clamp_stick(filtered.action.left_stick),
                 right_stick=clamp_stick(filtered.action.right_stick),
+                hold_seconds={
+                    button: seconds
+                    for button, seconds in hold_seconds.items()
+                    if button in new_held
+                },
             )
             now = self.clock()
             pressed_before = self._held.buttons | frozenset(self._tapping)
-            new_held = frozenset(sent_action.held)
+            pressed_held = self._replace_holds_locked(sent_action, now)
             self._held = PadState(
-                new_held,
+                pressed_held,
                 {"LS": sent_action.left_stick, "RS": sent_action.right_stick},
             )
             for button in list(self._pending_taps):
@@ -237,6 +291,9 @@ class PadOutput:
                 self._pending_taps[button] = sent_at + TAP_RELEASE_GAP_S
             for button in released:
                 self._last_released[button] = sent_at
+            self._set_hold_deadlines_locked(
+                pressed_held, sent_action.hold_seconds, sent_at
+            )
             self._report_operation_locked("apply", sent_action, error)
             if error is not None:
                 raise error
@@ -315,7 +372,27 @@ class PadOutput:
         外に出さず、説明を last_error に記録する (このときの期限は、送信の前の clock() から決める)。on_operation は
         呼ばない。タイマースレッドから呼ぶ。テストから直接呼べるよう公開している。
         """
-        raise NotImplementedError
+        with self._lock:
+            now = self.clock()
+            due = sorted(
+                button
+                for button, (start_at, _) in self._pending_holds.items()
+                if start_at <= now
+            )
+            if not due:
+                return
+            started: dict[str, float | None] = {}
+            for button in due:
+                _, seconds = self._pending_holds.pop(button)
+                started[button] = seconds
+            self._held = PadState(
+                self._held.buttons | frozenset(started), self._held.sticks
+            )
+            error = self._send_locked()
+            if error is not None:
+                self._last_error = describe_exception(error)
+            sent_at = now if error is not None else self.clock()
+            self._set_hold_deadlines_locked(frozenset(started), started, sent_at)
 
     def release_due_holds(self) -> None:
         """期限 (離す時刻) を過ぎた (期限 <= clock()) 押し続けを held から外し、外したものがあるときだけレポートを送る。
@@ -325,10 +402,33 @@ class PadOutput:
         離してから TAP_RELEASE_GAP_S 秒たつまで始めない。送信の例外 (Exception) は外に出さず、説明を last_error に
         記録する。on_operation は呼ばない。タイマースレッドから呼ぶ。テストから直接呼べるよう公開している。
         """
-        raise NotImplementedError
+        with self._lock:
+            now = self.clock()
+            due = [
+                button
+                for button, deadline in self._hold_deadlines.items()
+                if deadline <= now
+            ]
+            if not due:
+                return
+            for button in due:
+                del self._hold_deadlines[button]
+            self._held = PadState(
+                self._held.buttons - frozenset(due), self._held.sticks
+            )
+            error = self._send_locked()
+            if error is not None:
+                self._last_error = describe_exception(error)
+            released_at = now if error is not None else self.clock()
+            for button in due:
+                # 短押しの最中のボタンは、このレポートでは離れていない
+                if button not in self._tapping:
+                    self._last_released[button] = released_at
+                    self._deadline_released[button] = released_at
 
     def neutral(self) -> None:
-        """held・tapping・pending_taps を空にし、中立のレポート (controller_state.NEUTRAL_REPORT) を送る。
+        """held・hold_deadlines・pending_holds・tapping・pending_taps を空にし、中立のレポート
+        (controller_state.NEUTRAL_REPORT) を送る。秒数を指定した押し続けも、ここですべて離す。
 
         on_operation に OperationEvent(source="neutral", action=NEUTRAL_ACTION, ok, error) を渡す。
         送信の例外 (Exception) は外に出さず、説明を last_error に記録する。stop_output の後でも送る。
@@ -337,8 +437,8 @@ class PadOutput:
             self._send_neutral_locked("neutral")
 
     def stop_output(self) -> None:
-        """以後の apply を止めたうえで、neutral と同じく held・tapping・pending_taps を空にして中立のレポートを送る。
-        止めた状態は戻さない。
+        """以後の apply を止めたうえで、neutral と同じく押下状態 (秒数を指定した押し続けを含む) を空にして中立の
+        レポートを送る。止めた状態は戻さない。
 
         on_operation には source="stop" で渡す。送信の例外は外に出さず、last_error に記録する。
         呼ぶたびに中立のレポートを送る。
@@ -354,7 +454,8 @@ class PadOutput:
 
     @property
     def last_error(self) -> str | None:
-        """start_due_taps・release_due_taps・neutral・stop_output の送信の最後の失敗の説明。無ければ None。"""
+        """start_due_taps・release_due_taps・start_due_holds・release_due_holds・neutral・stop_output の送信の
+        最後の失敗の説明。無ければ None。"""
         with self._lock:
             return self._last_error
 
@@ -364,6 +465,48 @@ class PadOutput:
         if self._timer_thread is not None:
             self._timer_thread.join()
             self._timer_thread = None
+
+    def _replace_holds_locked(self, action: PadAction, now: float) -> frozenset[str]:
+        """apply の 6 の押し続けの扱いを行い、新しい held (action.held) のうち、このレポートで押すボタンを返す。
+
+        pending_holds を置き換え、このレポートで押さないボタンの期限を取り消す。呼び出し側がロックを持つ。
+        """
+        old_held = self._held.buttons
+        pending: dict[str, tuple[float, float | None]] = {}
+        for button in sorted(action.held):
+            if button in old_held:
+                continue
+            seconds = action.hold_seconds.get(button)
+            waiting = self._pending_holds.get(button)
+            if waiting is not None:
+                start_at, _ = waiting
+                pending[button] = (start_at, seconds)
+                continue
+            released_at = self._deadline_released.get(button)
+            if released_at is not None and now - released_at < TAP_RELEASE_GAP_S:
+                pending[button] = (released_at + TAP_RELEASE_GAP_S, seconds)
+        self._pending_holds = pending
+        pressed = frozenset(action.held) - frozenset(pending)
+        self._hold_deadlines = {
+            button: deadline
+            for button, deadline in self._hold_deadlines.items()
+            if button in pressed
+        }
+        return pressed
+
+    def _set_hold_deadlines_locked(
+        self,
+        buttons: frozenset[str],
+        hold_seconds: Mapping[str, float | None],
+        sent_at: float,
+    ) -> None:
+        """buttons の各ボタンの期限を、秒数があれば sent_at + 秒数にし、無ければ外す。呼び出し側がロックを持つ。"""
+        for button in buttons:
+            seconds = hold_seconds.get(button)
+            if seconds is None:
+                self._hold_deadlines.pop(button, None)
+            else:
+                self._hold_deadlines[button] = sent_at + seconds
 
     def _opposite_is_tapping_or_waiting(self, button: str) -> bool:
         """button が十字キーの方向で、その反対の方向が tapping か pending_taps にあれば True。呼び出し側がロックを持つ。"""
@@ -394,6 +537,8 @@ class PadOutput:
         """押下状態を空にして中立のレポートを送り、on_operation に知らせる。呼び出し側がロックを持つ。"""
         pressed = self._held.buttons | frozenset(self._tapping)
         self._held = PadState()
+        self._hold_deadlines.clear()
+        self._pending_holds.clear()
         self._tapping.clear()
         self._pending_taps.clear()
         now = self.clock()
@@ -428,7 +573,10 @@ class PadOutput:
             logger.warning("on_operation failed", exc_info=True)
 
     def _run_timer(self) -> None:
-        """close() まで、TIMER_INTERVAL_S ごとに start_due_taps と release_due_taps を呼ぶ (タイマースレッドの本体)。"""
+        """close() まで、TIMER_INTERVAL_S ごとに start_due_taps・release_due_taps・start_due_holds・
+        release_due_holds を呼ぶ (タイマースレッドの本体)。"""
         while not self._stop_timer.wait(TIMER_INTERVAL_S):
             self.start_due_taps()
             self.release_due_taps()
+            self.start_due_holds()
+            self.release_due_holds()

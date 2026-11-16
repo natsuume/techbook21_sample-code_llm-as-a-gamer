@@ -5,7 +5,8 @@
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
       "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
-      "recent_actions": [{"time": 時刻のラベル, "held": [...], "taps": [...], "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
+      "recent_actions": [{"time": 時刻のラベル, "held": [...], "hold_seconds": {ボタン名: 秒}, "taps": [...],
+                          "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
       "frames": [{"label": 時刻のラベル, "image": <画像の参照文字列>}, ...]
     }
 時刻のラベルは relative_time_label (例: "t=12.345 秒 (0.4 秒前)")。「何秒前」は要求の時刻 (SurfaceInput.t) から数える。
@@ -162,9 +163,10 @@ def timeline_to_state(
 def recent_actions_to_state(
     recent_actions: Sequence[RecentAction], request_t: float
 ) -> list[dict[str, object]]:
-    """直近の操作を、古い順の [{"time", "held", "taps", "sticks"}] にする。
+    """直近の操作を、古い順の [{"time", "held", "hold_seconds", "taps", "sticks"}] にする。
 
-    time は relative_time_label(操作の t, request_t)、held・taps・sticks は pad_action.action_to_json の値。
+    time は relative_time_label(操作の t, request_t)、held・hold_seconds (押し続けの秒数)・taps・sticks は
+    pad_action.action_to_json の値。
     """
     return [
         {
