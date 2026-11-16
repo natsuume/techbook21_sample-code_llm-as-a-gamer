@@ -210,6 +210,85 @@ def test_pressing_buttons_is_cleared_by_neutral():
     assert output.pressing_buttons() == frozenset()
 
 
+def test_timer_send_failures_is_zero_at_first():
+    output, _, _, _ = make_output()
+    assert output.timer_send_failures == 0
+
+
+def test_timer_send_failures_does_not_count_successes():
+    output, _, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    clock.now += TAP_PRESS_S
+    output.release_due_taps()
+    assert output.timer_send_failures == 0
+    assert output.last_error is None
+
+
+def test_timer_send_failures_counts_a_failed_tap_release():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    sender.fail_with = OSError("bridge is down")
+    clock.now += TAP_PRESS_S
+    output.release_due_taps()
+    assert output.timer_send_failures == 1
+    # 今までどおり、押下の記録からは外し、説明を last_error に残す
+    assert output.pressing_buttons() == frozenset()
+    assert "bridge is down" in (output.last_error or "")
+
+
+def test_timer_send_failures_counts_a_failed_tap_start():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    # 短押しの最中の再度の短押しは、いったん離してから始める予定になる
+    output.apply(PadAction(taps=frozenset({"A"})))
+    sender.fail_with = OSError("bridge is down")
+    clock.now += TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert output.timer_send_failures == 1
+
+
+def test_timer_send_failures_counts_a_failed_hold_release():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"L"}), hold_seconds={"L": 0.4}))
+    sender.fail_with = OSError("bridge is down")
+    clock.now += 0.4
+    output.release_due_holds()
+    assert output.timer_send_failures == 1
+
+
+def test_timer_send_failures_counts_a_failed_hold_start():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.2}))
+    clock.now += 0.2
+    output.release_due_holds()
+    # 期限で離した直後の押し続けは、間をあけてから始める予定になる
+    output.apply(PadAction(held=frozenset({"A"}), hold_seconds={"A": 0.2}))
+    sender.fail_with = OSError("bridge is down")
+    clock.now += TAP_RELEASE_GAP_S
+    output.start_due_holds()
+    assert output.timer_send_failures == 1
+
+
+def test_timer_send_failures_counts_each_failure():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    output.apply(PadAction(held=frozenset({"L"}), hold_seconds={"L": 0.4}))
+    sender.fail_with = OSError("bridge is down")
+    clock.now += 0.4
+    output.release_due_taps()
+    output.release_due_holds()
+    assert output.timer_send_failures == 2
+
+
+def test_timer_send_failures_does_not_count_apply_or_neutral():
+    output, sender, _, _ = make_output()
+    sender.fail_with = OSError("bridge is down")
+    with pytest.raises(OSError):
+        output.apply(PadAction(taps=frozenset({"A"})))
+    output.neutral()
+    assert output.timer_send_failures == 0
+
+
 def test_apply_removes_home_right_before_sending():
     output, sender, _, events = make_output()
     result = output.apply(

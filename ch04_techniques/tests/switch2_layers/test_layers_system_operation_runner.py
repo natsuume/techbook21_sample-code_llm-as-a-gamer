@@ -26,6 +26,7 @@ from switch2_layers.system_screen.system_operation_runner import (
     RELEASE_WAIT_S,
     SETTLE_S,
     SystemOperationRunner,
+    SystemOutputError,
     operation_pad_action,
 )
 
@@ -733,6 +734,71 @@ def test_send_failure_is_raised():
     harness.sender.fail_with = BridgeDown("bridge is down")
     with pytest.raises(BridgeDown):
         run(harness, press("home_menu", "DOWN"))
+
+
+def fail_after_the_first_send(harness: Harness) -> None:
+    """最初のレポート (押すレポート) の送信の後、次のレポート (離すレポート) から送信を失敗させる。"""
+
+    def set_failure() -> None:
+        if len(harness.sender.sent_t) == 1:
+            harness.sender.fail_with = BridgeDown("release report failed")
+
+    harness.sender.on_send = set_failure
+
+
+@pytest.mark.parametrize(
+    "first",
+    [press("home_menu", "DOWN"), press("home_menu", "L", "R", seconds=0.4)],
+    ids=["tap", "hold"],
+)
+def test_failed_release_report_raises_and_sends_nothing_more(first):
+    harness = make_harness(steady("home_menu"))
+    fail_after_the_first_send(harness)
+    with pytest.raises(SystemOutputError, match="release report failed"):
+        run(harness, first, press("home_menu", "B"))
+    # 離すレポートの失敗の後は、次の操作を送らない
+    assert len(system_actions(harness)) == 1
+    assert harness.pad_output.timer_send_failures == 1
+
+
+def test_output_error_is_a_runtime_error():
+    assert issubclass(SystemOutputError, RuntimeError)
+
+
+def test_no_timer_failure_sends_all_operations():
+    harness = make_harness(steady("home_menu"))
+    result = run(
+        harness,
+        press("home_menu", "DOWN"),
+        press("home_menu", "L", "R", seconds=0.4),
+        press("home_menu", "B"),
+    )
+    assert result == sent_all(3)
+    assert harness.pad_output.timer_send_failures == 0
+
+
+def test_timer_failure_before_the_run_is_not_raised():
+    # run を始める前の失敗では出さない (送る前と終えた後の回数を比べる)
+    harness = make_harness(steady("home_menu"))
+    harness.pad_output.apply(PadAction(taps=frozenset({"X"})))
+    harness.sender.fail_with = BridgeDown("earlier failure")
+    harness.monotonic.now += TAP_PRESS_S + TIMER_INTERVAL_S
+    harness.pad_output.release_due_taps()
+    assert harness.pad_output.timer_send_failures == 1
+    harness.sender.fail_with = None
+    result = run(harness, press("home_menu", "DOWN"), press("home_menu", "B"))
+    assert result == sent_all(2)
+    assert harness.pad_output.timer_send_failures == 1
+
+
+def test_timer_failure_during_a_wait_is_not_checked():
+    harness = make_harness(steady("home_menu"))
+    # run の外で押し続けを始めておき、wait の間にタイマーが離すレポートを失敗させる
+    harness.pad_output.apply(PadAction(held=frozenset({"X"}), hold_seconds={"X": 0.2}))
+    harness.sender.fail_with = BridgeDown("release report failed")
+    result = run(harness, wait("home_menu", 1.0))
+    assert result == sent_all(1)
+    assert harness.pad_output.timer_send_failures == 1
 
 
 # --- 押せないボタン ---

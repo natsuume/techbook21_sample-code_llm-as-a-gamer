@@ -59,6 +59,14 @@ RELEASE_WAIT_S = 1.0
 WaitOrStop = Callable[[threading.Event, float], bool]
 
 
+class SystemOutputError(RuntimeError):
+    """press を送ってから終えるまでの間に、PadOutput のタイマーが送るレポート (離すレポートなど) の送信が失敗した。
+
+    PadOutput は押下の記録からボタンを外しても、ブリッジ側ではボタンが押されたままのことがある。説明には
+    PadOutput.last_error を入れる。
+    """
+
+
 class JudgmentResult(Protocol):
     """照合の結果 1 つ。
 
@@ -177,6 +185,11 @@ class SystemOperationRunner:
         待つのをやめた場合を除く)。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
         送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、そのまま外に出す。
+        press では、apply の直前と、その操作を終えた (離したことを確かめた、または上限に達した) 後に
+        pad_output.timer_send_failures を読み、増えていれば (タイマーが送る離すレポートなどの送信が失敗した)
+        SystemOutputError (説明に pad_output.last_error を入れる) を出し、その後の操作は送らない。stop が立って待つのを
+        やめたときと、wait の操作では確かめない。SystemOutputError のときは、ブリッジ側でボタンが押されたまま残って
+        いるおそれがあるため、呼び出し側は PadOutput.neutral() で押下の状態をそろえてから次の入力を作る前提とする。
 
         先頭の操作は、渡された judged_screen とだけ比べて送り、新しいフレームの照合の結果を待たない。そのため呼び出し側は、
         次の列を決める入力の照合の結果を、前の列の最後の操作を終えた時刻 + SETTLE_S より後に撮ったフレームのものにする
@@ -191,6 +204,7 @@ class SystemOperationRunner:
             if reason is not None:
                 return _cut(index, reason, blocked)
             if operation.kind == "press":
+                failures_before = self.pad_output.timer_send_failures
                 try:
                     filtered = self.pad_output.apply(
                         operation_pad_action(operation), source="system"
@@ -199,6 +213,14 @@ class SystemOperationRunner:
                     return _cut(index, SystemCutReason.STOPPED, blocked)
                 blocked.update(filtered.blocked_buttons)
                 end_t = self._finish_press(operation, stop)
+                if (
+                    not stop.is_set()
+                    and self.pad_output.timer_send_failures > failures_before
+                ):
+                    raise SystemOutputError(
+                        f"a timer report failed while finishing operation {index}: "
+                        f"{self.pad_output.last_error}"
+                    )
             else:
                 # wait は何も送らず、待ち始めた時刻 + 秒数まで待つ
                 end_t = self.clock.now() + (operation.seconds or 0.0)

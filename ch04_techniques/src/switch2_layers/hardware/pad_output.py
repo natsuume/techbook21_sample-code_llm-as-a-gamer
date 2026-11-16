@@ -180,6 +180,8 @@ class PadOutput:
         # 期限で離したボタン → 離した時刻 (押し続けを始める前に間をあけるため)
         self._deadline_released: dict[str, float] = {}
         self._last_error: str | None = None
+        # タイマーから呼ぶ 4 つの処理の送信が失敗した回数 (timer_send_failures)
+        self._timer_send_failures = 0
         self._output_stopped = False
         self._stop_timer = threading.Event()
         self._timer_thread: threading.Thread | None = None
@@ -341,7 +343,7 @@ class PadOutput:
                 return
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
                 return
             sent_at = self.clock()
             for button in started:
@@ -366,7 +368,7 @@ class PadOutput:
                 del self._tapping[button]
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             released_at = now if error is not None else self.clock()
             for button in due:
                 if button not in self._held.buttons:
@@ -400,7 +402,7 @@ class PadOutput:
             )
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             sent_at = now if error is not None else self.clock()
             self._set_hold_deadlines_locked(frozenset(started), started, sent_at)
 
@@ -428,7 +430,7 @@ class PadOutput:
             )
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             released_at = now if error is not None else self.clock()
             for button in due:
                 # 短押しの最中のボタンは、このレポートでは離れていない
@@ -484,6 +486,18 @@ class PadOutput:
         最後の失敗の説明。無ければ None。"""
         with self._lock:
             return self._last_error
+
+    @property
+    def timer_send_failures(self) -> int:
+        """タイマーから呼ぶ 4 つの処理 (start_due_taps・release_due_taps・start_due_holds・release_due_holds) の
+        送信が失敗した回数 (作ったときは 0)。ロックの中で読む。
+
+        失敗するたびに 1 増え、減らさない。apply・neutral・stop_output の送信の失敗は数えない。last_error は最後の
+        失敗の説明だけを持つため、新しい失敗があったかは、この回数を前後で比べて確かめる (タイマーの離すレポートが
+        失敗すると、押下の記録からボタンを外しても、ブリッジ側では押されたままのことがある)。
+        """
+        with self._lock:
+            return self._timer_send_failures
 
     def close(self) -> None:
         """タイマースレッドを止め、終わるのを待つ。タイマースレッドが無ければ何もしない。レポートは送らない。"""
@@ -558,6 +572,14 @@ class PadOutput:
             logger.debug("set_report failed", exc_info=True)
             return error
         return None
+
+    def _record_timer_send_failure_locked(self, error: Exception) -> None:
+        """タイマーから呼ぶ処理の送信の失敗 error を、last_error に記録し、timer_send_failures を 1 増やす。
+
+        呼び出し側がロックを持つ。
+        """
+        self._last_error = describe_exception(error)
+        self._timer_send_failures += 1
 
     def _send_neutral_locked(self, source: OperationSource) -> None:
         """押下状態を空にして中立のレポートを送り、on_operation に知らせる。呼び出し側がロックを持つ。"""
