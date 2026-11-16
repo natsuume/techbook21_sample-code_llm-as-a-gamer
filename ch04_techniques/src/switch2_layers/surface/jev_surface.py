@@ -6,6 +6,8 @@
       "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言,
                     "game": ゲームの性質},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
+      "progress": {"measured": 画面の停滞の計測の値の時刻のラベル (無ければ NOT_MEASURED_TEXT),
+                   "text": 2 つの値の文 (progress.progress_text。無ければ NO_PROGRESS_TEXT)},
       "recent_actions": [{"time": 時刻のラベル, "held": [...], "hold_seconds": {ボタン名: 秒}, "taps": [...],
                           "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
       "advisor": {文書の種類の値: deep の呼び出しの状況の文, ...},
@@ -55,6 +57,11 @@ from switch2_layers.deep.deep_scheduler import (
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.pad_action import action_to_json
+from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.progress_text import (
+    NO_PROGRESS_TEXT,
+    describe_progress_values,
+)
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
@@ -97,6 +104,8 @@ from switch2_layers.surface.surface_types import (
 )
 
 NO_TIMELINE_TEXT = "まだ作られていない"  # 系列情報がまだ無いときの timeline の created
+# 画面の停滞の計測の値がまだ無いときの progress の measured
+NOT_MEASURED_TEXT = "まだ測っていない"
 # deep の呼び出しの状況を読めなかった種類の、state の advisor の文
 ADVISOR_STATUS_UNAVAILABLE_TEXT = "状況を取得できない"
 # deep のジョブの終わり方 → state の advisor の「前回の終了」の文に書く言い方
@@ -193,6 +202,24 @@ def timeline_to_state(
         else relative_time_label(generated_t, request_t)
     )
     return {"created": created, "text": timeline}
+
+
+def progress_to_state(
+    progress: ProgressState | None, request_t: float
+) -> dict[str, str]:
+    """画面の停滞の計測の値を state の progress {"measured", "text"} にする。
+
+    measured は値の時刻のラベル relative_time_label(progress.t, request_t)、text は
+    progress.progress_text.describe_progress_values(progress) (例: 「画面が変わっていない: 12.4 秒」と
+    「直近 300 秒に見た画面だけが出ている: 85.0 秒」の 2 行)。
+    progress が None (値が無い) なら、measured は NOT_MEASURED_TEXT、text は progress.progress_text.NO_PROGRESS_TEXT。
+    """
+    if progress is None:
+        return {"measured": NOT_MEASURED_TEXT, "text": NO_PROGRESS_TEXT}
+    return {
+        "measured": relative_time_label(progress.t, request_t),
+        "text": describe_progress_values(progress),
+    }
 
 
 def recent_actions_to_state(
@@ -335,6 +362,7 @@ def _state_with_images(
         "timeline": timeline_to_state(
             surface_input.timeline, surface_input.timeline_generated_t, request_t
         ),
+        "progress": progress_to_state(surface_input.progress, request_t),
         "recent_actions": recent_actions_to_state(
             surface_input.recent_actions, request_t
         ),

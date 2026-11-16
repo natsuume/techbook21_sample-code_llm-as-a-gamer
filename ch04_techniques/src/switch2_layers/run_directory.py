@@ -17,6 +17,8 @@
     deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
                                             Claude Code で動かしたジョブには stream.jsonl・result.json も置く
                                             (deep.claude_stream_log)
+    progress/state.json                     画面の停滞の計測の最新の値 (progress.progress_state)。
+                                            まだフレームが無いときは無い
 """
 
 from collections.abc import Collection
@@ -58,6 +60,9 @@ MIDDLE_CALLS_FILE = "calls.jsonl"
 # middle のマップの記録 (middle.map_records)
 MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
 DEEP_DIR = "deep"
+# 画面の停滞の計測 (progress.progress_loop)
+PROGRESS_DIR = "progress"
+PROGRESS_STATE_FILE = "state.json"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
 
@@ -147,6 +152,16 @@ class RunPaths:
         """root / DEEP_DIR"""
         return self.root / DEEP_DIR
 
+    @property
+    def progress_dir(self) -> Path:
+        """root / PROGRESS_DIR"""
+        return self.root / PROGRESS_DIR
+
+    @property
+    def progress_state(self) -> Path:
+        """root / PROGRESS_DIR / PROGRESS_STATE_FILE"""
+        return self.root / PROGRESS_DIR / PROGRESS_STATE_FILE
+
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
         return self.interval_frames_dir / frame_file_name(t)
@@ -191,7 +206,8 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
     - 同じ名前のファイルかディレクトリーが既にあれば、末尾に -2、-3 … を付けた最初の無い名前で作る
       (例: 20261115-142233 → 20261115-142233-2 → 20261115-142233-3)
     - 作るのは mkdir(exist_ok=False) で行い、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
-    - 中に frames/interval/、frames/surface/、middle/、deep/ も作る。notes/ は write_initial_notes で作る
+    - 中に frames/interval/、frames/surface/、middle/、deep/、progress/ も作る。notes/ は write_initial_notes で作る。
+      progress/state.json は作らない (最初の一定間隔のフレームの値を計算したときに progress.progress_loop が書く)
     """
     runs_dir.mkdir(parents=True, exist_ok=True)
     base_name = run_directory_name(started_at)
@@ -212,6 +228,7 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
         paths.surface_frames_dir,
         paths.middle_dir,
         paths.deep_dir,
+        paths.progress_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return paths

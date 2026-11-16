@@ -3,7 +3,8 @@
 1 回の要求の流れ (step):
     1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選ぶ。2 秒以内のフレームが無ければ要求を送らず、
        NO_FRAME_RETRY_S 秒待って選び直す
-    2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書を読む
+    2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書を読む。
+       画面の停滞の計測の値 (progress/state.json) も読む
     3. 画像を作る: 各画像の左上に t を書き込み、追えている box の枠と名前も書き込んで JPEG にする。どの box を
        書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
        Box を問い直す対象は、最新のフレームの画像に書き込まない)。
@@ -56,6 +57,7 @@ from switch2_layers.frames.surface_frames import (
 )
 from switch2_layers.hardware.pad_output import OutputStoppedError, PadOutput
 from switch2_layers.notes.surface_documents import read_surface_documents
+from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.records.run_log import (
     EVENT_DEEP_REQUEST_ERROR,
     EVENT_SURFACE_ERROR,
@@ -244,7 +246,8 @@ class SurfaceLoop:
            (使えない間は毎回は呼ばない)
         2. now_t = clock.now()。frames.surface_frames.select_surface_frames(frame_buffer.frames(), now_t) が空なら
            NO_FRAMES (wait_s = NO_FRAME_RETRY_S) を返す
-        3. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) を読む
+        3. read_surface_context(paths.middle_state) と read_surface_documents(paths.notes_dir, その scene_id) と
+           progress.progress_state.read_progress_state(paths.progress_state) (無い・読めなければ None) を読む
         4. 書き込み方 plan = plan_boxes(documents.scene_id) を 1 回求める (plan_boxes が None なら plan も None)。
            plan_boxes が例外 (Exception) を出したら、logging で警告を書き、この要求のどの画像にも box を書き込まない
            (decide の失敗には数えない)。
@@ -261,7 +264,8 @@ class SurfaceLoop:
            警告を書いて残りの種類を続ける (decide の失敗には数えず、run.jsonl にも書かない)。
            writer = SurfaceRequestWriter(paths.surface_requests_log, clock) を作る。t_sent = clock.now() で
            SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t, 直近の操作, advisor_statuses=statuses,
-           request_sink=writer) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる。
+           request_sink=writer, progress=3 で読んだ値) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。
+           ここで stop を確かめる。
            続けて、writer.write_error があれば (surface_requests.jsonl の追記の失敗)、decide の成否に依らず、その例外を
            step の外にそのまま出す (surface.jsonl の追記の失敗と同じ扱い。操作の送信・失敗の回数の変更・
            run.jsonl と surface.jsonl への書き込み・deep の要求をしない)
@@ -329,6 +333,7 @@ class SurfaceLoop:
             recent_actions=tuple(self._recent_actions),
             advisor_statuses=advisor_statuses,
             request_sink=writer,
+            progress=read_progress_state(parts.paths.progress_state),
         )
         t_sent = parts.clock.now()
         try:

@@ -113,6 +113,15 @@ def test_instructions_include_the_safety_rules():
     assert SAFETY_RULES in SURFACE_INSTRUCTIONS
 
 
+def test_instructions_explain_progress_state():
+    # state のほかのキーと同じく、progress の意味も説明する
+    assert "`progress`" in SURFACE_INSTRUCTIONS
+    progress_part = SURFACE_INSTRUCTIONS[SURFACE_INSTRUCTIONS.index("`progress`") :]
+    progress_part = progress_part[: progress_part.index("\n")]
+    assert "画面が変わっていない" in progress_part
+    assert "新しい画面が出ていない" in progress_part
+
+
 def test_instructions_explain_advisor_as_deep_status_per_document_kind():
     assert "`advisor`" in SURFACE_INSTRUCTIONS
     advisor_part = SURFACE_INSTRUCTIONS[SURFACE_INSTRUCTIONS.index("`advisor`") :]

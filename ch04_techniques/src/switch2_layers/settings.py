@@ -20,6 +20,8 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
+from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
+from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
 
 
@@ -135,6 +137,11 @@ class RunSettings:
     threshold_safety            安全の問いのしきい値。確率がこれを超えた画面で止める
                                 (--threshold-safety、既定 0.7。0 より大きく 1 より小さい値)
     max_safety_errors           安全の監視の失敗がこの回数続いたら全体を止める (--max-safety-errors、既定 3。1 以上)
+    progress_window_s           画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数)
+                                (--progress-window、既定 300。0 より大きい有限の値)
+    stuck_advice_seconds        新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で求める。
+                                超えたまま続く間は、この秒数ごとに求める (--stuck-advice-seconds、既定 60。
+                                0 より大きい有限の値)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -157,6 +164,8 @@ class RunSettings:
     safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S
     threshold_safety: float = DEFAULT_THRESHOLD_SAFETY
     max_safety_errors: int = DEFAULT_MAX_SAFETY_ERRORS
+    progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
+    stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -200,6 +209,7 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
+    --progress-window と --stuck-advice-seconds は 0 より大きい有限の値。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -269,6 +279,16 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     if settings.max_safety_errors < 1:
         errors.append(
             f"--max-safety-errors must be 1 or more: {settings.max_safety_errors}"
+        )
+    if not _is_finite_positive(settings.progress_window_s):
+        errors.append(
+            "--progress-window must be a finite number more than 0: "
+            f"{settings.progress_window_s}"
+        )
+    if not _is_finite_positive(settings.stuck_advice_seconds):
+        errors.append(
+            "--stuck-advice-seconds must be a finite number more than 0: "
+            f"{settings.stuck_advice_seconds}"
         )
     return errors
 

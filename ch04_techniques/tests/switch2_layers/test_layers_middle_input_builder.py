@@ -22,6 +22,7 @@ from switch2_layers.notes.map_document import (
     TilePosition,
 )
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.run_directory import RunPaths
 
 STATE = {
@@ -719,3 +720,28 @@ def test_grid_map_is_read(tmp_path):
     assert middle_input.map_document == GRID_MAP_DOCUMENT
     # grid の場所の name と aliases も、場所の名前の一覧に入れる
     assert middle_input.place_names == ("家の 1 階", "1 階の部屋")
+
+
+# --- 画面の停滞の計測 (progress/state.json) ---
+
+
+def test_progress_is_read_from_progress_state_file(tmp_path):
+    root = make_run(tmp_path)
+    # まだ値が無い
+    assert (
+        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
+    )
+    (root / "progress").mkdir()
+    (root / "progress" / "state.json").write_text(
+        json.dumps({"t": 19.8, "static_s": 4.0, "no_novel_s": 75.5, "window_s": 300.0}),
+        encoding="utf-8",
+    )
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.progress == ProgressState(
+        t=19.8, static_s=4.0, no_novel_s=75.5, window_s=300.0
+    )
+    # 壊れていれば値が無いものとして扱い、middle の実行は失敗にしない
+    (root / "progress" / "state.json").write_text("{broken", encoding="utf-8")
+    assert (
+        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
+    )

@@ -31,6 +31,7 @@ from switch2_layers.notes.map_document import (
 )
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
 
 
 class ObservationKind(StrEnum):
@@ -146,6 +147,8 @@ class MiddleInput:
                              既定値の None は、マップを渡さない入力 (テストなど) のため
     game                     ゲームの性質 (notes/game.md。場面に依らない)。読んだまま (前後の空白も除かない) で、
                              無い・読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
+    progress                 画面の停滞の計測の最新の値 (progress/state.json。progress.progress_state.read_progress_state)。
+                             無い・読めないときは None。既定値の None は、値を渡さない入力 (テストなど) のため
     """
 
     t: float
@@ -163,6 +166,7 @@ class MiddleInput:
     place_names: tuple[str, ...] = ()
     map_document: MapDocument | GridMapDocument | None = None
     game: str = ""
+    progress: ProgressState | None = None
 
 
 @dataclass(frozen=True)

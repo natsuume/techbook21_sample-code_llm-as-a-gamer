@@ -17,6 +17,7 @@ from switch2_layers.middle.luna_request import (
     describe_map_document,
     describe_place_names,
     describe_previous_state,
+    describe_progress,
     describe_scene_labels,
     frame_label,
     jpeg_data_url,
@@ -42,6 +43,8 @@ from switch2_layers.notes.map_document import (
     map_document_to_json,
 )
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 JPEG_1 = b"\xff\xd8\xff\xe0frame-1"
@@ -118,6 +121,7 @@ MAP_JSON = {
     ],
 }
 PLACE_NAMES = ("家の 1 階", "1 階の部屋", "自分の部屋 (2 階)")
+PROGRESS = ProgressState(t=15.2, static_s=12.4, no_novel_s=85.0, window_s=300.0)
 FULL_INPUT = MiddleInput(
     t=15.25,
     frames=(
@@ -139,6 +143,7 @@ FULL_INPUT = MiddleInput(
     current_controls="\n# 操作説明 (共通)\n\n- A: unknown\n- B: ジャンプ\n",
     place_names=PLACE_NAMES,
     map_document=MAP_DOCUMENT,
+    progress=PROGRESS,
 )
 EMPTY_INPUT = MiddleInput(
     t=0.0,
@@ -229,9 +234,9 @@ def test_user_content_is_sections_then_labeled_images():
     assert user == build_luna_payload(FULL_INPUT)["input"][1]
     content = user["content"]
     sections = build_user_sections(FULL_INPUT)
-    assert len(sections) == 14
-    assert content[:14] == [{"type": "input_text", "text": text} for text in sections]
-    assert content[14:] == [
+    assert len(sections) == 15
+    assert content[:15] == [{"type": "input_text", "text": text} for text in sections]
+    assert content[15:] == [
         {"type": "input_text", "text": "フレーム t=6.000"},
         {
             "type": "input_image",
@@ -281,6 +286,7 @@ def test_section_titles_and_order():
         "前回以降の surface の記録",
         "前回以降の操作の記録",
         "場面転換の印",
+        "画面の停滞 (コードの計測)",
         "フレーム",
     )
     sections = build_user_sections(FULL_INPUT)
@@ -328,6 +334,12 @@ def test_section_contents_of_full_input():
     assert section_body(sections, "場面転換の印") == (
         "surface が、前回の middle の実行以降に場面転換を検知した"
     )
+    # コードが画面のハッシュから測った停滞の値を、surface と同じ文で渡す
+    assert section_body(sections, "画面の停滞 (コードの計測)") == (
+        "計測した時刻: t=15.200\n"
+        "画面が変わっていない: 12.4 秒\n"
+        "直近 300 秒に見た画面だけが出ている: 85.0 秒"
+    )
     assert section_body(sections, "フレーム") == (
         "一定間隔で保存したフレーム 2 枚 (古い順)。各画像の直前に時刻のラベルがある"
     )
@@ -364,9 +376,10 @@ def test_section_contents_of_empty_input():
     assert section_body(sections, "場面転換の印") == (
         "surface は、前回の middle の実行以降に場面転換を検知していない"
     )
+    assert section_body(sections, "画面の停滞 (コードの計測)") == NO_PROGRESS_TEXT
     assert section_body(sections, "フレーム") == "フレームは無い"
     content = build_user_message(EMPTY_INPUT)["content"]
-    assert len(content) == 14
+    assert len(content) == 15
     assert all(part["type"] == "input_text" for part in content)
 
 
@@ -502,6 +515,15 @@ def test_first_task_time_without_record_is_empty_text():
     )
 
 
+def test_describe_progress():
+    assert describe_progress(PROGRESS) == (
+        "計測した時刻: t=15.200\n"
+        "画面が変わっていない: 12.4 秒\n"
+        "直近 300 秒に見た画面だけが出ている: 85.0 秒"
+    )
+    assert describe_progress(None) == NO_PROGRESS_TEXT
+
+
 # --- 変わらない指示 ---
 
 
@@ -550,6 +572,17 @@ def test_instructions_cover_the_map():
     # 場所の名前の一覧とマップを入力として説明し、マップを使って現在地から行き先までの手順をタスクにする
     for phrase in ["場所の名前の一覧", "マップ", "現在地"]:
         assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase
+
+
+def test_instructions_use_the_measured_progress_for_is_stuck():
+    instructions = LUNA_DEVELOPER_INSTRUCTIONS
+    stuck_section = instructions.split("# 詰まり (is_stuck と stuck_description)", 1)[1]
+    stuck_section = stuck_section.split("\n# ", 1)[0]
+    # is_stuck を決めるときに、コードの計測の節を使う
+    assert "画面の停滞 (コードの計測)" in stuck_section
+    assert "is_stuck" in stuck_section
+    # 出力の形は変えない
+    assert set(MIDDLE_OUTPUT_SCHEMA["properties"]) >= {"is_stuck", "stuck_description"}
 
 
 def test_instructions_describe_first_task_and_its_time_in_previous_output():
@@ -750,7 +783,7 @@ GRID_INPUT = dataclasses.replace(
 
 def test_grid_map_and_route_sections():
     sections = build_user_sections(GRID_INPUT)
-    assert len(sections) == 14
+    assert len(sections) == 15
     map_json = json.loads(section_body(sections, "マップ"))
     assert map_json == map_document_to_json(GRID_MAP_DOCUMENT)
     assert map_json["layout"] == "grid"

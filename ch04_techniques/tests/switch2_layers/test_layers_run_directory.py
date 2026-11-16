@@ -48,6 +48,15 @@ def test_create_run_directory_creates_parent_and_subdirectories(tmp_path):
     assert (paths.root / "deep").is_dir()
 
 
+def test_create_run_directory_creates_progress_directory_without_state(tmp_path):
+    paths = create_run_directory(tmp_path, STARTED_AT)
+    assert paths.progress_dir == paths.root / "progress"
+    assert paths.progress_state == paths.root / "progress" / "state.json"
+    assert paths.progress_dir.is_dir()
+    # まだフレームが無いため、値のファイルは作らない
+    assert not paths.progress_state.exists()
+
+
 def test_create_run_directory_adds_suffix_for_duplicate_names(tmp_path):
     first = create_run_directory(tmp_path, STARTED_AT)
     second = create_run_directory(tmp_path, STARTED_AT)

@@ -35,6 +35,7 @@ def test_triggers_follow_the_issue():
         "new_scene",
         "auto",
         "manual",
+        "progress",
     }
 
 

@@ -25,6 +25,8 @@ from switch2_layers.deep.deep_scheduler import (
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
+from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
+from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.safety.fake_safety import FakeSafetyChecker
 from switch2_layers.safety.jev_safety import JevSafetyChecker
 from switch2_layers.safety.safety_assembly import SafetyAssembly
@@ -1247,3 +1249,57 @@ def test_run_closes_safety_parts_when_the_bridge_fails(no_hardware, monkeypatch)
     monkeypatch.setattr(cli, "BridgeSupervisor", failing_bridge)
     assert main(["run", *ALL_FAKE]) == 1
     assert closed == [True]
+
+
+# --- 画面の停滞の計測の引数 (--progress-window・--stuck-advice-seconds) ---
+
+
+def test_run_progress_defaults_follow_the_issue():
+    args = build_parser().parse_args(["run"])
+    assert args.progress_window == DEFAULT_PROGRESS_WINDOW_S == 300
+    assert args.stuck_advice_seconds == DEFAULT_STUCK_ADVICE_SECONDS == 60
+    settings = run_settings_from_args(args)
+    assert settings.progress_window_s == 300.0
+    assert settings.stuck_advice_seconds == 60.0
+
+
+def test_run_accepts_progress_options():
+    args = build_parser().parse_args(
+        ["run", "--progress-window", "120.5", "--stuck-advice-seconds", "30"]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.progress_window_s == 120.5
+    assert settings.stuck_advice_seconds == 30.0
+
+
+@pytest.mark.parametrize(
+    "argv, option",
+    [
+        (["--progress-window", "0"], "--progress-window"),
+        (["--progress-window", "-5"], "--progress-window"),
+        (["--progress-window", "inf"], "--progress-window"),
+        (["--progress-window", "nan"], "--progress-window"),
+        (["--stuck-advice-seconds", "0"], "--stuck-advice-seconds"),
+        (["--stuck-advice-seconds", "-1"], "--stuck-advice-seconds"),
+        (["--stuck-advice-seconds", "inf"], "--stuck-advice-seconds"),
+        (["--stuck-advice-seconds", "nan"], "--stuck-advice-seconds"),
+    ],
+)
+def test_run_progress_range_errors_exit_without_hardware(
+    no_hardware, capsys, argv, option
+):
+    code = main(["run", "--middle", "fake", "--surface", "fake", *argv])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert option in captured.err
+
+
+def test_run_passes_the_progress_arguments_in_settings(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    argv = ["run", *ALL_FAKE, "--progress-window", "90", "--stuck-advice-seconds", "45"]
+    assert main(argv) == 0
+    [(settings, _)] = created
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    assert settings.progress_window_s == 90.0
+    assert settings.stuck_advice_seconds == 45.0

@@ -8,6 +8,8 @@
 - 自動の呼び出し (check_auto) は、種類ごとに現在の対象の文書について判定し、次の 2 つを満たしたら、きっかけ auto で起動する
     - その文書のジョブが実行中でない
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
+- 画面の停滞の計測による呼び出し (check_progress) は、新しい画面が出ていない秒数が stuck_advice_seconds を超えたら、
+  advice の文書をきっかけ progress で要求する (progress.stuck_advice_trigger の規則。最小の起動間隔は request が当てる)
 - ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
@@ -45,6 +47,11 @@ from switch2_layers.deep.deep_types import (
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_store import latest_frame_t
 from switch2_layers.notes.note_paths import document_key, is_scene_id
+from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    StuckAdviceTrigger,
+)
 from switch2_layers.records.run_log import (
     EVENT_DEEP_END,
     EVENT_DEEP_REQUEST_ERROR,
@@ -70,6 +77,9 @@ CLOSE_POLL_INTERVAL_S = 0.05
 SKIP_MIN_START_INTERVAL = "min_start_interval"
 # deep_skipped の reason: close の後に来た要求
 SKIP_CLOSED = "closed"
+# check_progress は、progress/state.json の t がこの秒数より前の値では判定を見送る。
+# フレームの保存か値の書き込みが止まったときに、しきい値を超えた古い値で advice を求め続けないため
+PROGRESS_STATE_MAX_AGE_S = 10.0
 
 
 class DeepStopReason(StrEnum):
@@ -170,6 +180,11 @@ def start_daemon_thread(body: Callable[[], None]) -> None:
     threading.Thread(target=body, name="deep-job", daemon=True).start()
 
 
+def no_progress_state() -> ProgressState | None:
+    """いつも None (画面の停滞の計測の値が無い) を返す (DeepSchedulerParts.progress_state の既定値)。"""
+    return None
+
+
 @dataclass(frozen=True)
 class DeepSchedulerSettings:
     """deep のスケジューラーの設定。
@@ -178,12 +193,15 @@ class DeepSchedulerSettings:
     auto_seconds           自動の呼び出しの秒数 (--deep-auto-seconds)
     timeout_s              ジョブの実行時間の上限 (--deep-timeout)。起動からこの秒数たったジョブを止める
     stop_grace_s           stop を呼んでから、run が戻らなければ kill を呼ぶまでの秒数 (既定 STOP_GRACE_S)
+    stuck_advice_seconds   新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で要求する
+                           (--stuck-advice-seconds。既定 progress.stuck_advice_trigger.DEFAULT_STUCK_ADVICE_SECONDS)
     """
 
     min_start_interval_s: float
     auto_seconds: float
     timeout_s: float
     stop_grace_s: float = STOP_GRACE_S
+    stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -203,6 +221,9 @@ class DeepSchedulerParts:
     prepare_job_directory
                        ジョブのディレクトリーを用意する関数 (既定 deep_job_directory.create_job_directory)。
                        テストでは、ある種類の用意に失敗する関数を渡す
+    progress_state     画面の停滞の計測の最新の値を返す関数 (run では progress/state.json を
+                       progress.progress_state.read_progress_state で読む)。値が無ければ None。
+                       既定は、いつも None を返す関数 (きっかけ progress で要求しない)
     """
 
     paths: RunPaths
@@ -214,6 +235,7 @@ class DeepSchedulerParts:
     start_job_thread: Callable[[Callable[[], None]], None] = start_daemon_thread
     sleep: Callable[[float], None] = time.sleep
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
+    progress_state: Callable[[], ProgressState | None] = no_progress_state
 
 
 @dataclass
@@ -252,6 +274,7 @@ class DeepScheduler:
 
     request・check_auto・check_timeouts・close・document_status は複数のスレッドから呼んでよい (判断と記録と読み取りは
     1 つのロックの中で行う。DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。
+    check_progress は 1 つのスレッドからだけ呼ぶ。
     DeepRequestSink と surface.surface_types.DeepStatusReader の実装。作ったときの t を、最初の対象の文書が対象になった
     時刻とする。
     ジョブは request で起動してから、run が戻るか kill を呼ぶまで「実行中」に数える。
@@ -277,6 +300,8 @@ class DeepScheduler:
         self._closed = False
         self._stop_checks = threading.Event()
         self._thread: threading.Thread | None = None
+        # きっかけ progress で要求するかの判定 (check_progress だけが使う)
+        self._stuck_advice = StuckAdviceTrigger(settings.stuck_advice_seconds)
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -417,6 +442,48 @@ class DeepScheduler:
                 )
         return results
 
+    def check_progress(self) -> DeepRequestResult | None:
+        """画面の停滞の計測から、advice の deep をきっかけ progress で要求するかを 1 回判定する。
+
+        判定は progress.stuck_advice_trigger.StuckAdviceTrigger (しきい値は settings.stuck_advice_seconds) で行う:
+            1. state = parts.progress_state() (値が無ければ None)。now = clock.now() とし、now - state.t が
+               PROGRESS_STATE_MAX_AGE_S を超える state なら、StuckAdviceTrigger を呼ばずに None を返す
+               (ちょうどその秒数なら使う)。古い値は停滞が解けたことを示さないため、前回の要求の時刻を消さない
+            2. advice の文書 (場面に依らない) のジョブが 1 つ以上実行中か (きっかけに依らない) を確かめる
+            3. StuckAdviceTrigger.check(now, state の no_novel_s (state が None なら None), 実行中か) が
+               True なら、request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None) を呼んで、その結果を返す。
+               最小の起動間隔などの規則は request がそのまま当てる (捨てたら DeepRequestResult(started=False, ...))
+            4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "progress",
+               "kind": "advice", "trigger": "progress", "scene_id": null, "error": 説明} を書き、None を返す
+        要求しなければ None を返す。close の後は何もせず None を返す。
+        判定の状態 (前回の要求の時刻) を持つため、1 つのスレッド (start で起動する判定のスレッド) からだけ呼ぶ。
+        """
+        with self._lock:
+            if self._closed:
+                return None
+        state = self.parts.progress_state()
+        now = self.parts.clock.now()
+        if state is not None and now - state.t > PROGRESS_STATE_MAX_AGE_S:
+            return None
+        advice_key = document_key(DocumentKind.ADVICE, None)
+        advice_running = self.is_running(advice_key)
+        no_novel_s = None if state is None else state.no_novel_s
+        if not self._stuck_advice.check(now, no_novel_s, advice_running):
+            return None
+        try:
+            return self.request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None)
+        except Exception as error:
+            logger.debug("progress deep request failed", exc_info=True)
+            self.parts.run_log.write(
+                EVENT_DEEP_REQUEST_ERROR,
+                source="progress",
+                kind=DocumentKind.ADVICE.value,
+                trigger=DeepTrigger.PROGRESS.value,
+                scene_id=None,
+                error=describe_exception(error),
+            )
+            return None
+
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
 
@@ -494,10 +561,10 @@ class DeepScheduler:
             )
 
     def start(self) -> None:
-        """CHECK_INTERVAL_S ごとに check_timeouts を呼んでから check_auto を呼ぶスレッド (daemon) を起動する。
+        """CHECK_INTERVAL_S ごとに check_timeouts・check_auto・check_progress をこの順に呼ぶスレッド (daemon) を起動する。
 
-        2 回目以降は何もしない。check_timeouts と check_auto の想定外の例外 (Exception) は、スレッドを止めずに
-        logging で警告を書く。
+        2 回目以降は何もしない。check_timeouts・check_auto・check_progress の想定外の例外 (Exception) は、スレッドを
+        止めずに logging で警告を書く。
         """
         with self._lock:
             if self._thread is not None or self._closed:
@@ -643,7 +710,8 @@ class DeepScheduler:
             return bool(self._running)
 
     def _run_checks(self) -> None:
-        """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts と check_auto を呼ぶ。"""
+        """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts・check_auto・
+        check_progress を呼ぶ。"""
         while not self._stop_checks.wait(CHECK_INTERVAL_S):
             try:
                 self.check_timeouts()
@@ -653,6 +721,10 @@ class DeepScheduler:
                 self.check_auto()
             except Exception:
                 logger.warning("checking automatic deep requests failed", exc_info=True)
+            try:
+                self.check_progress()
+            except Exception:
+                logger.warning("checking progress deep requests failed", exc_info=True)
 
 
 def _call_runner(action: Callable[[Path], None], job_dir: Path) -> None:

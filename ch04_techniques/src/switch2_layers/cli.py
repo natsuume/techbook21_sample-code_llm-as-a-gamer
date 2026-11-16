@@ -5,7 +5,7 @@
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
                        [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
-                       [--max-safety-errors N]
+                       [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
         実機で 3 層を動かす。surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
         middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep は --deep で選ぶ
         (既定 claude = Claude Code、fake = deep.fake_deep)。安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、
@@ -71,9 +71,11 @@ from switch2_layers.settings import (
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
+    DEFAULT_PROGRESS_WINDOW_S,
     DEFAULT_RUNS_DIR,
     DEFAULT_SAFETY,
     DEFAULT_SAFETY_INTERVAL_S,
+    DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
@@ -299,6 +301,24 @@ def add_run_parser(
             f"(1 以上。既定 {DEFAULT_MAX_SAFETY_ERRORS})"
         ),
     )
+    parser.add_argument(
+        "--progress-window",
+        type=float,
+        default=DEFAULT_PROGRESS_WINDOW_S,
+        help=(
+            "画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数。0 より大きい値。"
+            f"既定 {DEFAULT_PROGRESS_WINDOW_S:g})"
+        ),
+    )
+    parser.add_argument(
+        "--stuck-advice-seconds",
+        type=float,
+        default=DEFAULT_STUCK_ADVICE_SECONDS,
+        help=(
+            "新しい画面が出ていない秒数がこれを超えたら、advice の deep を求める。超えたまま続く間は、"
+            f"この秒数ごとに求める (0 より大きい値。既定 {DEFAULT_STUCK_ADVICE_SECONDS:g})"
+        ),
+    )
     parser.set_defaults(handler=run_command)
 
 
@@ -434,6 +454,8 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         safety_interval_s=args.safety_interval,
         threshold_safety=args.threshold_safety,
         max_safety_errors=args.max_safety_errors,
+        progress_window_s=args.progress_window,
+        stuck_advice_seconds=args.stuck_advice_seconds,
     )
 
 

@@ -48,6 +48,8 @@ from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
+# 画面の停滞の計測のテストで止めるまで動かす秒数 (最初の 2 秒のフレームは新しい画面になるため、長めにとる)
+PROGRESS_RUN_SECONDS = 5.0
 SAFETY_TIMEOUT_S = 20.0  # 止まらないときに、テストを終わらせるために止める秒数
 SAFETY_REASON = "test safety timeout"
 HOME_BIT = 0x10  # レポートの b2
@@ -928,6 +930,7 @@ def test_jev_surface_sends_and_records_deep_status_with_mock_jev(tmp_path):
             "instructions",
             "documents",
             "timeline",
+            "progress",
             "recent_actions",
             "advisor",
             "frames",
@@ -1113,3 +1116,85 @@ def test_safety_monitor_keeps_checking_while_the_bridge_is_recovering(tmp_path):
     rows = read_rows(root / "safety.jsonl")
     assert len(rows) >= 3
     assert all(row["error"] is None for row in rows)
+
+
+# --- 画面の停滞の計測 ---
+
+
+class ProgressRecordingSurface:
+    """surface の偽物。受け取った画面の停滞の計測の値を記録し、中立の操作を返す。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.progress: list[object] = []
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        with self.lock:
+            self.progress.append(surface_input.progress)
+        return SurfaceOutput(action=PadAction())
+
+
+def test_progress_is_measured_and_advice_is_requested_with_fake_deep(tmp_path):
+    # FakeFrameReader は同じ画面を返し続ける (新しい画面が出ない、止まった画面)
+    surface = ProgressRecordingSurface()
+    app = LayersApp(
+        settings(
+            tmp_path,
+            stuck_advice_seconds=0.5,
+            progress_window_s=120.0,
+            deep=DeepRunnerChoice.FAKE,
+        ),
+        parts(FakeSender(), surface=surface),
+    )
+    # 最初の 2 秒のフレームは比べる相手が無く新しい画面になるため、その後もしきい値を超えるまで動かす
+    reason, root = run_app(app, stop_after=PROGRESS_RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+
+    # progress/state.json: 一定間隔のフレームごとに計算した最新の値
+    state = read_json(root / "progress" / "state.json")
+    assert list(state) == ["t", "static_s", "no_novel_s", "window_s"]
+    assert state["window_s"] == 120.0
+    assert state["no_novel_s"] > 0.5
+    # 同じ画面が続いている。新しい画面は、比べる相手が無かった最初の 2 秒のフレームまで
+    assert 1.5 < state["static_s"] - state["no_novel_s"] <= 2.0
+    interval_times = [
+        row["t"]
+        for row in read_rows(root / "frames.jsonl")
+        if row["kind"] == "interval"
+    ]
+    assert state["t"] in interval_times
+
+    # surface は値を受け取った
+    assert any(progress is not None for progress in surface.progress)
+
+    # deep: 新しい画面が出ていない秒数がしきい値を超え、advice をきっかけ progress で求めた (フェイクが成功を返す)
+    job = read_json(root / "deep" / "advice-001" / "job.json")
+    assert job["trigger"] == "progress"
+    run_rows = read_rows(root / "run.jsonl")
+    progress_starts = [
+        row
+        for row in run_rows
+        if row["event"] == "deep_start" and row["trigger"] == "progress"
+    ]
+    assert progress_starts
+    assert all(row["kind"] == "advice" for row in progress_starts)
+    ends = [
+        row
+        for row in run_rows
+        if row["event"] == "deep_end" and row["job"] == "deep/advice-001"
+    ]
+    assert [row["status"] for row in ends] == ["ok"]
+
+    # 起動引数は run.jsonl の start の args に入る
+    args = run_rows[0]["args"]
+    assert args["progress_window_s"] == 120.0
+    assert args["stuck_advice_seconds"] == 0.5
+
+
+def test_no_progress_state_before_the_first_frame(tmp_path):
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
+    reason, root = run_app(app, stop_after=0.5)
+    assert reason == REASON_INTERRUPTED
+    assert (root / "progress").is_dir()
+    assert not (root / "progress" / "state.json").exists()
+    assert not (root / "deep" / "advice-001").exists()

@@ -22,6 +22,8 @@ from switch2_layers.deep.deep_scheduler import (
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.pad_action import PadAction
+from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS
 from switch2_layers.surface.box_tracker import NormalizedBox, TrackingFrame, TrackResult
@@ -39,6 +41,7 @@ from switch2_layers.surface.jev_surface import (
     ADVISOR_STATUS_UNAVAILABLE_TEXT,
     DEEP_JOB_STATUS_TEXTS,
     NO_TIMELINE_TEXT,
+    NOT_MEASURED_TEXT,
     JevSurfaceDecider,
     JevSurfaceSettings,
     advisor_to_state,
@@ -46,6 +49,7 @@ from switch2_layers.surface.jev_surface import (
     build_surface_state,
     deep_status_text,
     documents_to_state,
+    progress_to_state,
     recent_actions_to_state,
     relative_time_label,
     timeline_to_state,
@@ -176,6 +180,7 @@ def surface_input(
     files: Sequence[str | None] | None = None,
     request_sink: Callable[[SurfaceRequest], None] | None = None,
     advisor_statuses: Mapping[DocumentKind, DeepDocumentStatus | None] | None = None,
+    progress: ProgressState | None = None,
 ) -> SurfaceInput:
     """files は times と同じ順の、画像の保存を予約したファイル (None なら、どの画像も file を持たない)。
 
@@ -194,6 +199,7 @@ def surface_input(
         timeline_generated_t=timeline_generated_t,
         recent_actions=recent_actions,
         request_sink=request_sink,
+        progress=progress,
     )
     if advisor_statuses is None:
         return value
@@ -521,15 +527,33 @@ def test_advisor_to_state_treats_missing_kinds_as_unreadable_and_ignores_others(
     }
 
 
+def test_progress_to_state():
+    progress = ProgressState(t=9.8, static_s=12.4, no_novel_s=85.0, window_s=300.0)
+    assert progress_to_state(progress, 10.0) == {
+        "measured": "t=9.800 秒 (0.2 秒前)",
+        "text": (
+            "画面が変わっていない: 12.4 秒\n"
+            "直近 300 秒に見た画面だけが出ている: 85.0 秒"
+        ),
+    }
+    assert progress_to_state(None, 10.0) == {
+        "measured": NOT_MEASURED_TEXT,
+        "text": NO_PROGRESS_TEXT,
+    }
+
+
 def test_build_surface_state_has_keys_in_order():
+    progress = ProgressState(t=9.5, static_s=1.0, no_novel_s=70.0, window_s=300.0)
     state = build_surface_state(
-        surface_input(timeline="系列", timeline_generated_t=8.5), ["a", "b", "c"]
+        surface_input(timeline="系列", timeline_generated_t=8.5, progress=progress),
+        ["a", "b", "c"],
     )
     # advisor は recent_actions の直後、frames の前
     assert list(state) == [
         "instructions",
         "documents",
         "timeline",
+        "progress",
         "recent_actions",
         "advisor",
         "frames",
@@ -537,6 +561,7 @@ def test_build_surface_state_has_keys_in_order():
     assert state["instructions"] == SURFACE_INSTRUCTIONS
     assert state["documents"] == documents_to_state(DOCUMENTS)
     assert state["timeline"] == {"created": "t=8.500 秒 (1.5 秒前)", "text": "系列"}
+    assert state["progress"] == progress_to_state(progress, REQUEST_T)
     assert state["recent_actions"] == []
     # 状況を渡していない (既定の空) ので、どの種類も状況を取得できない
     assert state["advisor"] == {
@@ -551,6 +576,14 @@ def test_build_surface_state_has_keys_in_order():
         {"label": "t=9.500 秒 (0.5 秒前)", "image": "b"},
         {"label": "t=10.000 秒 (0.0 秒前)", "image": "c"},
     ]
+
+
+def test_build_surface_state_says_when_there_is_no_progress():
+    state = build_surface_state(surface_input(), ["a", "b", "c"])
+    assert state["progress"] == {
+        "measured": NOT_MEASURED_TEXT,
+        "text": NO_PROGRESS_TEXT,
+    }
 
 
 def test_build_surface_state_needs_one_reference_per_frame():

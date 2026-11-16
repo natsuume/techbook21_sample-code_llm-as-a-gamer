@@ -8,6 +8,7 @@ from typing import Protocol
 from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction
+from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.surface.jev_client import JevAnswers
 from switch2_layers.surface.surface_questions import SurfaceQuestion
 
@@ -116,6 +117,8 @@ class SurfaceInput:
                            送る直前に 1 回だけ SurfaceRequest を渡して呼ぶ。要求を作る前に失敗したら呼ばない。
                            呼んだ書き込み先が例外を出したら、要求を送らずにその例外をそのまま出す。
                            None なら何も書かない。Jev を呼ばない実装 (フェイク) は呼ばない
+    progress               画面の停滞の計測の最新の値 (progress/state.json)。ファイルが無いか読めなければ None。
+                           既定値の None は、値を渡さない入力 (フェイクやテストなど) のため
     """
 
     t: float
@@ -128,6 +131,7 @@ class SurfaceInput:
         default_factory=dict
     )
     request_sink: Callable[[SurfaceRequest], None] | None = None
+    progress: ProgressState | None = None
 
 
 @dataclass(frozen=True)

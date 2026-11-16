@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
+from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_RUNNER,
@@ -409,3 +411,65 @@ def test_jev_safety_with_api_key_has_no_error():
 @pytest.mark.parametrize("environ", [{}, {"TYPESAFE_API_KEY": "ts-x"}])
 def test_fake_safety_never_needs_api_key(environ):
     assert safety_api_key_errors(SafetyKind.FAKE, environ) == []
+
+
+# --- 画面の停滞の計測 (--progress-window・--stuck-advice-seconds) ---
+
+
+def test_progress_settings_defaults_follow_the_issue():
+    settings = RunSettings()
+    assert settings.progress_window_s == DEFAULT_PROGRESS_WINDOW_S == 300.0
+    assert settings.stuck_advice_seconds == DEFAULT_STUCK_ADVICE_SECONDS == 60.0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"progress_window_s": 0.001},
+        {"progress_window_s": 3600.0},
+        {"stuck_advice_seconds": 0.001},
+        {"stuck_advice_seconds": 600.0},
+    ],
+)
+def test_progress_boundary_values_are_valid(changes):
+    assert run_settings_errors(dataclasses.replace(RunSettings(), **changes)) == []
+
+
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"progress_window_s": 0.0}, "--progress-window"),
+        ({"progress_window_s": -1.0}, "--progress-window"),
+        ({"progress_window_s": math.inf}, "--progress-window"),
+        ({"progress_window_s": math.nan}, "--progress-window"),
+        ({"stuck_advice_seconds": 0.0}, "--stuck-advice-seconds"),
+        ({"stuck_advice_seconds": -60.0}, "--stuck-advice-seconds"),
+        ({"stuck_advice_seconds": math.inf}, "--stuck-advice-seconds"),
+        ({"stuck_advice_seconds": math.nan}, "--stuck-advice-seconds"),
+    ],
+)
+def test_progress_out_of_range_values_are_reported_with_option_name(changes, option):
+    errors = run_settings_errors(dataclasses.replace(RunSettings(), **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_progress_errors_follow_the_argument_order():
+    errors = run_settings_errors(
+        RunSettings(
+            stuck_advice_seconds=0.0, progress_window_s=0.0, max_middle_errors=0
+        )
+    )
+    assert len(errors) == 3
+    assert "--max-middle-errors" in errors[0]
+    assert "--progress-window" in errors[1]
+    assert "--stuck-advice-seconds" in errors[2]
+
+
+def test_run_settings_to_json_has_the_progress_arguments():
+    value = run_settings_to_json(
+        RunSettings(progress_window_s=120.0, stuck_advice_seconds=30.0)
+    )
+    assert value["progress_window_s"] == 120.0
+    assert value["stuck_advice_seconds"] == 30.0
+    assert json.loads(json.dumps(value)) == value

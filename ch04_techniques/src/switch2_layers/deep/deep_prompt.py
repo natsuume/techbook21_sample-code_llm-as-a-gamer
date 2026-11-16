@@ -7,7 +7,7 @@
     controls.md    操作説明の指示
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)
     strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
-    advice.md      詰まったときの助言の指示 (マップの場所の構造を使うことを含む)
+    advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json を使うことを含む)
     map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く)
     game.md        ゲームの性質の指示 (6 つの節の見出しと順、マップの形式の型の行、確かめたことと推測の分け方、
                    ゲームの名前を書かないこと、全体の行数の上限)
@@ -83,6 +83,7 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
     "scene_labels",
     "map_dir",
     "game_note",
+    "progress_state",
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
@@ -270,6 +271,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         scene_labels              実行ディレクトリー/notes/scene_labels.json
         map_dir                   実行ディレクトリー/notes/map (マップの文書を置くディレクトリー)
         game_note                 実行ディレクトリー/notes/game.md (ゲームの性質の文書。まだ無いこともある)
+        progress_state            実行ディレクトリー/progress/state.json (画面の停滞の計測の最新の値)
     パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths と
     notes.note_paths に合わせる。
     """
@@ -293,6 +295,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "scene_labels": (paths.notes_dir / SCENE_LABELS_FILE).as_posix(),
         "map_dir": (paths.notes_dir / MAP_DIR).as_posix(),
         "game_note": (paths.notes_dir / GAME_NOTE).as_posix(),
+        "progress_state": paths.progress_state.as_posix(),
     }
 
 
