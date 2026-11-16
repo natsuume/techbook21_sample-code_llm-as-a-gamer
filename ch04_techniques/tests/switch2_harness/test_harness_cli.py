@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
@@ -276,6 +278,67 @@ def test_daemon_error_exits_with_1(workspace, harness, capsys):
     harness.daemon.overrides["status"] = "error cannot connect to daemon: refused"
     assert harness.run("status", "--workspace", str(workspace)) == 1
     assert capsys.readouterr().out == "error cannot connect to daemon: refused\n"
+
+
+# --- 行動履歴 (action-history) ---
+
+HISTORY_HEADER = "直近の行動 (古い順、最大 20 件。秒数はこの撮影の何秒前か):"
+
+
+def write_frames_on_shot(harness: Harness, values: list[int]) -> None:
+    """harness の送信を、shot のたびに PNG を書いてから fake のデーモンに送るものに替える。
+
+    PNG は、すべての画素が values の値 (shot のたびに順に 1 つずつ使う) のグレースケールの画像にする。
+    """
+    daemon = harness.daemon
+    remaining = iter(values)
+
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
+        if args[0] == "shot":
+            image = np.full((90, 160), next(remaining), dtype=np.uint8)
+            assert cv2.imwrite(args[1], image)
+        return daemon(args, timeout_s=timeout_s)
+
+    harness.deps = replace(harness.deps, send=send)
+
+
+@pytest.mark.parametrize(("second_value", "change"), [(255, "あり"), (0, "なし")])
+def test_look_prints_the_history_with_action_history(
+    tmp_path, harness, capsys, second_value, change
+):
+    directory = tmp_path / "play"
+    argv = ["init", str(directory), "--game", "G", "--enable", "action-history"]
+    assert harness.run(*argv) == 0
+    write_frames_on_shot(harness, [0, second_value])
+    workspace = ["--workspace", str(directory)]
+    capsys.readouterr()
+    # 1 回目の look を 1000 秒、press を 1010 秒、2 回目の look を 1020 秒に送る
+    assert harness.run("look", *workspace) == 0
+    first_frame = directory / "frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {first_frame}\n直近の行動: なし\n"
+    harness.clock.advance(9.5)
+    assert harness.run("press", "tap", "A", *workspace) == 0
+    harness.clock.advance(9.5)
+    capsys.readouterr()
+    assert harness.run("look", *workspace) == 0
+    second_frame = directory / "frames" / "000002.png"
+    assert capsys.readouterr().out == (
+        f"ok {second_frame}\n"
+        f"{HISTORY_HEADER}\n"
+        "- 20 秒前 look 000001.png\n"
+        f"- 10 秒前 press tap A: 画面の変化 {change}\n"
+    )
+
+
+def test_look_prints_no_history_without_features(tmp_path, harness, capsys):
+    directory = tmp_path / "play"
+    assert harness.run("init", str(directory), "--game", "G") == 0
+    workspace = ["--workspace", str(directory)]
+    assert harness.run("look", *workspace) == 0
+    assert harness.run("press", "tap", "A", *workspace) == 0
+    capsys.readouterr()
+    assert harness.run("look", *workspace) == 0
+    assert capsys.readouterr().out == f"ok {directory / 'frames' / '000002.png'}\n"
 
 
 # --- report ---

@@ -76,3 +76,15 @@ def test_render_instructions_with_package_base_template():
     assert "$goal" not in text
     assert text.endswith("確かめてください。\n")
     assert not text.endswith("\n\n")
+
+
+def test_read_package_template_reads_action_history_md():
+    text = read_package_template("action-history.md")
+    assert text.startswith("## 行動履歴\n")
+
+
+def test_render_instructions_with_action_history_adds_its_section():
+    text = render_instructions(make_config(("action-history",)), read_package_template)
+    assert "\n\n## 行動履歴\n\n" in text
+    assert text.index("## 守ること") < text.index("## 行動履歴")
+    assert text.endswith("エラーの応答を表示します\n")

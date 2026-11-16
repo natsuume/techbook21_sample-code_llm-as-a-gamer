@@ -13,7 +13,8 @@ from pathlib import Path
 from switch2_harness.features import Feature
 from switch2_harness.workspace import WorkspacePaths
 
-# テスト用の要素。本物の FEATURES は空のため、要素の検証にはこれを available に渡す
+# テスト用の要素。本物の FEATURES に左右されずに、複数の要素の順やサブコマンドの追加を確かめるため、
+# 要素の検証にはこれを available に渡す (FAKE_HISTORY は本物の行動履歴と名前が同じだが、commands などはテスト用の値)
 FAKE_HISTORY = Feature(
     name="action-history",
     title="行動履歴",

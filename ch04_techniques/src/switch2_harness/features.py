@@ -1,7 +1,8 @@
 """要素 (feature) の一覧と、要素の名前の検証。
 
-要素は先行研究の手法を 1 つずつ足したもので、有効にすると CLAUDE.md に節が加わり、
-エージェントが使えるサブコマンドが増える。すべての要素を無効にした状態が、第3章と同じ基準条件になる。
+要素は先行研究の手法を 1 つずつ足したもので、有効にすると CLAUDE.md に節が加わり、要素によって、
+エージェントが使えるサブコマンドが増えるか、サブコマンドの出力が変わる。
+すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
 
 from collections.abc import Iterable
@@ -24,8 +25,18 @@ class Feature:
     commands: tuple[str, ...]
 
 
+# 行動履歴の要素の名前。有効にすると、look が直近の行動 (look と press) を表示する (action_history)
+ACTION_HISTORY_FEATURE = "action-history"
+
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順とサブコマンドの順になる
-FEATURES: tuple[Feature, ...] = ()
+FEATURES: tuple[Feature, ...] = (
+    Feature(
+        name=ACTION_HISTORY_FEATURE,
+        title="行動履歴",
+        instruction_file="action-history.md",
+        commands=(),
+    ),
+)
 
 # 要素によらずエージェントが使えるサブコマンド
 BASE_AGENT_COMMANDS: tuple[str, ...] = ("look", "press", "status", "finish")
