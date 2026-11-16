@@ -36,6 +36,7 @@ from switch2_layers.deep.deep_types import (
     DeepTrigger,
     DocumentKind,
 )
+from switch2_layers.notes.map_document import MapLayout
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
@@ -262,6 +263,7 @@ def make_run(tmp_path: Path) -> Path:
 
 
 def deep_job(kind: DocumentKind, scene_id: str | None = None) -> DeepJob:
+    # map のジョブは、コードが決めた型 (ここでは free) を持つ
     return DeepJob(
         kind=kind,
         scene_id=scene_id,
@@ -269,6 +271,7 @@ def deep_job(kind: DocumentKind, scene_id: str | None = None) -> DeepJob:
         requested_t=10.0,
         previous_latest_frame_t=None,
         latest_frame_t=9.5,
+        map_layout=MapLayout.FREE if kind is DocumentKind.MAP else None,
     )
 
 
