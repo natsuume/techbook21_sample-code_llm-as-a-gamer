@@ -85,6 +85,14 @@ def is_error_reply(reply: str) -> bool:
     return reply.startswith("error")
 
 
+def release_not_confirmed_message(reply: str) -> str:
+    """run の後片付けの up ALL を確かめられなかったときの error 行を返す。
+
+    例: `error up ALL after the run was not confirmed: error cannot connect to daemon: ...`。
+    """
+    return f"error up ALL after the run was not confirmed: {reply}"
+
+
 def _error_result(message: object) -> CommandResult:
     """`error <message>` を stderr に出す、終了コード 1 の結果を返す。"""
     return CommandResult(exit_code=1, stderr_lines=(f"error {message}",))
@@ -315,6 +323,9 @@ def handle_run(
        RUN_INTERRUPTED_MESSAGE を stderr に出し、終了コード 1 (例外は外に出さない)
     4. `ok run finished reason=<理由> launches=<起動した回数> log=<paths.agent_log_file>` を stdout に出し、終了コード 0。
        理由は agent_launcher.StopReason のいずれか (deadline / budget_exhausted / no_session / resumes_exhausted)
+    5. ただし、後片付けの up ALL の応答 (RunOutcome.release_reply) が error で始まるときは、4. の行に加えて
+       `error up ALL after the run was not confirmed: <応答>` を stderr に出し、終了コード 1
+       (押したままの入力が残っているかもしれないことを、起動した人に知らせるため)
     """
     try:
         validate_minutes(minutes)
@@ -349,4 +360,10 @@ def handle_run(
         f"ok run finished reason={outcome.reason} launches={outcome.launches} "
         f"log={paths.agent_log_file}"
     )
+    if is_error_reply(outcome.release_reply):
+        return CommandResult(
+            exit_code=1,
+            stdout_lines=(finished,),
+            stderr_lines=(release_not_confirmed_message(outcome.release_reply),),
+        )
     return CommandResult(exit_code=0, stdout_lines=(finished,))

@@ -1,4 +1,5 @@
 import inspect
+import itertools
 import json
 import math
 import os
@@ -33,6 +34,7 @@ from switch2_harness.agent_launcher import (
     MAX_RESUMES,
     MIN_REMAINING_S,
     POLL_INTERVAL_S,
+    RELEASE_RETRY_INTERVAL_S,
     RELEASE_TIMEOUT_S,
     RESUME_PROMPT,
     SKIP_AUTH_ENV_PREFIX,
@@ -1424,11 +1426,64 @@ def test_run_records_release_error(tmp_path):
         daemon_overrides={"up": "error bridge is recovering"},
     )
     outcome = run_scenario(scenario, minutes=1.0)
-    assert outcome == RunOutcome(reason="deadline", launches=1)
+    assert outcome == RunOutcome(
+        reason="deadline", launches=1, release_reply="error bridge is recovering"
+    )
     release = scenario.events[-1]
     assert release.args == ("release",)
     assert release.reply == "error bridge is recovering"
     assert release.ok is False
+    # 接続の拒否ではない error は送り直さない
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+REFUSED_REPLY = (
+    "error cannot connect to daemon: [Errno 11] Resource temporarily unavailable"
+)
+
+
+def test_run_resends_release_while_the_daemon_refuses_the_connection(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    replies = iter([REFUSED_REPLY, REFUSED_REPLY])
+    release_timeouts: list[float | None] = []
+
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
+        if args == ["up", "ALL"]:
+            release_timeouts.append(timeout_s)
+            scenario.clock.advance(0.01)
+            return next(replies, "ok held=none")
+        return scenario.daemon(args, timeout_s=timeout_s)
+
+    outcome = run_scenario(scenario, minutes=1.0, send=send)
+    assert outcome.release_reply == "ok held=none"
+    assert len(release_timeouts) == 3
+    # 送り直すほど、各送信の待ち時間の上限は RELEASE_TIMEOUT_S の残りに縮む
+    assert release_timeouts[0] == RELEASE_TIMEOUT_S
+    assert all(
+        later < earlier for earlier, later in itertools.pairwise(release_timeouts)
+    )
+    release = scenario.events[-1]
+    assert release.args == ("release",)
+    assert release.ok is True
+
+
+def test_run_gives_up_resending_release_after_the_timeout(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    release_count = 0
+
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
+        nonlocal release_count
+        if args == ["up", "ALL"]:
+            release_count += 1
+            scenario.clock.advance(0.01)
+            return REFUSED_REPLY
+        return scenario.daemon(args, timeout_s=timeout_s)
+
+    outcome = run_scenario(scenario, minutes=1.0, send=send)
+    assert outcome.release_reply == REFUSED_REPLY
+    # 0.2 秒おきに送り直し、RELEASE_TIMEOUT_S (10 秒) の中に収まる回数で諦める
+    assert 2 <= release_count <= int(RELEASE_TIMEOUT_S / RELEASE_RETRY_INTERVAL_S) + 1
+    assert scenario.events[-1].ok is False
 
 
 # --- 後片付けの up ALL の待ち時間 ---

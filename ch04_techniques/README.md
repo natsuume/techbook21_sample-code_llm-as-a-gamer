@@ -750,7 +750,7 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 
 エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
 
-期限になったら Claude Code に SIGINT を送り、20 秒たっても終わらなければ SIGTERM、さらに 10 秒たっても終わらなければ強制終了 (SIGKILL) します。止めた後は、デーモンに `up ALL` を送って押したままの入力を離します (応答を待つのは 10 秒まで)。
+期限になったら Claude Code に SIGINT を送り、20 秒たっても終わらなければ SIGTERM、さらに 10 秒たっても終わらなければ強制終了 (SIGKILL) します。止めた後は、デーモンに `up ALL` を送って押したままの入力を離します。応答を待つのは合わせて 10 秒までです。デーモンが処理中で接続が拒否されたときは、その 10 秒の間に送り直します。
 
 Claude Code の Bash ツールは、コマンドを別のセッションで起動します。2026-11-17 に Claude Code 2.1.325 で確かめたところ、SIGINT と SIGTERM では Claude Code が終わるときに Bash ツールのコマンドも止めました。強制終了する場合は Claude Code がコマンドを止められないため、強制終了の直前に Claude Code の子孫のプロセスとそのセッションを控えておき、強制終了の後に、控えたセッションに残っているプロセスを止めます。
 
@@ -758,7 +758,7 @@ Claude Code の Bash ツールは、コマンドを別のセッションで起�
 
 `run` は HOME 画面には戻さないため、プレイを終えるときは人がゲームを終了するか、エージェントに `finish` を指示してください。
 
-期限などで止まったときは `ok run finished reason=<理由> ...` を表示して終了コード 0 で終わり、止まった理由は `reason=` で確かめられます。Ctrl+C で止めたときは `error run interrupted`、SIGTERM・SIGHUP で止めたときは `error run terminated by signal` を表示して、終了コード 1 で終わります。
+期限などで止まったときは `ok run finished reason=<理由> ...` を表示して終了コード 0 で終わり、止まった理由は `reason=` で確かめられます。Ctrl+C で止めたときは `error run interrupted`、SIGTERM・SIGHUP で止めたときは `error run terminated by signal` を表示して、終了コード 1 で終わります。後片付けの `up ALL` の成功を確かめられなかったときは、`ok run finished ...` に加えて `error up ALL after the run was not confirmed: <デーモンの応答>` を表示し、終了コード 1 で終わります。押したままの入力が残っているかもしれないので、デーモンの状態を確かめてください。
 
 | `reason` | 止まった理由 |
 |---|---|

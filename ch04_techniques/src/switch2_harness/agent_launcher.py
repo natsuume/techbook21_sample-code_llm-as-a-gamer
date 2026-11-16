@@ -89,6 +89,10 @@ MIN_REMAINING_S = 30.0  # 期限までの残りがこれ未満なら、終わっ
 MAX_RESUMES = 20  # 起動し直す回数の上限 (最初の起動は数えない)
 # 後片付けの up ALL の待ち時間の上限 (秒)。後片付けの間はシグナルを無視するため、デーモンが応答しなくても止まれるようにする
 RELEASE_TIMEOUT_S = 10.0
+# 後片付けの up ALL の接続が拒否されたとき (デーモンが処理中で接続の待ち行列が埋まっているときなど)、送り直すまで待つ秒数
+RELEASE_RETRY_INTERVAL_S = 0.2
+# daemon_client.send_command が接続に失敗したときの error 行の書き出し
+CANNOT_CONNECT_PREFIX = "error cannot connect to daemon"
 # shield に入る前・入る途中で届いた割り込みで、後片付けをやり直す回数の上限 (最初の 1 回を含む)
 MAX_CLEANUP_ATTEMPTS = 5
 
@@ -160,10 +164,16 @@ class LaunchOptions:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """run_agent_until の結果。reason は止まった理由、launches は claude を起動した回数 (起動し直しを含む)。"""
+    """run_agent_until の結果。
+
+    reason: 止まった理由
+    launches: claude を起動した回数 (起動し直しを含む)
+    release_reply: 後片付けの up ALL へのデーモンの応答 (error で始まれば、押したままの入力を離せたか確かめられていない)
+    """
 
     reason: StopReason
     launches: int
+    release_reply: str = "ok held=none"
 
 
 class AgentProcess(Protocol):
@@ -598,6 +608,31 @@ def stop_reason_after_exit(
     return None
 
 
+def _send_release(
+    send: SendCommand,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> str:
+    """後片付けの up ALL を送り、デーモンの応答を返す。
+
+    第2章のデーモンは 1 接続ずつ順に処理し、接続の待ち行列は短い。止めた時点でエージェントのコマンドが
+    処理待ちで並んでいると、up ALL の接続がすぐに拒否されることがある (CANNOT_CONNECT_PREFIX の error 行)。
+    そのときは RELEASE_RETRY_INTERVAL_S 待って送り直し、最初の送信から RELEASE_TIMEOUT_S たつまで繰り返す。
+    待ち行列に入れれば、先に並んでいたコマンドの後に up ALL が処理される。
+    各送信の待ち時間の上限は、RELEASE_TIMEOUT_S の残り (0.1 秒より短くはしない)。
+    接続の拒否以外の応答 (成功、上限の超過、接続後の切断など) は、送り直さずにそのまま返す。
+    """
+    started = monotonic()
+    while True:
+        remaining = RELEASE_TIMEOUT_S - (monotonic() - started)
+        reply = send(["up", "ALL"], timeout_s=max(remaining, 0.1))
+        if not reply.startswith(CANNOT_CONNECT_PREFIX):
+            return reply
+        if monotonic() - started + RELEASE_RETRY_INTERVAL_S >= RELEASE_TIMEOUT_S:
+            return reply
+        sleep(RELEASE_RETRY_INTERVAL_S)
+
+
 def _clean_up_shielded(
     clean_up: Callable[[], None],
     shield: Shield,
@@ -697,8 +732,9 @@ def run_agent_until(
            claude の Bash ツールのコマンドは claude 自身が止める。SIGKILL まで進んだときは、stop_process が
            控えた claude の子孫のセッションも止める (Claude Code 2.1.325 で 2026-11-17 に確かめたふるまい。モジュールの説明を参照)
         2. 理由が決まって終えるときは、停止のイベントを記録する
-        3. 1・2 が例外になっても、send(["up", "ALL"], timeout_s=RELEASE_TIMEOUT_S) を送り、そのイベントを記録する
-           (後片付けの間はシグナルを無視するため、デーモンが応答しなくても止まれるように待ち時間に上限を付ける)
+        3. 1・2 が例外になっても、_send_release で up ALL を送り、そのイベントを記録する
+           (後片付けの間はシグナルを無視するため、デーモンが応答しなくても止まれるように、待ち時間は合わせて
+           RELEASE_TIMEOUT_S まで。接続が拒否されたときは、その間に送り直す)。応答は RunOutcome.release_reply で返す
     ループを抜けてから shield が割り込みを無視に切り替えるまでの間に Ctrl-C・SIGTERM・SIGHUP が届くと、
     KeyboardInterrupt か RunTerminated になり、後片付けの本体が飛ばされうる。そのため、shield に入って後片付けを
     行うことを、これらの例外を受けたら入り直すループで包む (最初に受けた例外を覚えておき、後片付けが済んだら
@@ -722,6 +758,7 @@ def run_agent_until(
     resumes = 0
     process: AgentProcess | None = None
     reason: StopReason | None = None
+    release_reply = ""
 
     def launch(
         launch_options: LaunchOptions, prompt: str, session_id: str | None
@@ -745,9 +782,11 @@ def run_agent_until(
                     )
                 )
         finally:
+            nonlocal release_reply
             sent_at = clock()
             started = monotonic()
-            reply = send(["up", "ALL"], timeout_s=RELEASE_TIMEOUT_S)
+            reply = _send_release(send, sleep, monotonic)
+            release_reply = reply
             record(
                 _run_event(
                     sent_at,
@@ -808,4 +847,4 @@ def run_agent_until(
         _clean_up_shielded(clean_up, shield)
     # reason が None のまま finally を抜けるのは例外のときだけで、そのときはここに来ない
     assert reason is not None
-    return RunOutcome(reason=reason, launches=launches)
+    return RunOutcome(reason=reason, launches=launches, release_reply=release_reply)

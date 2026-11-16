@@ -35,6 +35,7 @@ from switch2_harness.commands import (
     handle_run,
     handle_status,
     is_error_reply,
+    release_not_confirmed_message,
 )
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import BASE_AGENT_COMMANDS
@@ -742,6 +743,39 @@ def test_run_reports_budget_exhausted(paths, clock):
     assert result == CommandResult(exit_code=0, stdout_lines=(expected,))
     assert len(starter.launches) == 1
     assert daemon.sent == [["up", "ALL"]]
+
+
+def test_run_reports_an_unconfirmed_release(paths, clock):
+    write_harness_json(paths, [])
+    starter = FakeProcessStarter(clock, [ProcessPlan(runs_for_s=None)])
+    daemon = FakeDaemon(clock, {"up": "error bridge is recovering"})
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        monotonic=clock,
+        sleep=FakeSleep(clock),
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    finished = f"ok run finished reason=deadline launches=1 log={paths.agent_log_file}"
+    assert result == CommandResult(
+        exit_code=1,
+        stdout_lines=(finished,),
+        stderr_lines=(
+            "error up ALL after the run was not confirmed: error bridge is recovering",
+        ),
+    )
+
+
+def test_release_not_confirmed_message():
+    assert (
+        release_not_confirmed_message("error no reply from daemon")
+        == "error up ALL after the run was not confirmed: error no reply from daemon"
+    )
 
 
 @pytest.mark.parametrize("minutes", [0.0, -5.0])
