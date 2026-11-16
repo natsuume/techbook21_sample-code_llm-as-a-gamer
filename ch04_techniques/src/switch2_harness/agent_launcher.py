@@ -82,6 +82,11 @@ DEFAULT_MODEL = "claude-opus-5-5"
 # エージェント用のサブコマンドを Bash で許可するときのコマンドの書き出し
 HARNESS_COMMAND_PREFIX = "uv run switch2-harness"
 
+# --tools に必ず挙げるツール (--restricted では Bash も名前を挙げないと使えない)
+BASE_TOOL_NAMES: tuple[str, ...] = ("Bash", "Read")
+# 書き換えられるファイルがあるときに --tools に足すツール
+FILE_WRITE_TOOL_NAMES: tuple[str, ...] = ("Write", "Edit")
+
 # 期限より前に終わったプロセスを --resume で起動し直すときのプロンプト
 RESUME_PROMPT = "プレイを続けてください。"
 
@@ -255,7 +260,8 @@ def tool_names(writable_files: Sequence[str]) -> str:
 
     writable_files (書き換えられるファイルの名前) が空なら "Bash,Read"、空でなければ "Bash,Read,Write,Edit"。
     """
-    raise NotImplementedError
+    names = BASE_TOOL_NAMES + (FILE_WRITE_TOOL_NAMES if writable_files else ())
+    return ",".join(names)
 
 
 def allowed_tools(
@@ -271,7 +277,11 @@ def allowed_tools(
     Read は作業ディレクトリーの中なら承認なしで通るため挙げない。
     例: (("look",), ("notes.md",)) なら ["Bash(uv run switch2-harness look *)", "Edit(./notes.md)"]。
     """
-    return [f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands]
+    bash_rules = [
+        f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands
+    ]
+    edit_rules = [f"Edit(./{file_name})" for file_name in writable_files]
+    return bash_rules + edit_rules
 
 
 def format_budget_usd(budget_usd: float) -> str:
@@ -318,9 +328,9 @@ def build_claude_args(
         "--permission-mode",
         "dontAsk",
         "--tools",
-        "Bash,Read",
+        tool_names(writable_files),
         "--allowedTools",
-        *allowed_tools(agent_commands),
+        *allowed_tools(agent_commands, writable_files),
         "--disallowedTools",
         "Skill",
         "--disable-slash-commands",
@@ -785,7 +795,12 @@ def run_agent_until(
         launch_options: LaunchOptions, prompt: str, session_id: str | None
     ) -> AgentProcess:
         args = build_claude_args(
-            prompt, agent_commands, paths.instructions_file, launch_options, session_id
+            prompt,
+            agent_commands,
+            paths.instructions_file,
+            launch_options,
+            session_id,
+            writable_files=writable_files,
         )
         return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
 

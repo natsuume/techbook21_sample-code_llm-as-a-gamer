@@ -112,5 +112,8 @@ def create_workspace(
     root.mkdir(parents=True, exist_ok=True)
     write_config(paths.harness_file, config)
     paths.instructions_file.write_text(instructions_text, encoding="utf-8")
+    if initial_files is not None:
+        for file_name, text in initial_files.items():
+            (root / file_name).write_text(text, encoding="utf-8")
     paths.records_dir.mkdir()
     paths.frames_dir.mkdir()

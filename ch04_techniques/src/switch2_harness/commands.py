@@ -36,6 +36,7 @@ from switch2_harness.features import (
     FEATURES,
     Feature,
     agent_commands,
+    agent_writable_files,
     validate_feature_names,
 )
 from switch2_harness.frame_files import reserve_next_frame_path
@@ -166,8 +167,13 @@ def handle_init(
     )
     paths = workspace_paths(directory)
     instructions_text = render_instructions(config, read_template, available)
+    # 要素のファイルの最初の内容は、テンプレートを置換せずにそのまま書く
+    initial_files = {
+        writable_file.name: read_template(writable_file.template_file)
+        for writable_file in agent_writable_files(names, available)
+    }
     try:
-        create_workspace(paths, config, instructions_text)
+        create_workspace(paths, config, instructions_text, initial_files)
     except WorkspaceNotEmptyError as e:
         return _error_result(e)
     features_text = ",".join(names) or "none"
@@ -365,6 +371,10 @@ def handle_run(
         config = read_config(paths.harness_file, available)
     except ValueError as e:
         return _error_result(e)
+    writable_files = tuple(
+        writable_file.name
+        for writable_file in agent_writable_files(config.features, available)
+    )
     try:
         with interrupts_as_exceptions():
             outcome = run_agent_until(
@@ -380,6 +390,7 @@ def handle_run(
                 send=send,
                 record=partial(append_event, paths.events_file),
                 base_env=base_env,
+                writable_files=writable_files,
             )
     except RunTerminated:
         return CommandResult(exit_code=1, stderr_lines=(RUN_TERMINATED_MESSAGE,))

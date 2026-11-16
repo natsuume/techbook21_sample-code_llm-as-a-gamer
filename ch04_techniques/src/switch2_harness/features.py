@@ -48,7 +48,7 @@ ACTION_HISTORY_FEATURE = "action-history"
 NOTES_FEATURE = "notes"
 NOTES_FILE_NAME = "notes.md"
 
-# 利用できる要素の一覧。この順が CLAUDE.md の節の順とサブコマンドの順になる
+# 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順になる
 FEATURES: tuple[Feature, ...] = (
     Feature(
         name=ACTION_HISTORY_FEATURE,
@@ -127,4 +127,10 @@ def agent_writable_files(
     enabled に名前がある要素の writable_files を、available の順に続けたもの。
     enabled は validate_feature_names を通した名前を渡す。
     """
-    raise NotImplementedError
+    enabled_names = set(enabled)
+    return tuple(
+        writable_file
+        for feature in available
+        if feature.name in enabled_names
+        for writable_file in feature.writable_files
+    )
