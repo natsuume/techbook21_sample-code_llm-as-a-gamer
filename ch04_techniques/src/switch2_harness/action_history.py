@@ -13,9 +13,12 @@
 """
 
 from collections.abc import Callable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+import numpy as np
 
 from switch2_harness.event_log import CommandEvent
+from switch2_harness.screen_change import change_ratio, is_static, load_sample
 
 # 表示する行動の数の上限
 HISTORY_LIMIT = 20
@@ -25,6 +28,44 @@ HISTORY_COMMANDS: tuple[str, ...] = ("look", "press")
 
 # 作業ディレクトリーからの相対パスの 2 枚の画像 (前, 後) を受け取り、画面が変わったなら True を返す関数の型
 FramesChanged = Callable[[str, str], bool]
+
+# 表示する行動が 1 件も無いときの行
+NO_ACTIONS_LINE = "直近の行動: なし"
+
+
+def _successful_look_frame(event: CommandEvent) -> str | None:
+    """event が成功した look ならその frame を、そうでなければ None を返す。"""
+    if event.command == "look" and event.ok:
+        return event.frame
+    return None
+
+
+def _frame_before(ordered: Sequence[CommandEvent], index: int) -> str | None:
+    """ordered[index] より前にある最後の成功した look の frame (直前の撮影) を返す。無ければ None。"""
+    for event in reversed(ordered[:index]):
+        frame = _successful_look_frame(event)
+        if frame is not None:
+            return frame
+    return None
+
+
+def _frame_after(
+    ordered: Sequence[CommandEvent], index: int, current_frame: str
+) -> str:
+    """ordered[index] より後にある最初の成功した look の frame (直後の撮影) を返す。無ければ current_frame。"""
+    for event in ordered[index + 1 :]:
+        frame = _successful_look_frame(event)
+        if frame is not None:
+            return frame
+    return current_frame
+
+
+def _look_text(event: CommandEvent) -> str:
+    """look の行の、秒数より後の部分を返す (成功なら frame のファイル名、失敗なら reply)。"""
+    frame = _successful_look_frame(event)
+    if frame is None:
+        return f"look {event.reply}"
+    return f"look {PurePosixPath(frame).name}"
 
 
 def build_history_lines(
@@ -56,7 +97,40 @@ def build_history_lines(
     同じ (直前の撮影, 直後の撮影) の組について frames_changed を呼ぶのは 1 回だけにする
     (同じ 2 枚の look の間にある press は、どれも同じ結果になる)。
     """
-    raise NotImplementedError
+    ordered = sorted(previous, key=lambda event: event.time)
+    action_indexes = [
+        index
+        for index, event in enumerate(ordered)
+        if event.command in HISTORY_COMMANDS
+    ]
+    shown_indexes = action_indexes[max(len(action_indexes) - limit, 0) :]
+    if not shown_indexes:
+        return (NO_ACTIONS_LINE,)
+    # (直前の撮影, 直後の撮影) の組ごとの frames_changed の結果。同じ組は 1 回だけ比べる
+    changed_by_pair: dict[tuple[str, str], bool] = {}
+
+    def screen_change_word(index: int) -> str:
+        before = _frame_before(ordered, index)
+        if before is None:
+            return "不明"
+        pair = (before, _frame_after(ordered, index, current_frame))
+        if pair not in changed_by_pair:
+            changed_by_pair[pair] = frames_changed(*pair)
+        return "あり" if changed_by_pair[pair] else "なし"
+
+    lines = [f"直近の行動 (古い順、最大 {limit} 件。秒数はこの撮影の何秒前か):"]
+    for index in shown_indexes:
+        event = ordered[index]
+        if event.command == "look":
+            text = _look_text(event)
+        elif event.ok:
+            text = (
+                f"press {' '.join(event.args)}: 画面の変化 {screen_change_word(index)}"
+            )
+        else:
+            text = f"press {' '.join(event.args)}: {event.reply}"
+        lines.append(f"- {round(now_time - event.time)} 秒前 {text}")
+    return tuple(lines)
 
 
 def frames_changed_on_disk(root: Path) -> FramesChanged:
@@ -66,4 +140,14 @@ def frames_changed_on_disk(root: Path) -> FramesChanged:
     not screen_change.is_static(screen_change.change_ratio(<前の画像>, <後の画像>)) を返す。
     読んだ画像は返す関数の中の dict に相対パスごとに持ち、同じ相対パスの画像は 1 回だけ読む。
     """
-    raise NotImplementedError
+    images: dict[str, np.ndarray] = {}
+
+    def load(frame: str) -> np.ndarray:
+        if frame not in images:
+            images[frame] = load_sample(root / frame)
+        return images[frame]
+
+    def frames_changed(before: str, after: str) -> bool:
+        return not is_static(change_ratio(load(before), load(after)))
+
+    return frames_changed

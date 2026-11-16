@@ -21,7 +21,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
-from switch2_harness.action_history import FramesChanged
+from switch2_harness.action_history import FramesChanged, build_history_lines
 from switch2_harness.agent_launcher import (
     LaunchOptions,
     StartProcess,
@@ -192,11 +192,13 @@ def handle_look(
 
     frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら上のとおり応答だけを出す。
     None でなく応答が error でなければ、イベントを記録した後に event_log.read_events(paths.events_file) を読み、
-    最後のイベントを今回の look (current)、それより前のイベントを previous として、
-    action_history.build_history_lines(previous, current.time, current.frame, frames_changed) の行を、
-    応答の行の後に stdout に続ける。応答が error なら履歴は出さない。どちらでも終了コードは上と同じ。
+    今回の frame を持つ look のイベントを後ろから探して今回の look (current) とし、それより前のイベントを previous として、
+    action_history.build_history_lines(previous, current.time, <今回の frame>, frames_changed) の行を、
+    応答の行の後に stdout に続ける (並行に走ったコマンドのイベントが今回の look の後ろに追記されていることがあるため、
+    最後のイベントを今回の look とはみなさない)。応答が error なら履歴は出さない。どちらでも終了コードは上と同じ。
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
+    frame = frame_path.relative_to(paths.root).as_posix()
     reply = _send_and_record(
         paths,
         "look",
@@ -204,11 +206,23 @@ def handle_look(
         ["shot", str(frame_path)],
         send=send,
         clock=clock,
-        frame_on_success=frame_path.relative_to(paths.root).as_posix(),
+        frame_on_success=frame,
     )
     if is_error_reply(reply):
         frame_path.unlink(missing_ok=True)
-    return _reply_result(reply)
+        return _reply_result(reply)
+    if frames_changed is None:
+        return _reply_result(reply)
+    events = read_events(paths.events_file)
+    index = next(
+        i
+        for i in range(len(events) - 1, -1, -1)
+        if events[i].command == "look" and events[i].frame == frame
+    )
+    history = build_history_lines(
+        events[:index], events[index].time, frame, frames_changed
+    )
+    return CommandResult(exit_code=0, stdout_lines=(reply, *history))
 
 
 def handle_press(

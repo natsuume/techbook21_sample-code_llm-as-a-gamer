@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
+from switch2_harness.action_history import FramesChanged, frames_changed_on_disk
 from switch2_harness.agent_launcher import (
     DEFAULT_MODEL,
     LaunchOptions,
@@ -40,8 +41,13 @@ from switch2_harness.commands import (
     handle_status,
 )
 from switch2_harness.daemon_client import SendCommand, send_command
-from switch2_harness.features import BASE_AGENT_COMMANDS, FEATURES, Feature
-from switch2_harness.harness_config import DEFAULT_GOAL
+from switch2_harness.features import (
+    ACTION_HISTORY_FEATURE,
+    BASE_AGENT_COMMANDS,
+    FEATURES,
+    Feature,
+)
+from switch2_harness.harness_config import DEFAULT_GOAL, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
 from switch2_harness.workspace import (
     NotAWorkspaceError,
@@ -194,13 +200,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _look_frames_changed(
+    paths: WorkspacePaths, available: tuple[Feature, ...]
+) -> FramesChanged | None:
+    """look に渡す frames_changed を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に行動履歴の要素
+    (features.ACTION_HISTORY_FEATURE) があれば action_history.frames_changed_on_disk(paths.root)、無ければ None。
+    """
+    config = read_config(paths.harness_file, available)
+    if ACTION_HISTORY_FEATURE in config.features:
+        return frames_changed_on_disk(paths.root)
+    return None
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
     """init 以外のサブコマンドを commands の処理に振り分ける。"""
     command: str = args.command
     if command == "look":
-        return handle_look(paths, send=deps.send, clock=deps.clock)
+        return handle_look(
+            paths,
+            send=deps.send,
+            clock=deps.clock,
+            frames_changed=_look_frames_changed(paths, deps.available),
+        )
     if command == "press":
         return handle_press(
             paths, args.action, args.args, send=deps.send, clock=deps.clock
@@ -241,6 +266,9 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
         - 人用のサブコマンド (report / run) は、固定の環境変数を見ずに --workspace (省けば ".") を使う
     続けて workspace.require_workspace で作業ディレクトリーを確かめる。
     NotAWorkspaceError なら `error <メッセージ>` を stderr に出して 1 を返す (デーモンには送らない)。
+    look は、harness.json (read_config(..., deps.available)) で行動履歴の要素 (features.ACTION_HISTORY_FEATURE) が
+    有効なら、action_history.frames_changed_on_disk(<作業ディレクトリー>) を frames_changed として commands.handle_look に渡す
+    (look の応答の後に直近の行動を表示する)。無効なら渡さない。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)
