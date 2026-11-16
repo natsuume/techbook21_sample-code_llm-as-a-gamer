@@ -1203,6 +1203,7 @@ def test_hit_is_the_highest_case_over_the_threshold(
     else:
         button = ("A", "B")[expected]
         h.wait_pressed({button})
+        h.wait_until(lambda: len(h.monitor_rows()) == 1, "the answer is recorded")
         assert h.monitor_rows()[0]["hit"] == f"C{expected}"
         assert h.controller.take_events().case_hits == (
             CaseHit("dialog", expected, f"c{expected}", 1, (tap(button),)),
@@ -1774,3 +1775,41 @@ def test_nothing_is_pressed_after_the_output_is_stopped(tmp_path, cleanups):
     h.drive(1.0)
     assert not any(sent.buttons for sent in h.sender.reports())
     assert h.thread is not None and h.thread.is_alive()
+
+
+# --- 出力を止めた後の監視 ---
+
+
+def test_no_request_after_the_output_stop_is_known(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.pad_output.stop_output()
+    # 主ループの操作を送ろうとして、出力が止まったことを知る
+    h.controller.apply(act(tap("A")))
+    h.wait_until(
+        lambda: h.controller.take_events().running is False, "the actions are dropped"
+    )
+    h.controller.apply(monitor(case("c0", tap("B"))))
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    assert not any(sent.buttons for sent in h.sender.reports())
+
+
+def test_hit_returned_after_the_output_stopped_is_not_counted_or_recorded(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(monitor(case("c0", tap("A"), repeat="once")))
+    request = h.wait_request(1)
+    # 要求の応答を待つ間に出力を止める
+    h.pad_output.stop_output()
+    h.jev.respond(hit(request, 0))
+    h.wait_until(lambda: len(h.monitor_rows()) == 1, "the answer is recorded")
+    h.wait_rounds()
+    [row] = h.monitor_rows()
+    assert row["hit"] is None
+    assert row["probabilities"]["C0"] == 0.95
+    events = h.controller.take_events()
+    assert events.case_hits == ()
+    assert events.monitor_ends == ()
+    assert h.jev.request_count() == 1
+    assert not any(sent.buttons for sent in h.sender.reports())

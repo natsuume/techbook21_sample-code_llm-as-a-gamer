@@ -10,7 +10,8 @@
     probabilities
                  選択肢ごとの確率 (monitor_questions.monitor_option_names の順)。失敗した要求では null
     hit          当たって操作を始めた条件の選択肢の名前。当たらなかった、または応答を操作に使わなかった (要求を送った後に
-                 主ループの actions を受け付けた・監視を止めたか置き換えた) ときは null
+                 主ループの actions を受け付けた・監視を止めたか置き換えた・出力が止まっていて操作を始められなかった)
+                 ときは null
     usage        Jev の応答の usage (受け取った値のまま)。無いか、失敗した要求では null
     error        失敗の説明 (error_text.describe_exception)。答えがあれば null
 """

@@ -24,6 +24,7 @@ from switch2_remote.controller_state import BUTTON_ORDER
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
 from switch2_layers.orchestrator.decision_types import PressAction, WaitAction
 from switch2_layers.orchestrator.json_values import (
+    finite_float,
     is_integer,
     is_number,
     seconds_problem,
@@ -117,7 +118,8 @@ def expand_procedure(
 
 
 def _checked_number(value: object) -> float:
-    """確かめ済みの秒数の値 value を float にして返す。数でなければ ValueError。"""
-    if not is_number(value):
-        raise ValueError(f"not a number: {value!r}")
-    return float(value)
+    """確かめ済みの秒数の値 value を float にして返す。有限の数として float にできなければ ValueError。"""
+    number = finite_float(value) if is_number(value) else None
+    if number is None:
+        raise ValueError(f"not a finite number: {value!r}")
+    return number

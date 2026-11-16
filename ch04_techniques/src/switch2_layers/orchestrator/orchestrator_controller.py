@@ -37,6 +37,8 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
 監視:
     要求を出せるのは、次のすべてに当たるとき:
         - set_started の後で、監視があり、主ループの操作の残りが無く、監視の操作の列を実行していない
+        - 出力が止まっていない (ActionExecutor.output_stopped が False。PadOutput.stop_output の後に送ろうとして
+          OutputStoppedError を受けたら、以後は要求を送らない)
         - 返っていない要求が無い (同時に送る要求は 1 つまで。監視を置き換えた後も、前の監視の要求が返るまで次を送らない)
         - latest_frame() がフレームを返し、そのフレームの時刻 (CapturedFrame.t) が、最後に操作を離した時刻
           (ActionExecutor.last_release_t。主ループの操作と監視の操作の両方) に MONITOR_FRAME_SETTLE_S を足した時刻
@@ -52,9 +54,11 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
           MonitorEnd が返ったら監視を止め、知らせに入れる (実行全体は止めない)
         - 答えがあった: ActiveMonitor.record_answer (失敗の回数を 0 に戻す)。要求を送った後に、空でない actions を
           apply で受け付けていれば、ほかに何もしない (操作の前の画面への答えで操作しない)。当たった条件があれば、
-          その条件の CaseHit の回数を 1 足し、条件の操作の列 (ActiveMonitor.operations_of。展開した後の列) を監視の列
-          (source が monitor) として始める。展開した後の列が空なら (条件の actions が空のときと、展開すると空になる
-          マクロのとき)、列を始めずに、その場で次の「実行し終えた」の扱いをする
+          条件の操作の列 (ActiveMonitor.operations_of。展開した後の列) を監視の列 (source が monitor) として始め、
+          その場で 1 回進める (ActionExecutor.advance)。出力が止まっていて始められなければ (output_stopped)、当たりに
+          数えず、monitor.jsonl の hit も null にする。始められたら、その条件の CaseHit の回数を 1 足す。展開した後の
+          列が空なら (条件の actions が空のときと、展開すると空になるマクロのとき)、CaseHit の回数を 1 足し、列を
+          始めずに、その場で次の「実行し終えた」の扱いをする
         - 監視の列を最後まで実行し終えたら、ActiveMonitor.case_finished。MonitorEnd が返ったら (once の条件) 監視を
           止め、知らせに入れる。主ループの列か監視の停止・置き換えで途中で捨てた列は、実行し終えたことにしない
 take_events:
@@ -406,14 +410,18 @@ class OrchestratorController:
         case_index = monitor.record_answer(result.probabilities)
         if case_index is None or request.actions_serial != self._actions_serial:
             return None
-        self._count_case_hit_locked(monitor, case_index)
         operations = monitor.operations_of(case_index)
         if not operations:
+            self._count_case_hit_locked(monitor, case_index)
             self._case_done_locked(monitor, case_index)
             return case_index
+        # 列を始めてすぐ 1 回進め、出力が止まっていて始められなかったら当たりに数えない
         self._executor.start(operations, "monitor")
-        if self._executor.owner == "monitor":
-            self._running_case = (monitor.generation, case_index)
+        self._executor.advance()
+        if self._executor.output_stopped:
+            return None
+        self._count_case_hit_locked(monitor, case_index)
+        self._running_case = (monitor.generation, case_index)
         return case_index
 
     def _count_case_hit_locked(self, monitor: ActiveMonitor, case_index: int) -> None:
@@ -465,7 +473,7 @@ class OrchestratorController:
     def _start_request_if_possible_locked(self) -> None:
         """要求を出せるなら、別のスレッドで監視の要求を 1 回送る (回りの 4)。"""
         monitor = self._monitor
-        if monitor is None or self._request_in_flight:
+        if monitor is None or self._request_in_flight or self._executor.output_stopped:
             return
         if self._pending_main is not None or self._executor.remaining_count > 0:
             return

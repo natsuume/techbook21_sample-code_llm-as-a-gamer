@@ -949,3 +949,81 @@ def test_condition_text_is_kept_as_written():
 )
 def test_broken_shapes_return_an_error_without_raising(text):
     messages_of(parse_decision(text))
+
+
+# --- float に収まらない大きな整数 ---
+
+# 1 の後に 0 が 400 個の整数 (JSON の整数としては読めるが、float にすると桁あふれする)
+HUGE_INTEGER = "1" + "0" * 400
+
+
+@pytest.mark.parametrize(
+    "body, path",
+    [
+        (
+            '{"actions": [{"type": "press", "buttons": ["A"], "seconds": HUGE}]}',
+            "actions[0].seconds",
+        ),
+        (
+            '{"actions": [{"type": "press", "buttons": ["A"], "seconds": -HUGE}]}',
+            "actions[0].seconds",
+        ),
+        ('{"actions": [{"type": "wait", "seconds": HUGE}]}', "actions[0].seconds"),
+        (
+            '{"actions": [{"type": "press", "sticks": {"left": {"x": HUGE, "y": 0}}}]}',
+            "actions[0].sticks.left.x",
+        ),
+        (
+            '{"actions": [{"type": "press", "sticks": {"left": {"x": 0, "y": -HUGE}}}]}',
+            "actions[0].sticks.left.y",
+        ),
+        (
+            (
+                '{"actions": [{"type": "procedure", "name": "walk", "args": '
+                '{"direction": "UP", "count": 1, "seconds": HUGE, "interval_seconds": 0}}]}'
+            ),
+            "actions[0].args.seconds",
+        ),
+        (
+            (
+                '{"actions": [{"type": "procedure", "name": "tap_repeat", "args": '
+                '{"button": "A", "count": 1, "interval_seconds": HUGE}}]}'
+            ),
+            "actions[0].args.interval_seconds",
+        ),
+        (
+            (
+                '{"actions": [{"type": "procedure", "name": "walk", "args": '
+                '{"direction": "UP", "count": HUGE, "seconds": 0.2, "interval_seconds": 0}}]}'
+            ),
+            "actions[0].args.count",
+        ),
+        (
+            '{"macros": {"set": {"m": [{"type": "wait", "seconds": HUGE}]}}}',
+            "macros.set.m[0].seconds",
+        ),
+        (
+            (
+                '{"monitor": {"action": "create", "name": "dialog", "cases": '
+                '[{"condition": "c", "actions": [{"type": "press", "buttons": ["A"], '
+                '"seconds": HUGE}], "repeat": "every"}]}}'
+            ),
+            "monitor.cases[0].actions[0].seconds",
+        ),
+    ],
+    ids=[
+        "press_seconds",
+        "negative_press_seconds",
+        "wait_seconds",
+        "stick_x",
+        "negative_stick_y",
+        "walk_seconds",
+        "tap_repeat_interval_seconds",
+        "walk_count",
+        "macro_wait_seconds",
+        "monitor_case_seconds",
+    ],
+)
+def test_huge_integer_is_an_error_without_raising(body, path):
+    result = parse_decision(json_block(body.replace("HUGE", HUGE_INTEGER)))
+    assert_error_at(result, path)

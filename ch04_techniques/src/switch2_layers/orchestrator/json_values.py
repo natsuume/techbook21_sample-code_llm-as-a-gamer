@@ -17,15 +17,25 @@ def is_integer(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def finite_float(value: float) -> float | None:
+    """数 value を float にして返す。float に収まらない (桁あふれする大きな整数) か、有限でなければ None。"""
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def seconds_problem(value: object, maximum: float, allow_zero: bool) -> str | None:
     """value が秒数として使えなければ、その理由の英語の文を返す。使えれば None。
 
     秒数として使えるのは、有限の数で、allow_zero なら 0 以上、そうでなければ 0 より大きく、maximum 以下の値。
+    float に収まらない大きな整数は、有限の数でないものとして扱う。
     """
     if not is_number(value):
         return "must be a number"
-    seconds = float(value)
-    if not math.isfinite(seconds):
+    seconds = finite_float(value)
+    if seconds is None:
         return "must be a finite number"
     if allow_zero and seconds < 0.0:
         return "must be 0 or more"

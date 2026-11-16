@@ -33,6 +33,7 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
     - press と wait の seconds が 0 以下・nan・無限大、または MAX_ACTION_SECONDS を超える。wait には seconds が要る
     - sticks のキーが left・right でない。スティックの値に x か y が無い。x か y が -1〜1 の外 (nan・無限大を含む)、
       または math.hypot(x, y) が 1 を超える
+    - 秒数とスティックの値に、float に収まらない大きな整数がある (有限の数でない、または範囲の外として扱う)
     - procedure の name が procedures.PROCEDURE_NAMES に無い、または args が手順の引数に合わない
       (procedures.procedure_argument_errors)
     - macro の name が、この JSON の macros を当てた後の登録に無い。当てた後の登録は、registered_macros に
@@ -62,11 +63,13 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         手順の引数                           args の下のパス (`actions[0].args.count`。args が object でなければ
                                              `actions[0].args`)
     コードブロックが無い・最後のブロックが閉じていない・JSON として読めない・最上位が object でないときは、パスを
-    付けない文にする。
+    付けない文にする。読み取りの中で想定外の例外が出たときも、例外を外に出さず、UNEXPECTED_ERROR_MESSAGE に
+    例外の説明を足した、パスを付けない文 1 つの誤りにする。
     説明の文は英語にする。
 """
 
 import json
+import logging
 import math
 import re
 from collections.abc import Collection, Mapping
@@ -74,6 +77,7 @@ from dataclasses import dataclass
 
 from switch2_remote.controller_state import BUTTON_ORDER, DPAD_DIRECTIONS
 
+from switch2_layers.error_text import describe_exception
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
 from switch2_layers.orchestrator.decision_types import (
     Action,
@@ -89,12 +93,19 @@ from switch2_layers.orchestrator.decision_types import (
     StickName,
     WaitAction,
 )
-from switch2_layers.orchestrator.json_values import is_number, seconds_problem
+from switch2_layers.orchestrator.json_values import (
+    finite_float,
+    is_number,
+    seconds_problem,
+)
 from switch2_layers.orchestrator.procedures import (
     PROCEDURE_NAMES,
     procedure_argument_errors,
 )
 from switch2_layers.pad_action import sort_buttons
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # 最上位のキー
 TOP_LEVEL_KEYS: tuple[str, ...] = ("actions", "macros", "monitor")
@@ -131,6 +142,7 @@ UNCLOSED_BLOCK_MESSAGE = (
     "the last ```json block is not closed (the response may be cut off)"
 )
 NOT_OBJECT_MESSAGE = "the JSON in the ```json block must be an object"
+UNEXPECTED_ERROR_MESSAGE = "unexpected error while reading the ```json block"
 
 
 @dataclass(frozen=True)
@@ -203,7 +215,14 @@ def parse_decision(
     if not isinstance(value, dict):
         return DecisionError((NOT_OBJECT_MESSAGE,))
     reader = _DecisionReader(frozenset(registered_macros))
-    decision = reader.read(value)
+    try:
+        decision = reader.read(value)
+    except Exception as error:
+        # どんな本文でも例外を出さない契約のため、読み取りの想定外の失敗も誤りとして返す
+        logger.warning("unexpected error while reading a decision", exc_info=True)
+        return DecisionError(
+            (f"{UNEXPECTED_ERROR_MESSAGE}: {describe_exception(error)}",)
+        )
     if reader.errors:
         return DecisionError(tuple(reader.errors))
     return decision
@@ -391,8 +410,9 @@ class _DecisionReader:
             if not is_number(coordinate):
                 self.error(axis_path, "must be a number")
                 continue
-            number = float(coordinate)
-            if not math.isfinite(number) or not -1.0 <= number <= 1.0:
+            # float に収まらない大きな整数は、範囲の外として扱う
+            number = finite_float(coordinate)
+            if number is None or not -1.0 <= number <= 1.0:
                 self.error(axis_path, "must be between -1 and 1")
                 continue
             coordinates.append(number)
