@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Protocol
 
 from switch2_layers.deep.deep_scheduler import (
+    REQUEST_PENDING,
     SKIP_MIN_START_INTERVAL,
     DeepDocumentStatus,
     DeepJobEnd,
@@ -268,8 +269,9 @@ def deep_status_text(status: DeepDocumentStatus | None, request_t: float) -> str
     return "。".join(
         (
             _running_jobs_text(status, request_t),
+            _pending_request_text(status.pending_request_t, request_t),
             _last_end_text(status.last_end, request_t),
-            _min_interval_text(status.min_interval_remaining_s),
+            _request_now_text(status),
             _last_surface_request_text(status.last_surface_request, request_t),
         )
     )
@@ -286,12 +288,20 @@ def _running_jobs_text(status: DeepDocumentStatus, request_t: float) -> str:
 
 def _pending_request_text(pending_request_t: float | None, request_t: float) -> str:
     """deep_status_text の 2 の部分 (保留中の要求) を返す。"""
-    raise NotImplementedError
+    if pending_request_t is None:
+        return "保留中の要求: なし"
+    return f"保留中の要求: {relative_time_label(pending_request_t, request_t)}"
 
 
 def _request_now_text(status: DeepDocumentStatus) -> str:
     """deep_status_text の 4 の部分 (今求めたときの扱い) を返す。"""
-    raise NotImplementedError
+    if status.min_interval_remaining_s > 0:
+        return f"今求めると捨てられる (あと {status.min_interval_remaining_s:.1f} 秒)"
+    if status.pending_request_t is not None:
+        return "今求めると保留中の要求を置き換える"
+    if status.running_count > 0:
+        return "今求めると保留され、実行中のジョブの終了後に起動する"
+    return "今求めれば起動する"
 
 
 def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
@@ -300,13 +310,6 @@ def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
         return "前回の終了: まだ無い"
     label = relative_time_label(last_end.t, request_t)
     return f"前回の終了: {label}、{DEEP_JOB_STATUS_TEXTS[last_end.status]}"
-
-
-def _min_interval_text(remaining_s: float) -> str:
-    """最小間隔の残り remaining_s だけで決めた、今求めると捨てられるかの文を返す。"""
-    if remaining_s > 0:
-        return f"今求めると捨てられる (あと {remaining_s:.1f} 秒)"
-    return "今求めれば起動する"
 
 
 def _last_surface_request_text(
@@ -319,6 +322,8 @@ def _last_surface_request_text(
         result = "起動した"
     elif outcome.reason == SKIP_MIN_START_INTERVAL:
         result = "前回の起動から間もないため捨てられた"
+    elif outcome.reason == REQUEST_PENDING:
+        result = "保留した"
     else:
         result = f"捨てられた ({outcome.reason})"
     label = relative_time_label(outcome.t, request_t)

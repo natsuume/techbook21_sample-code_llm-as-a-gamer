@@ -207,7 +207,7 @@ def add_run_parser(
         type=float,
         default=DEFAULT_DEEP_MIN_START_INTERVAL_S,
         help=(
-            "同じ文書の deep を、前回の起動からこの秒数たつまで起動しない "
+            "同じ文書の deep を、前回の起動からこの秒数たつまで、起動も保留もしない "
             f"(0 以上。既定 {DEFAULT_DEEP_MIN_START_INTERVAL_S:g})"
         ),
     )

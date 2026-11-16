@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,6 +154,23 @@ def make_run(tmp_path: Path) -> Path:
     return root
 
 
+class HookedRunLog(RunLog):
+    """RunLog に、1 行を書いた後で呼ぶ関数 (書いた event の名前を受け取る) を足したもの。
+
+    スケジューラーはロックの中で run_log に書くため、after_write はスケジューラーのロックを持ったまま呼ばれる。
+    """
+
+    def __init__(
+        self, path: Path, clock: RunClock, after_write: Callable[[str], None]
+    ) -> None:
+        super().__init__(path, clock)
+        self.after_write = after_write
+
+    def write(self, event: str, /, **fields: object) -> None:
+        super().write(event, **fields)
+        self.after_write(event)
+
+
 class FailingPreparation:
     """prepare_job_directory の偽物。fail_kinds の種類では例外を出し、それ以外は create_job_directory を呼ぶ。
 
@@ -179,11 +197,13 @@ def make_scheduler(
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory,
     start_job_thread: Callable[[Callable[[], None]], None] | None = None,
     stuck_advice_seconds: float = 60.0,
+    after_log_write: Callable[[str], None] | None = None,
 ) -> Harness:
     """DeepScheduler と偽の部品を組み立てる (テストの本体から呼ぶ)。スケジューラーは t = 0 に作る。
 
     ジョブの本体は DeferredThreads に溜め (start_job_thread を渡せば、それを使う)、close の待ちは
     Harness.sleep (偽の時計を進める) にする。stop_grace_s は既定の 5 秒のまま。
+    after_log_write を渡せば、run.jsonl に 1 行書くたびに、書いた event の名前で呼ぶ (HookedRunLog)。
     """
     root = make_run(tmp_path)
     paths = RunPaths(root)
@@ -201,7 +221,9 @@ def make_scheduler(
         paths=paths,
         runner=runner,
         clock=clock,
-        run_log=RunLog(paths.run_log, clock),
+        run_log=RunLog(paths.run_log, clock)
+        if after_log_write is None
+        else HookedRunLog(paths.run_log, clock, after_log_write),
         current_scene_id=lambda: scene["id"],
         latest_frame_t=lambda: latest["t"],
         start_job_thread=start_job_thread or threads,
@@ -917,6 +939,72 @@ def test_different_documents_are_independent(tmp_path):
     assert scene.started and common.started and tips.started
     assert common.job_dir == harness.root / "deep" / "controls-002"
     assert tips.job_dir == harness.root / "deep" / "tips-001"
+
+
+@pytest.mark.parametrize("ended_by", ["run_returns", "killed"])
+def test_request_while_a_job_ends_is_held_for_the_job_started_from_pending(
+    tmp_path, ended_by
+):
+    """ジョブの終わりの記録 (deep_end) と保留からの起動 (deep_start) の間に、ほかのスレッドの要求が割り込まない。"""
+    holder: list[Harness] = []
+    others: list[threading.Thread] = []
+    results: list[DeepRequestResult] = []
+    calling = threading.Event()
+
+    def request_from_another_thread() -> None:
+        calling.set()
+        results.append(
+            holder[0].scheduler.request(
+                DocumentKind.ADVICE, DeepTrigger.NEW_SCENE, None
+            )
+        )
+
+    def after_log_write(event: str) -> None:
+        if event == "deep_end" and not others:
+            # deep_end を書いた時点では、このスレッドがスケジューラーのロックを持っているため、
+            # 別のスレッドの request はロックで待たされる
+            thread = threading.Thread(target=request_from_another_thread)
+            others.append(thread)
+            thread.start()
+            assert calling.wait(5.0)
+
+    harness = make_scheduler(
+        tmp_path,
+        min_start_interval_s=0.0,
+        timeout_s=10.0,
+        after_log_write=after_log_write,
+    )
+    holder.append(harness)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.AUTO, None)
+    assert (
+        harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+        == PENDING
+    )
+    if ended_by == "run_returns":
+        harness.at(5.0)
+        harness.threads.run_all()
+    else:
+        harness.at(10.0)
+        harness.scheduler.check_timeouts()
+        harness.at(15.0)
+        harness.scheduler.check_timeouts()
+    assert len(others) == 1
+    others[0].join(5.0)
+    assert not others[0].is_alive()
+    # 割り込んだ要求は、保留から起動したジョブが実行中なので、直接起動せずに保留する
+    assert results == [PENDING]
+    assert [row["trigger"] for row in run_rows(harness.root, "deep_start")] == [
+        "auto",
+        "surface",
+    ]
+    assert [row["trigger"] for row in run_rows(harness.root, "deep_pending")] == [
+        "surface",
+        "new_scene",
+    ]
+    assert run_rows(harness.root, "deep_skipped") == []
+    status = status_of(harness, DocumentKind.ADVICE)
+    assert status.running_count == 1
+    assert status.pending_request_t == (5.0 if ended_by == "run_returns" else 15.0)
 
 
 # --- 自動の呼び出し ---

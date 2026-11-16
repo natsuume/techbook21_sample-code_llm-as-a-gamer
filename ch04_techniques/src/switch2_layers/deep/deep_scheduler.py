@@ -8,7 +8,10 @@
        新しい要求に置き換える
     4. どれにも当たらなければ起動する
 - 同じ文書の実行中のジョブは 1 件まで。保留中の要求は、その文書の実行中のジョブが終わったとき (run が戻った・kill した・
-  ジョブのスレッドを起動できなかった) に、すぐ起動する。close では保留中の要求を捨てる
+  ジョブのスレッドを起動できなかった) に、すぐ起動する。ジョブの終わりの記録 (deep_end) と、保留中の要求の起動の用意
+  (ジョブのディレクトリーと deep_start) は、同じ 1 つのロックの区間で行う。そのため、その間にほかのスレッドの要求が
+  入り、実行中のジョブが無いと見て直接起動することは無い (start_job_thread だけをロックの外で呼ぶ)。
+  close では保留中の要求を捨てる
 - controls と tips の対象は、要求した側が渡した現在の場面の文書 (場面が無ければ共通の文書)
 - 自動の呼び出し (check_auto) は、種類ごとに現在の対象の文書について判定し、次の 2 つを満たしたら、きっかけ auto で起動する
     - その文書のジョブが実行中でない (実行中の文書は対象にせず、保留も作らない)
@@ -59,6 +62,7 @@ from switch2_layers.progress.stuck_advice_trigger import (
 )
 from switch2_layers.records.run_log import (
     EVENT_DEEP_END,
+    EVENT_DEEP_PENDING,
     EVENT_DEEP_REQUEST_ERROR,
     EVENT_DEEP_SKIPPED,
     EVENT_DEEP_START,
@@ -204,7 +208,8 @@ def no_progress_state() -> ProgressState | None:
 class DeepSchedulerSettings:
     """deep のスケジューラーの設定。
 
-    min_start_interval_s   同じ文書のジョブを、前回の起動からこの秒数たつまで起動しない (--deep-min-start-interval)
+    min_start_interval_s   同じ文書のジョブを、前回の起動からこの秒数たつまで、起動も保留もしない
+                           (--deep-min-start-interval)
     auto_seconds           自動の呼び出しの秒数 (--deep-auto-seconds)
     timeout_s              ジョブの実行時間の上限 (--deep-timeout)。起動からこの秒数たったジョブを止める
     stop_grace_s           stop を呼んでから、run が戻らなければ kill を呼ぶまでの秒数 (既定 STOP_GRACE_S)
@@ -362,10 +367,11 @@ class DeepScheduler:
            "pending_t": null} を書いてから、start_job_thread(ジョブの本体) を呼ぶ。
            DeepRequestResult(started=True, job_dir=ディレクトリー) を返す
         ジョブの本体 (_run_job): execute_deep_job(runner, job, job_dir) を呼ぶ。戻ったときに、そのジョブがまだ kill されて
-        いなければ、実行中から外し、key の前回の終了を (戻った時刻, 終わり方) にして、run_log に deep_end {"kind",
-        "scene_id", "trigger", "job", "status", "message", "stop_reason": 止めた理由 (DeepStopReason の値。止めていなければ
-        null)} を書き、key の保留中の要求を起動する (_start_pending)。既に kill したジョブなら、戻り値を使わず何も書かない
-        (deep_end は kill のときに書いてあり、保留中の要求も kill のときに起動してある)。
+        いなければ、1 つのロックの区間で、実行中から外し、key の前回の終了を (戻った時刻, 終わり方) にして、run_log に
+        deep_end {"kind", "scene_id", "trigger", "job", "status", "message", "stop_reason": 止めた理由 (DeepStopReason の値。
+        止めていなければ null)} を書き、key の保留中の要求の起動を用意する (_finish_locked)。ロックの外で、用意したジョブの
+        スレッドを起動する (_start_pending)。既に kill したジョブなら、戻り値を使わず何も書かない (deep_end は kill の
+        ときに書いてあり、保留中の要求も kill のときに起動してある)。
         trigger が DeepTrigger.SURFACE なら、1 と 2 で捨てたとき (deep_skipped を書いたとき)、3 で保留したとき
         (deep_pending を書いたとき)、4 で起動したとき (deep_start を書いたとき) に、key の surface の最後の要求を
         DeepRequestOutcome(now, started, 理由) にする (document_status の last_surface_request。理由は、捨てたらその理由、
@@ -378,12 +384,13 @@ class DeepScheduler:
               deep_job_directory.create_job_directory が消す)、前回の終了を (now, ERROR) にしてから、例外をそのまま出す。
               前回の起動の t は変えず (最小間隔の判定に数えない)、run_log にも書かない (呼んだ側が記録する)。
               起動も捨ても保留もしていないため、surface の最後の要求も変えない
-            - start_job_thread が例外を出したら、key を実行中から外し、前回の終了を (now, ERROR) にし、run_log に
-              deep_end {..., "status": "error", "message": 説明, "stop_reason": null} を書き、key の保留中の要求
-              (start_job_thread を呼ぶまでの間に、ほかのスレッドが保留したもの) を起動してから (_start_pending)、
-              例外をそのまま出す (deep_start と対応させるため、ジョブのディレクトリーは残す。surface の最後の要求は、
-              4 で起動したときのまま)
-        保留中の要求を起動する手順と、その失敗の扱い (例外を外に出さない) は _start_pending に書く。
+            - start_job_thread が例外を出したら、1 つのロックの区間で、key を実行中から外し、前回の終了を (now, ERROR)
+              にし、run_log に deep_end {..., "status": "error", "message": 説明, "stop_reason": null} を書き、key の
+              保留中の要求 (start_job_thread を呼ぶまでの間に、ほかのスレッドが保留したもの) の起動を用意する
+              (_finish_locked)。ロックの外で用意したジョブのスレッドを起動してから (_start_pending)、例外をそのまま出す
+              (deep_start と対応させるため、ジョブのディレクトリーは残す。surface の最後の要求は、4 で起動したときのまま)
+        保留中の要求の起動の用意は _take_pending_job_locked、スレッドの起動とその失敗の扱い (例外を外に出さない) は
+        _start_pending に書く。
         """
         key = document_key(kind, scene_id)
         parts = self.parts
@@ -412,6 +419,8 @@ class DeepScheduler:
                     DeepRequestOutcome(now, False, SKIP_MIN_START_INTERVAL),
                 )
                 return DeepRequestResult(started=False, reason=SKIP_MIN_START_INTERVAL)
+            if self._is_running_locked(key):
+                return self._hold_request_locked(key, trigger, now)
             job = DeepJob(
                 kind=kind,
                 scene_id=key.scene_id,
@@ -427,9 +436,7 @@ class DeepScheduler:
                 self._last_end[key] = DeepJobEnd(now, DeepJobStatus.ERROR)
                 raise
             running = _RunningJob(job, job_dir, parts.paths.relative(job_dir), now)
-            self._last_start_t[key] = now
-            self._running.append(running)
-            parts.run_log.write(EVENT_DEEP_START, **running.fields())
+            self._add_running_locked(running)
             self._note_surface_request_locked(
                 key, trigger, DeepRequestOutcome(now, True)
             )
@@ -437,12 +444,13 @@ class DeepScheduler:
             parts.start_job_thread(partial(self._run_job, running))
         except Exception as error:
             with self._lock:
-                self._finish_locked(
+                pending_job = self._finish_locked(
                     running,
                     DeepJobStatus.ERROR,
                     describe_exception(error),
                     parts.clock.now(),
                 )
+            self._start_pending(pending_job)
             raise
         return DeepRequestResult(started=True, job_dir=job_dir)
 
@@ -542,13 +550,15 @@ class DeepScheduler:
         1 と 2 は同じ呼び出しの中で続けて行わない (止めたばかりのジョブは、次の呼び出しから kill の判定をする)。
         止める手順 (stop_job): stop を呼んだ t と理由を記録し、run_log に deep_stop {"kind", "scene_id", "trigger",
         "job", "reason"} を書いてから、ロックの外で runner.stop(job_dir) を呼ぶ。
-        kill の手順 (kill_job): ジョブを kill 済みにして実行中から外し、key の前回の終了の t を now にし、run_log に
-        deep_end {"kind", "scene_id", "trigger", "job", "status": "killed", "message": stop からの秒数の説明,
-        "stop_reason"} を書いてから、ロックの外で runner.kill(job_dir) を呼び、key の保留中の要求を起動する
-        (_start_pending。close の後は保留中の要求が無く、起動もしない)。
+        kill の手順 (kill_job): 1 つのロックの区間で、ジョブを kill 済みにして実行中から外し、key の前回の終了の t を
+        now にし、run_log に deep_end {"kind", "scene_id", "trigger", "job", "status": "killed", "message": stop からの
+        秒数の説明, "stop_reason"} を書き、key の保留中の要求の起動を用意する (_mark_killed_locked)。ロックの外で
+        runner.kill(job_dir) を呼んでから、用意したジョブのスレッドを起動する (_start_pending。close の後は保留中の
+        要求が無く、起動の用意もしない)。
         runner.stop と runner.kill の例外 (Exception) は外に出さず、logging で警告を書く。
         """
         actions: list[tuple[Callable[[Path], None], _RunningJob]] = []
+        pending_jobs: list[_RunningJob] = []
         with self._lock:
             if self._closed:
                 return
@@ -559,10 +569,14 @@ class DeepScheduler:
                         self._mark_stopped_locked(running, DeepStopReason.TIMEOUT, now)
                         actions.append((self.parts.runner.stop, running))
                 elif now - running.stop_t >= self.settings.stop_grace_s:
-                    self._mark_killed_locked(running, now)
+                    pending_job = self._mark_killed_locked(running, now)
                     actions.append((self.parts.runner.kill, running))
+                    if pending_job is not None:
+                        pending_jobs.append(pending_job)
         for action, running in actions:
             _call_runner(action, running.job_dir)
+        for pending_job in pending_jobs:
+            self._start_pending(pending_job)
 
     def is_running(self, key: DocumentKey) -> bool:
         """文書 key のジョブが 1 つ以上実行中なら True を返す。"""
@@ -646,6 +660,7 @@ class DeepScheduler:
             if self._closed:
                 return
             self._closed = True
+            self._discard_all_pending_locked()
             thread = self._thread
         # 1. 判定のスレッドを止める (ロックを持たずに待つ)
         self._stop_checks.set()
@@ -664,7 +679,7 @@ class DeepScheduler:
         deadline = clock.now() + self.settings.stop_grace_s
         while self._has_running_jobs() and clock.now() < deadline:
             self.parts.sleep(CLOSE_POLL_INTERVAL_S)
-        # 4. まだ戻らないジョブを kill する
+        # 4. まだ戻らないジョブを kill する (close の後なので、保留から起動するジョブは無い)
         with self._lock:
             now = clock.now()
             to_kill = list(self._running)
@@ -674,25 +689,32 @@ class DeepScheduler:
             _call_runner(self.parts.runner.kill, running.job_dir)
 
     def _run_job(self, running: _RunningJob) -> None:
-        """ジョブの本体。run を呼び、戻ったときにまだ kill していなければ deep_end を書いて、同じ文書の保留中の要求を
-        起動する (_start_pending)。"""
+        """ジョブの本体。run を呼び、戻ったときにまだ kill していなければ、1 つのロックの区間で deep_end を書いて同じ文書の
+        保留中の要求の起動を用意し (_finish_locked)、ロックの外で用意したジョブのスレッドを起動する (_start_pending)。"""
         outcome = execute_deep_job(self.parts.runner, running.job, running.job_dir)
         with self._lock:
             if running.ended:
-                # kill した後に戻った。deep_end は kill のときに書いてある
+                # kill した後に戻った。deep_end と保留中の要求の起動の用意は、kill のときに済ませてある
                 return
-            self._finish_locked(
+            pending_job = self._finish_locked(
                 running, outcome.status, outcome.message, self.parts.clock.now()
             )
+        self._start_pending(pending_job)
 
     def _finish_locked(
         self, running: _RunningJob, status: DeepJobStatus, message: str, now: float
-    ) -> None:
-        """ジョブを終わったものにする: 実行中から外し、前回の終了を (now, status) にして、deep_end を書く。"""
+    ) -> _RunningJob | None:
+        """ジョブを終わったものにし、同じ文書の保留中の要求の起動を用意して、そのジョブを返す (ロックの中で呼ぶ)。
+
+        実行中から外し、前回の終了を (now, status) にして、deep_end を書いてから、同じロックの区間のまま
+        _take_pending_job_locked(key, now) を呼び、その結果 (起動を用意したジョブ。用意しなければ None) を返す。
+        返したジョブのスレッドは、呼び出し側がロックの外で _start_pending で起動する。
+        """
         running.ended = True
         if running in self._running:
             self._running.remove(running)
-        self._last_end[running.job.key] = DeepJobEnd(now, status)
+        key = running.job.key
+        self._last_end[key] = DeepJobEnd(now, status)
         self.parts.run_log.write(
             EVENT_DEEP_END,
             **running.fields(),
@@ -702,6 +724,7 @@ class DeepScheduler:
             if running.stop_reason is None
             else running.stop_reason.value,
         )
+        return self._take_pending_job_locked(key, now)
 
     def _mark_stopped_locked(
         self, running: _RunningJob, reason: DeepStopReason, now: float
@@ -713,10 +736,13 @@ class DeepScheduler:
             EVENT_DEEP_STOP, **running.fields(), reason=reason.value
         )
 
-    def _mark_killed_locked(self, running: _RunningJob, now: float) -> None:
-        """ジョブを kill 済みにして deep_end (status killed) を書く (runner.kill は呼び出し側がロックの外で呼ぶ)。"""
+    def _mark_killed_locked(
+        self, running: _RunningJob, now: float
+    ) -> _RunningJob | None:
+        """ジョブを kill 済みにして deep_end (status killed) を書き、同じ文書の保留中の要求の起動を用意して、そのジョブを
+        返す (_finish_locked)。runner.kill と、返したジョブのスレッドの起動は、呼び出し側がロックの外で行う。"""
         since_stop = 0.0 if running.stop_t is None else now - running.stop_t
-        self._finish_locked(
+        return self._finish_locked(
             running,
             DeepJobStatus.KILLED,
             f"killed {since_stop:.1f} seconds after stop",
@@ -754,44 +780,113 @@ class DeepScheduler:
            "trigger", "since_last_start_s": round_to_milliseconds(now - key の前回の起動の t)} を書く
         3. trigger が surface なら、key の surface の最後の要求を DeepRequestOutcome(now, False, REQUEST_PENDING) にする
         DeepRequestResult(started=False, reason=REQUEST_PENDING) を返す。ジョブのディレクトリーは作らない。
+        key のジョブが実行中のときに呼ぶため、key の前回の起動の t はいつもある。
         """
-        raise NotImplementedError
+        replaced = self._pending.get(key)
+        if replaced is not None:
+            self._write_skipped_locked(key, replaced.trigger, SKIP_REPLACED)
+        self._pending[key] = _PendingRequest(trigger, now)
+        self.parts.run_log.write(
+            EVENT_DEEP_PENDING,
+            kind=key.kind.value,
+            scene_id=key.scene_id,
+            trigger=trigger.value,
+            since_last_start_s=round_to_milliseconds(now - self._last_start_t[key]),
+        )
+        self._note_surface_request_locked(
+            key, trigger, DeepRequestOutcome(now, False, REQUEST_PENDING)
+        )
+        return DeepRequestResult(started=False, reason=REQUEST_PENDING)
 
-    def _start_pending(self, key: DocumentKey) -> None:
-        """文書 key の実行中のジョブが終わった直後 (run が戻った・kill した・スレッドを起動できなかった) に呼び、key の
-        保留中の要求があれば、すぐ起動する。ロックを持たずに呼ぶ。例外は外に出さない。
+    def _start_pending(self, pending_job: _RunningJob | None) -> None:
+        """保留中の要求から起動を用意したジョブ pending_job (_finish_locked の結果) のスレッドを起動する。
 
-        次を繰り返す:
-        1. ロックの中で _take_pending_job_locked(key, clock.now()) を呼ぶ。None なら戻る
-        2. ロックの外で start_job_thread(ジョブの本体) を呼ぶ。起動できたら戻る。例外 (Exception) を出したら、ロックの
-           中で、そのジョブを実行中から外し、key の前回の終了を (その時刻, DeepJobStatus.ERROR) にし、run_log に
-           deep_end {"kind", "scene_id", "trigger", "job", "status": "error", "message": 説明, "stop_reason": null} を
-           書いて、1 に戻る (その間に保留された要求があれば起動する)
-        保留からの起動には例外を受け取る呼び出し元が無いため、どの失敗も例外を外に出さず、run.jsonl に書く。
+        ロックを持たずに呼ぶ。pending_job が None なら何もしない。次を繰り返す:
+        1. ロックの外で start_job_thread(ジョブの本体) を呼ぶ。起動できたら戻る
+        2. 例外 (Exception) を出したら、1 つのロックの区間で、そのジョブを実行中から外し、前回の終了を
+           (その時刻, DeepJobStatus.ERROR) にし、run_log に deep_end {"kind", "scene_id", "trigger", "job",
+           "status": "error", "message": 説明, "stop_reason": null} を書き、同じ文書の保留中の要求 (その間にほかの
+           スレッドが保留したもの) の起動を用意する (_finish_locked)。用意したジョブがあれば 1 に戻り、無ければ戻る
+        保留からの起動には例外を受け取る呼び出し元が無いため、スレッドを起動できなくても例外を外に出さず、run.jsonl に書く。
         """
-        raise NotImplementedError
+        while pending_job is not None:
+            try:
+                self.parts.start_job_thread(partial(self._run_job, pending_job))
+            except Exception as error:
+                logger.warning(
+                    "starting pending deep job %s failed",
+                    pending_job.job_dir,
+                    exc_info=True,
+                )
+                with self._lock:
+                    pending_job = self._finish_locked(
+                        pending_job,
+                        DeepJobStatus.ERROR,
+                        describe_exception(error),
+                        self.parts.clock.now(),
+                    )
+            else:
+                return
 
     def _take_pending_job_locked(
         self, key: DocumentKey, now: float
     ) -> _RunningJob | None:
         """key の保留中の要求を取り出して起動の用意をし、起動するジョブを返す (start_job_thread は呼び出し側が呼ぶ)。
 
+        ジョブの終わりを記録したのと同じロックの区間で、_finish_locked から呼ぶ。
         close の後、key のジョブが実行中、または key に保留中の要求が無ければ、何もせずに None を返す。
         そうでなければ、保留中の要求 (trigger, requested_t) を取り出し (key の保留中の要求は無くなる)、次を行う:
         1. DeepJob(key.kind, key.scene_id, trigger, requested_t=保留した要求の t, previous_latest_frame_t=
            deep_job_directory.find_previous_latest_frame_t(paths, key) (終わったばかりのジョブが正常に終わっていれば、
-           その latest_frame_t), latest_frame_t=latest_frame_t()) を作る。最小の起動間隔は確かめ直さない
-           (保留した要求は、前回の起動から min_start_interval_s 秒たった後に来たものであるため)
-        2. prepare_job_directory(paths, job) でディレクトリーを用意する。例外 (Exception) を出したら、key の前回の終了を
-           (now, DeepJobStatus.ERROR) にし (前回の起動の t は変えない)、run_log に deep_request_error {"source":
-           "pending", "kind", "trigger": 保留した要求のきっかけ, "scene_id", "error": 説明} を書いて、None を返す
-           (例外は外に出さない)
+           その latest_frame_t), latest_frame_t=latest_frame_t()) を作り、prepare_job_directory(paths, job) で
+           ディレクトリーを用意する。最小の起動間隔は確かめ直さない (保留した要求は、前回の起動から
+           min_start_interval_s 秒たった後に来たものであるため)
+        2. 1 が例外 (Exception) を出したら、key の前回の終了を (now, DeepJobStatus.ERROR) にし (前回の起動の t は
+           変えない)、run_log に deep_request_error {"source": "pending", "kind", "trigger": 保留した要求のきっかけ,
+           "scene_id", "error": 説明} を書いて、None を返す (例外は外に出さない)
         3. key の前回の起動の t を now にし、実行中に数え、run_log に deep_start {"kind", "scene_id", "trigger": 保留した
            要求のきっかけ, "job", "pending_t": 保留した要求の t} を書いて、そのジョブ (_RunningJob。pending_t は保留した
            要求の t) を返す
         surface の最後の要求は変えない。
         """
-        raise NotImplementedError
+        if self._closed or self._is_running_locked(key):
+            return None
+        pending = self._pending.pop(key, None)
+        if pending is None:
+            return None
+        parts = self.parts
+        try:
+            job = DeepJob(
+                kind=key.kind,
+                scene_id=key.scene_id,
+                trigger=pending.trigger,
+                requested_t=pending.requested_t,
+                previous_latest_frame_t=find_previous_latest_frame_t(parts.paths, key),
+                latest_frame_t=parts.latest_frame_t(),
+            )
+            job_dir = parts.prepare_job_directory(parts.paths, job)
+        except Exception as error:
+            logger.debug("preparing pending deep job failed", exc_info=True)
+            # request の失敗と同じく前回の終了として扱い、自動の呼び出しが同じ失敗をすぐ繰り返さないようにする
+            self._last_end[key] = DeepJobEnd(now, DeepJobStatus.ERROR)
+            parts.run_log.write(
+                EVENT_DEEP_REQUEST_ERROR,
+                source="pending",
+                kind=key.kind.value,
+                trigger=pending.trigger.value,
+                scene_id=key.scene_id,
+                error=describe_exception(error),
+            )
+            return None
+        running = _RunningJob(
+            job,
+            job_dir,
+            parts.paths.relative(job_dir),
+            now,
+            pending_t=pending.requested_t,
+        )
+        self._add_running_locked(running)
+        return running
 
     def _discard_all_pending_locked(self) -> None:
         """保留中の要求をすべて捨てる (close の 1)。
@@ -799,7 +894,25 @@ class DeepScheduler:
         捨てた要求ごとに、run_log に deep_skipped {"kind", "scene_id", "trigger": 保留中の要求のきっかけ,
         "reason": SKIP_CLOSED} を書く。surface の最後の要求は変えない。
         """
-        raise NotImplementedError
+        for key, pending in self._pending.items():
+            self._write_skipped_locked(key, pending.trigger, SKIP_CLOSED)
+        self._pending.clear()
+
+    def _is_running_locked(self, key: DocumentKey) -> bool:
+        """文書 key のジョブが実行中なら True を返す (ロックの中で呼ぶ)。"""
+        return any(running.job.key == key for running in self._running)
+
+    def _add_running_locked(self, running: _RunningJob) -> None:
+        """起動を用意したジョブを実行中に数える (ロックの中で呼ぶ)。
+
+        文書の前回の起動の t を running.started_t にし、実行中に足し、run_log に deep_start {"kind", "scene_id",
+        "trigger", "job", "pending_t": running.pending_t} を書く。
+        """
+        self._last_start_t[running.job.key] = running.started_t
+        self._running.append(running)
+        self.parts.run_log.write(
+            EVENT_DEEP_START, **running.fields(), pending_t=running.pending_t
+        )
 
     def _auto_due_locked(
         self, kind: DocumentKind, key: DocumentKey, now: float
