@@ -26,6 +26,7 @@ from enum import StrEnum
 from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 from switch2_layers.surface.box_targets import BoxTarget
 
 # state の中でフレームの一覧を置くキー (問いの文がパスで参照する)
@@ -180,7 +181,7 @@ STICK_DIRECTION_CHOICES = {
     ),
 }
 
-# 要求の state の instructions に入れる、役割と規則の説明
+# 要求の state の instructions に入れる、役割と規則の説明。最後に安全のための規則 (safety.safety_rules) を置く
 SURFACE_INSTRUCTIONS = (
     "あなたは、Nintendo Switch 2 のゲームを遊ぶエージェントの surface (コントローラーを操作する層) です。\n"
     "`frames` は直近 2 秒以内のゲームの画面で、古い順に並び、最後が最新です。"
@@ -192,7 +193,7 @@ SURFACE_INSTRUCTIONS = (
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
     "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
-    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。"
+    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
 
 # advisor 判定の問いの文 (文書の種類 → 文)

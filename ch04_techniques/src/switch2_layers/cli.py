@@ -53,7 +53,8 @@ from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
-from switch2_layers.safety.fake_safety import FakeSafetyChecker
+from switch2_layers.safety.safety_assembly import build_safety_assembly
+from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import (
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
@@ -96,6 +97,7 @@ from switch2_layers.settings import (
     middle_once_settings_errors,
     openai_api_key_errors,
     run_settings_errors,
+    safety_api_key_errors,
     typesafe_api_key_errors,
 )
 from switch2_layers.surface.surface_assembly import (
@@ -496,7 +498,7 @@ def run_command(args: argparse.Namespace) -> int:
        surface_boxes_at=部品の boxes_at, on_run_directory=部品の on_run_directory,
        surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
        (settings.deep は --deep の値。run.jsonl の start の args にも deep として書く)
-    9. 止まったら、作れた部品を capture.close()、supervisor.close()、surface の部品の close()、安全の監視の部品の close()
+    9. 止まったら、作れた部品を capture.close()、supervisor.close()、安全の監視の部品の close()、surface の部品の close()
        の順に閉じる (5 の後に 6 で失敗しても、surface と安全の監視の部品は閉じる)
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
@@ -509,29 +511,44 @@ def run_command(args: argparse.Namespace) -> int:
     if key_errors:
         _print_errors(key_errors)
         return EXIT_USAGE
-    surface_key_errors = typesafe_api_key_errors(settings.surface, os.environ)
-    if surface_key_errors:
-        _print_errors(surface_key_errors)
+    typesafe_key_errors = typesafe_api_key_errors(
+        settings.surface, os.environ
+    ) + safety_api_key_errors(settings.safety, os.environ)
+    if typesafe_key_errors:
+        _print_errors(typesafe_key_errors)
         return EXIT_USAGE
-    surface_api_key = (
-        os.environ.get(TYPESAFE_API_KEY_ENV, "").strip()
-        if settings.surface is SurfaceKind.JEV
-        else None
-    )
     middle = create_middle_analyzer(settings.middle, os.environ)
-    surface = build_surface_assembly(settings, surface_api_key)
+    surface = build_surface_assembly(
+        settings, _typesafe_api_key(settings.surface is SurfaceKind.JEV)
+    )
     try:
-        return _run_with_hardware(settings, middle, surface)
+        safety = build_safety_assembly(
+            settings.safety, _typesafe_api_key(settings.safety is SafetyKind.JEV)
+        )
+        try:
+            return _run_with_hardware(settings, middle, surface, safety.checker)
+        finally:
+            safety.close()
     finally:
         surface.close()
 
 
+def _typesafe_api_key(needed: bool) -> str | None:
+    """needed なら環境変数 TYPESAFE_API_KEY の前後の空白を除いた値を返し、そうでなければ None を返す (読まない)。"""
+    if not needed:
+        return None
+    return os.environ.get(TYPESAFE_API_KEY_ENV, "").strip()
+
+
 def _run_with_hardware(
-    settings: RunSettings, middle: MiddleAnalyzer, surface: SurfaceAssembly
+    settings: RunSettings,
+    middle: MiddleAnalyzer,
+    surface: SurfaceAssembly,
+    safety: SafetyChecker,
 ) -> int:
     """run_command の 6〜9 (ブリッジとキャプチャーを作って LayersApp を動かし、閉じる)。終了コードを返す。
 
-    surface の部品は閉じない (run_command が閉じる)。
+    surface と安全の監視の部品は閉じない (run_command が閉じる)。
     """
     try:
         supervisor = BridgeSupervisor(
@@ -550,7 +567,7 @@ def _run_with_hardware(
             surface=surface.decider,
             middle=middle,
             deep=build_deep_runner(settings.deep),
-            safety=FakeSafetyChecker(),
+            safety=safety,
             on_frame=surface.on_frame,
             surface_boxes_at=surface.boxes_at,
             on_run_directory=surface.on_run_directory,

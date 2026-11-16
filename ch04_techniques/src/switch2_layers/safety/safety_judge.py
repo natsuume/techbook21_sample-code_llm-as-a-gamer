@@ -15,7 +15,13 @@ safety_questions.ALLOW_HOME_EXEMPT_NAMES の問い (home_menu・user_select) で
 同時に複数の問いが条件に当たったら、safety_questions.SAFETY_QUESTION_NAMES の順で先の問いの名前を理由に書く。
 """
 
+import math
 from collections.abc import Mapping
+
+from switch2_layers.safety.safety_questions import (
+    ALLOW_HOME_EXEMPT_NAMES,
+    SAFETY_QUESTION_NAMES,
+)
 
 # 同じ問いがしきい値を超えた確かめがこの回数続いたら止める
 UNSAFE_STREAK_TO_STOP = 2
@@ -24,17 +30,17 @@ REASON_SAFETY_FAILED_AT_START = "safety check failed at start"
 
 def unsafe_screen_reason(name: str) -> str:
     """監視で問い name の画面を見つけて止まるときの理由 `unsafe screen: <name>` を返す。"""
-    raise NotImplementedError
+    return f"unsafe screen: {name}"
 
 
 def unsafe_screen_at_start_reason(name: str) -> str:
     """実行を始めるときの確かめで問い name の画面を見つけて止まるときの理由 `unsafe screen at start: <name>` を返す。"""
-    raise NotImplementedError
+    return f"unsafe screen at start: {name}"
 
 
 def safety_failure_reason(count: int) -> str:
     """監視の確かめの失敗が count 回続いて止まるときの理由 `safety check failed <count> times in a row` を返す。"""
-    raise NotImplementedError
+    return f"safety check failed {count} times in a row"
 
 
 def watched_names(allow_home: bool) -> tuple[str, ...]:
@@ -42,7 +48,11 @@ def watched_names(allow_home: bool) -> tuple[str, ...]:
 
     allow_home が True なら ALLOW_HOME_EXEMPT_NAMES の名前を除く。
     """
-    raise NotImplementedError
+    if not allow_home:
+        return SAFETY_QUESTION_NAMES
+    return tuple(
+        name for name in SAFETY_QUESTION_NAMES if name not in ALLOW_HOME_EXEMPT_NAMES
+    )
 
 
 def validate_probabilities(probabilities: Mapping[str, object]) -> dict[str, float]:
@@ -51,7 +61,28 @@ def validate_probabilities(probabilities: Mapping[str, object]) -> dict[str, flo
     SAFETY_QUESTION_NAMES のどれかの名前が無い、値が数 (int か float。bool は除く) でない、有限でない、0〜1 の外なら
     ValueError (安全の監視は、確かめの失敗として数える)。SAFETY_QUESTION_NAMES に無い名前は無視する。
     """
-    raise NotImplementedError
+    result: dict[str, float] = {}
+    for name in SAFETY_QUESTION_NAMES:
+        if name not in probabilities:
+            raise ValueError(f"no probability for the safety question: {name}")
+        probability = _as_probability(probabilities[name])
+        if probability is None:
+            raise ValueError(
+                f"probability of {name} is not a number in 0..1: "
+                f"{probabilities[name]!r}"
+            )
+        result[name] = probability
+    return result
+
+
+def _as_probability(value: object) -> float | None:
+    """value が 0〜1 の有限の数 (int か float。bool は除く) なら float にして返し、そうでなければ None を返す。"""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    probability = float(value)
+    if math.isfinite(probability) and 0.0 <= probability <= 1.0:
+        return probability
+    return None
 
 
 def names_over_threshold(
@@ -59,7 +90,9 @@ def names_over_threshold(
 ) -> tuple[str, ...]:
     """watched_names(allow_home) のうち、確率が threshold を超えた (ちょうど同じ値は超えない) 名前を、
     SAFETY_QUESTION_NAMES の順で返す。probabilities は validate_probabilities の値 (すべての名前を含む)。"""
-    raise NotImplementedError
+    return tuple(
+        name for name in watched_names(allow_home) if probabilities[name] > threshold
+    )
 
 
 def start_stop_reason(
@@ -71,7 +104,12 @@ def start_stop_reason(
     names_over_threshold(probabilities, threshold, allow_home) が空でなければ、その先頭の名前の
     unsafe_screen_at_start_reason。どちらでもなければ None。
     """
-    raise NotImplementedError
+    if probabilities is None:
+        return REASON_SAFETY_FAILED_AT_START
+    over = names_over_threshold(probabilities, threshold, allow_home)
+    if over:
+        return unsafe_screen_at_start_reason(over[0])
+    return None
 
 
 class MonitorJudge:
@@ -88,15 +126,19 @@ class MonitorJudge:
         self.threshold = threshold
         self.allow_home = allow_home
         self.max_errors = max_errors
+        self._watched = watched_names(allow_home)
+        # 止める対象の問いの名前 → 答えのあった確かめで続けてしきい値を超えた回数
+        self._streaks: dict[str, int] = dict.fromkeys(self._watched, 0)
+        self._consecutive_errors = 0
 
     @property
     def consecutive_errors(self) -> int:
         """確かめの失敗が続いている回数 (答えを受け取ると 0 に戻る)。"""
-        raise NotImplementedError
+        return self._consecutive_errors
 
     def streak(self, name: str) -> int:
         """問い name の確率が、続けてしきい値を超えた確かめの回数を返す。止める対象でない名前は常に 0。"""
-        raise NotImplementedError
+        return self._streaks.get(name, 0)
 
     def record_answer(self, probabilities: Mapping[str, float]) -> str | None:
         """答えのあった確かめ 1 回を数え、止まる理由を返す。止めなければ None。
@@ -108,7 +150,16 @@ class MonitorJudge:
            unsafe_screen_reason を返す
         probabilities は validate_probabilities の値 (すべての名前を含む)。
         """
-        raise NotImplementedError
+        self._consecutive_errors = 0
+        for name in self._watched:
+            if probabilities[name] > self.threshold:
+                self._streaks[name] += 1
+            else:
+                self._streaks[name] = 0
+        for name in self._watched:
+            if self._streaks[name] >= UNSAFE_STREAK_TO_STOP:
+                return unsafe_screen_reason(name)
+        return None
 
     def record_failure(self) -> str | None:
         """失敗した確かめ 1 回を数え、止まる理由を返す。止めなければ None。
@@ -118,7 +169,10 @@ class MonitorJudge:
         ため、「超えた → 失敗 → 超えた」で止まり、超えた・失敗が交互に続いても止まる (失敗の回数は、答えのあった
         確かめのたびに 0 に戻るため、交互のときは失敗の回数では止まらない)。
         """
-        raise NotImplementedError
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= self.max_errors:
+            return safety_failure_reason(self._consecutive_errors)
+        return None
 
 
 def next_check_wait_s(interval_s: float, t_sent: float, t_received: float) -> float:
@@ -127,4 +181,4 @@ def next_check_wait_s(interval_s: float, t_sent: float, t_received: float) -> fl
     前の確かめを送ってから interval_s 秒ごとに送る。応答を待つ間に interval_s 秒を過ぎていたら、待たずに送る
     (前の確かめの応答を待ってから次を送る): max(interval_s - (t_received - t_sent), 0.0)。
     """
-    raise NotImplementedError
+    return max(interval_s - (t_received - t_sent), 0.0)

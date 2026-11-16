@@ -8,6 +8,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyPhase
 
 
@@ -39,4 +40,17 @@ def safety_row(record: SafetyRecord) -> dict[str, object]:
     phase は段階の値の文字列、probabilities は safety_questions.SAFETY_QUESTION_NAMES の順の辞書 (None なら null)、
     usage はそのまま (None なら null)。
     """
-    raise NotImplementedError
+    probabilities = (
+        None
+        if record.probabilities is None
+        else {name: record.probabilities[name] for name in SAFETY_QUESTION_NAMES}
+    )
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "frame_t": record.frame_t,
+        "phase": record.phase.value,
+        "probabilities": probabilities,
+        "usage": record.usage,
+        "error": record.error,
+    }

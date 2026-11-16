@@ -67,6 +67,11 @@ from switch2_layers.run_directory import (
     create_run_directory,
     write_initial_notes,
 )
+from switch2_layers.safety.safety_monitor import (
+    SafetyMonitor,
+    SafetyMonitorParts,
+    SafetyMonitorSettings,
+)
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import RunSettings, run_settings_to_json
 from switch2_layers.surface.middle_state_reader import read_surface_context
@@ -84,8 +89,10 @@ REASON_INTERRUPTED = "interrupted"
 REASON_BRIDGE_FAILED = "bridge recovery failed"
 REASON_CLOSED = "closed"  # 止まる条件より前に close が呼ばれた
 MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
-# 終了時に surface と middle のループのスレッドの終わりを待つ上限 (秒)
+# 終了時に surface と middle のループと安全の監視のスレッドの終わりを待つ上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
+# surface と middle のループのスレッドが、実行を始めるときの確かめを終えた合図を確かめ直す間隔 (秒)
+START_CHECK_POLL_S = 0.05
 BRIDGE_FAILED = "failed"  # bridge_state が返す、ブリッジの復旧が失敗した状態
 
 
@@ -152,7 +159,8 @@ class _PartsBuiltSoFar:
     frame_store      FrameStore (作る前は None)
     capture_source   CaptureSource (作る前は None)
     deep_scheduler   DeepScheduler (作る前は None)
-    loop_threads     作った surface と middle のループのスレッド (起動したかどうかは Thread.is_alive で見分ける)
+    loop_threads     作った surface と middle のループと安全の監視のスレッド (起動したかどうかは Thread.is_alive で
+                     見分ける)
     """
 
     run_log: RunLog | None = None
@@ -187,8 +195,8 @@ class LayersApp:
     settings       run の起動引数
     parts          注入する部品
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
-    start_thread   start が surface と middle のループのスレッドを起動する関数 (既定 threading.Thread.start)。
-                   テストでは、起動の途中で例外を出す関数を渡せる
+    start_thread   start が surface と middle のループと安全の監視のスレッドを起動する関数
+                   (既定 threading.Thread.start)。テストでは、起動の途中で例外を出す関数を渡せる
     """
 
     def __init__(
@@ -204,8 +212,10 @@ class LayersApp:
         self.sleep = sleep
         self.start_thread = start_thread
         self._lock = threading.Lock()
-        # ループの停止の合図 (surface と middle のループが見る)
+        # ループの停止の合図 (surface と middle のループと安全の監視が見る)
         self._stop_event = threading.Event()
+        # 実行を始めるときの安全の確かめで、止まる条件に当たらなかった合図 (surface と middle のループが見る)
+        self._start_check_passed = threading.Event()
         self._stop_reason: str | None = None
         # 停止の処理 (PadOutput.stop_output) を終えたか。理由が決まっただけで処理の途中に割り込まれた場合
         # (Ctrl+C など) に、close でやり直すために理由とは別に持つ
@@ -265,7 +275,7 @@ class LayersApp:
             raise
 
     def _build_and_start(self, built: _PartsBuiltSoFar) -> RunPaths:
-        """start の 1〜7 を行う。作った部品は、作った直後に built に記録する。"""
+        """start の 1〜8 を行う。作った部品は、作った直後に built に記録する。"""
         settings = self.settings
         parts = self.parts
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
@@ -357,17 +367,41 @@ class LayersApp:
                 max_errors=settings.max_middle_errors,
             ),
         )
+        # 8: 安全の監視
+        safety_monitor = SafetyMonitor(
+            SafetyMonitorParts(
+                checker=parts.safety,
+                latest_frame=frame_buffer.latest,
+                clock=clock,
+                safety_log=paths.safety_log,
+                on_stop=self.request_stop,
+                on_start_passed=self._start_check_passed.set,
+            ),
+            SafetyMonitorSettings(
+                interval_s=settings.safety_interval_s,
+                threshold=settings.threshold_safety,
+                max_errors=settings.max_safety_errors,
+                allow_home=settings.allow_home,
+            ),
+        )
+        # surface と middle のループは、実行を始めるときの確かめを終えてから始める
         loop_threads = (
             threading.Thread(
-                target=surface_loop.run,
-                args=(self._stop_event,),
+                target=self._run_after_start_check,
+                args=(surface_loop.run,),
                 name="surface-loop",
                 daemon=True,
             ),
             threading.Thread(
-                target=middle_loop.run,
-                args=(self._stop_event,),
+                target=self._run_after_start_check,
+                args=(middle_loop.run,),
                 name="middle-loop",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=safety_monitor.run,
+                args=(self._stop_event,),
+                name="safety-monitor",
                 daemon=True,
             ),
         )
@@ -386,6 +420,19 @@ class LayersApp:
         for thread in loop_threads:
             self.start_thread(thread)
         return paths
+
+    def _run_after_start_check(
+        self, loop_run: Callable[[threading.Event], None]
+    ) -> None:
+        """実行を始めるときの確かめを終えた合図が立ってから、loop_run(停止の合図) を呼ぶ (スレッドの本体)。
+
+        START_CHECK_POLL_S ごとに、確かめを終えた合図と停止の合図を確かめる。停止の合図が先に立ったら、loop_run を
+        呼ばずに戻る (surface と middle は要求を 1 つも送らない)。
+        """
+        while not self._stop_event.is_set():
+            if self._start_check_passed.wait(START_CHECK_POLL_S):
+                loop_run(self._stop_event)
+                return
 
     def _clean_up_failed_start(
         self, built: _PartsBuiltSoFar, error: BaseException

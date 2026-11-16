@@ -16,7 +16,11 @@
 state の中に 1 回だけ置き、問いの文は画像を state の中のパス `frame` で指す。
 """
 
-from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_questions import (
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
 
 HOME_MENU = "home_menu"
 USER_SELECT = "user_select"
@@ -68,7 +72,16 @@ def build_safety_questions() -> tuple[SurfaceQuestion, ...]:
     name と target は問いの名前、instructions は SAFETY_QUESTION_TEXTS[名前]、kind は QuestionKind.SAFETY、
     型は QuestionType.NOUL (選択肢は無い)。
     """
-    raise NotImplementedError
+    return tuple(
+        SurfaceQuestion(
+            name=name,
+            instructions=SAFETY_QUESTION_TEXTS[name],
+            kind=QuestionKind.SAFETY,
+            target=name,
+            question_type=QuestionType.NOUL,
+        )
+        for name in SAFETY_QUESTION_NAMES
+    )
 
 
 def build_safety_state(reference: str) -> dict[str, object]:
@@ -76,4 +89,4 @@ def build_safety_state(reference: str) -> dict[str, object]:
 
     reference は、要求の assets に登録した画像の参照文字列。
     """
-    raise NotImplementedError
+    return {"instructions": SAFETY_INSTRUCTIONS, FRAME_STATE_KEY: reference}

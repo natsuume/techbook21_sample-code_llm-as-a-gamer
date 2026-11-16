@@ -252,6 +252,8 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 
 surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層ともフェイク (`--surface fake --middle fake --deep fake`) でも、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
+3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。HOME メニュー・ユーザー選択・オンライン・通報・購入などの画面を見つけたら、操作を中立にして実行全体を止めます。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視はすべての確率を 0 として返すフェイクになります。
+
 ### サブコマンド
 
 | コマンド | 内容 |
@@ -260,11 +262,13 @@ surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
-middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
+middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
+
+run を始める前に、対象のゲームの起動と、ユーザー選択の画面で AI に遊ばせるユーザー (AIプレイヤー) を選ぶことは、人が行います。ゲームの画面になってから run を始めてください。run は、最初のフレームが届いた後、surface と middle を始める前に画面を確かめ、HOME メニュー・ユーザー選択・オンラインなどの画面なら、操作を 1 つも送らずに止まります。
 
 ```bash
 uv run --env-file .env switch2-layers run
-uv run switch2-layers run --surface fake --middle fake
+uv run switch2-layers run --surface fake --middle fake --safety fake
 uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
 uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
@@ -403,6 +407,58 @@ Claude Code を起動する前に、対象の文書と、その親のディレ�
 
 停止を求めると Claude Code のプロセスグループに SIGTERM を送り、強制終了では SIGKILL を送ります。deep-once の最中に Ctrl+C を押したときも、Claude Code を止めてから終わります。
 
+### 安全のための規則と安全の監視 (`--safety`)
+
+3 つの層に、`switch2-agent` と同じ安全のための規則を毎回渡します。規則の文は [`safety/safety_rules.py`](./src/switch2_layers/safety/safety_rules.py) にあり、次のとおりです。
+
+```text
+安全のための規則 (毎回必ず守る):
+- これはオフラインの個人実験である。
+- 通信対戦のソフト、オンラインに接続する機能、ショップでの購入を選ばない。
+- HOME メニューでは、試行しているソフト以外を起動しない。
+- セーブデータの削除と、本体の設定の変更をしない。
+- 迷ったら何も押さない。
+```
+
+| 層 | 規則を入れる場所 |
+|---|---|
+| surface | Jev への要求の state の `instructions` (役割と規則の説明の最後) |
+| middle | gpt-6-luna の変わらない指示の最後の「安全のための規則」の節。規則に反するタスクを書かないよう指示します |
+| deep | プロンプトの共通部分 ([`deep/prompts/common.md`](./src/switch2_layers/deep/prompts/common.md)) の「安全のための規則」の節。規則に反する進め方を文書に書かないよう指示します |
+
+押せるボタンから HOME を外すだけでは、HOME メニューの画面でソフトを起動する操作 (A など) は防げません。そこで、surface とは別のスレッドで安全の監視を動かします。安全の監視は surface の判断に依らず、キャプチャーの最新のフレーム 1 枚 (時刻も box も書き込まない画像。幅 1280 まで縮小) を Jev に送り、次の 5 つの問い (Noul) を問います。
+
+| 問いの名前 | 真になる画面 |
+|---|---|
+| `home_menu` | Nintendo Switch 2 の HOME メニュー (ソフトのアイコンが並ぶ本体の画面) |
+| `user_select` | ソフトを遊ぶユーザーを選ぶ画面 |
+| `online` | オンラインのロビー・対戦・マッチング、ほかのプレイヤーの情報、通報、投稿のどれかの画面 |
+| `purchase` | ショップ・購入・課金の画面 |
+| `system_settings` | 本体の設定、またはセーブデータの削除などのデータの管理の画面 |
+
+| `--safety` の値 | 内容 |
+|---|---|
+| `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) に問います。API キーは surface と同じ環境変数 `TYPESAFE_API_KEY` から読みます。HTTP のクライアントは surface と別に作ります |
+| `fake` | 画像を見ずに、すべての確率を 0 として返すフェイクです。API キーは要りません |
+
+安全の監視は、次の 2 つの確かめをします。どちらも、確率が `--threshold-safety` (既定 0.7) より大きいときに「超えた」とします (ちょうど同じ値は超えません)。`--allow-home` を付けたときは、ゲームの起動と終了まで含めて試すため、どちらの確かめでも `home_menu` と `user_select` では止めません (ほかの 3 つの問いでは止めます)。
+
+| 確かめ | いつ | 止める条件 |
+|---|---|---|
+| 実行を始めるときの確かめ | 最初のフレームが届いた後に 1 回。surface と middle のループは、この確かめで止まる条件に当たらないと分かるまで始めません | どれかの問いが 1 回超えた、または確かめが失敗した。止まるまでに操作を 1 つも送りません (送るのは、止めるときの中立のレポートだけです) |
+| 監視の確かめ | 実行を始めるときの確かめの後、止まるまで `--safety-interval` 秒 (既定 1.0) ごと | 同じ問いが、答えのあった確かめで続けて 2 回超えた、または確かめの失敗が `--max-safety-errors` 回 (既定 3) 続いた |
+
+- 監視の確かめは、前の確かめを送ってから `--safety-interval` 秒たったら次を送ります。前の確かめの応答を待ってから次を送り、応答がそれより遅ければ、受け取ってすぐに次を送ります
+- 「続けて 2 回超えた」は、答えのあった確かめだけを並べて数えます。失敗した確かめは数えず、それまでに続けて超えた回数も消しません。たとえば「超えた → 失敗 → 超えた」で止まり、超えた・失敗が交互に続いても止まります。答えのあった確かめで超えなければ、その問いは数え直します
+- 確かめの失敗は、接続できない・タイムアウト (10 秒)・HTTP のエラー、JSON として読めない応答、確率が無い・数でない・0〜1 の外の応答です。再試行はしません。失敗の回数は、答えのあった確かめで数え直します
+- ブリッジの復旧中も、安全の監視は続けます
+- 安全の監視のスレッドが想定外の例外で終わったときも、全体を止めます
+- 止め方は、ほかの止まる条件と同じです (「止まる条件」の節)。理由は `unsafe screen at start: <問いの名前>`・`safety check failed at start`・`unsafe screen: <問いの名前>`・`safety check failed <回数> times in a row`・`safety monitor failed: <例外の説明>` です。同時に複数の問いが条件に当たったら、上の表の順で先の問いの名前を書きます
+
+確かめのたびに、`safety.jsonl` に 1 行 `{"t_sent", "t_received", "frame_t", "phase", "probabilities", "usage", "error"}` を書きます。`t_sent` と `t_received` は Jev に送った時刻と応答を受け取った (または失敗した) 時刻、`frame_t` は確かめたフレームの時刻、`phase` は実行を始めるときの確かめなら `start`、監視の確かめなら `monitor` です。`probabilities` は問いの名前ごとの確率 (失敗した行では null)、`usage` は Jev の応答の `usage` (受け取った形のまま。フェイクと失敗した行では null)、`error` は失敗の説明 (成功した行では null) です。止まることが決まった後に受け取った応答は、記録も判定もせずに捨てます。
+
+安全の監視は、既定の 1 秒の間隔では 1 時間に約 3,600 回 Jev に要求を送ります。そのぶん、surface とは別に Jev の料金がかかります。
+
 ### run の起動引数
 
 `switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
@@ -425,8 +481,12 @@ Claude Code を起動する前に、対象の文書と、その親のディレ�
 | `--threshold-advisor P` | surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求めます | 0.5 | 0〜1 |
 | `--box-requery-every N` | 追えている box も、前回の問い直しからこの回数の要求がたったら Jev に問い直します | 5 | 1 以上の整数 |
 | `--deep {claude,fake}` | deep のジョブを実行するもの (「deep の実装」の節)。`claude` は Claude Code を起動します | `claude` | `claude`、`fake` |
+| `--safety {jev,fake}` | 安全の監視の実装 (「安全のための規則と安全の監視」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
+| `--safety-interval S` | 安全の監視が最新のフレームを確かめる間隔 (秒) | 1.0 | 0.2 以上 10 以下 |
+| `--threshold-safety P` | 安全の問いのしきい値。確率がこれを超えた画面で止まります | 0.7 | 0 より大きく 1 より小さい値 |
+| `--max-safety-errors N` | 安全の監視の失敗がこの回数続いたら止まります | 3 | 1 以上の整数 |
 
-範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
 同じ文書の deep のジョブは、前のジョブが実行中でも、前回の起動から `--deep-min-start-interval` 秒たっていれば並行して起動します。間隔の中に来た要求は捨て、`run.jsonl` に `deep_skipped` を書きます。起動から `--deep-timeout` 秒たったジョブには停止を求め、5 秒たっても終わらなければ強制終了します。
 
@@ -439,6 +499,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・捨てた要求、deep を求めたときの失敗 (`deep_request_error`)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
+| `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、段階 (`phase`。`start` か `monitor`)、問いの名前ごとの確率 (`probabilities`。失敗した行では null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます |
 | `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
@@ -485,7 +546,12 @@ surface が決めた操作は、コントローラーに送る直前に、押せ
 | コントローラーのブリッジが復旧できない状態 (第2章の `failed`) になった | `bridge recovery failed` |
 | surface の失敗が `--max-surface-errors` 回続いた | `surface failed <回数> times in a row` |
 | middle の失敗が `--max-middle-errors` 回続いた | `middle failed <回数> times in a row` |
+| 実行を始めるときの安全の確かめで、どれかの問いの確率が `--threshold-safety` を超えた | `unsafe screen at start: <問いの名前>` |
+| 実行を始めるときの安全の確かめが失敗した | `safety check failed at start` |
+| 安全の監視で、同じ問いの確率が、答えのあった確かめで続けて 2 回 `--threshold-safety` を超えた | `unsafe screen: <問いの名前>` |
+| 安全の監視の失敗が `--max-safety-errors` 回続いた | `safety check failed <回数> times in a row` |
+| 安全の監視のスレッドが想定外の例外で終わった | `safety monitor failed: <例外の説明>` |
 
-ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
+ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
-止まるときは、surface と middle のループの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。
+止まるときは、surface と middle のループと安全の監視のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。

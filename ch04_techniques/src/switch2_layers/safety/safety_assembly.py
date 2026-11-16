@@ -9,8 +9,11 @@ from dataclasses import dataclass
 
 import httpx
 
+from switch2_layers.safety.fake_safety import FakeSafetyChecker
+from switch2_layers.safety.jev_safety import JevSafetyChecker
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import SafetyKind
+from switch2_layers.surface.jev_client import JevClient
 
 
 @dataclass(frozen=True)
@@ -38,4 +41,13 @@ def build_safety_assembly(
       api_key が None か空なら ValueError (HTTP のクライアントを作る前)
     HTTP の要求は送らない (Jev を呼ぶのは check のとき)。
     """
-    raise NotImplementedError
+    if kind is SafetyKind.FAKE:
+        return SafetyAssembly(checker=FakeSafetyChecker(), close=_do_nothing)
+    if not api_key:
+        raise ValueError("the jev safety monitor needs an API key")
+    client = JevClient(api_key, client=http_client)
+    return SafetyAssembly(checker=JevSafetyChecker(client), close=client.close)
+
+
+def _do_nothing() -> None:
+    """何もしない後片付けの関数 (フェイクの安全の監視の close)。"""

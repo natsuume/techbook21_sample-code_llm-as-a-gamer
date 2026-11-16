@@ -1,14 +1,22 @@
 """TypeSafe Jev に安全の問いを送る SafetyChecker (JevSafetyChecker)。
 
-要求の送り方と応答の読み方は surface と同じ surface.jev_client を使う (モデル jev-1.14.0、API キーは環境変数
-TYPESAFE_API_KEY)。応答の usage を safety.jsonl に書くため、JevClient.ask (答えだけを返す) ではなく、
-jev_client.build_payload で作った本文を JevClient.post で送り、応答の本文を jev_client.parse_answers で読む。
+要求の送り方と応答の読み方は surface と同じ surface.jev_client.JevClient を使う (モデル jev-1.14.0、API キーは
+環境変数 TYPESAFE_API_KEY)。JevClient.ask の答えは応答の usage も持つので、それを safety.jsonl に書く。
 """
 
 from collections.abc import Callable
 
+from switch2_layers.safety.safety_questions import (
+    SAFETY_QUESTION_NAMES,
+    build_safety_questions,
+    build_safety_state,
+)
 from switch2_layers.safety.safety_types import SafetyAnswer
-from switch2_layers.surface.jev_client import JevClient, new_asset_reference
+from switch2_layers.surface.jev_client import (
+    JevClient,
+    JevImage,
+    new_asset_reference,
+)
 
 
 class JevSafetyChecker:
@@ -31,11 +39,19 @@ class JevSafetyChecker:
         """jpeg を 1 枚の画像として、安全の問いを Jev に送り、答えを返す。
 
         1. reference = make_reference()
-        2. 本文 = jev_client.build_payload(safety_questions.build_safety_state(reference),
-           safety_questions.build_safety_questions(), [JevImage(reference, jpeg)], client.model)
-        3. client.post(本文, with_images=jev_client.needs_images_header(問い, 画像)) で送る
-        4. jev_client.parse_answers(応答の本文, 問い) の nouls から、SAFETY_QUESTION_NAMES の順の (名前 → 確率) を作る
-        SafetyAnswer(probabilities, usage=応答の本文の "usage" (無ければ None)) を返す。
+        2. client.ask(safety_questions.build_safety_state(reference), safety_questions.build_safety_questions(),
+           [JevImage(reference, jpeg)]) で送る (画像を含むので TypeSafe-Danger-Zone-Images のヘッダーが付く)
+        3. 答えの nouls から、SAFETY_QUESTION_NAMES の順の (名前 → 確率) を作る
+        SafetyAnswer(probabilities, usage=答えの usage (応答に無ければ None)) を返す。
         HTTP のエラー・JSON として読めない応答・答えの欠け・確率が数でないか 0〜1 の外は、jev_client.JevError をそのまま出す。
         """
-        raise NotImplementedError
+        reference = self.make_reference()
+        answers = self.client.ask(
+            build_safety_state(reference),
+            build_safety_questions(),
+            [JevImage(reference, jpeg)],
+        )
+        return SafetyAnswer(
+            probabilities={name: answers.nouls[name] for name in SAFETY_QUESTION_NAMES},
+            usage=answers.usage,
+        )

@@ -256,6 +256,20 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
         )
+    if not SAFETY_INTERVAL_MIN_S <= settings.safety_interval_s <= SAFETY_INTERVAL_MAX_S:
+        errors.append(
+            f"--safety-interval must be {SAFETY_INTERVAL_MIN_S:g}..{SAFETY_INTERVAL_MAX_S:g}: "
+            f"{settings.safety_interval_s}"
+        )
+    if not 0.0 < settings.threshold_safety < 1.0:
+        errors.append(
+            "--threshold-safety must be more than 0 and less than 1: "
+            f"{settings.threshold_safety}"
+        )
+    if settings.max_safety_errors < 1:
+        errors.append(
+            f"--max-safety-errors must be 1 or more: {settings.max_safety_errors}"
+        )
     return errors
 
 
@@ -349,7 +363,17 @@ def safety_api_key_errors(safety: SafetyKind, environ: Mapping[str, str]) -> lis
     メッセージに API キーの値は含めない。cli は実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば
     終了コード 2 で終わる。
     """
-    raise NotImplementedError
+    if safety is not SafetyKind.JEV:
+        return []
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--safety {SafetyKind.JEV.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV}. Set it, or use --safety {SafetyKind.FAKE.value} "
+            "to run without an API key"
+        )
+    ]
 
 
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
@@ -363,4 +387,5 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value["middle"] = settings.middle.value
     value["surface"] = settings.surface.value
     value["deep"] = settings.deep.value
+    value["safety"] = settings.safety.value
     return value
