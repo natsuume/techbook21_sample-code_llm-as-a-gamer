@@ -30,7 +30,12 @@ from pathlib import Path
 from switch2_layers.deep.claude_code_command import validate_document_note
 from switch2_layers.deep.deep_job_directory import read_job_file, run_directory_of_job
 from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
-from switch2_layers.notes.note_paths import MAP_DIR, SCENE_LABELS_FILE, is_scene_id
+from switch2_layers.notes.note_paths import (
+    GAME_NOTE,
+    MAP_DIR,
+    SCENE_LABELS_FILE,
+    is_scene_id,
+)
 from switch2_layers.run_directory import FRAMES_DIR, RunPaths
 
 # プロンプトのファイルを置くパッケージの中のディレクトリー (importlib.resources.files("switch2_layers.deep") / PROMPTS_DIR)
@@ -44,6 +49,7 @@ KIND_PROMPT_FILES: dict[DocumentKind, str] = {
     DocumentKind.STRATEGY: "strategy.md",
     DocumentKind.ADVICE: "advice.md",
     DocumentKind.MAP: "map.md",
+    DocumentKind.GAME: "game.md",
 }
 # 種類の日本語の名前 (プロンプトの ${kind_title})
 KIND_TITLES: dict[DocumentKind, str] = {
@@ -285,6 +291,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "notes_dir": paths.notes_dir.as_posix(),
         "scene_labels": (paths.notes_dir / SCENE_LABELS_FILE).as_posix(),
         "map_dir": (paths.notes_dir / MAP_DIR).as_posix(),
+        "game_note": (paths.notes_dir / GAME_NOTE).as_posix(),
     }
 
 

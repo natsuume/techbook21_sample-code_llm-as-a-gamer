@@ -176,6 +176,7 @@ def documents_to_state(documents: SurfaceDocuments) -> dict[str, str]:
         "tips": documents.tips,
         "controls": documents.controls,
         "advice": documents.advice,
+        "game": documents.game,
     }
 
 

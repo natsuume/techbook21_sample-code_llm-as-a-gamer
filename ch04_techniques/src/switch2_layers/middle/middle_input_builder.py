@@ -47,7 +47,12 @@ from switch2_layers.middle.middle_types import (
 )
 from switch2_layers.middle.place_names import collect_place_names
 from switch2_layers.notes.map_document import read_map_document
-from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, scene_note
+from switch2_layers.notes.note_paths import (
+    GAME_NOTE,
+    SCENE_LABELS_FILE,
+    STRATEGY_NOTE,
+    scene_note,
+)
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.notes.surface_documents import read_surface_documents
@@ -164,6 +169,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         current_controls=current_controls,
         place_names=tuple(place_names),
         map_document=map_document,
+        game=read_note_text(paths.notes_dir, GAME_NOTE),
     )
 
 

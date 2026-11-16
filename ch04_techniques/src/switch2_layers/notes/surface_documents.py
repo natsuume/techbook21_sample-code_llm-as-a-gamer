@@ -15,6 +15,7 @@ from typing import Literal
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.notes.note_paths import (
     ADVICE_NOTE,
+    GAME_NOTE,
     common_note,
     is_scene_id,
     scene_note,
@@ -55,6 +56,7 @@ def read_surface_documents(notes_dir: Path, scene_id: str | None) -> SurfaceDocu
         scene_id=scene_id,
         uses_common_controls=uses_common_controls,
         uses_common_tips=uses_common_tips,
+        game=read_note_text(notes_dir, GAME_NOTE),
     )
 
 
