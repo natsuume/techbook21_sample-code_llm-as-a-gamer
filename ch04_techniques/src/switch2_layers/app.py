@@ -4,7 +4,9 @@
 cli の run は実機の部品と各層 (surface は --surface で選ぶ。middle と deep はフェイク) を渡し、テストはフェイクの
 キャプチャー・ブリッジ・層を渡して数秒動かす。surface の box の追跡のための接続点 (on_frame・surface_boxes_at・
 surface_plan_boxes・on_run_directory) も LayersParts で受け取る。安全の監視 (safety.safety_monitor) が画面を
-確かめるもの (SafetyChecker) も LayersParts で受け取る (cli の run は --safety で選ぶ)。
+確かめるもの (SafetyChecker) も LayersParts で受け取る (cli の run は --safety で選ぶ)。安全の監視が本体の画面を
+見本と照合した最新の結果は、start で作る system_screen.screen_judgment.LatestSystemScreen に渡す (ほかの部品からは
+読まない)。
 
 止まる条件 (どれも、操作を中立にして出力を止め、全体を止めて、run.jsonl の stop に理由を書く):
     - Ctrl+C (wait の中の KeyboardInterrupt)                          REASON_INTERRUPTED
@@ -12,7 +14,7 @@ surface_plan_boxes・on_run_directory) も LayersParts で受け取る。安全�
                                                                     hardware.capture_watcher の理由
     - ブリッジの復旧が失敗した (bridge_state() が "failed")             REASON_BRIDGE_FAILED
     - surface か middle が続けて失敗した                                surface_loop・middle_loop の理由
-    - 安全の確かめで HOME メニューなどの画面を見つけたか、確かめが失敗した
+    - 安全の確かめでオンライン・購入・本体の設定の画面を見つけたか、確かめが失敗した
                                                                     safety.safety_judge・safety_monitor の理由
 ブリッジの復旧中は、surface が要求を送らず、操作を中立にして待つ (surface_loop)。安全の監視は続ける。
 surface と middle のループは、安全の監視のスレッドが実行を始めるときの確かめ (最初のフレームが届いた後に 1 回) で
@@ -85,6 +87,7 @@ from switch2_layers.surface.surface_loop import (
     SurfaceLoopSettings,
 )
 from switch2_layers.surface.surface_types import Box, SurfaceDecider
+from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -248,10 +251,12 @@ class LayersApp:
            boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
            MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
            on_stop には request_stop を渡す
-        8. SafetyMonitor (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
-           on_stop = request_stop、on_start_passed = 実行を始めるときの確かめを終えた合図を立てる関数。
-           interval_s = safety_interval_s、threshold = threshold_safety、max_errors = max_safety_errors、
-           allow_home = allow_home) を作り、そのスレッドを 7 の 2 つの後に start_thread で起動する
+        8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor
+           (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
+           on_stop = request_stop、on_start_passed = 実行を始めるときの確かめを終えた合図を立てる関数、
+           on_system_screen = LatestSystemScreen.update。interval_s = safety_interval_s、threshold = threshold_safety、
+           max_errors = max_safety_errors) を作り、そのスレッドを 7 の 2 つの後に start_thread で起動する
+           (allow_home は 2 と 4 の押せるボタンだけに使い、安全の監視には渡さない)
         9. 画面の停滞の計測の ProgressLoop (ScreenProgressTracker(progress_window_s)) を作り、そのスレッドを 8 の後に
            start_thread で起動する
         7 の surface と middle のスレッドは、8 の確かめを終えた合図か、ループの停止の合図が立つまで待ってから、
@@ -379,7 +384,8 @@ class LayersApp:
                 max_errors=settings.max_middle_errors,
             ),
         )
-        # 8: 安全の監視
+        # 8: 安全の監視 (照合の結果は LatestSystemScreen に渡す)
+        latest_system_screen = LatestSystemScreen()
         safety_monitor = SafetyMonitor(
             SafetyMonitorParts(
                 checker=parts.safety,
@@ -388,12 +394,12 @@ class LayersApp:
                 safety_log=paths.safety_log,
                 on_stop=self.request_stop,
                 on_start_passed=self._start_check_passed.set,
+                on_system_screen=latest_system_screen.update,
             ),
             SafetyMonitorSettings(
                 interval_s=settings.safety_interval_s,
                 threshold=settings.threshold_safety,
                 max_errors=settings.max_safety_errors,
-                allow_home=settings.allow_home,
             ),
         )
         # 9: 画面の停滞の計測 (操作を送らないため、実行を始めるときの確かめを待たない)

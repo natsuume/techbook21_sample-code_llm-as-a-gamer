@@ -2,13 +2,27 @@
 
 from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyAnswer
+from switch2_layers.system_screen.system_screen_references import (
+    NONE_CHOICE,
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 
 class FakeSafetyChecker:
-    """SafetyChecker の実装。画像を見ずに、すべての問いの確率を 0 として返す (止まる条件に当たらない)。"""
+    """SafetyChecker の実装。画像を見ずに、止める条件に当たらず、どの見本の画面でもない答えを返す。"""
 
     def check(self, jpeg: bytes) -> SafetyAnswer:
-        """SafetyAnswer(probabilities={SAFETY_QUESTION_NAMES の各名前: 0.0} (この順), usage=None) を返す。"""
+        """次の SafetyAnswer を返す (usage は None)。
+
+        probabilities   {safety_questions.SAFETY_QUESTION_NAMES の各名前: 0.0} (この順)
+        system_screen   {system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES の各名前: 確率} (この順)。
+                        確率は NONE_CHOICE が 1.0、ほかの選択肢が 0.0
+        """
         return SafetyAnswer(
-            probabilities=dict.fromkeys(SAFETY_QUESTION_NAMES, 0.0), usage=None
+            probabilities=dict.fromkeys(SAFETY_QUESTION_NAMES, 0.0),
+            system_screen={
+                name: 1.0 if name == NONE_CHOICE else 0.0
+                for name in SYSTEM_SCREEN_CHOICE_NAMES
+            },
+            usage=None,
         )

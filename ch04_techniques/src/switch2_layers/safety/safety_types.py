@@ -17,16 +17,21 @@ class SafetyPhase(StrEnum):
 class SafetyAnswer:
     """1 回の確かめの答え。
 
-    probabilities   問いの名前 → その画面である確率 (0〜1)。safety_questions.SAFETY_QUESTION_NAMES のすべてを含む
+    probabilities   止める条件に使う問いの名前 → その画面である確率 (0〜1)。
+                    safety_questions.SAFETY_QUESTION_NAMES のすべてを含む
+    system_screen   照合の選択肢の名前 (none を含む) → その画面である確率 (0〜1)。
+                    system_screen.system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES のすべてを含む
     usage           API の usage (Jev の応答の本文の usage をそのまま)。無ければ None
+    答えの値は確かめずに持つ (安全の監視が safety_judge で確かめ、合わなければ確かめの失敗として数える)。
     """
 
     probabilities: Mapping[str, float]
+    system_screen: Mapping[str, float]
     usage: object | None = None
 
 
 class SafetyChecker(Protocol):
-    """画面が安全の問いのそれぞれの画面である確率を返すもの。
+    """画面が安全の問いのそれぞれの画面である確率と、照合の選択肢ごとの確率を返すもの。
 
     実装は safety.jev_safety.JevSafetyChecker (TypeSafe Jev に問う) と safety.fake_safety.FakeSafetyChecker (フェイク)。
     """
