@@ -24,6 +24,7 @@ from pathlib import Path
 
 from switch2_layers.file_io import read_json_lines
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
+from switch2_layers.notes.map_document import TilePosition, tile_position_to_json
 
 # middle/map_records.jsonl の行のキー (この順に書く)
 MAP_RECORD_KEYS: tuple[str, ...] = (
@@ -64,11 +65,16 @@ def build_map_record(
         "t": max(frame.t for frame in middle_input.frames),
         "scene_id": scene_id,
         "place_name": place_name,
+        "current_tile": None
+        if place_name is None
+        else _tile_to_json(output.current_tile),
         "connections": [
             {
                 "from": connection.from_place,
                 "to": connection.to_place,
                 "how": connection.how,
+                "from_tile": _tile_to_json(connection.from_tile),
+                "to_tile": _tile_to_json(connection.to_tile),
             }
             for connection in output.new_connections
         ],
@@ -77,10 +83,16 @@ def build_map_record(
                 "kind": observation.kind.value,
                 "place": observation.place,
                 "description": observation.description,
+                "tile": _tile_to_json(observation.tile),
             }
             for observation in output.new_observations
         ],
     }
+
+
+def _tile_to_json(position: TilePosition | None) -> dict[str, int] | None:
+    """座標 position を tile_position_to_json の形にする。None はそのまま None (JSON の null)。"""
+    return None if position is None else tile_position_to_json(position)
 
 
 def read_recorded_place_names(path: Path) -> list[str]:

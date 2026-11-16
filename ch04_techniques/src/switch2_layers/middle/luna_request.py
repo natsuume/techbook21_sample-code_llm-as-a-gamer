@@ -59,6 +59,10 @@ from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
 )
+from switch2_layers.middle.route_section import (
+    ROUTE_SECTION_TITLE,
+    describe_route_section,
+)
 from switch2_layers.notes.map_document import (
     GridMapDocument,
     MapDocument,
@@ -74,6 +78,7 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "場面ラベルの一覧",
     "場所の名前の一覧",
     "マップ",
+    ROUTE_SECTION_TITLE,
     "前回の middle の出力",
     "ゲームの性質",
     "大方針",
@@ -209,6 +214,7 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
         describe_scene_labels(middle_input.scene_labels),
         describe_place_names(middle_input.place_names),
         describe_map_document(middle_input.map_document),
+        describe_route_section(middle_input.map_document, middle_input.previous_state),
         describe_previous_state(middle_input.previous_state, middle_input.t),
         _stripped_or_empty_text(middle_input.game),
         _stripped_or_empty_text(middle_input.strategy),

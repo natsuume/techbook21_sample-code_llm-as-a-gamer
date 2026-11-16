@@ -183,7 +183,7 @@ class GridMapDocument:
 
 def tile_position_to_json(position: TilePosition) -> dict[str, int]:
     """座標 position を JSON の形 {"x": x, "y": y} (この順のキー) にする。"""
-    raise NotImplementedError
+    return {"x": position.x, "y": position.y}
 
 
 def parse_map_document(value: object) -> MapDocument | GridMapDocument:
@@ -213,11 +213,17 @@ def parse_map_document(value: object) -> MapDocument | GridMapDocument:
     値は書かれたまま (前後の空白も除かない) にし、配列はタプルにする。空の places・connections は形に合う。
     """
     top = _object(value, "map.json")
+    layout = _layout(top)
     places = _array(top, "places", "map.json")
     connections = _array(top, "connections", "map.json")
+    if layout is MapLayout.GRID:
+        return GridMapDocument(
+            places=tuple(_grid_place(item) for item in places),
+            connections=tuple(_grid_connection(item) for item in connections),
+        )
     return MapDocument(
-        places=tuple(_place(item) for item in places),
-        connections=tuple(_connection(item) for item in connections),
+        places=tuple(_free_place(item) for item in places),
+        connections=tuple(_free_connection(item) for item in connections),
     )
 
 
@@ -252,7 +258,23 @@ def map_document_to_json(document: MapDocument | GridMapDocument) -> dict[str, o
     座標は tile_position_to_json の形 (None は null)、exits・blocked・landmarks の要素は x・y・description の順の
     キーにする。タプルはリストにする。parse_map_document(map_document_to_json(document)) は document と等しい。
     """
+    if isinstance(document, GridMapDocument):
+        return {
+            "layout": document.layout.value,
+            "places": [_grid_place_to_json(place) for place in document.places],
+            "connections": [
+                {
+                    "from": connection.from_place,
+                    "to": connection.to_place,
+                    "how": connection.how,
+                    "from_tile": _optional_tile_position_to_json(connection.from_tile),
+                    "to_tile": _optional_tile_position_to_json(connection.to_tile),
+                }
+                for connection in document.connections
+            ],
+        }
     return {
+        "layout": document.layout.value,
         "places": [
             {
                 "name": place.name,
@@ -276,12 +298,53 @@ def map_document_to_json(document: MapDocument | GridMapDocument) -> dict[str, o
     }
 
 
+def _grid_place_to_json(place: GridMapPlace) -> dict[str, object]:
+    """grid の場所 place を map.json の places の要素の形の辞書にする (map_document_to_json のキーの順)。"""
+    return {
+        "name": place.name,
+        "aliases": list(place.aliases),
+        "description": place.description,
+        "state": place.state,
+        "changes_on_entry": place.changes_on_entry,
+        "origin": tile_position_to_json(place.origin),
+        "tiles": list(place.tiles),
+        "exits": [_tile_mark_to_json(mark) for mark in place.exits],
+        "blocked": [_tile_mark_to_json(mark) for mark in place.blocked],
+        "landmarks": [_tile_mark_to_json(mark) for mark in place.landmarks],
+    }
+
+
+def _tile_mark_to_json(mark: TileMark) -> dict[str, object]:
+    """座標の付いた説明 mark を {"x": x, "y": y, "description": 説明} (この順のキー) にする。"""
+    return {**tile_position_to_json(mark.position), "description": mark.description}
+
+
+def _optional_tile_position_to_json(
+    position: TilePosition | None,
+) -> dict[str, int] | None:
+    """座標 position を tile_position_to_json の形にする。None はそのまま None (JSON の null)。"""
+    return None if position is None else tile_position_to_json(position)
+
+
 # 以下の読み取りは、契約 (parse_map_document) どおり型の誤りも ValueError にする。
 # 型が合えば値を返し、合わなければ if の後で ValueError を出す。where は、誤りの説明に入れる、確かめている値の名前
 
 
-def _place(item: object) -> MapPlace:
-    """places の要素 item を MapPlace にする。形に合わなければ ValueError。"""
+def _layout(top: Mapping[str, object]) -> MapLayout:
+    """map.json の最上位の object top の layout を MapLayout にする。無ければ FREE。
+
+    文字列でないか、MapLayout の値 (大文字と小文字を区別する) でなければ ValueError。
+    """
+    if "layout" not in top:
+        return MapLayout.FREE
+    item = top["layout"]
+    if isinstance(item, str) and item in {layout.value for layout in MapLayout}:
+        return MapLayout(item)
+    raise ValueError(f"'layout' in map.json must be 'grid' or 'free': {item!r}")
+
+
+def _free_place(item: object) -> MapPlace:
+    """free の places の要素 item を MapPlace にする。形に合わなければ ValueError。"""
     value = _object(item, "an element of places")
     return MapPlace(
         name=_non_blank_string(value, "name", "a place"),
@@ -294,14 +357,107 @@ def _place(item: object) -> MapPlace:
     )
 
 
-def _connection(item: object) -> MapConnection:
-    """connections の要素 item を MapConnection にする。形に合わなければ ValueError。"""
+def _free_connection(item: object) -> MapConnection:
+    """free の connections の要素 item を MapConnection (from_tile と to_tile は None) にする。形に合わなければ
+    ValueError。"""
     value = _object(item, "an element of connections")
     return MapConnection(
         from_place=_non_blank_string(value, "from", "a connection"),
         to_place=_non_blank_string(value, "to", "a connection"),
         how=_string(value, "how", "a connection"),
     )
+
+
+def _grid_place(item: object) -> GridMapPlace:
+    """grid の places の要素 item を GridMapPlace にする。形に合わなければ ValueError。"""
+    value = _object(item, "an element of places")
+    where = "a place"
+    return GridMapPlace(
+        name=_non_blank_string(value, "name", where),
+        aliases=_string_array(value, "aliases", where),
+        description=_string(value, "description", where),
+        state=_string(value, "state", where),
+        changes_on_entry=_boolean(value, "changes_on_entry", where),
+        origin=_tile_position(_value(value, "origin", where), f"'origin' in {where}"),
+        tiles=_tiles(value, where),
+        exits=_tile_marks(value, "exits", where),
+        blocked=_tile_marks(value, "blocked", where),
+        landmarks=_tile_marks(value, "landmarks", where),
+    )
+
+
+def _grid_connection(item: object) -> MapConnection:
+    """grid の connections の要素 item を MapConnection にする。形に合わなければ ValueError。"""
+    value = _object(item, "an element of connections")
+    where = "a connection"
+    return MapConnection(
+        from_place=_non_blank_string(value, "from", where),
+        to_place=_non_blank_string(value, "to", where),
+        how=_string(value, "how", where),
+        from_tile=_optional_tile_position(value, "from_tile", where),
+        to_tile=_optional_tile_position(value, "to_tile", where),
+    )
+
+
+def _tiles(value: Mapping[str, object], where: str) -> tuple[str, ...]:
+    """value["tiles"] がマスの図 (各行が同じ文字数で、文字が TILE_CHARACTERS だけの文字列の配列) なら、タプルにして
+    返す。それ以外は ValueError。空の配列は形に合う。"""
+    rows = _string_array(value, "tiles", where)
+    if len({len(row) for row in rows}) > 1:
+        raise ValueError(
+            f"rows of 'tiles' in {where} must have the same length: {rows!r}"
+        )
+    if all(character in TILE_CHARACTERS for row in rows for character in row):
+        return rows
+    raise ValueError(f"'tiles' in {where} must use only # . E ?: {rows!r}")
+
+
+def _tile_marks(
+    value: Mapping[str, object], key: str, where: str
+) -> tuple[TileMark, ...]:
+    """value[key] が {"x": 整数, "y": 整数, "description": 文字列} の object の配列なら、TileMark のタプルにして返す。
+    それ以外は ValueError。"""
+    item_where = f"an element of {key!r} in {where}"
+    marks: list[TileMark] = []
+    for item in _array(value, key, where):
+        mark = _object(item, item_where)
+        marks.append(
+            TileMark(
+                position=_tile_position(mark, item_where),
+                description=_string(mark, "description", item_where),
+            )
+        )
+    return tuple(marks)
+
+
+def _optional_tile_position(
+    value: Mapping[str, object], key: str, where: str
+) -> TilePosition | None:
+    """value[key] が null なら None、座標の object なら TilePosition を返す。無いか、どちらでもなければ ValueError。"""
+    item = _value(value, key, where)
+    if item is None:
+        return None
+    return _tile_position(item, f"{key!r} in {where}")
+
+
+def _tile_position(item: object, where: str) -> TilePosition:
+    """item が x と y に整数 (bool と小数を除く) を持つ object なら TilePosition を返す。それ以外は ValueError。
+
+    object のほかのキー (exits などの要素の description を含む) は見ない。
+    """
+    value = _object(item, where)
+    return TilePosition(x=_integer(value, "x", where), y=_integer(value, "y", where))
+
+
+def _integer(value: Mapping[str, object], key: str, where: str) -> int:
+    """value[key] が整数 (bool を除く) ならその値を返す。無いか整数でなければ ValueError。
+
+    JSON の 1.0 は json.loads で float になるため、整数としない。
+    """
+    item = _value(value, key, where)
+    if isinstance(item, int) and not isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} in {where} must be an integer: {item!r}")
 
 
 def _object(item: object, where: str) -> Mapping[str, object]:

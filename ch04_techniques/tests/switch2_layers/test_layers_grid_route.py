@@ -33,6 +33,8 @@ def place(
     name: str = "家の 1 階",
     aliases: tuple[str, ...] = (),
     exits: tuple[TileMark, ...] = (),
+    blocked: tuple[TileMark, ...] = (),
+    landmarks: tuple[TileMark, ...] = (),
 ) -> GridMapPlace:
     return GridMapPlace(
         name=name,
@@ -43,8 +45,8 @@ def place(
         origin=TilePosition(*origin),
         tiles=tuple(tiles),
         exits=exits,
-        blocked=(),
-        landmarks=(),
+        blocked=blocked,
+        landmarks=landmarks,
     )
 
 
@@ -54,8 +56,14 @@ def route(*steps: tuple[MoveDirection, int]) -> GridRoute:
     )
 
 
-# issue の I/O 契約の例の場所
+# issue の I/O 契約の例の場所 (机 (4, 1) は、tiles では . だが blocked にある)
 HOUSE_TILES = ["#########", "#.......#", "#E......#"]
+HOUSE = place(
+    HOUSE_TILES,
+    exits=(TileMark(TilePosition(1, 2), "左下の赤いマット"),),
+    blocked=(TileMark(TilePosition(4, 1), "机"),),
+    landmarks=(TileMark(TilePosition(6, 1), "テレビ"),),
+)
 OPEN_3X3 = ["...", "...", "..."]
 
 
@@ -96,10 +104,52 @@ def test_passable_tiles():
 
 
 def test_route_from_the_issue_example():
-    # (7, 1) から左下の赤いマット (1, 2) へ。最短 7 マスで、向きを 1 回変える経路は 2 つあり、下 (DOWN) を先にする
-    found = find_grid_route(place(HOUSE_TILES), TilePosition(7, 1), TilePosition(1, 2))
+    # (7, 1) から左下の赤いマット (1, 2) へ。最短 7 マスで向きを 1 回変える経路は、下 → 左 と、左 → 下 の 2 つ。
+    # 左 → 下 は机 (4, 1) を通るので通れず、下 → 左 になる
+    found = find_grid_route(HOUSE, TilePosition(7, 1), TilePosition(1, 2))
     assert found == route((DOWN, 1), (LEFT, 6))
     assert found.total_tiles == 7
+
+
+# --- 通れないマス (blocked) ---
+
+
+def test_blocked_tile_is_not_passable_even_on_a_passable_character():
+    # 机 (4, 1) は tiles では . だが、blocked にあるので通らない。左に 6 マスの経路の代わりに下の行を回る
+    assert find_grid_route(
+        place(HOUSE_TILES), TilePosition(7, 1), TilePosition(1, 1)
+    ) == route((LEFT, 6))
+    found = find_grid_route(HOUSE, TilePosition(7, 1), TilePosition(1, 1))
+    assert found == route((DOWN, 1), (LEFT, 6), (UP, 1))
+    assert found.total_tiles == 8
+
+
+def test_blocked_tile_can_close_the_only_way():
+    corridor = place(["....."], blocked=(TileMark(TilePosition(2, 0), "岩"),))
+    assert find_grid_route(corridor, TilePosition(0, 0), TilePosition(4, 0)) is None
+
+
+def test_blocked_goal_can_be_entered():
+    # 目標のマスは、blocked にあっても入ってよい
+    found = find_grid_route(HOUSE, TilePosition(7, 1), TilePosition(4, 1))
+    assert found == route((LEFT, 3))
+
+
+def test_start_on_a_blocked_tile_does_not_matter():
+    # 開始のマスは、blocked にあっても問わない
+    found = find_grid_route(HOUSE, TilePosition(4, 1), TilePosition(1, 1))
+    assert found == route((LEFT, 3))
+
+
+def test_blocked_outside_the_tiles_and_landmarks_do_not_change_the_route():
+    # tiles の範囲の外の blocked と、landmarks の座標は経路に関わらない
+    marked = place(
+        ["....."],
+        blocked=(TileMark(TilePosition(9, 9), "画面の外の壁"),),
+        landmarks=(TileMark(TilePosition(2, 0), "看板"),),
+    )
+    found = find_grid_route(marked, TilePosition(0, 0), TilePosition(4, 0))
+    assert found == route((RIGHT, 4))
 
 
 def test_same_tile_is_a_route_of_zero_tiles():

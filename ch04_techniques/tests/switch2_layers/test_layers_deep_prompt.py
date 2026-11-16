@@ -805,3 +805,9 @@ def test_strategy_and_advice_read_the_grid_map_by_tiles():
         # grid のマップでは、出口と通れないマスを座標とマスの図で読む
         for phrase in ["grid", "座標", "マスの図"]:
             assert phrase in text, (kind, phrase)
+
+
+def test_map_prompt_draws_blocked_tiles_as_walls():
+    # 経路の計算は tiles の文字と blocked の座標の両方を見るため、blocked のマスは tiles でも # で描かせる
+    text = raw_prompt_file("map.md")
+    assert "`blocked` に入れたマスは、`tiles` でも `#` で描く" in text

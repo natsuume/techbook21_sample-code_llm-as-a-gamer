@@ -29,9 +29,24 @@ grid のマップのときだけ、現在地のマスから出口とつながり
 <name> はマップの場所の name (書かれたまま)。
 """
 
+from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.middle.middle_types import MiddleState
-from switch2_layers.notes.grid_route import GridRoute, MoveDirection
-from switch2_layers.notes.map_document import GridMapDocument, MapDocument
+from switch2_layers.notes.grid_route import (
+    GridRoute,
+    MoveDirection,
+    RouteTarget,
+    RouteTargetKind,
+    find_grid_place,
+    find_grid_route,
+    list_route_targets,
+    tile_at,
+)
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    GridMapPlace,
+    MapDocument,
+    TilePosition,
+)
 
 # 節の見出し (luna_request.USER_SECTION_TITLES の「マップ」の直後に置く)
 ROUTE_SECTION_TITLE = "現在地からの経路 (コードの計算)"
@@ -52,6 +67,11 @@ DIRECTION_LABELS: dict[MoveDirection, str] = {
     MoveDirection.LEFT: "左",
     MoveDirection.RIGHT: "右",
 }
+# 目標の種類の書き方
+_TARGET_KIND_LABELS: dict[RouteTargetKind, str] = {
+    RouteTargetKind.EXIT: "出口",
+    RouteTargetKind.CONNECTION: "つながり",
+}
 
 
 def format_route(route: GridRoute | None) -> str:
@@ -62,7 +82,15 @@ def format_route(route: GridRoute | None) -> str:
     - それ以外: 手順ごとに「<向き>に <マス数> マス」(向きは DIRECTION_LABELS) を「 → 」でつなぎ、
       後ろに「 (合計 <合計のマス数> マス)」を付ける。例: 「上に 3 マス → 左に 2 マス (合計 5 マス)」
     """
-    raise NotImplementedError
+    if route is None:
+        return NO_ROUTE_TEXT
+    if not route.steps:
+        return "移動しない (合計 0 マス)"
+    steps = " → ".join(
+        f"{DIRECTION_LABELS[step.direction]}に {step.tiles} マス"
+        for step in route.steps
+    )
+    return f"{steps} (合計 {route.total_tiles} マス)"
 
 
 def describe_route_section(
@@ -76,4 +104,65 @@ def describe_route_section(
     notes.grid_route.list_route_targets(document, 場所)、経路は notes.grid_route.find_grid_route(場所,
     state.current_tile, 目標の position) で求める。開始のマスが範囲の外かは notes.grid_route.tile_at で確かめる。
     """
-    raise NotImplementedError
+    if document is None:
+        return ROUTE_NO_MAP_TEXT
+    if not isinstance(document, GridMapDocument):
+        return ROUTE_FREE_LAYOUT_TEXT
+    if state is None:
+        return ROUTE_NO_PREVIOUS_OUTPUT_TEXT
+    if state.place_name is None or state.current_tile is None:
+        return ROUTE_NO_CURRENT_TILE_TEXT
+    place = find_grid_place(document, state.place_name)
+    if place is None:
+        return (
+            f"前回の middle の出力の現在地「{state.place_name}」がマップの場所 (name と aliases) に無いため、"
+            "経路を計算しない"
+        )
+    if not place.tiles:
+        return f"マップの場所「{place.name}」のマスの図 (tiles) が空のため、経路を計算しない"
+    start = state.current_tile
+    if tile_at(place, start) is None:
+        return (
+            f"現在地のマス {_position_text(start)} がマップの場所「{place.name}」のマスの図 (tiles) の"
+            "範囲の外のため、経路を計算しない"
+        )
+    targets = list_route_targets(document, place)
+    if not targets:
+        return (
+            f"マップの場所「{place.name}」に、マスの図 (tiles) の範囲の中の出口とつながりが無いため、"
+            "経路を計算しない"
+        )
+    return "\n".join(
+        [
+            _header_line(state, place, start),
+            *(_target_line(place, start, target) for target in targets),
+        ]
+    )
+
+
+def _position_text(position: TilePosition) -> str:
+    """座標 position を「(x=<x>, y=<y>)」の文にする。"""
+    return f"(x={position.x}, y={position.y})"
+
+
+def _header_line(state: MiddleState, place: GridMapPlace, start: TilePosition) -> str:
+    """節の 1 行目 (前回の出力の現在地の場所・マスと、その出力の入力の時刻) を返す (モジュールの docstring)。"""
+    place_name = state.place_name or ""
+    if place.name.strip() != place_name:
+        place_name += f" (マップの場所「{place.name}」)"
+    return (
+        f"前回の middle の出力 (入力の時刻 {format_frame_label(state.based_on_t)}) の現在地: "
+        f"{place_name} のマス {_position_text(start)}"
+    )
+
+
+def _target_line(place: GridMapPlace, start: TilePosition, target: RouteTarget) -> str:
+    """目標 target の 1 行 (種類・説明・座標・行き先・手順) を返す (モジュールの docstring)。"""
+    destinations = (
+        f"。行き先: {'、'.join(target.destinations)}" if target.destinations else ""
+    )
+    route = find_grid_route(place, start, target.position)
+    return (
+        f"- {_TARGET_KIND_LABELS[target.kind]}「{target.description}」"
+        f"{_position_text(target.position)}{destinations}。手順: {format_route(route)}"
+    )

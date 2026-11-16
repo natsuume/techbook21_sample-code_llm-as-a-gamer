@@ -27,6 +27,7 @@ from switch2_layers.notes.map_document import (
     MapConnection,
     MapDocument,
     TilePosition,
+    tile_position_to_json,
 )
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
@@ -222,6 +223,10 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
         "operations_rows_offset": state.operations_rows_offset,
         "first_task": state.first_task,
         "first_task_since_t": state.first_task_since_t,
+        "place_name": state.place_name,
+        "current_tile": None
+        if state.current_tile is None
+        else tile_position_to_json(state.current_tile),
     }
 
 
@@ -255,6 +260,13 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         if "first_task_since_t" in value
         else None
     )
+    # place_name と current_tile も省けるキー: 無ければ None にする
+    place_name = (
+        _optional_string(value, "place_name") if "place_name" in value else None
+    )
+    current_tile = (
+        _optional_tile(value, "current_tile") if "current_tile" in value else None
+    )
     return MiddleState(
         generated_t=_number(value, "generated_t"),
         based_on_t=_number(value, "based_on_t"),
@@ -268,6 +280,8 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         operations_rows_offset=_offset(value, "operations_rows_offset"),
         first_task=first_task,
         first_task_since_t=first_task_since_t,
+        place_name=place_name,
+        current_tile=current_tile,
     )
 
 
@@ -332,3 +346,24 @@ def _boolean(value: Mapping[str, object], key: str) -> bool:
     if isinstance(item, bool):
         return item
     raise ValueError(f"{key!r} in middle state must be a boolean: {item!r}")
+
+
+def _optional_tile(value: Mapping[str, object], key: str) -> TilePosition | None:
+    """value[key] が null なら None、x と y に整数 (bool と小数を除く) を持つ object なら TilePosition を返す。
+    それ以外は ValueError。object のほかのキーは無視する。"""
+    item = _field(value, key)
+    if item is None:
+        return None
+    if isinstance(item, dict):
+        x = item.get("x")
+        y = item.get("y")
+        if _is_integer(x) and _is_integer(y):
+            return TilePosition(x=x, y=y)
+    raise ValueError(
+        f"{key!r} in middle state must be {{'x': integer, 'y': integer}} or null: {item!r}"
+    )
+
+
+def _is_integer(item: object) -> bool:
+    """item が整数 (bool を除く) なら True。JSON の 1.0 は json.loads で float になるため、整数としない。"""
+    return isinstance(item, int) and not isinstance(item, bool)

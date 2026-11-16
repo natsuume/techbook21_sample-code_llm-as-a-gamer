@@ -104,6 +104,7 @@ def write_middle_output(
         write_text_atomic(tasks_path, output.tasks)
     first_task = first_task_of(output.tasks)
     scene_id = None if scene is None else scene.id
+    place_name = (output.place_name or "").strip() or None
     state = MiddleState(
         generated_t=generated_t,
         based_on_t=middle_input.t,
@@ -119,6 +120,8 @@ def write_middle_output(
         first_task_since_t=first_task_since(
             middle_input.previous_state, first_task, generated_t, scene_id=scene_id
         ),
+        place_name=place_name,
+        current_tile=None if place_name is None else output.current_tile,
     )
     if _is_stopped(stop):
         return None
