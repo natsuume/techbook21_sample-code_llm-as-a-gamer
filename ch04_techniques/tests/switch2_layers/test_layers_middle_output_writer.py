@@ -24,6 +24,8 @@ STATE_KEYS = [
     "timeline",
     "surface_rows_offset",
     "operations_rows_offset",
+    "first_task",
+    "first_task_since_t",
 ]
 EMPTY_LABELS = {"scenes": []}
 
@@ -42,6 +44,7 @@ def middle_input(
     t: float,
     surface_rows_offset: int = 0,
     operations_rows_offset: int = 0,
+    previous_state: MiddleState | None = None,
 ) -> MiddleInput:
     return MiddleInput(
         t=t,
@@ -50,11 +53,29 @@ def middle_input(
         operation_rows=(),
         scene_change_reported=False,
         scene_labels=(),
-        previous_state=None,
+        previous_state=previous_state,
         strategy="",
         current_tasks="",
         surface_rows_offset=surface_rows_offset,
         operations_rows_offset=operations_rows_offset,
+    )
+
+
+def previous_state(first_task: str, first_task_since_t: float | None) -> MiddleState:
+    """前回の middle/state.json の値 (最初のタスクの文と、その文になった時刻だけを変える)。"""
+    return MiddleState(
+        generated_t=7.5,
+        based_on_t=7.0,
+        scene_id="scene-001",
+        scene_name="町",
+        is_stuck=False,
+        stuck_description="",
+        surface_wait_s=0.5,
+        timeline="",
+        surface_rows_offset=0,
+        operations_rows_offset=0,
+        first_task=first_task,
+        first_task_since_t=first_task_since_t,
     )
 
 
@@ -96,6 +117,8 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         timeline="## 直近\n町",
         surface_rows_offset=210,
         operations_rows_offset=84,
+        first_task="宿屋に入る",
+        first_task_since_t=12.8,
     )
     assert read_json(root / "notes" / "scene_labels.json") == {
         "scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 12.0}]
@@ -116,6 +139,8 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         "timeline": "## 直近\n町",
         "surface_rows_offset": 210,
         "operations_rows_offset": 84,
+        "first_task": "宿屋に入る",
+        "first_task_since_t": 12.8,
     }
 
 
@@ -184,6 +209,155 @@ def test_state_is_replaced_without_temp_files(tmp_path):
     write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
     assert read_json(root / "middle" / "state.json")["generated_t"] == 6.5
     assert sorted(p.name for p in (root / "middle").iterdir()) == ["state.json"]
+
+
+# --- 最初のタスクの文と、その文になった時刻 ---
+# 前回の時刻 (3.0)・入力の時刻 (12.0)・書いた時刻 (12.8) をすべて違う値にして、どの時刻を使ったかを見分ける
+
+
+def test_without_previous_state_first_task_starts_at_generated_t(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0),
+        output("町", tasks="# タスク\n\n- 宿屋に入る\n- 主人に話しかける\n"),
+        12.8,
+    )
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 12.8
+
+
+def test_same_first_task_keeps_previous_time(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output("町", tasks="- 宿屋に入る\n- 主人に話しかける\n"),
+        12.8,
+    )
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 3.0
+    state = read_json(root / "middle" / "state.json")
+    assert state["first_task"] == "宿屋に入る"
+    assert state["first_task_since_t"] == 3.0
+
+
+def test_first_task_differing_only_in_whitespace_keeps_previous_time(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output("町", tasks="- 宿屋 に　入る\n"),
+        12.8,
+    )
+    # 文は今回の出力のもの、時刻は前回のもの
+    assert result.state.first_task == "宿屋 に　入る"
+    assert result.state.first_task_since_t == 3.0
+
+
+def test_changed_first_task_starts_at_generated_t(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output("町", tasks="- 主人に話しかける\n- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.first_task == "主人に話しかける"
+    assert result.state.first_task_since_t == 12.8
+    state = read_json(root / "middle" / "state.json")
+    assert state["first_task"] == "主人に話しかける"
+    assert state["first_task_since_t"] == 12.8
+
+
+def test_previous_state_without_time_starts_at_generated_t(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", None)),
+        output("町", tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 12.8
+
+
+def test_first_task_is_recorded_without_scene(tmp_path):
+    # 場面が決まらない (tasks.md を書かない) 回も、最初のタスクとその時刻を計算して state.json に書く
+    root = make_run(tmp_path)
+    same = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output(None, tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert same.state.scene_id is None
+    assert same.state.first_task == "宿屋に入る"
+    assert same.state.first_task_since_t == 3.0
+    state = read_json(root / "middle" / "state.json")
+    assert list(state) == STATE_KEYS
+    assert state["first_task"] == "宿屋に入る"
+    assert state["first_task_since_t"] == 3.0
+    changed = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output(None, tasks="- 外に出る\n"),
+        12.8,
+    )
+    assert changed.state.first_task == "外に出る"
+    assert changed.state.first_task_since_t == 12.8
+    assert not (root / "notes" / "scenes").exists()
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [None, previous_state("宿屋に入る", 3.0), previous_state("", 3.0)],
+)
+@pytest.mark.parametrize("scene_name", ["町", None])
+def test_tasks_without_bullet_record_no_first_task_time(tmp_path, previous, scene_name):
+    # 最初のタスクが無い回は、文を空文字列、時刻を None (state.json では null) にする
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous),
+        output(scene_name, tasks="タスクは無い\n"),
+        12.8,
+    )
+    assert result.state.first_task == ""
+    assert result.state.first_task_since_t is None
+    state = read_json(root / "middle" / "state.json")
+    assert state["first_task"] == ""
+    assert state["first_task_since_t"] is None
+
+
+def test_same_first_task_in_another_scene_starts_at_generated_t(tmp_path):
+    # 前回の場面は scene-001 (町)。今回は別の場面 (scene-002) なので、同じ文でも時刻を引き継がない
+    root = make_run(tmp_path)
+    (root / "notes" / "scene_labels.json").write_text(
+        '{"scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 1.0}]}',
+        encoding="utf-8",
+    )
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output("宿屋の中", tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.scene_id == "scene-002"
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 12.8
+
+
+def test_first_task_after_tasks_without_bullet_starts_at_generated_t(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("", None)),
+        output("町", tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 12.8
 
 
 # --- 書き込みに失敗したとき (一覧に足すのは最後) ---

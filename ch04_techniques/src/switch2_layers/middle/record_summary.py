@@ -49,7 +49,10 @@ def describe_operation(row: Mapping[str, object]) -> str:
     """operations.jsonl の 1 行 (または surface.jsonl の action) の held・taps・sticks を説明の文にする。
 
     次の項目を、あるものだけこの順に「 / 」でつなぐ:
-        held がリストなら、その文字列の要素    「押し続け: A, B」(書かれた順)
+        held がリストなら、その文字列の要素    「押し続け: A, B」(書かれた順)。hold_seconds が object で、そのボタンの
+                                               値が有限の正の数 (bool を除く) なら、ボタン名の後ろに「 (0.3 秒)」の
+                                               形で秒数を添える (例: 「押し続け: A, LEFT (0.3 秒)」)。秒数の違う
+                                               押し続けは説明が違うので、まとめで 1 行にならない
         taps がリストなら、その文字列の要素    「短押し: X」
         sticks が object で、その LS が 2 つの有限の数 (bool を除く) のリストで (0, 0) でない
                                                「左スティック: (0.00, 1.00)」(小数第 2 位まで)
@@ -60,7 +63,16 @@ def describe_operation(row: Mapping[str, object]) -> str:
     parts: list[str] = []
     held = _strings(row.get("held"))
     if held:
-        parts.append("押し続け: " + ", ".join(held))
+        hold_seconds = row.get("hold_seconds")
+        if not isinstance(hold_seconds, Mapping):
+            hold_seconds = {}
+        parts.append(
+            "押し続け: "
+            + ", ".join(
+                _describe_held_button(button, hold_seconds.get(button))
+                for button in held
+            )
+        )
     taps = _strings(row.get("taps"))
     if taps:
         parts.append("短押し: " + ", ".join(taps))
@@ -71,6 +83,19 @@ def describe_operation(row: Mapping[str, object]) -> str:
             if position is not None and position != (0.0, 0.0):
                 parts.append(f"{name}: ({position[0]:.2f}, {position[1]:.2f})")
     return " / ".join(parts) if parts else NEUTRAL_OPERATION_TEXT
+
+
+def _describe_held_button(button: str, seconds: object) -> str:
+    """押し続けのボタン名に、seconds が有限の正の数 (bool を除く) なら「 (<秒> 秒)」を添えて返す。
+
+    秒は小数第 2 位までにし、末尾の 0 を除く (小数点の後には少なくとも 1 桁を残す。例: 0.3 → 「0.3」、1 → 「1.0」)。
+    """
+    if not _is_finite_number(seconds) or float(seconds) <= 0:
+        return button
+    text = f"{float(seconds):.2f}".rstrip("0")
+    if text.endswith("."):
+        text += "0"
+    return f"{button} ({text} 秒)"
 
 
 def summarize_operation_rows(rows: Sequence[Mapping[str, object]]) -> str:

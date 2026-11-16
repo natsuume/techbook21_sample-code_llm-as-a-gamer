@@ -24,6 +24,8 @@ from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.surface.fake_surface import FakeSurfaceDecider
+from switch2_layers.surface.jev_client import JevAnswers
 from switch2_layers.surface.surface_loop import (
     BRIDGE_WAIT_S,
     DECIDE_ERROR_WAIT_S,
@@ -34,11 +36,19 @@ from switch2_layers.surface.surface_loop import (
     SurfaceStepOutcome,
     surface_failure_reason,
 )
+from switch2_layers.surface.surface_questions import (
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
+from switch2_layers.surface.surface_record import answers_to_json, question_to_json
 from switch2_layers.surface.surface_types import (
     Box,
     BoxSource,
+    SurfaceExchange,
     SurfaceInput,
     SurfaceOutput,
+    SurfaceRequest,
 )
 
 ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
@@ -952,3 +962,213 @@ def test_plan_error_draws_no_boxes_without_counting_as_failure(tmp_path):
         == build_surface_image(frame, 320, DEFAULT_JPEG_QUALITY).jpeg
     )
     assert harness.loop.consecutive_errors == 0
+
+
+# --- 送った要求の記録 (surface_requests.jsonl) と、surface.jsonl の要求の番号・答え・usage ---
+
+REQUEST_QUESTION = SurfaceQuestion(
+    name="scene_changed",
+    instructions="画面の種類が変わったか。",
+    kind=QuestionKind.SCENE_CHANGE,
+    target="",
+    question_type=QuestionType.NOUL,
+)
+ANSWERS = JevAnswers(
+    choices={"button_A": {"none": 0.2, "hold": 0.7, "tap": 0.1}},
+    nouls={"scene_changed": 0.25},
+    boxes={"box_1": None},
+    usage={"input_tokens": 9, "output_tokens": 1},
+)
+SEND_DELAY_S = (
+    0.05  # decide を呼んでから Jev に送るまでの時間 (RequestingDecider が時計を進める)
+)
+
+
+class RequestingDecider:
+    """Jev を呼ぶ SurfaceDecider の偽物。
+
+    decide のたびに要求の番号を 1 増やし、時計を SEND_DELAY_S 進めてから、request_sink に要求を渡す
+    (Jev に送る直前に書く)。その後、results を順に返す (例外なら出す。最後の 1 つは繰り返す)。返す出力には、
+    渡した要求と ANSWERS の exchange を付ける。swallow_sink_error なら、request_sink の例外を外に出さない。
+    """
+
+    def __init__(
+        self,
+        monotonic: FakeMonotonic,
+        *results: SurfaceOutput | Exception,
+        swallow_sink_error: bool = False,
+    ):
+        self.monotonic = monotonic
+        self.results = list(results)
+        self.swallow_sink_error = swallow_sink_error
+        self.inputs: list[SurfaceInput] = []
+        self.count = 0
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        self.inputs.append(surface_input)
+        self.count += 1
+        self.monotonic.now += SEND_DELAY_S
+        request = SurfaceRequest(
+            request_index=self.count,
+            model="jev-test",
+            state={
+                "frames": [
+                    {"label": frame.label, "image": frame.file}
+                    for frame in surface_input.frames
+                ]
+            },
+            questions=(REQUEST_QUESTION,),
+        )
+        if surface_input.request_sink is not None:
+            try:
+                surface_input.request_sink(request)
+            except Exception:
+                if not self.swallow_sink_error:
+                    raise
+        result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if isinstance(result, Exception):
+            raise result
+        return dataclasses.replace(result, exchange=SurfaceExchange(request, ANSWERS))
+
+
+def use_decider(harness: Harness, decider) -> None:
+    harness.loop.parts = dataclasses.replace(harness.loop.parts, decider=decider)
+
+
+def requesting_harness(
+    tmp_path: Path, *results: SurfaceOutput | Exception, **options: bool
+) -> tuple[Harness, RequestingDecider]:
+    harness = make_harness(tmp_path, ScriptedDecider(neutral_output()))
+    decider = RequestingDecider(harness.monotonic, *results, **options)
+    use_decider(harness, decider)
+    return harness, decider
+
+
+def requests_log(harness: Harness) -> Path:
+    return harness.root / "surface_requests.jsonl"
+
+
+def test_sent_frames_carry_the_saved_files(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.0, 9.5, 10.0])
+    result = harness.loop.step()
+    assert result.row is not None
+    files = [frame.file for frame in decider.inputs[0].frames]
+    # decide に渡す画像は、surface.jsonl と同じ、保存を予約したファイルを持つ
+    assert files == [frame["file"] for frame in result.row["frames"]]
+    assert files == [
+        "frames/surface/000009000.jpg",
+        "frames/surface/000009500.jpg",
+        "frames/surface/000010000.jpg",
+    ]
+
+
+def test_request_line_is_written_just_before_sending(tmp_path):
+    harness, _ = requesting_harness(tmp_path, neutral_output())
+    add_frames(harness, [9.5, 9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    rows = read_rows(requests_log(harness))
+    assert len(rows) == 1
+    row = rows[0]
+    assert list(row) == ["request", "t_sent", "model", "state", "questions"]
+    assert row["request"] == 1
+    # 送った時刻は、decide を呼んだ時刻 (surface.jsonl の t_sent) ではなく、送る直前の時刻
+    assert row["t_sent"] == pytest.approx(NOW + SEND_DELAY_S)
+    assert result.row is not None
+    assert result.row["t_sent"] == NOW
+    assert row["model"] == "jev-test"
+    assert row["questions"] == [question_to_json(REQUEST_QUESTION)]
+    # 画像は、surface.jsonl の frames と同じファイル名
+    assert [frame["image"] for frame in row["state"]["frames"]] == [
+        frame["file"] for frame in result.row["frames"]
+    ]
+
+
+def test_surface_row_has_request_answers_and_usage_of_the_output(tmp_path):
+    harness, _ = requesting_harness(tmp_path, neutral_output())
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    harness.monotonic.now = ORIGIN + NOW + 0.3
+    add_frames(harness, [10.2])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert result.row is not None
+    assert result.row["request"] == 2
+    assert result.row["answers"] == answers_to_json(ANSWERS)
+    assert result.row["usage"] == {"input_tokens": 9, "output_tokens": 1}
+    assert [row["request"] for row in read_rows(requests_log(harness))] == [1, 2]
+    surface_rows = read_rows(harness.root / "surface.jsonl")
+    assert [row["request"] for row in surface_rows] == [1, 2]
+
+
+def test_request_failing_after_sending_keeps_its_line_and_number(tmp_path):
+    harness, _ = requesting_harness(tmp_path, RuntimeError("HTTP 500"))
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.DECIDE_ERROR
+    assert result.row is not None
+    assert "HTTP 500" in result.row["error"]
+    # 送った後に失敗した要求: 番号を書き、答えと usage は null。送った要求の行は残る
+    assert result.row["request"] == 1
+    assert result.row["answers"] is None
+    assert result.row["usage"] is None
+    assert [row["request"] for row in read_rows(requests_log(harness))] == [1]
+
+
+def test_request_failing_before_sending_has_no_request_number(tmp_path):
+    harness = make_harness(tmp_path, ScriptedDecider(RuntimeError("no run directory")))
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.DECIDE_ERROR
+    assert result.row is not None
+    assert result.row["request"] is None
+    assert result.row["answers"] is None
+    assert result.row["usage"] is None
+    assert not requests_log(harness).exists()
+
+
+def test_fake_surface_writes_no_request_lines(tmp_path):
+    harness = make_harness(tmp_path, ScriptedDecider(neutral_output()))
+    use_decider(harness, FakeSurfaceDecider())
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert result.row is not None
+    assert result.row["request"] is None
+    assert result.row["answers"] is None
+    assert result.row["usage"] is None
+    assert not requests_log(harness).exists()
+
+
+@pytest.mark.parametrize("file_name", ["surface.jsonl", "surface_requests.jsonl"])
+def test_log_write_failure_stops_the_loop(tmp_path, file_name):
+    harness, _ = requesting_harness(tmp_path, neutral_output())
+    # 追記できないように、同じ名前のディレクトリーを置く
+    (harness.root / file_name).mkdir()
+    add_frames(harness, [9.9])
+    with pytest.raises(OSError):
+        harness.loop.step()
+    # どちらのファイルでも、run は全体を止める
+    harness.loop.run(threading.Event())
+    assert len(harness.stops) == 1
+    assert harness.stops[0].startswith("surface loop failed")
+
+
+@pytest.mark.parametrize("swallow", [False, True], ids=["raised", "swallowed"])
+def test_request_log_write_failure_is_not_a_decide_failure(tmp_path, swallow):
+    harness, _ = requesting_harness(
+        tmp_path, neutral_output(), swallow_sink_error=swallow
+    )
+    (harness.root / "surface_requests.jsonl").mkdir()
+    add_frames(harness, [9.9])
+    # decide がその例外を出しても出さなくても、step の外に出す
+    with pytest.raises(OSError):
+        harness.loop.step()
+    # decide の失敗には数えず、操作を送らず、surface.jsonl と run.jsonl にも書かない
+    assert harness.loop.consecutive_errors == 0
+    assert harness.sender.reports == []
+    assert read_rows(harness.root / "surface.jsonl") == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert harness.stops == []

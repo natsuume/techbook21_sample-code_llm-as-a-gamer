@@ -1,4 +1,4 @@
-"""操作の決め方の規則。入出力の例は、現行の switch2_agent の規則のテスト (tests/test_action_decision.py) と同じ。"""
+"""操作の決め方の規則。スティックの入出力の例は、switch2_agent の規則のテスト (tests/test_action_decision.py) と同じ。"""
 
 import pytest
 
@@ -15,12 +15,14 @@ from switch2_layers.surface.action_rules import (
     decide_info_labels,
     decide_pad_action,
     decide_scene_changed,
+    keep_single_dpad_direction,
     probabilities_equal,
-    remove_opposite_dpad,
     visible_target_names,
 )
 from switch2_layers.surface.box_targets import BoxTarget
 from switch2_layers.surface.surface_questions import (
+    HOLD_LONG_SECONDS,
+    HOLD_SHORT_SECONDS,
     NONE_CHOICE,
     QuestionType,
     SurfaceQuestion,
@@ -66,8 +68,10 @@ def decide(
     return decide_pad_action(choices, nouls, questions())
 
 
-def button(none: float, hold: float, tap: float) -> dict[str, float]:
-    return {"none": none, "hold": hold, "tap": tap}
+def button(
+    none: float, tap: float = 0.0, hold_short: float = 0.0, hold_long: float = 0.0
+) -> dict[str, float]:
+    return {"none": none, "tap": tap, "hold_short": hold_short, "hold_long": hold_long}
 
 
 def x_axis(none: float, left: float, right: float) -> dict[str, float]:
@@ -91,6 +95,8 @@ def test_constants_follow_the_issue():
     assert STICK_STRENGTH_STEP == 0.25
     assert SCENE_CHANGE_THRESHOLD == 0.5
     assert BOX_EXISTS_THRESHOLD == 0.5
+    assert HOLD_SHORT_SECONDS == 0.3
+    assert HOLD_LONG_SECONDS == 1.0
 
 
 def test_neutral_answers_give_neutral_action():
@@ -100,40 +106,53 @@ def test_neutral_answers_give_neutral_action():
 # --- ボタン ---
 
 
-def test_button_is_pressed_only_when_hold_or_tap_is_chosen():
-    action = decide({"button_A": button(0.0, 1.0, 0.0)})
+def test_tap_choice_gives_tap():
+    action = decide({"button_B": button(0.1, tap=0.9)})
+    assert action.held == frozenset()
+    assert action.taps == frozenset({"B"})
+    assert action.hold_seconds == {}
+
+
+def test_hold_short_choice_gives_hold_with_short_seconds():
+    action = decide({"button_A": button(0.1, hold_short=0.9)})
     assert action.held == frozenset({"A"})
     assert action.taps == frozenset()
+    assert action.hold_seconds == {"A": 0.3}
+
+
+def test_hold_long_choice_gives_hold_with_long_seconds():
+    action = decide({"button_A": button(0.1, hold_long=0.9)})
+    assert action.held == frozenset({"A"})
+    assert action.taps == frozenset()
+    assert action.hold_seconds == {"A": 1.0}
 
 
 def test_button_is_pressed_when_press_side_sum_exceeds_none_even_if_none_is_largest():
-    action = decide({"button_A": button(0.4, 0.35, 0.25)})
+    # 押す側の合計 0.1 + 0.35 + 0.15 = 0.6 が none の 0.4 を超える
+    action = decide({"button_A": button(0.4, tap=0.1, hold_short=0.35, hold_long=0.15)})
     assert action.held == frozenset({"A"})
     assert action.taps == frozenset()
-
-
-def test_button_is_tapped_when_tap_is_more_probable_than_hold():
-    action = decide({"button_B": button(0.2, 0.3, 0.5)})
-    assert action.held == frozenset()
-    assert action.taps == frozenset({"B"})
+    assert action.hold_seconds == {"A": 0.3}
 
 
 def test_button_is_not_pressed_when_press_side_sum_equals_none():
     action = decide(
         {
-            "button_A": button(0.5, 0.25, 0.25),
-            "button_B": button(0.375, 0.375, 0.25),
+            "button_A": button(0.5, tap=0.2, hold_short=0.2, hold_long=0.1),
+            "button_B": button(0.4, tap=0.1, hold_short=0.1, hold_long=0.4),
         }
     )
     assert action.held == frozenset({"B"})
     assert action.taps == frozenset()
+    assert action.hold_seconds == {"B": 1.0}
 
 
 def test_button_is_not_pressed_when_press_side_sum_equals_none_up_to_rounding():
-    assert 0.1 + 0.2 != 0.3
-    action = decide({"button_A": button(0.3, 0.1, 0.2)})
+    assert 0.1 + 0.2 + 0.3 != 0.6
+    action = decide({"button_A": button(0.6, tap=0.1, hold_short=0.2, hold_long=0.3)})
     assert action.held == frozenset()
     assert action.taps == frozenset()
+    assert action.hold_seconds == {}
 
 
 def test_probabilities_equal_uses_tolerance():
@@ -142,76 +161,174 @@ def test_probabilities_equal_uses_tolerance():
     assert not probabilities_equal(0.8, 0.8 + PROBABILITY_TOLERANCE * 10)
 
 
-def test_hold_wins_when_hold_and_tap_are_equal():
-    action = decide({"button_X": button(0.0, 0.5, 0.5)})
-    assert action.held == frozenset({"X"})
+def test_press_style_is_the_most_probable_of_the_three():
+    action = decide(
+        {
+            "button_A": button(0.1, tap=0.2, hold_short=0.3, hold_long=0.4),
+            "button_B": button(0.1, tap=0.5, hold_short=0.3, hold_long=0.1),
+            "button_X": button(0.1, tap=0.2, hold_short=0.5, hold_long=0.2),
+        }
+    )
+    assert action.held == frozenset({"A", "X"})
+    assert action.taps == frozenset({"B"})
+    assert action.hold_seconds == {"A": 1.0, "X": 0.3}
+
+
+def test_press_style_tie_picks_the_shorter_press():
+    action = decide(
+        {
+            # tap と hold_short が同率の最大 → tap
+            "button_A": button(0.1, tap=0.4, hold_short=0.4, hold_long=0.1),
+            # hold_short と hold_long が同率の最大 → hold_short
+            "button_B": button(0.1, tap=0.1, hold_short=0.4, hold_long=0.4),
+            # 3 つとも同じ → tap
+            "button_X": button(0.1, tap=0.3, hold_short=0.3, hold_long=0.3),
+            # tap と hold_long が同率の最大 → tap
+            "button_Y": button(0.1, tap=0.4, hold_short=0.1, hold_long=0.4),
+        }
+    )
+    assert action.taps == frozenset({"A", "X", "Y"})
+    assert action.held == frozenset({"B"})
+    assert action.hold_seconds == {"B": 0.3}
+
+
+def test_press_style_compares_probabilities_exactly():
+    # 押し方の比較は確率をそのまま比べる (丸めの差でも大きい方を選ぶ)
+    assert 0.1 + 0.2 > 0.3
+    action = decide({"button_A": button(0.1, tap=0.3, hold_short=0.1 + 0.2)})
     assert action.taps == frozenset()
+    assert action.held == frozenset({"A"})
+    assert action.hold_seconds == {"A": 0.3}
 
 
 def test_each_button_is_decided_by_its_own_question():
     action = decide(
         {
-            "button_A": button(0.1, 0.8, 0.1),
-            "button_B": button(0.1, 0.1, 0.8),
-            "button_ZR": button(0.9, 0.05, 0.05),
+            "button_A": button(0.1, tap=0.1, hold_long=0.8),
+            "button_B": button(0.1, tap=0.8, hold_short=0.1),
+            "button_ZR": button(0.9, tap=0.05, hold_short=0.05),
         }
     )
     assert action.held == frozenset({"A"})
     assert action.taps == frozenset({"B"})
+    assert action.hold_seconds == {"A": 1.0}
 
 
-# --- 十字キーの相反 ---
+# --- 十字キーを 1 方向に絞る ---
 
 
-def test_opposite_dpad_keeps_higher_press_side_sum_across_hold_and_tap():
-    action = decide(
-        {"button_UP": button(0.3, 0.7, 0.0), "button_DOWN": button(0.1, 0.0, 0.9)}
-    )
-    assert action.held == frozenset()
-    assert action.taps == frozenset({"DOWN"})
-
-
-def test_opposite_dpad_compares_press_side_sum_not_probability_of_adopted_choice():
-    action = decide(
-        {"button_UP": button(0.1, 0.5, 0.4), "button_DOWN": button(0.2, 0.8, 0.0)}
-    )
-    assert action.held == frozenset({"UP"})
-    assert action.taps == frozenset()
-
-
-def test_opposite_dpad_with_equal_press_side_sum_drops_both():
+def test_two_dpad_directions_keep_the_higher_press_side_sum():
     action = decide(
         {
-            "button_LEFT": button(0.25, 0.0, 0.75),
-            "button_RIGHT": button(0.25, 0.75, 0.0),
-            "button_UP": button(0.0, 1.0, 0.0),
+            "button_UP": button(0.1, hold_short=0.9),
+            "button_RIGHT": button(0.2, hold_long=0.8),
         }
     )
     assert action.held == frozenset({"UP"})
     assert action.taps == frozenset()
+    assert action.hold_seconds == {"UP": 0.3}
 
 
-def test_opposite_dpad_with_press_side_sums_equal_up_to_rounding_drops_both():
+def test_opposite_dpad_keeps_higher_press_side_sum_across_press_styles():
+    action = decide(
+        {"button_UP": button(0.3, hold_long=0.7), "button_DOWN": button(0.1, tap=0.9)}
+    )
+    assert action.held == frozenset()
+    assert action.taps == frozenset({"DOWN"})
+    assert action.hold_seconds == {}
+
+
+def test_dpad_compares_press_side_sum_not_probability_of_adopted_choice():
+    # UP の合計は 0.9 (押し方は hold_short の 0.5)、LEFT の合計は 0.8 (押し方は hold_long の 0.8)
+    action = decide(
+        {
+            "button_UP": button(0.1, tap=0.4, hold_short=0.5),
+            "button_LEFT": button(0.2, hold_long=0.8),
+        }
+    )
+    assert action.held == frozenset({"UP"})
+    assert action.hold_seconds == {"UP": 0.3}
+
+
+def test_three_dpad_directions_keep_only_the_highest():
+    action = decide(
+        {
+            "button_UP": button(0.1, hold_short=0.9),
+            "button_LEFT": button(0.2, tap=0.8),
+            "button_DOWN": button(0.3, hold_long=0.7),
+        }
+    )
+    assert action.held == frozenset({"UP"})
+    assert action.taps == frozenset()
+    assert action.hold_seconds == {"UP": 0.3}
+
+
+def test_dpad_tie_at_the_highest_drops_all_directions():
+    action = decide(
+        {
+            "button_LEFT": button(0.25, tap=0.75),
+            "button_RIGHT": button(0.25, hold_short=0.75),
+            "button_DOWN": button(0.4, hold_long=0.6),
+            "button_A": button(0.0, hold_long=1.0),
+        }
+    )
+    # 十字キーの方向はすべて外し、十字キー以外のボタンは残す
+    assert action.held == frozenset({"A"})
+    assert action.taps == frozenset()
+    assert action.hold_seconds == {"A": 1.0}
+
+
+def test_dpad_tie_up_to_rounding_drops_all_directions():
     assert 0.1 + 0.7 != 0.3 + 0.5
     action = decide(
-        {"button_UP": button(0.2, 0.1, 0.7), "button_DOWN": button(0.2, 0.3, 0.5)}
+        {
+            "button_UP": button(0.2, tap=0.1, hold_short=0.7),
+            "button_DOWN": button(0.2, tap=0.3, hold_short=0.5),
+        }
     )
     assert action.held == frozenset()
     assert action.taps == frozenset()
 
 
-def test_non_opposite_dpad_directions_can_be_combined():
+def test_single_dpad_direction_is_kept():
+    action = decide({"button_DOWN": button(0.2, hold_long=0.8)})
+    assert action.held == frozenset({"DOWN"})
+    assert action.hold_seconds == {"DOWN": 1.0}
+
+
+def test_dpad_is_not_narrowed_against_sticks():
     action = decide(
-        {"button_UP": button(0.1, 0.9, 0.0), "button_RIGHT": button(0.2, 0.8, 0.0)}
+        {
+            "button_UP": button(0.1, hold_short=0.9),
+            "stick_LS_x": x_axis(0.0, 0.0, 1.0),
+        }
     )
-    assert action.held == frozenset({"UP", "RIGHT"})
+    assert action.held == frozenset({"UP"})
+    assert action.left_stick == (0.25, 0.0)
 
 
-def test_remove_opposite_dpad_does_not_change_its_argument():
-    adopted = {"UP": ("hold", 0.9), "DOWN": ("tap", 0.8), "A": ("hold", 0.7)}
+def test_keep_single_dpad_direction_does_not_change_its_argument():
+    adopted = {
+        "UP": ("hold_short", 0.9),
+        "RIGHT": ("tap", 0.8),
+        "A": ("hold_long", 0.7),
+    }
     before = dict(adopted)
-    assert remove_opposite_dpad(adopted) == {"UP": ("hold", 0.9), "A": ("hold", 0.7)}
+    assert keep_single_dpad_direction(adopted) == {
+        "UP": ("hold_short", 0.9),
+        "A": ("hold_long", 0.7),
+    }
     assert adopted == before
+
+
+def test_keep_single_dpad_direction_with_tie_drops_all_directions():
+    adopted = {
+        "UP": ("tap", 0.8),
+        "LEFT": ("hold_long", 0.8),
+        "DOWN": ("tap", 0.6),
+        "B": ("tap", 0.9),
+    }
+    assert keep_single_dpad_direction(adopted) == {"B": ("tap", 0.9)}
 
 
 # --- スティックの向き ---
@@ -304,12 +421,13 @@ def test_stick_strength_of_none_axis_is_not_used():
 def test_sticks_and_buttons_are_decided_together():
     action = decide(
         {
-            "button_A": button(0.1, 0.9, 0.0),
+            "button_A": button(0.1, hold_short=0.9),
             "stick_LS_x": x_axis(0.0, 1.0, 0.0),
             "stick_RS_y": y_axis(0.0, 1.0, 0.0),
         }
     )
     assert action.held == frozenset({"A"})
+    assert action.hold_seconds == {"A": 0.3}
     assert action.left_stick == (-0.25, 0.0)
     assert action.right_stick == (0.0, 0.25)
 

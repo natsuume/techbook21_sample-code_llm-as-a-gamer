@@ -1,5 +1,6 @@
 """surface 層の型: SurfaceDecider の入力 (SurfaceInput) と出力 (SurfaceOutput)、その部品と Protocol。"""
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -7,6 +8,8 @@ from typing import Protocol
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.surface.jev_client import JevAnswers
+from switch2_layers.surface.surface_questions import SurfaceQuestion
 
 
 @dataclass(frozen=True)
@@ -16,11 +19,15 @@ class SurfaceFrame:
     t       フレームの時刻 (実行の経過秒)
     jpeg    左上に t を、追えている box の枠と名前を書き込んだ JPEG のバイト列 (frames.surface_frames.build_surface_image)
     label   画像のラベル (frames.surface_frames.format_frame_label(t))
+    file    この画像の保存を予約した、実行ディレクトリーからの相対パス (frames/surface/<tミリ秒9桁>.jpg など。
+            surface.jsonl の frames の file と同じ値)。保存を捨てたとき (frame_store.FrameStore.save_surface が
+            None を返したとき) と、保存しないとき (テストなど) は None
     """
 
     t: float
     jpeg: bytes
     label: str
+    file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,36 @@ class RecentAction:
 
 
 @dataclass(frozen=True)
+class SurfaceRequest:
+    """Jev に送る要求 1 回の、記録に書く内容 (surface_requests.jsonl の 1 行の元)。
+
+    request_index   要求の番号 (1 始まり。JevSurfaceDecider.request_count と同じ数え方)
+    model           要求の model (モデル名)
+    state           Jev に送った state と同じ内容で、frames の各要素の image (画像の参照文字列) を、その画像の
+                    SurfaceFrame.file (保存を予約できなかった画像は None) に置き換えたもの
+    questions       送った問い (送った順)
+    API キーと HTTP のヘッダーは持たない。
+    """
+
+    request_index: int
+    model: str
+    state: Mapping[str, object]
+    questions: tuple[SurfaceQuestion, ...]
+
+
+@dataclass(frozen=True)
+class SurfaceExchange:
+    """1 回の要求の、記録のための情報 (SurfaceOutput.exchange)。
+
+    request   送った要求 (要求の番号・モデル名・記録の形の state・問い)
+    answers   受け取った答え (すべての問いの答えと、応答の usage)
+    """
+
+    request: SurfaceRequest
+    answers: JevAnswers
+
+
+@dataclass(frozen=True)
 class SurfaceInput:
     """SurfaceDecider.decide の入力。
 
@@ -67,6 +104,10 @@ class SurfaceInput:
     timeline               系列情報 (middle/state.json の timeline)。ファイルが無ければ空文字列
     timeline_generated_t   系列情報を作った時刻 (middle/state.json の generated_t)。ファイルが無ければ None
     recent_actions         直近に送った操作 (古い順。最大 surface_loop.RECENT_ACTIONS_COUNT 件)
+    request_sink           送る要求の書き込み先 (surface のループが要求ごとに渡す)。Jev を呼ぶ実装は、Jev に要求を
+                           送る直前に 1 回だけ SurfaceRequest を渡して呼ぶ。要求を作る前に失敗したら呼ばない。
+                           呼んだ書き込み先が例外を出したら、要求を送らずにその例外をそのまま出す。
+                           None なら何も書かない。Jev を呼ばない実装 (フェイク) は呼ばない
     progress               画面の停滞の計測の最新の値 (progress/state.json)。ファイルが無いか読めなければ None。
                            既定値の None は、値を渡さない入力 (フェイクやテストなど) のため
     """
@@ -77,6 +118,7 @@ class SurfaceInput:
     timeline: str
     timeline_generated_t: float | None
     recent_actions: tuple[RecentAction, ...]
+    request_sink: Callable[[SurfaceRequest], None] | None = None
     progress: ProgressState | None = None
 
 
@@ -130,6 +172,7 @@ class SurfaceOutput:
     info_labels     フレームへの情報ラベル
     boxes           要求の最新のフレーム (SurfaceInput.frames の最後) での box
     scene_changed   場面転換を検知したら True (次の middle の入力に伝わる)
+    exchange        記録のための情報 (送った要求と受け取った答え)。Jev を呼ばない実装 (フェイク) では None
     """
 
     action: PadAction
@@ -137,6 +180,7 @@ class SurfaceOutput:
     info_labels: tuple[InfoLabel, ...] = ()
     boxes: tuple[Box, ...] = ()
     scene_changed: bool = False
+    exchange: SurfaceExchange | None = None
 
 
 class SurfaceDecider(Protocol):

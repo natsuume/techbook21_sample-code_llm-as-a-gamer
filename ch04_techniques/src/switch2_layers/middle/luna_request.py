@@ -28,7 +28,7 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     2. 場面ラベルの一覧                 describe_scene_labels(middle_input.scene_labels)
     3. 場所の名前の一覧                 describe_place_names(middle_input.place_names)
     4. マップ                           describe_map_document(middle_input.map_document)
-    5. 前回の middle の出力             describe_previous_state(middle_input.previous_state)
+    5. 前回の middle の出力             describe_previous_state(middle_input.previous_state, middle_input.t)
     6. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
     7. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
     8. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
@@ -145,14 +145,21 @@ def describe_progress(progress: ProgressState | None) -> str:
     raise NotImplementedError
 
 
-def describe_previous_state(state: MiddleState | None) -> str:
+def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
     """前回の middle の出力を、次の行の文にする。state が None なら EMPTY_TEXT を返す。
+
+    now_t は今回の入力の時刻 (MiddleInput.t)。最初のタスクが今の文になってからの経過秒の基準にする。
 
         作成時刻: t=<generated_t> (入力の時刻 t=<based_on_t>)
         場面: <scene_name> (<scene_id>)        場面が決まっていなければ「場面: (決まっていない)」
         止まっているか: はい | いいえ
         詰まり方: <stuck_description>          空なら EMPTY_TEXT
         surface の待ち時間: <surface_wait_s> 秒        surface_wait_s は書式 g (例: 0.4)
+        最初のタスク: <first_task>             空なら EMPTY_TEXT
+        最初のタスクが今の文になった時刻: t=<first_task_since_t> (入力の時刻まで <経過> 秒)
+                                               経過は max(0.0, now_t - first_task_since_t) を小数 1 桁 (書式 .1f。
+                                               例: 35.2)。first_task_since_t が None なら
+                                               「最初のタスクが今の文になった時刻: (無い)」
         系列情報:
         <timeline>                             空なら EMPTY_TEXT
     t は format_frame_label の形。
@@ -163,6 +170,14 @@ def describe_previous_state(state: MiddleState | None) -> str:
         scene = "(決まっていない)"
     else:
         scene = f"{state.scene_name} ({state.scene_id})"
+    if state.first_task_since_t is None:
+        first_task_since_text = EMPTY_TEXT
+    else:
+        elapsed_s = max(0.0, now_t - state.first_task_since_t)
+        first_task_since_text = (
+            f"{format_frame_label(state.first_task_since_t)} "
+            f"(入力の時刻まで {elapsed_s:.1f} 秒)"
+        )
     return "\n".join(
         [
             (
@@ -173,6 +188,8 @@ def describe_previous_state(state: MiddleState | None) -> str:
             f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
             f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
             f"surface の待ち時間: {state.surface_wait_s:g} 秒",
+            f"最初のタスク: {state.first_task or EMPTY_TEXT}",
+            f"最初のタスクが今の文になった時刻: {first_task_since_text}",
             "系列情報:",
             state.timeline or EMPTY_TEXT,
         ]
@@ -194,7 +211,7 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
         describe_scene_labels(middle_input.scene_labels),
         describe_place_names(middle_input.place_names),
         describe_map_document(middle_input.map_document),
-        describe_previous_state(middle_input.previous_state),
+        describe_previous_state(middle_input.previous_state, middle_input.t),
         _stripped_or_empty_text(middle_input.strategy),
         _stripped_or_empty_text(middle_input.current_tasks),
         _stripped_or_empty_text(middle_input.current_controls),
