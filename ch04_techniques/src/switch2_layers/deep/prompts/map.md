@@ -7,10 +7,18 @@
 - 場所とつながりの一覧: `map/map.json` (JSON)
 - 場所ごとの文章: `map/places.md` (Markdown)
 
+マップの型 (`map.json` の最上位の `layout`):
+
+- ゲームの性質の文書 (${game_note}。まだ無いこともある) の「マップの形式」の節を読み、型を決める。節の最初の行が「- 型: マス目型」なら `"grid"` (マス目型)、それ以外 (「- 型: 自由型」「- 型: 未確認」、節や文書が無い) なら `"free"` (自由型) にする
+- `grid` は、主人公が 1 マス単位で動くゲームのための型で、場所ごとにマスの図 (`tiles`) と座標を持つ。middle は、現在地のマスを座標で書き、コードがマスの図から出口までの経路を計算する。`free` は、出口と通れない位置を文で持つ型である
+- 書いてある `map.json` の `layout` と、ゲームの性質から決めた型が違うときは、すべての場所とつながりを新しい型の形で書き直す。場所の `name`・`aliases`・`description`・`state`・`changes_on_entry` と、つながりの `from`・`to`・`how` は引き継ぐ。`free` から `grid` へ直すときは、まだマスの図を描けない場所の `tiles` を空の配列 `[]` にし、`exits`・`blocked`・`landmarks` も座標が分かるものだけを書く。`grid` から `free` へ直すときは、座標を含む説明 (出口・通れないマス・目印と、マスの図から分かる位置) を文にして、`exits`・`blocked` (目印は `description`) に移す
+- `map.json` がまだ無いときも、決めた型で書く
+
 材料 (middle のマップの記録):
 
 - middle のマップの記録 (`middle/map_records.jsonl`): ${map_records}
-  - 1 行が middle の 1 回の実行で、`{"t": 判断に使った画像の時刻 (秒), "scene_id": 場面 ID か null, "place_name": 現在地の場所の名前か null, "connections": [{"from": 移る前の場所, "to": 移った後の場所, "how": 移り方}, ...], "observations": [{"kind": "exit" (出口) か "landmark" (目印) か "blocked" (通れなかった位置), "place": 場所の名前, "description": 画面上の位置などの説明}, ...]}` の形
+  - 1 行が middle の 1 回の実行で、`{"t": 判断に使った画像の時刻 (秒), "scene_id": 場面 ID か null, "place_name": 現在地の場所の名前か null, "current_tile": 現在地のマスか null, "connections": [{"from": 移る前の場所, "to": 移った後の場所, "how": 移り方, "from_tile": 出たマスか null, "to_tile": 着いたマスか null}, ...], "observations": [{"kind": "exit" (出口) か "landmark" (目印) か "blocked" (通れなかった位置), "place": 場所の名前, "description": 画面上の位置などの説明, "tile": 観察したマスか null}, ...]}` の形
+  - マスは `{"x": 整数, "y": 整数}` の座標で、middle がそのときの `map.json` のその場所の座標で書いたものである。`current_tile` は `place_name` の場所、`from_tile` は `from` の場所、`to_tile` は `to` の場所、`tile` は `place` の場所の座標である。`map.json` が `grid` でないときや、その場所の `tiles` が空のときは null になる
 - 記録のうち、`t` が、前回、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻 (${previous_latest_frame_t}) の 60 秒前より後の行を読み、一覧と文章に取り込む。middle は応答を待つ間 (最大 30 秒) に、その時刻より前の `t` の行を後から足すことがあるため、前回の時刻の直前の行も読み直す。前回のジョブがすでに取り込んだ内容は、重ねて足さない。前回の時刻が「なし」なら、すべての行を読む。これより前まで遡って読むかは、あなたが決める
 - 記録は middle が数秒ごとに書いたもので、同じ場所が別の名前で書かれていることや、誤りがある。`from`・`to`・`place` が空の文字列のこともある。疑わしいときは、`t` の前後のフレームと surface の記録で確かめる
 - `from` か `to` が空のつながりと、`place` が空の観察は、そのまま一覧に取り込まない。フレームで場所が分かったときだけ、その場所の名前で取り込む
@@ -20,16 +28,26 @@
 - 同じ場所の重複をまとめる。名前は一覧 (`map.json`) に既にある名前を残し、まとめた別の名前 (middle が前に使った名前) は、その場所の `aliases` に入れる。middle は一覧の名前と `aliases` から現在地の名前を選ぶので、まとめた名前を捨てない
 - 一覧に無い場所は、記録の名前で足す
 - つながりの `from`・`to` は、一覧の場所の `name` で書く (`aliases` の名前を使わない)。同じ移動を重ねて書かない
-- 出口は `exits` に、通れない位置は `blocked` に、画面上の位置で書く。目印は `description` に書く
+- `free` では、出口は `exits` に、通れない位置は `blocked` に、画面上の位置で書く。目印は `description` に書く
 - `state` には、訪れたか、出口を通ったか、まだ確かめていないことは何かを短く書く
 - 同じ場所のつながり (出口の位置や、出た先の場所) が、訪れるたびに食い違うときは、入るたびに構造が変わる場所として、その場所の `changes_on_entry` を true にする。middle は、この場所のつながりを、次に入ったときの手順に使わない
 - 確かめたことと推測を区別する。推測には「(未確認)」を付ける
 - 一覧と文章は同じジョブで書き、場所の名前・出口・通れない位置・状態・構造が変わるかを一致させる。片方だけを書き換えない
 
-`map.json` の形:
+`grid` の書き方:
+
+- 座標は、x が右に、y が下に増える整数にする。マス (x, y) は、`tiles` の (y - `origin` の y) 行目の (x - `origin` の x) 文字目 (どちらも 0 から数える) である。`origin` は、`tiles` の 1 行目の 1 文字目のマスの座標である
+- `tiles` (マスの図) は、場所のフレームを見てマスを数えて描く。1 つの文字列が 1 行で、上の行から順に並べ、各行の文字数をそろえる。文字は `#` (通れない)・`.` (通れる)・`E` (出口)・`?` (まだ確かめていない) の 4 つだけを使う。フレームで確かめていないマスは `?` にする。まだ図を描けない場所は、空の配列 `[]` にする
+- 出口は `exits` に、通れないマスは `blocked` に、目印は `landmarks` に、座標 (`x`・`y`) と説明 (`description`) で書く。`blocked` に入れたマスは、`tiles` でも `#` で描く (コードは、`tiles` の文字と `blocked` の座標の両方を見て、通れないマスを決める)。出口のマスは、`tiles` では `E` で描く。`exits`・`blocked`・`landmarks` の座標は、`tiles` の範囲の外でもよい
+- middle の記録の `current_tile`・`tile`・`from_tile`・`to_tile` を取り込む。`current_tile` のマスは、主人公が立っていたので通れるマスである。`tile` は、観察の `kind` に合わせて `exits`・`landmarks`・`blocked` に入れる。`from_tile` と `to_tile` は、つながりの `from_tile` と `to_tile` に書く (分からなければ null)
+- 場所の範囲が左や上に広がったときは、`origin` の x か y を小さくして、`tiles` の左に列を、上に行を足す。既にあるマスの座標を変えない (middle の記録と、ほかの場所のつながりの座標が、そのまま使えるようにする)。右や下に広がったときは、`tiles` の右に列を、下に行を足す
+- 記録の座標が、今の `tiles` と食い違う (例: 通れないマスに主人公が立っている) ときは、`t` の前後のフレームで確かめてから直す
+
+`map.json` の形 (`free`):
 
 ```json
 {
+  "layout": "free",
   "places": [
     {
       "name": "家の 1 階",
@@ -47,13 +65,42 @@
 }
 ```
 
-- 最上位は object で、`places` と `connections` の 2 つの配列を持つ
-- `places` の各要素は、`name` (空でない文字列)・`aliases` (文字列の配列)・`description` (文字列)・`exits` (文字列の配列)・`blocked` (文字列の配列)・`state` (文字列)・`changes_on_entry` (true か false) の 7 つのキーをすべて持つ
-- `connections` の各要素は、`from`・`to` (どちらも空でない文字列)・`how` (文字列) の 3 つのキーをすべて持つ
+`map.json` の形 (`grid`):
+
+```json
+{
+  "layout": "grid",
+  "places": [
+    {
+      "name": "家の 1 階",
+      "aliases": ["1 階の部屋"],
+      "description": "自分の部屋から階段で下りた先の部屋",
+      "state": "訪問済み。出口は未通過",
+      "changes_on_entry": false,
+      "origin": {"x": 0, "y": 0},
+      "tiles": ["#########", "#...#...#", "#E......#"],
+      "exits": [{"x": 1, "y": 2, "description": "左下の赤いマット"}],
+      "blocked": [{"x": 4, "y": 1, "description": "机"}],
+      "landmarks": [{"x": 6, "y": 1, "description": "テレビ"}]
+    }
+  ],
+  "connections": [
+    {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "部屋の右上の階段を上に",
+     "from_tile": {"x": 7, "y": 1}, "to_tile": {"x": 7, "y": 1}}
+  ]
+}
+```
+
+- 最上位は object で、`layout` (`"grid"` か `"free"`) と、`places` と `connections` の 2 つの配列を持つ。最初のキーを `layout` にする
+- `free` の `places` の各要素は、`name` (空でない文字列)・`aliases` (文字列の配列)・`description` (文字列)・`exits` (文字列の配列)・`blocked` (文字列の配列)・`state` (文字列)・`changes_on_entry` (true か false) の 7 つのキーをすべて持つ。`connections` の各要素は、`from`・`to` (どちらも空でない文字列)・`how` (文字列) の 3 つのキーをすべて持つ
+- `grid` の `places` の各要素は、`name`・`aliases`・`description`・`state`・`changes_on_entry` (`free` と同じ型) と、`origin` (`{"x": 整数, "y": 整数}`)・`tiles` (文字列の配列)・`exits`・`blocked`・`landmarks` (`{"x": 整数, "y": 整数, "description": 文字列}` の配列) の 10 個のキーをすべて持つ。`connections` の各要素は、`from`・`to`・`how` (`free` と同じ型) と、`from_tile`・`to_tile` (`{"x": 整数, "y": 整数}` か null) の 5 つのキーをすべて持つ
+- 整数は、小数点を付けずに書く (`1.0` や true は整数として読まれない)
+- `layout` が `grid` なら、すべての場所とつながりを `grid` の形で書き、`free` なら `free` の形で書く。2 つの形を混ぜない
 - 形に合わない要素が 1 つでもあると、middle はマップ全体を「マップなし」として扱う。キーを省かず、値の型を守り、JSON として正しい形 (コメントや末尾のカンマを入れない) で書く
-- 場所もつながりもまだ無ければ、`{"places": [], "connections": []}` と書く
+- 場所もつながりもまだ無ければ、`{"layout": "free", "places": [], "connections": []}` (`grid` なら `"layout": "grid"`) と書く
 
 `places.md` の形:
 
 - 場所ごとに `## 場所: <name>` の節を置く。`<name>` は一覧の `name` と同じ文字列にし、一覧の場所の順に並べる
 - 各節には、次を箇条書きで書く: 別の名前 (`aliases`)、入り方 (どの場所から、どう入るか)、出口、通れない位置、状態、構造が変わるか (入るたびに構造が変わるなら「変わる」)
+- `grid` では、各節に、`map.json` と同じマスの図を、`origin` の座標を添えたコードブロックで書く。出口・通れないマス・目印も、座標を添えて書く

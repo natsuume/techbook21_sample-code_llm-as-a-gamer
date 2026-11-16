@@ -14,7 +14,7 @@ from switch2_layers.middle.middle_types import (
     MiddleOutput,
     ObservationKind,
 )
-from switch2_layers.notes.map_document import MapConnection
+from switch2_layers.notes.map_document import MapConnection, TilePosition
 
 FRAMES = (
     MiddleFrame(t=6.0, file="frames/interval/000006000.jpg", jpeg=b"a"),
@@ -36,13 +36,20 @@ INPUT = MiddleInput(
 )
 CONNECTIONS = (
     MapConnection(
-        from_place="自分の部屋 (2 階)", to_place="家の 1 階", how="右上の階段を下に"
+        from_place="自分の部屋 (2 階)",
+        to_place="家の 1 階",
+        how="右上の階段を下に",
+        from_tile=TilePosition(7, 0),
+        to_tile=TilePosition(-7, 1),
     ),
     MapConnection(from_place="家の 1 階", to_place="町", how=" 左下のマットから下へ "),
 )
 OBSERVATIONS = (
     MapObservation(
-        kind=ObservationKind.EXIT, place="家の 1 階", description="左下の赤いマット"
+        kind=ObservationKind.EXIT,
+        place="家の 1 階",
+        description="左下の赤いマット",
+        tile=TilePosition(1, 2),
     ),
     MapObservation(
         kind=ObservationKind.BLOCKED, place="家の 1 階", description="下側の壁"
@@ -57,6 +64,7 @@ OUTPUT = MiddleOutput(
     timeline="",
     tasks="- 町へ出る\n",
     place_name="家の 1 階",
+    current_tile=TilePosition(7, 1),
     new_connections=CONNECTIONS,
     new_observations=OBSERVATIONS,
 )
@@ -75,28 +83,58 @@ def test_row_has_latest_sent_frame_time_scene_place_and_items():
         "t": 15.25,
         "scene_id": "scene-002",
         "place_name": "家の 1 階",
+        "current_tile": {"x": 7, "y": 1},
         "connections": [
-            {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "右上の階段を下に"},
-            # 値は書かれたまま
-            {"from": "家の 1 階", "to": "町", "how": " 左下のマットから下へ "},
+            {
+                "from": "自分の部屋 (2 階)",
+                "to": "家の 1 階",
+                "how": "右上の階段を下に",
+                "from_tile": {"x": 7, "y": 0},
+                "to_tile": {"x": -7, "y": 1},
+            },
+            # 値は書かれたまま。座標の無いつながりは null
+            {
+                "from": "家の 1 階",
+                "to": "町",
+                "how": " 左下のマットから下へ ",
+                "from_tile": None,
+                "to_tile": None,
+            },
         ],
         "observations": [
-            {"kind": "exit", "place": "家の 1 階", "description": "左下の赤いマット"},
-            {"kind": "blocked", "place": "家の 1 階", "description": "下側の壁"},
-            {"kind": "landmark", "place": "町", "description": "噴水"},
+            {
+                "kind": "exit",
+                "place": "家の 1 階",
+                "description": "左下の赤いマット",
+                "tile": {"x": 1, "y": 2},
+            },
+            {
+                "kind": "blocked",
+                "place": "家の 1 階",
+                "description": "下側の壁",
+                "tile": None,
+            },
+            {"kind": "landmark", "place": "町", "description": "噴水", "tile": None},
         ],
     }
     assert MAP_RECORD_KEYS == (
         "t",
         "scene_id",
         "place_name",
+        "current_tile",
         "connections",
         "observations",
     )
     assert list(row) == list(MAP_RECORD_KEYS)
-    assert all(list(item) == ["from", "to", "how"] for item in row["connections"])
+    assert list(row["current_tile"]) == ["x", "y"]
     assert all(
-        list(item) == ["kind", "place", "description"] for item in row["observations"]
+        list(item) == ["from", "to", "how", "from_tile", "to_tile"]
+        for item in row["connections"]
+    )
+    assert list(row["connections"][0]["from_tile"]) == ["x", "y"]
+    assert all(
+        list(item) == ["kind", "place", "description", "tile"]
+        for item in row["observations"]
     )
     assert json.loads(json.dumps(row, ensure_ascii=False)) == row
 
@@ -123,9 +161,36 @@ def test_only_place_name_is_recorded():
         "t": 15.25,
         "scene_id": "scene-001",
         "place_name": "家の 1 階",
+        "current_tile": {"x": 7, "y": 1},
         "connections": [],
         "observations": [],
     }
+
+
+def test_place_name_without_current_tile_is_recorded_with_null_tile():
+    row = build_map_record(INPUT, "scene-001", map_output(current_tile=None))
+    assert row["place_name"] == "家の 1 階"
+    assert row["current_tile"] is None
+
+
+def test_current_tile_without_place_name_is_null():
+    # middle/state.json と同じく、place_name が null なら current_tile も null にする
+    for place_name in [None, "", "   "]:
+        row = build_map_record(INPUT, "scene-001", map_output(place_name=place_name))
+        assert row is not None
+        assert row["place_name"] is None
+        assert row["current_tile"] is None
+
+
+def test_current_tile_alone_is_not_recorded():
+    # current_tile は記録するかの判断に使わない (place_name が null で、つながりと観察が空なら記録しない)
+    output = map_output(
+        place_name=None,
+        current_tile=TilePosition(7, 1),
+        new_connections=(),
+        new_observations=(),
+    )
+    assert build_map_record(INPUT, "scene-001", output) is None
 
 
 def test_place_name_without_place_is_null_when_items_exist():

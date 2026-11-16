@@ -12,7 +12,15 @@ from switch2_layers.middle.middle_input_builder import (
     select_interval_frames,
 )
 from switch2_layers.middle.middle_types import MiddleState
-from switch2_layers.notes.map_document import MapConnection, MapDocument, MapPlace
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    GridMapPlace,
+    MapConnection,
+    MapDocument,
+    MapPlace,
+    TileMark,
+    TilePosition,
+)
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.run_directory import RunPaths
 
@@ -103,6 +111,25 @@ def test_read_middle_state(tmp_path):
     assert read_middle_state(path) is None
     path.write_text(json.dumps({**STATE, "is_stuck": "yes"}), encoding="utf-8")
     assert read_middle_state(path) is None
+
+
+def test_read_middle_state_with_place_and_current_tile(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {**STATE, "place_name": "家の 1 階", "current_tile": {"x": 7, "y": 1}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state = read_middle_state(path)
+    assert state.place_name == "家の 1 階"
+    assert state.current_tile == TilePosition(7, 1)
+    # 2 つのキーが無い middle/state.json は、どちらも None
+    path.write_text(json.dumps(STATE), encoding="utf-8")
+    state = read_middle_state(path)
+    assert state.place_name is None
+    assert state.current_tile is None
 
 
 # --- フレームの選び方 ---
@@ -630,3 +657,65 @@ def test_map_symlinked_to_outside_of_notes_is_passed_as_no_map(tmp_path):
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert middle_input.map_document is None
     assert middle_input.place_names == ("庭",)
+
+
+GRID_MAP_JSON = {
+    "layout": "grid",
+    "places": [
+        {
+            "name": "家の 1 階",
+            "aliases": ["1 階の部屋"],
+            "description": "",
+            "state": "",
+            "changes_on_entry": False,
+            "origin": {"x": 0, "y": 0},
+            "tiles": ["#####", "#...#", "#E..#"],
+            "exits": [{"x": 1, "y": 2, "description": "左下のマット"}],
+            "blocked": [],
+            "landmarks": [],
+        }
+    ],
+    "connections": [
+        {
+            "from": "家の 1 階",
+            "to": "町",
+            "how": "左下のマット",
+            "from_tile": {"x": 1, "y": 2},
+            "to_tile": None,
+        }
+    ],
+}
+GRID_MAP_DOCUMENT = GridMapDocument(
+    places=(
+        GridMapPlace(
+            name="家の 1 階",
+            aliases=("1 階の部屋",),
+            description="",
+            state="",
+            changes_on_entry=False,
+            origin=TilePosition(0, 0),
+            tiles=("#####", "#...#", "#E..#"),
+            exits=(TileMark(TilePosition(1, 2), "左下のマット"),),
+            blocked=(),
+            landmarks=(),
+        ),
+    ),
+    connections=(
+        MapConnection(
+            from_place="家の 1 階",
+            to_place="町",
+            how="左下のマット",
+            from_tile=TilePosition(1, 2),
+            to_tile=None,
+        ),
+    ),
+)
+
+
+def test_grid_map_is_read(tmp_path):
+    root = make_run(tmp_path)
+    write_map(root, GRID_MAP_JSON)
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.map_document == GRID_MAP_DOCUMENT
+    # grid の場所の name と aliases も、場所の名前の一覧に入れる
+    assert middle_input.place_names == ("家の 1 階", "1 階の部屋")

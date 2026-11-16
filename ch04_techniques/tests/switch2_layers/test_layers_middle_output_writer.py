@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -10,6 +11,7 @@ from switch2_layers.middle.middle_output_writer import (
     write_middle_output,
 )
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput, MiddleState
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.run_directory import RunPaths
 
@@ -26,6 +28,8 @@ STATE_KEYS = [
     "operations_rows_offset",
     "first_task",
     "first_task_since_t",
+    "place_name",
+    "current_tile",
 ]
 EMPTY_LABELS = {"scenes": []}
 
@@ -146,6 +150,9 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         "operations_rows_offset": 84,
         "first_task": "宿屋に入る",
         "first_task_since_t": 12.8,
+        # 場所を出力しない回は null
+        "place_name": None,
+        "current_tile": None,
     }
 
 
@@ -415,3 +422,77 @@ def test_failed_label_write_keeps_scene_new_for_next_call(tmp_path):
     (root / "notes" / "scene_labels.json").rmdir()
     result = write_middle_output(paths, middle_input(6.0), output("町"), 6.5)
     assert result.new_scene == SceneLabel("scene-001", "町", 6.0)
+
+
+# --- 現在地の場所とマス ---
+
+
+def place_output(
+    place_name: str | None, current_tile: TilePosition | None
+) -> MiddleOutput:
+    return dataclasses.replace(
+        output("町"), place_name=place_name, current_tile=current_tile
+    )
+
+
+def test_place_name_and_current_tile_are_written_to_state(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0),
+        place_output(" 家の 1 階 ", TilePosition(7, -1)),
+        12.8,
+    )
+    # place_name は前後の空白を除いたもの、current_tile は出力の値
+    assert result.state.place_name == "家の 1 階"
+    assert result.state.current_tile == TilePosition(7, -1)
+    state = read_json(root / "middle" / "state.json")
+    assert list(state) == STATE_KEYS
+    assert state["place_name"] == "家の 1 階"
+    assert state["current_tile"] == {"x": 7, "y": -1}
+    assert list(state["current_tile"]) == ["x", "y"]
+
+
+def test_place_name_without_current_tile_is_written_with_null_tile(tmp_path):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root), middle_input(12.0), place_output("家の 1 階", None), 12.8
+    )
+    assert result.state.place_name == "家の 1 階"
+    assert result.state.current_tile is None
+    state = read_json(root / "middle" / "state.json")
+    assert state["place_name"] == "家の 1 階"
+    assert state["current_tile"] is None
+
+
+@pytest.mark.parametrize("place_name", [None, "", "   "])
+def test_current_tile_without_place_name_is_null(tmp_path, place_name):
+    # place_name が null なら、出力の current_tile があっても null にする
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0),
+        place_output(place_name, TilePosition(7, 1)),
+        12.8,
+    )
+    assert result.state.place_name is None
+    assert result.state.current_tile is None
+    state = read_json(root / "middle" / "state.json")
+    assert list(state) == STATE_KEYS
+    assert state["place_name"] is None
+    assert state["current_tile"] is None
+
+
+def test_place_is_written_without_scene(tmp_path):
+    # 場面が決まらない (tasks.md を書かない) 回も、場所とマスを書く
+    root = make_run(tmp_path)
+    output_without_scene = dataclasses.replace(
+        place_output("家の 1 階", TilePosition(2, 3)), scene_name=None
+    )
+    result = write_middle_output(
+        RunPaths(root), middle_input(12.0), output_without_scene, 12.8
+    )
+    assert result.state.scene_id is None
+    assert result.state.place_name == "家の 1 階"
+    assert result.state.current_tile == TilePosition(2, 3)
+    assert not (root / "notes" / "scenes").exists()

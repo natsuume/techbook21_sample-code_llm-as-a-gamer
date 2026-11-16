@@ -1,13 +1,17 @@
 """gpt-6-luna の出力の JSON Schema (Structured Outputs) と、出力の JSON の文を MiddleOutput にする読み取り。I/O を扱わない。
 
 出力の形 (すべて required。additionalProperties は false。キーの順に書かせる):
-    {"scene_name": 文字列, "place_name": 文字列,
-     "new_connections": [{"from": 文字列, "to": 文字列, "how": 文字列}, ...],
-     "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列}, ...],
+    {"scene_name": 文字列, "place_name": 文字列, "current_tile": 座標か null,
+     "new_connections": [{"from": 文字列, "to": 文字列, "how": 文字列, "from_tile": 座標か null,
+                          "to_tile": 座標か null}, ...],
+     "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列,
+                           "tile": 座標か null}, ...],
      "is_stuck": 真偽, "stuck_description": 文字列,
      "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列, "tasks": 文字列}
-new_connections と new_observations の要素も、すべて required で additionalProperties は false。
-場所の項目 (place_name・new_connections・new_observations) は、短期タスクリスト (tasks) より前に書かせる。
+座標は {"x": 整数, "y": 整数} (入力のマップのその場所の座標。x は右に、y は下に増える)。座標か null の値は、
+スキーマでは anyOf で座標の object と {"type": "null"} を並べる (_tile_or_null_schema)。
+new_connections と new_observations の要素と、座標の object も、すべて required で additionalProperties は false。
+場所の項目 (place_name・current_tile・new_connections・new_observations) は、短期タスクリスト (tasks) より前に書かせる。
 scene_name が空 (空白だけを含む) なら、場面を決められなかったものとして MiddleOutput の scene_name を None にする。
 place_name も同じく、空なら場所を決められなかった (ゲームの世界の中の場所が映っていない場合を含む) ものとして None にする。
 tasks は Markdown の箇条書き。
@@ -24,13 +28,45 @@ from switch2_layers.middle.middle_types import (
     MiddleOutput,
     ObservationKind,
 )
-from switch2_layers.notes.map_document import MapConnection
+from switch2_layers.notes.map_document import MapConnection, TilePosition
 from switch2_layers.surface.middle_state_reader import (
     SURFACE_WAIT_MAX_S,
     SURFACE_WAIT_MIN_S,
 )
 
 OUTPUT_FORMAT_NAME = "middle_output"
+
+
+def _tile_or_null_schema(description: str) -> dict[str, object]:
+    """座標 {"x": 整数, "y": 整数} か null の値のスキーマを返す (MIDDLE_OUTPUT_SCHEMA の座標の項目に使う)。
+
+    形: {"anyOf": [{"type": "object", "properties": {"x": {"type": "integer", ...}, "y": {"type": "integer", ...}},
+    "required": ["x", "y"], "additionalProperties": False}, {"type": "null"}], "description": description}
+    (x と y にも description を付ける)。Structured Outputs の strict では、すべてのキーを required にし、書かない値は
+    null との union で表す。object と null の union は anyOf で書く。
+    """
+    return {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "右に増える座標"},
+                    "y": {"type": "integer", "description": "下に増える座標"},
+                },
+                "required": ["x", "y"],
+                "additionalProperties": False,
+            },
+            {"type": "null"},
+        ],
+        "description": description,
+    }
+
+
+# 座標の項目を書かせる条件 (current_tile・from_tile・to_tile・tile の説明の末尾に付ける)
+_TILE_CONDITION = (
+    "。入力のマップのその場所の座標 (origin と tiles) で書く。マップが grid で、その場所に tiles があるときだけ"
+    "書き、それ以外 (マップなし・free・場所がマップに無い・tiles が空・決められない) は null"
+)
 
 MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -50,6 +86,9 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
                 " (メニュー・タイトル・戦闘など) か、決められなければ空文字列"
             ),
         },
+        "current_tile": _tile_or_null_schema(
+            "最新のフレームの主人公がいる、現在地 (place_name) のマス" + _TILE_CONDITION
+        ),
         "new_connections": {
             "type": "array",
             "description": "前回の実行より後に新しく分かった、場所から場所への移動。無ければ空の配列",
@@ -62,8 +101,14 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
                         "type": "string",
                         "description": "移り方 (出た位置・方向・直前の操作)",
                     },
+                    "from_tile": _tile_or_null_schema(
+                        "移る前の場所 (from) で、出たマス" + _TILE_CONDITION
+                    ),
+                    "to_tile": _tile_or_null_schema(
+                        "移った後の場所 (to) で、着いたマス" + _TILE_CONDITION
+                    ),
                 },
-                "required": ["from", "to", "how"],
+                "required": ["from", "to", "how", "from_tile", "to_tile"],
                 "additionalProperties": False,
             },
         },
@@ -85,8 +130,11 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
                         "type": "string",
                         "description": "画面上の位置などの説明",
                     },
+                    "tile": _tile_or_null_schema(
+                        "観察した場所 (place) で、観察したマス" + _TILE_CONDITION
+                    ),
                 },
-                "required": ["kind", "place", "description"],
+                "required": ["kind", "place", "description", "tile"],
                 "additionalProperties": False,
             },
         },
@@ -116,6 +164,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
     "required": [
         "scene_name",
         "place_name",
+        "current_tile",
         "new_connections",
         "new_observations",
         "is_stuck",
@@ -130,6 +179,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
 _OUTPUT_KEYS: tuple[str, ...] = (
     "scene_name",
     "place_name",
+    "current_tile",
     "new_connections",
     "new_observations",
     "is_stuck",
@@ -139,9 +189,11 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "tasks",
 )
 # new_connections の要素のキー (スキーマの items の properties と同じ順)
-_CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how")
+_CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how", "from_tile", "to_tile")
 # new_observations の要素のキー (スキーマの items の properties と同じ順)
-_OBSERVATION_KEYS: tuple[str, ...] = ("kind", "place", "description")
+_OBSERVATION_KEYS: tuple[str, ...] = ("kind", "place", "description", "tile")
+# 座標の object のキー (_tile_or_null_schema の object の properties と同じ順)
+_TILE_KEYS: tuple[str, ...] = ("x", "y")
 
 
 def build_text_format() -> dict[str, object]:
@@ -166,11 +218,15 @@ def parse_middle_output(text: str) -> MiddleOutput:
           surface_wait_s が数 (bool を除く) でないか有限でない (NaN・Infinity を含む)
         - surface_wait_s が SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S (両端を含む) の外
         - new_connections・new_observations が配列でない。要素が object でない、要素のキーがスキーマと一致しない
-          (足りない・余分なキーがある)、要素の値が文字列でない
+          (足りない・余分なキーがある)、要素の from・to・how・place・description が文字列でない
         - new_observations の要素の kind が ObservationKind の値 (exit・landmark・blocked。大文字と小文字を区別する)
           でない
+        - current_tile と、new_connections の要素の from_tile・to_tile、new_observations の要素の tile が、null でも
+          座標の object でもない。座標の object のキーが x と y に一致しない (足りない・余分なキーがある)、x か y が
+          整数でない (bool と小数 (1.0 を含む) は整数でない)
     scene_name と place_name は、空 (前後の空白を除くと空) なら None、それ以外は文字列のまま。new_connections と
     new_observations は、出力の順に並べた MapConnection と MapObservation のタプルにする (値は書かれたまま)。
+    座標は notes.map_document.TilePosition、null は None にする (current_tile は place_name が None でもそのまま)。
     ほかの値はそのまま (surface_wait_s は float) にする。
     """
     value = _json_object(text)
@@ -185,6 +241,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
         timeline=_string(value, "timeline"),
         tasks=_string(value, "tasks"),
         place_name=place_name if place_name.strip() else None,
+        current_tile=_tile(value["current_tile"], "'current_tile' in middle output"),
         new_connections=tuple(
             _connection(item) for item in _array(value, "new_connections")
         ),
@@ -250,6 +307,8 @@ def _connection(item: object) -> MapConnection:
         from_place=_string(value, "from"),
         to_place=_string(value, "to"),
         how=_string(value, "how"),
+        from_tile=_tile(value["from_tile"], f"'from_tile' in {where}"),
+        to_tile=_tile(value["to_tile"], f"'to_tile' in {where}"),
     )
 
 
@@ -262,7 +321,35 @@ def _observation(item: object) -> MapObservation:
         kind=_observation_kind(value["kind"]),
         place=_string(value, "place"),
         description=_string(value, "description"),
+        tile=_tile(value["tile"], f"'tile' in {where}"),
     )
+
+
+def _tile(item: object, where: str) -> TilePosition | None:
+    """座標の値 item が null なら None、{"x": 整数, "y": 整数} の object なら TilePosition にする。
+
+    object のキーが x と y に一致しない (足りない・余分なキーがある) か、x か y が整数でない (bool と小数は整数でない)
+    とき、null でも object でもないときは ValueError。where は誤りの説明に入れる、確かめる値の名前。
+    """
+    if item is None:
+        return None
+    if isinstance(item, dict):
+        _check_keys(item, _TILE_KEYS, where)
+        return TilePosition(
+            x=_tile_integer(item, "x", where), y=_tile_integer(item, "y", where)
+        )
+    raise ValueError(f"{where} must be a JSON object or null: {item!r}")
+
+
+def _tile_integer(value: Mapping[str, object], key: str, where: str) -> int:
+    """座標の object value の value[key] が整数 (bool を除く) ならその値を返す。それ以外は ValueError。
+
+    JSON の 1.0 は json.loads で float になるため、整数としない。
+    """
+    item = value[key]
+    if isinstance(item, int) and not isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} of {where} must be an integer: {item!r}")
 
 
 def _observation_kind(item: object) -> ObservationKind:

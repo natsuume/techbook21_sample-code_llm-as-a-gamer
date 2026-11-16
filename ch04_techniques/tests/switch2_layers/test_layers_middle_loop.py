@@ -24,7 +24,7 @@ from switch2_layers.middle.middle_types import (
     MiddleOutput,
     ObservationKind,
 )
-from switch2_layers.notes.map_document import MapConnection
+from switch2_layers.notes.map_document import MapConnection, TilePosition
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
@@ -935,30 +935,52 @@ def test_stop_during_analyze_discards_details(tmp_path):
 
 MAP_CONNECTIONS = (
     MapConnection(
-        from_place="自分の部屋 (2 階)", to_place="家の 1 階", how="右上の階段を下に"
+        from_place="自分の部屋 (2 階)",
+        to_place="家の 1 階",
+        how="右上の階段を下に",
+        from_tile=TilePosition(7, 0),
+        to_tile=None,
     ),
 )
 MAP_OBSERVATIONS = (
     MapObservation(
-        kind=ObservationKind.EXIT, place="家の 1 階", description="左下の赤いマット"
+        kind=ObservationKind.EXIT,
+        place="家の 1 階",
+        description="左下の赤いマット",
+        tile=TilePosition(1, 2),
     ),
 )
+CURRENT_TILE = TilePosition(7, 1)
 MAP_ROW_ITEMS = {
     "connections": [
-        {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "右上の階段を下に"}
+        {
+            "from": "自分の部屋 (2 階)",
+            "to": "家の 1 階",
+            "how": "右上の階段を下に",
+            "from_tile": {"x": 7, "y": 0},
+            "to_tile": None,
+        }
     ],
     "observations": [
-        {"kind": "exit", "place": "家の 1 階", "description": "左下の赤いマット"}
+        {
+            "kind": "exit",
+            "place": "家の 1 階",
+            "description": "左下の赤いマット",
+            "tile": {"x": 1, "y": 2},
+        }
     ],
 }
 
 
 def map_output(
-    scene_name: str | None = "町", place_name: str | None = "家の 1 階"
+    scene_name: str | None = "町",
+    place_name: str | None = "家の 1 階",
+    current_tile: TilePosition | None = CURRENT_TILE,
 ) -> MiddleOutput:
     return dataclasses.replace(
         output(scene_name),
         place_name=place_name,
+        current_tile=current_tile,
         new_connections=MAP_CONNECTIONS,
         new_observations=MAP_OBSERVATIONS,
     )
@@ -984,6 +1006,7 @@ def test_step_appends_map_record_with_latest_sent_frame_time(tmp_path):
             "t": 9.5,
             "scene_id": "scene-001",
             "place_name": "家の 1 階",
+            "current_tile": {"x": 7, "y": 1},
             **MAP_ROW_ITEMS,
         }
     ]
@@ -1001,9 +1024,34 @@ def test_map_record_without_scene_has_null_scene_id(tmp_path):
         None,
     )
     assert result.ok is True
+    # place_name が null なら、current_tile も null
     assert map_rows(root) == [
-        {"t": 9.0, "scene_id": None, "place_name": None, **MAP_ROW_ITEMS}
+        {
+            "t": 9.0,
+            "scene_id": None,
+            "place_name": None,
+            "current_tile": None,
+            **MAP_ROW_ITEMS,
+        }
     ]
+
+
+def test_place_and_current_tile_are_given_to_the_next_input(tmp_path):
+    # middle/state.json に書いた現在地の場所とマスを、次の入力の前回の出力として読む (経路の計算に使う)
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [9.0])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = ScriptedAnalyzer(monotonic, map_output(), elapsed=0.0)
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    state = read_state(root)
+    assert state["place_name"] == "家の 1 階"
+    assert state["current_tile"] == {"x": 7, "y": 1}
+    run_middle_step(paths, analyzer, clock, 10.0, None)
+    previous = analyzer.inputs[1].previous_state
+    assert previous.place_name == "家の 1 階"
+    assert previous.current_tile == CURRENT_TILE
 
 
 def test_recorded_place_name_is_offered_in_the_next_input(tmp_path):
@@ -1118,6 +1166,7 @@ def test_middle_once_appends_map_record(tmp_path):
             "t": 12.5,
             "scene_id": "scene-001",
             "place_name": "家の 1 階",
+            "current_tile": {"x": 7, "y": 1},
             **MAP_ROW_ITEMS,
         }
     ]
