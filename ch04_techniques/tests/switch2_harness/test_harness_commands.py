@@ -564,6 +564,33 @@ def test_report_reads_agent_log_with_a_line_cut_in_a_character(paths):
     }
 
 
+def test_report_keeps_the_cost_before_a_crashed_result(paths):
+    # 同じセッションで 0.4 の後にクラッシュで 0.0 の result が来ても、費用は 0.4 のまま
+    paths.agent_log_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "result", "session_id": "s1", "total_cost_usd": 0.4}
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_during_execution",
+                        "session_id": "s1",
+                        "total_cost_usd": 0.0,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = handle_report(paths, as_json=True)
+    agent = json.loads(result.stdout_lines[0])["agent"]
+    assert agent["results"] == 2
+    assert agent["total_cost_usd"] == pytest.approx(0.4)
+
+
 def test_report_of_a_new_workspace(paths):
     result = handle_report(paths, as_json=False)
     assert result.exit_code == 0

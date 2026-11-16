@@ -1,3 +1,4 @@
+import inspect
 import json
 import math
 import os
@@ -31,6 +32,7 @@ from switch2_harness.agent_launcher import (
     MAX_RESUMES,
     MIN_REMAINING_S,
     POLL_INTERVAL_S,
+    RELEASE_TIMEOUT_S,
     RESUME_PROMPT,
     SKIP_AUTH_ENV_PREFIX,
     SKIP_AUTH_ENV_SUFFIX,
@@ -47,11 +49,11 @@ from switch2_harness.agent_launcher import (
     is_kept_env_name,
     last_result_subtype,
     last_session_id,
-    last_total_cost_usd,
+    max_total_cost_usd,
     read_agent_log_lines,
     read_last_result_subtype,
     read_last_session_id,
-    read_last_total_cost_usd,
+    read_max_total_cost_usd,
     run_agent_until,
     start_claude_process,
     stop_process,
@@ -62,6 +64,11 @@ from switch2_harness.agent_launcher import (
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.features import BASE_AGENT_COMMANDS
+from switch2_harness.process_tree import (
+    ProcessEntry,
+    kill_if_unchanged,
+    read_descendants,
+)
 from switch2_harness.signal_guard import ignore_interrupts
 from switch2_harness.workspace import WorkspacePaths
 
@@ -105,6 +112,7 @@ def test_constants():
     assert TERMINATE_GRACE_S == 10.0
     assert MIN_REMAINING_S == 30.0
     assert MAX_RESUMES == 20
+    assert RELEASE_TIMEOUT_S == 10.0
     assert BUDGET_EXHAUSTED_SUBTYPE == "error_max_budget_usd"
     assert KEPT_CLAUDE_ENV_NAMES == ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
     assert KEPT_CLAUDE_ENV_PREFIX == "CLAUDE_CODE_USE_"
@@ -528,10 +536,10 @@ def test_read_last_result_subtype_skips_a_line_cut_in_a_character(tmp_path):
     assert read_last_result_subtype(path, 0) == "success"
 
 
-# --- 最後の result の total_cost_usd の読み取り ---
+# --- result の total_cost_usd の最大の値の読み取り ---
 
 
-def test_last_total_cost_usd_returns_the_last_number():
+def test_max_total_cost_usd_returns_the_largest_number():
     lines = [
         result_line("s1", total_cost_usd=0.25),
         json.dumps({"type": "result", "total_cost_usd": 1}),
@@ -544,33 +552,42 @@ def test_last_total_cost_usd_returns_the_last_number():
         json.dumps([{"type": "result", "total_cost_usd": 3.0}]),
         '{"type": "result", "total_cost_usd": 4.',
     ]
-    cost = last_total_cost_usd(lines)
+    cost = max_total_cost_usd(lines)
     assert cost == 1.0
     assert isinstance(cost, float)
 
 
-def test_last_total_cost_usd_without_result_is_none():
-    assert last_total_cost_usd([]) is None
-    assert last_total_cost_usd([session_line("s1")]) is None
+def test_max_total_cost_usd_keeps_the_cost_before_a_crash():
+    # クラッシュで終わった result は total_cost_usd が 0 になることがある
+    lines = [
+        result_line("s1", total_cost_usd=0.4),
+        result_line("s1", subtype="error_during_execution", total_cost_usd=0.0),
+    ]
+    assert max_total_cost_usd(lines) == pytest.approx(0.4)
 
 
-def test_read_last_total_cost_usd_reads_only_after_offset(tmp_path):
+def test_max_total_cost_usd_without_result_is_none():
+    assert max_total_cost_usd([]) is None
+    assert max_total_cost_usd([session_line("s1")]) is None
+
+
+def test_read_max_total_cost_usd_reads_only_after_offset(tmp_path):
     path = tmp_path / "agent.jsonl"
     earlier = (result_line("old", total_cost_usd=0.9) + "\n").encode()
     path.write_bytes(earlier + (result_line("new", total_cost_usd=0.2) + "\n").encode())
-    assert read_last_total_cost_usd(path, 0) == pytest.approx(0.2)
-    assert read_last_total_cost_usd(path, len(earlier)) == pytest.approx(0.2)
-    assert read_last_total_cost_usd(path, path.stat().st_size) is None
+    assert read_max_total_cost_usd(path, 0) == pytest.approx(0.9)
+    assert read_max_total_cost_usd(path, len(earlier)) == pytest.approx(0.2)
+    assert read_max_total_cost_usd(path, path.stat().st_size) is None
 
 
-def test_read_last_total_cost_usd_of_missing_file_is_none(tmp_path):
-    assert read_last_total_cost_usd(tmp_path / "agent.jsonl", 0) is None
+def test_read_max_total_cost_usd_of_missing_file_is_none(tmp_path):
+    assert read_max_total_cost_usd(tmp_path / "agent.jsonl", 0) is None
 
 
-def test_read_last_total_cost_usd_skips_a_line_cut_in_a_character(tmp_path):
+def test_read_max_total_cost_usd_skips_a_line_cut_in_a_character(tmp_path):
     path = tmp_path / "agent.jsonl"
     write_log_bytes(path, BROKEN_LINE, result_line("s1", total_cost_usd=0.4).encode())
-    assert read_last_total_cost_usd(path, 0) == pytest.approx(0.4)
+    assert read_max_total_cost_usd(path, 0) == pytest.approx(0.4)
 
 
 # --- --minutes の検証 ---
@@ -666,16 +683,76 @@ def test_start_claude_process_appends_output_and_uses_cwd_and_env(tmp_path):
     assert stderr_path.read_text(encoding="utf-8") == "err\n"
 
 
-def test_stop_process_ends_with_sigint():
+def test_start_claude_process_starts_a_new_process_group(tmp_path):
+    process = start_claude_process(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        tmp_path,
+        {"PATH": os.environ.get("PATH", "")},
+        tmp_path / "out.jsonl",
+        tmp_path / "err.log",
+    )
+    try:
+        assert os.getpgid(process.pid) == process.pid
+        assert os.getsid(process.pid) != os.getsid(0)
+        process.signal_group(signal.SIGTERM)
+        assert process.wait(timeout=10) == -signal.SIGTERM
+        with pytest.raises(ProcessLookupError):
+            process.signal_group(0)
+    finally:
+        if process.poll() is None:
+            process.signal_group(signal.SIGKILL)
+            process.wait(timeout=10)
+
+
+class DescendantRecorder:
+    """stop_process の snapshot_descendants と kill_descendant の fake。
+
+    呼ばれたことを process.calls に足し、プロセスへの操作との順序を確かめられるようにする。
+    """
+
+    def __init__(
+        self, process: FakeAgentProcess, descendants: list[ProcessEntry]
+    ) -> None:
+        self.process = process
+        self.descendants = descendants
+
+    def snapshot(self, root_pid: int) -> list[ProcessEntry]:
+        self.process.calls.append(("snapshot", root_pid))
+        return list(self.descendants)
+
+    def kill(self, entry: ProcessEntry, sig: int) -> bool:
+        self.process.calls.append(("kill_descendant", entry.pid, sig))
+        return True
+
+
+def stop_with_recorder(
+    process: FakeAgentProcess, descendants: list[ProcessEntry] | None = None
+) -> None:
+    recorder = DescendantRecorder(process, descendants or [])
+    stop_process(
+        process,
+        snapshot_descendants=recorder.snapshot,
+        kill_descendant=recorder.kill,
+    )
+
+
+def test_stop_process_ends_with_sigint_without_snapshotting_descendants():
     process = FakeAgentProcess(FakeClock(), ProcessPlan(runs_for_s=None))
-    stop_process(process)
+    stop_with_recorder(process, [ProcessEntry(pid=501, ppid=process.pid, start_time=9)])
     assert process.calls == [("signal", signal.SIGINT), ("wait", 20.0)]
+
+
+def test_stop_process_does_not_fail_when_the_group_is_gone():
+    process = FakeAgentProcess(FakeClock(), ProcessPlan(runs_for_s=None))
+    process.exit_now()
+    stop_with_recorder(process)
+    assert process.calls == [("wait", 20.0)]
 
 
 def test_stop_process_sends_sigterm_when_sigint_is_ignored():
     plan = ProcessPlan(runs_for_s=None, stops_on=frozenset({signal.SIGTERM}))
     process = FakeAgentProcess(FakeClock(), plan)
-    stop_process(process)
+    stop_with_recorder(process, [ProcessEntry(pid=501, ppid=process.pid, start_time=9)])
     assert process.calls == [
         ("signal", signal.SIGINT),
         ("wait", 20.0),
@@ -684,18 +761,31 @@ def test_stop_process_sends_sigterm_when_sigint_is_ignored():
     ]
 
 
-def test_stop_process_kills_when_sigterm_is_ignored():
+def test_stop_process_kills_descendants_after_sigkill():
     plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
     process = FakeAgentProcess(FakeClock(), plan)
-    stop_process(process)
+    descendants = [
+        ProcessEntry(pid=501, ppid=process.pid, start_time=9),
+        ProcessEntry(pid=502, ppid=501, start_time=10),
+    ]
+    stop_with_recorder(process, descendants)
     assert process.calls == [
         ("signal", signal.SIGINT),
         ("wait", 20.0),
         ("signal", signal.SIGTERM),
         ("wait", 10.0),
-        ("kill",),
+        ("snapshot", process.pid),
+        ("signal", signal.SIGKILL),
         ("wait", None),
+        ("kill_descendant", 501, signal.SIGKILL),
+        ("kill_descendant", 502, signal.SIGKILL),
     ]
+
+
+def test_stop_process_defaults_to_process_tree_functions():
+    defaults = inspect.signature(stop_process).parameters
+    assert defaults["snapshot_descendants"].default is read_descendants
+    assert defaults["kill_descendant"].default is kill_if_unchanged
 
 
 # --- run_agent_until の流れ ---
@@ -782,7 +872,7 @@ def test_run_kills_at_deadline_when_signals_are_ignored(tmp_path):
         ("wait", 20.0),
         ("signal", signal.SIGTERM),
         ("wait", 10.0),
-        ("kill",),
+        ("signal", signal.SIGKILL),
         ("wait", None),
     ]
     assert scenario.daemon.sent == [["up", "ALL"]]
@@ -1135,7 +1225,7 @@ def test_run_releases_buttons_even_if_stopping_fails(tmp_path):
         args: list[str], cwd: Path, env: dict[str, str], stdout: Path, stderr: Path
     ) -> FakeAgentProcess:
         process = scenario.starter(args, cwd, env, stdout, stderr)
-        process.send_signal = failing_signal  # シグナルを送ると失敗するプロセスにする
+        process.signal_group = failing_signal  # シグナルを送ると失敗するプロセスにする
         return process
 
     with pytest.raises(OSError):
@@ -1240,9 +1330,9 @@ def test_run_stops_running_process_before_release_on_keyboard_interrupt(tmp_path
     )
     calls_when_sent: list[list[tuple[object, ...]]] = []
 
-    def send(args: list[str]) -> str:
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
         calls_when_sent.append(list(scenario.starter.processes[0].calls))
-        return scenario.daemon(args)
+        return scenario.daemon(args, timeout_s=timeout_s)
 
     with pytest.raises(KeyboardInterrupt):
         run_scenario(scenario, minutes=1.0, send=send)
@@ -1284,3 +1374,34 @@ def test_run_records_release_error(tmp_path):
     assert release.args == ("release",)
     assert release.reply == "error bridge is recovering"
     assert release.ok is False
+
+
+# --- 後片付けの up ALL の待ち時間 ---
+
+
+def test_run_sends_release_with_the_timeout(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    run_scenario(scenario, minutes=1.0)
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert scenario.daemon.timeouts == [RELEASE_TIMEOUT_S]
+
+
+def test_run_keeps_the_spent_budget_after_a_crashed_result(tmp_path):
+    # クラッシュで終わった result の total_cost_usd 0.0 で、使った 0.4 が戻らないこと
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", total_cost_usd=0.4)),
+    )
+    crashed = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(
+            result_line("s1", subtype="error_during_execution", total_cost_usd=0.0),
+        ),
+    )
+    scenario = make_scenario(tmp_path, [first, crashed, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="deadline", launches=3)
+    budgets = [budget_arg(launch.args) for launch in scenario.starter.launches]
+    assert budgets == ["1.0000", "0.6000", "0.6000"]

@@ -7,12 +7,13 @@
 import inspect
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from switch2_harness.daemon_client import send_command
+from switch2_harness.daemon_client import send_command, timeout_message
 
 SERVER_TIMEOUT_S = 5.0
 
@@ -69,9 +70,65 @@ def one_shot_server(reply: bytes | None) -> Iterator[OneShotServer]:
         listener.close()
 
 
+@contextmanager
+def silent_server() -> Iterator[str]:
+    """接続を受けて 1 行を読み、何も返さずに接続を開いたままにするサーバー。アドレスを返す。
+
+    with を抜けるときに、待っているスレッドを起こして接続を閉じる。
+    """
+    address = unique_address()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(address)
+    listener.listen(1)
+    listener.settimeout(SERVER_TIMEOUT_S)
+    release = threading.Event()
+
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn:
+            release.wait(timeout=SERVER_TIMEOUT_S)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield address
+    finally:
+        release.set()
+        thread.join(timeout=SERVER_TIMEOUT_S)
+        listener.close()
+
+
 def test_default_address_is_the_chapter2_daemon():
     default = inspect.signature(send_command).parameters["address"].default
     assert default == "\0switch2-remote"
+
+
+def test_send_command_has_no_timeout_by_default():
+    default = inspect.signature(send_command).parameters["timeout_s"].default
+    assert default is None
+
+
+def test_send_command_gives_up_on_a_silent_daemon():
+    with silent_server() as address:
+        started = time.monotonic()
+        reply = send_command(["up", "ALL"], address, timeout_s=0.2)
+        elapsed_s = time.monotonic() - started
+    assert reply == "error daemon did not reply within 0.2s"
+    assert elapsed_s < SERVER_TIMEOUT_S
+
+
+def test_timeout_message():
+    assert timeout_message(10.0) == "error daemon did not reply within 10s"
+    assert timeout_message(0.2) == "error daemon did not reply within 0.2s"
+
+
+def test_send_command_with_timeout_returns_a_prompt_reply():
+    with one_shot_server(b"ok held=none\n") as server:
+        reply = send_command(["up", "ALL"], server.address, timeout_s=5.0)
+    assert reply == "ok held=none"
 
 
 def test_send_command_sends_one_line_and_returns_the_reply():

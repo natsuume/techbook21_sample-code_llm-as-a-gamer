@@ -53,8 +53,9 @@ class AgentSummary:
 
     launches: 起動の数 (events.jsonl の run のイベントのうち args の先頭が "start" か "resume" のもの)
     results: result メッセージの数
-    total_cost_usd: session_id ごとに最後の result の total_cost_usd を取り、合計したもの
-        (--resume で続けたセッションの total_cost_usd は累計のため、すべてを単純には足さない)。
+    total_cost_usd: session_id ごとに最大の total_cost_usd を取り、合計したもの
+        (--resume で続けたセッションの total_cost_usd は累計のため、すべてを単純には足さない。
+        クラッシュや起動時のエラーで終わった result は total_cost_usd が 0 になることがあるため、最後の値ではなく最大の値を使う)。
         result メッセージを書いた起動の分だけで、期限で止めた起動の分は含まない
     num_turns: すべての result の num_turns の合計 (result メッセージを書いた起動の分だけ)
     duration_ms: すべての result の duration_ms の合計 (result メッセージを書いた起動の分だけ)
@@ -161,7 +162,7 @@ def summarize_agent(
     agent_lines は agent_messages_from_lines でメッセージにする。
     command が "run" のイベントが 1 つも無く、"type" が "assistant" か "result" のメッセージも無ければ None。
     launches は count_launches(events)、responses は count_responses(メッセージ)、results は result メッセージの数。
-    total_cost_usd は、session_id ごとに列の中で最後の result の値を取って合計する
+    total_cost_usd は、session_id ごとに列の中で最大の値を取って合計する
     (session_id が無い result は、session_id が無いもの同士を 1 つのセッションとして扱う)。
     num_turns と duration_ms は、すべての result の値を int にして合計する。
     値が無い、または数値でない (bool も数値とみなさない) 項目は 0 として扱う。
@@ -174,16 +175,18 @@ def summarize_agent(
     if not has_run_event and not has_agent_output:
         return None
     results = [message for message in messages if message.get("type") == "result"]
-    # --resume で続けたセッションの total_cost_usd は累計のため、セッションごとに最後の値だけを残す
-    last_cost_by_session: dict[str | None, float] = {}
+    # --resume で続けたセッションの total_cost_usd は累計のため、セッションごとに最大の値だけを残す
+    # (クラッシュで終わった result の 0 で、それまでの費用を消さないように最後の値は使わない)
+    max_cost_by_session: dict[str | None, float] = {}
     for result in results:
         session_id = result.get("session_id")
         key = session_id if isinstance(session_id, str) else None
-        last_cost_by_session[key] = _number_or_zero(result.get("total_cost_usd"))
+        cost = _number_or_zero(result.get("total_cost_usd"))
+        max_cost_by_session[key] = max(cost, max_cost_by_session.get(key, 0.0))
     return AgentSummary(
         launches=count_launches(events),
         results=len(results),
-        total_cost_usd=sum(last_cost_by_session.values(), 0.0),
+        total_cost_usd=sum(max_cost_by_session.values(), 0.0),
         num_turns=sum(int(_number_or_zero(r.get("num_turns"))) for r in results),
         duration_ms=sum(int(_number_or_zero(r.get("duration_ms"))) for r in results),
         responses=count_responses(messages),

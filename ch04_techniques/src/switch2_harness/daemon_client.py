@@ -7,20 +7,36 @@
 
 import os
 import socket
-from collections.abc import Callable
+from typing import Protocol
 
 from switch2_remote.client import SOCKET_ADDRESS, build_request, peer_uid
 
-# デーモンに引数の列を送り、応答の 1 行を返す関数の型。commands と agent_launcher はこの型で送信を受け取る
-SendCommand = Callable[[list[str]], str]
+
+class SendCommand(Protocol):
+    """デーモンに引数の列を送り、応答の 1 行を返す関数の型。commands と agent_launcher はこの型で送信を受け取る。
+
+    timeout_s を渡すと、接続・送信・受信のそれぞれの待ち時間の上限 (秒) にする。None なら上限なし。
+    """
+
+    def __call__(self, args: list[str], *, timeout_s: float | None = None) -> str: ...
 
 
-def send_command(args: list[str], address: str = SOCKET_ADDRESS) -> str:
+def timeout_message(timeout_s: float) -> str:
+    """待ち時間の上限を超えたときの error 行を返す。例: 0.2 は `error daemon did not reply within 0.2s`。"""
+    return f"error daemon did not reply within {timeout_s:g}s"
+
+
+def send_command(
+    args: list[str], address: str = SOCKET_ADDRESS, *, timeout_s: float | None = None
+) -> str:
     """args を 1 行にしてデーモンに送り、応答の 1 行 (前後の空白を除いたもの) を返す。
 
     1 行は switch2_remote.client.build_request で組み立てる (例: ["tap", "B+RIGHT"] は "tap B+RIGHT\\n")。
-    応答が複数行でも、最初の 1 行だけを返す。応答を待つ時間に上限は設けない。
-    次の場合はデーモンの応答の代わりに error 行を返す:
+    応答が複数行でも、最初の 1 行だけを返す。
+    timeout_s が None なら待ち時間に上限を設けない (エージェント用のサブコマンドは、長い tap があるため上限を付けない)。
+    数値なら、接続・送信・受信のそれぞれにその秒数の上限を付け (socket.settimeout)、超えたら
+    timeout_message(timeout_s) (`error daemon did not reply within <秒数>s`) を返す。
+    次の場合もデーモンの応答の代わりに error 行を返す (例外にしない):
         - 引数に改行が含まれる (build_request の ValueError): `error <ValueError のメッセージ>` (何も送らない)
         - 接続できない (OSError): `error cannot connect to daemon: <OSError>`
         - 接続先が自分と同じユーザーのプロセスでない: `error daemon is owned by another user`
@@ -33,9 +49,12 @@ def send_command(args: list[str], address: str = SOCKET_ADDRESS) -> str:
     except ValueError as e:
         return f"error {e}"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout_s)
         try:
             conn.connect(address)
         except OSError as e:
+            if isinstance(e, TimeoutError) and timeout_s is not None:
+                return timeout_message(timeout_s)
             return f"error cannot connect to daemon: {e}"
         try:
             # 抽象名前空間のソケット名は誰でも先に取れるため、接続先が自分と同じユーザーかを確かめる
@@ -45,6 +64,8 @@ def send_command(args: list[str], address: str = SOCKET_ADDRESS) -> str:
             with conn.makefile(encoding="utf-8", errors="replace") as reader:
                 reply = reader.readline().strip()
         except OSError as e:
+            if isinstance(e, TimeoutError) and timeout_s is not None:
+                return timeout_message(timeout_s)
             return f"error lost connection to daemon: {e}"
     if not reply:
         return "error no reply from daemon"

@@ -2,8 +2,10 @@
 
 Python の既定では、SIGTERM と SIGHUP を受けると finally を通らずにプロセスが終わる。それでは
 デーモンへの up ALL が送られず、起動した claude も残るため、run の間はこれらを例外 RunTerminated にして
-finally の後片付けを通す。また、後片付け (claude を止める待ちと up ALL の送信) の途中で 2 回目の Ctrl-C などが
-来ると up ALL の前で抜けてしまうため、後片付けの間は SIGINT・SIGTERM・SIGHUP を無視する。
+finally の後片付けを通す。ただし、すでに無視されているシグナル (nohup の SIGHUP など) は無視のままにする。
+また、後片付け (claude を止める待ちと up ALL の送信) の途中で 2 回目の Ctrl-C などが来ると up ALL の前で
+抜けてしまうため、後片付けの間は SIGINT・SIGTERM・SIGHUP を無視する。RunTerminated を送出するハンドラーも、
+送出の前にこれらを無視に切り替え、後片付けに入るまでの間の 2 回目のシグナルで後片付けが飛ばされないようにする。
 
 signal.signal はメインスレッドでしか使えない。どちらのコンテキストマネージャーも、メインスレッド以外で
 使われたときはハンドラーを変えず、何もしないコンテキストマネージャーとして動く (例外にしない)。
@@ -38,7 +40,19 @@ class RunTerminated(Exception):
 
 
 def _raise_run_terminated(signal_number: int, frame: FrameType | None) -> None:
+    """INTERRUPT_SIGNALS を無視に切り替えてから RunTerminated を送出するハンドラー。
+
+    例外が後片付け (ignore_interrupts の中) に届くまでの間に 2 回目のシグナルが来ても、
+    後片付けが飛ばされないように、例外を送出する前に無視に切り替える。
+    """
+    for sig in INTERRUPT_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
     raise RunTerminated(signal_number)
+
+
+def _restorable(handler: SignalHandler | None) -> SignalHandler:
+    """signal.getsignal の結果を signal.signal に渡せる形にする (Python から設定されていない None は SIG_DFL)。"""
+    return handler if handler is not None else signal.SIG_DFL
 
 
 def _in_main_thread() -> bool:
@@ -64,19 +78,32 @@ def _replaced_handlers(
         yield
     finally:
         for sig, old_handler in previous.items():
-            signal.signal(
-                sig, old_handler if old_handler is not None else signal.SIG_DFL
-            )
+            signal.signal(sig, _restorable(old_handler))
 
 
 @contextmanager
 def terminate_signals_as_exception() -> Iterator[None]:
     """with の中にいる間、SIGTERM と SIGHUP を受けたら RunTerminated を送出する。
 
-    抜けるときに (例外のときも) 元のハンドラーに戻す。メインスレッド以外では何もしない。
+    入るときにすでに無視されている (ハンドラーが signal.SIG_IGN の) シグナルは替えない
+    (例: nohup で起動した run の SIGHUP は無視されたままにする)。
+    ハンドラーは、RunTerminated を送出する前に SIGINT・SIGTERM・SIGHUP を signal.SIG_IGN にする。
+    抜けるときに (例外のときも)、入ったときと違うハンドラーになっている SIGINT・SIGTERM・SIGHUP を、
+    入る前のハンドラーに戻す (替えなかったシグナルには触れない)。メインスレッド以外では何もしない。
     """
-    with _replaced_handlers(TERMINATE_SIGNALS, _raise_run_terminated):
+    if not _in_main_thread():
         yield
+        return
+    previous = {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS}
+    try:
+        for sig in TERMINATE_SIGNALS:
+            if previous[sig] != signal.SIG_IGN:
+                signal.signal(sig, _raise_run_terminated)
+        yield
+    finally:
+        for sig, old_handler in previous.items():
+            if signal.getsignal(sig) != old_handler:
+                signal.signal(sig, _restorable(old_handler))
 
 
 @contextmanager

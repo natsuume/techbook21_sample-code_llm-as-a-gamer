@@ -77,6 +77,7 @@ class FakeDaemon:
     応答は overrides に command (引数の 1 つ目) があればその値、無ければ次の既定の値:
         shot PATH → "ok PATH"、up ... → "ok held=none"、それ以外 → "ok <引数を空白でつないだもの>"
     clock を渡すと、送るたびに step_s 秒進める (送信にかかった時間の代わり)。
+    送るたびに、受け取った timeout_s を timeouts に記録する。
     """
 
     def __init__(
@@ -89,9 +90,11 @@ class FakeDaemon:
         self.overrides = dict(overrides or {})
         self.step_s = step_s
         self.sent: list[list[str]] = []
+        self.timeouts: list[float | None] = []
 
-    def __call__(self, args: list[str]) -> str:
+    def __call__(self, args: list[str], *, timeout_s: float | None = None) -> str:
         self.sent.append(list(args))
+        self.timeouts.append(timeout_s)
         if self.clock is not None:
             self.clock.advance(self.step_s)
         command = args[0]
@@ -139,7 +142,7 @@ class ProcessPlan:
     """fake のプロセスのふるまい。
 
     runs_for_s: 起動から自分で終わるまでの秒数。None なら自分では終わらない
-    stops_on: 受け取ると終わるシグナル
+    stops_on: 受け取ると終わるシグナル (SIGKILL では必ず終わる)
     output_lines: 起動したときに agent.jsonl (stdout_path) に追記する行
     """
 
@@ -148,16 +151,25 @@ class ProcessPlan:
     output_lines: tuple[str, ...] = ()
 
 
+# fake のプロセスの番号の始まり。Linux の pid の上限 (PID_MAX_LIMIT = 2^22 = 4194304) より大きくし、
+# stop_process が既定の関数で本物の /proc から子孫を探しても、何も見つからない (本物のプロセスを止めない) ようにする
+FAKE_PID_BASE = 10_000_000
+
+
 class FakeAgentProcess:
     """AgentProcess の fake。呼ばれた操作を calls に記録する。
 
-    calls の要素: ("signal", シグナル)、("wait", timeout)、("kill",)
+    calls の要素: ("signal", シグナル) (プロセスグループに送ったもの)、("wait", timeout)
     動いている間の wait(timeout) は、時計を timeout 秒進めて subprocess.TimeoutExpired を送出する。
+    signal_group は、プロセスが終わっていれば ProcessLookupError を送出する (本物のシグナルは送らない)。
     """
 
-    def __init__(self, clock: FakeClock, plan: ProcessPlan) -> None:
+    def __init__(
+        self, clock: FakeClock, plan: ProcessPlan, pid: int = FAKE_PID_BASE
+    ) -> None:
         self.clock = clock
         self.plan = plan
+        self.pid = pid
         self.exit_at = None if plan.runs_for_s is None else clock.now + plan.runs_for_s
         self.returncode: int | None = None
         self.calls: list[tuple[object, ...]] = []
@@ -181,15 +193,12 @@ class FakeAgentProcess:
         self.clock.advance(timeout)
         raise subprocess.TimeoutExpired("claude", timeout)
 
-    def send_signal(self, sig: int) -> None:
+    def signal_group(self, sig: int) -> None:
+        if self.poll() is not None:
+            raise ProcessLookupError(f"no process in group {self.pid}")
         self.calls.append(("signal", sig))
-        if self.returncode is None and sig in self.plan.stops_on:
+        if sig in self.plan.stops_on or sig == signal.SIGKILL:
             self.returncode = -sig
-
-    def kill(self) -> None:
-        self.calls.append(("kill",))
-        if self.returncode is None:
-            self.returncode = -signal.SIGKILL
 
     def exit_now(self, returncode: int = 0) -> None:
         """テストから、プロセスが自分で終わったことにする (calls には記録しない)。"""
@@ -231,6 +240,8 @@ class FakeProcessStarter:
         )
         with open(stdout_path, "a", encoding="utf-8") as out:
             out.writelines(line + "\n" for line in plan.output_lines)
-        process = FakeAgentProcess(self.clock, plan)
+        process = FakeAgentProcess(
+            self.clock, plan, pid=FAKE_PID_BASE + len(self.processes)
+        )
         self.processes.append(process)
         return process

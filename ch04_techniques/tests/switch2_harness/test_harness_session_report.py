@@ -292,7 +292,7 @@ def test_count_responses_counts_lines_without_id_one_by_one():
     assert count_responses(messages) == 6
 
 
-def test_summarize_agent_sums_last_cost_of_each_session():
+def test_summarize_agent_sums_largest_cost_of_each_session():
     lines = [
         result_line(session_id="s1", total_cost_usd=0.5, num_turns=3, duration_ms=1000),
         result_line(
@@ -310,14 +310,29 @@ def test_summarize_agent_sums_last_cost_of_each_session():
     )
 
 
-def test_summarize_agent_takes_the_last_value_not_the_largest():
+def test_summarize_agent_takes_the_largest_value_not_the_last():
     lines = [
         result_line(session_id="s1", total_cost_usd=2.0),
         result_line(session_id="s1", total_cost_usd=1.0),
     ]
     agent = summarize_agent([], lines)
     assert agent is not None
-    assert agent.total_cost_usd == pytest.approx(1.0)
+    assert agent.total_cost_usd == pytest.approx(2.0)
+
+
+def test_summarize_agent_keeps_the_cost_before_a_crashed_result():
+    # クラッシュで終わった result は total_cost_usd が 0 になることがある
+    lines = [
+        result_line(session_id="s1", total_cost_usd=0.4),
+        result_line(
+            session_id="s1", subtype="error_during_execution", total_cost_usd=0.0
+        ),
+        result_line(session_id="s2", total_cost_usd=0.1),
+    ]
+    agent = summarize_agent([], lines)
+    assert agent is not None
+    assert agent.results == 3
+    assert agent.total_cost_usd == pytest.approx(0.5)
 
 
 def test_summarize_agent_treats_missing_values_as_zero():

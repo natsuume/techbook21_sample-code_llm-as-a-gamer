@@ -19,6 +19,7 @@
     screen_change     2 枚の画像の変化の割合と PNG の読み込み
     session_report    イベントから実験の集計を作り、表示用のテキストにする
     agent_launcher    claude -p の起動引数の組み立てと、時間を区切った起動
-    signal_guard      run の間の SIGTERM・SIGHUP の例外化と、後片付けの間の割り込みの無視
+    process_tree      SIGKILL で止める claude の子孫の控えと、pid の再利用を見分けた停止
+    signal_guard     run の間の SIGTERM・SIGHUP の例外化と、後片付けの間の割り込みの無視
     commands          look / press / status / finish / init / report / run の処理本体
 """

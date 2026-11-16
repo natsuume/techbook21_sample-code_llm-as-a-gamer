@@ -105,6 +105,36 @@ def test_terminate_signals_as_exception_leaves_sigint_alone():
     before = signal.getsignal(signal.SIGINT)
     with terminate_signals_as_exception():
         assert signal.getsignal(signal.SIGINT) is before
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_terminate_guard_leaves_an_ignored_signal_ignored():
+    # nohup で起動した run のように、SIGHUP が無視されている状態で入る
+    with recording_handlers(TERMINATE_SIGNALS) as recorder:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        with terminate_signals_as_exception():
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+            assert signal.getsignal(signal.SIGTERM) is not recorder
+            # 無視されたままなら RunTerminated にならない (なれば、ここで例外になってテストが失敗する)
+            send_to_self(signal.SIGHUP)
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is recorder
+        assert recorder.received == []
+
+
+def test_terminate_handler_ignores_interrupts_before_raising():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with terminate_signals_as_exception():
+            with pytest.raises(RunTerminated):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(HANDLER_WAIT_S)
+            # 後片付けに入るまでの間の 2 回目のシグナルで後片付けが飛ばされないように、無視になっている
+            for sig in INTERRUPT_SIGNALS:
+                assert signal.getsignal(sig) == signal.SIG_IGN
+            send_to_self(signal.SIGTERM)
+        for sig in INTERRUPT_SIGNALS:
+            assert signal.getsignal(sig) is recorder
+        assert recorder.received == []
 
 
 # --- ignore_interrupts ---
