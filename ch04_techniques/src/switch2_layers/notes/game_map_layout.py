@@ -6,8 +6,9 @@
       最初の空でない (前後の空白を除いても空でない) 行を見る
     - その行が、前後の空白を除いて GAME_GRID_LAYOUT_LINE (`- 型: マス目型`) と一致すれば MapLayout.GRID
     - それ以外 (行が `- 型: 自由型`・`- 型: 未確認` などほかの文、見出しの行や節の中の行が無い) は MapLayout.FREE
-deep の map のジョブは、この型と notes/map/map.json の layout を比べて、型を書き換えるかを決める
-(deep.deep_job_directory.find_previous_latest_frame_t)。
+deep の map のジョブで書く型は、ジョブを作るときにコードがこの読み方で 1 回だけ決め、job.json の map_layout で
+deep に渡す (deep.deep_job_directory.read_job_map_layout)。その型と notes/map/map.json の layout が違えば、
+前回の時刻を渡さない (deep.deep_job_directory.find_previous_latest_frame_t)。
 """
 
 from pathlib import Path

@@ -26,6 +26,7 @@ from switch2_layers.deep.deep_prompt import (
     read_prompt_context,
 )
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.notes.map_document import MapLayout
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 TIPS_NOTES = [
@@ -76,10 +77,16 @@ def make_job(
     documents: object,
     previous: float | None = 12.5,
     latest: float | None = 30.25,
+    map_layout: object = ...,
 ) -> Path:
-    """deep/<name>/ に job.json だけを作って返す (パッケージのコードは使わない)。"""
+    """deep/<name>/ に job.json だけを作って返す (パッケージのコードは使わない)。
+
+    map_layout を渡さなければ、map のジョブは "free"、ほかの種類は null にする。
+    """
     job_dir = run_dir / "deep" / name
     job_dir.mkdir(parents=True)
+    if map_layout is ...:
+        map_layout = "free" if kind == "map" else None
     value = {
         "kind": kind,
         "scene_id": scene_id,
@@ -88,6 +95,7 @@ def make_job(
         "previous_latest_frame_t": previous,
         "latest_frame_t": latest,
         "documents": documents,
+        "map_layout": map_layout,
     }
     (job_dir / "job.json").write_text(json.dumps(value), encoding="utf-8")
     return job_dir
@@ -285,6 +293,10 @@ def test_read_prompt_context_rejects_broken_documents(tmp_path, documents):
         {"scene_id": 1},
         {"previous_latest_frame_t": "12.5"},
         {"latest_frame_t": True},
+        # map 以外の種類では、マップの型は null か無い
+        {"map_layout": "grid"},
+        {"map_layout": "free"},
+        {"map_layout": ""},
     ],
 )
 def test_read_prompt_context_rejects_broken_values(tmp_path, overrides):
@@ -324,6 +336,18 @@ def test_read_prompt_context_rejects_missing_job_file_and_other_directories(tmp_
         read_prompt_context(other)
 
 
+def test_map_layout_of_other_kinds_is_none_or_missing(tmp_path):
+    run_dir = make_run(tmp_path)
+    job_dir = make_job(run_dir, "advice-001", "advice", None, ["advice.md"])
+    assert read_prompt_context(job_dir).map_layout is None
+    # キーが無い job.json も、null と同じに読む
+    path = job_dir / "job.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    del value["map_layout"]
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert read_prompt_context(job_dir).map_layout is None
+
+
 def test_prompt_values_have_exactly_the_names(tmp_path):
     run_dir = make_run(tmp_path)
     context = read_prompt_context(tips_job(run_dir))
@@ -347,6 +371,8 @@ def test_prompt_values_have_exactly_the_names(tmp_path):
     assert values["game_note"] == (run_abs / "notes" / "game.md").as_posix()
     assert values["previous_latest_frame_t"] == "12.500 秒"
     assert values["latest_frame_t"] == "30.250 秒"
+    # map 以外の種類のジョブには、マップの型が無い
+    assert values["map_layout"] == NOT_AVAILABLE_TEXT
     # ジョブのディレクトリーや作業用のディレクトリーは渡さない
     assert "job_dir" not in values
     assert "work_dir" not in values
@@ -472,8 +498,18 @@ def test_prompt_does_not_embed_text_read_from_files(tmp_path):
 MAP_NOTES = ["map/map.json", "map/places.md"]
 
 
-def map_job(run_dir: Path, previous: float | None = 12.5) -> Path:
-    return make_job(run_dir, "map-001", "map", None, MAP_NOTES, previous=previous)
+def map_job(
+    run_dir: Path, previous: float | None = 12.5, map_layout: object = "free"
+) -> Path:
+    return make_job(
+        run_dir,
+        "map-001",
+        "map",
+        None,
+        MAP_NOTES,
+        previous=previous,
+        map_layout=map_layout,
+    )
 
 
 def write_map_files_with_marker(run_dir: Path) -> None:
@@ -516,6 +552,38 @@ def test_read_prompt_context_of_map_job(tmp_path):
     assert context.documents == tuple(
         PromptDocument(note=note, path=run_abs / "notes" / note) for note in MAP_NOTES
     )
+    assert context.map_layout is MapLayout.FREE
+
+
+@pytest.mark.parametrize(
+    "map_layout, expected", [("grid", MapLayout.GRID), ("free", MapLayout.FREE)]
+)
+def test_read_prompt_context_of_map_job_reads_the_layout(
+    tmp_path, map_layout, expected
+):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(map_job(run_dir, map_layout=map_layout))
+    assert context.map_layout is expected
+    assert prompt_values(context)["map_layout"] == map_layout
+
+
+@pytest.mark.parametrize("map_layout", [None, "Grid", "unknown", "", 1, True])
+def test_read_prompt_context_rejects_broken_map_layout_of_map_job(tmp_path, map_layout):
+    # map のジョブでは、マップの型は "grid" か "free" (大文字と小文字を区別する)
+    run_dir = make_run(tmp_path)
+    with pytest.raises(ValueError):
+        read_prompt_context(map_job(run_dir, map_layout=map_layout))
+
+
+def test_read_prompt_context_rejects_map_job_without_layout(tmp_path):
+    run_dir = make_run(tmp_path)
+    job_dir = map_job(run_dir)
+    path = job_dir / "job.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    del value["map_layout"]
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError):
+        read_prompt_context(job_dir)
 
 
 def test_map_kind_has_a_title_and_prompt_file():
@@ -701,19 +769,33 @@ def test_game_prompt_follows_the_issue():
 # --- マップの型 (マス目型の grid と、自由型の free) ---
 
 
-def test_map_prompt_decides_the_layout_from_the_game_document():
+def test_map_prompt_uses_the_layout_decided_by_the_code():
     text = raw_prompt_file("map.md")
     for phrase in [
-        # ゲームの性質の文書の「マップの形式」の節を読み、マス目型なら grid、それ以外なら free にする
-        "${game_note}",
-        "マップの形式",
-        "マス目型",
-        "自由型",
-        "`layout`",
+        # 書く型は、コードが決めて job.json の map_layout で渡す
+        "${map_layout}",
+        # ゲームの性質の文書を読んで、型を決め直さない
+        "型を決め直さない",
+        # map.json の layout がこの型と違えば、この型の形で書き直す
+        "`layout` が、このジョブの型",
+        "この型の形で書き直す",
         '"grid"',
         '"free"',
     ]:
         assert phrase in text, phrase
+    # ゲームの性質の文書から型を決めさせる指示は無い
+    assert "の節を読み、型を決める" not in text
+    assert "ゲームの性質から決めた型" not in text
+
+
+@pytest.mark.parametrize("map_layout", ["grid", "free"])
+def test_map_prompt_embeds_the_layout_of_the_job(tmp_path, map_layout):
+    run_dir = make_run(tmp_path)
+    prompt = build_deep_prompt(
+        read_prompt_context(map_job(run_dir, map_layout=map_layout))
+    )
+    assert f'このジョブで書く型は `"{map_layout}"` である' in prompt
+    assert f'このジョブの型 (`"{map_layout}"`)' in prompt
 
 
 def test_game_prompt_forbids_writing_the_game_title():
@@ -795,7 +877,7 @@ def test_map_prompt_describes_the_grid_map():
         "座標を変えない",
         # places.md にもマスの図を書く
         "マスの図",
-        # 書いてある layout とゲームの性質から決めた型が違うときは、新しい型の形で書き直す
+        # 書いてある layout とこのジョブの型が違うときは、この型の形で書き直す
         "書き直",
     ]:
         assert phrase in text, phrase

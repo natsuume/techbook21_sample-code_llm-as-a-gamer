@@ -11,6 +11,7 @@ from switch2_layers.deep.deep_job_directory import (
     next_job_number,
     parse_job_directory_name,
     read_job_file,
+    read_job_map_layout,
     run_directory_of_job,
 )
 from switch2_layers.deep.deep_types import (
@@ -19,6 +20,7 @@ from switch2_layers.deep.deep_types import (
     DocumentKey,
     DocumentKind,
 )
+from switch2_layers.notes.map_document import MapLayout
 from switch2_layers.run_directory import RunPaths
 
 COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n"
@@ -43,6 +45,7 @@ def job(
     latest: float | None = 8.0,
     previous: float | None = None,
     trigger: DeepTrigger = DeepTrigger.SURFACE,
+    map_layout: MapLayout | None = None,
 ) -> DeepJob:
     return DeepJob(
         kind=kind,
@@ -51,6 +54,7 @@ def job(
         requested_t=9.5,
         previous_latest_frame_t=previous,
         latest_frame_t=latest,
+        map_layout=map_layout,
     )
 
 
@@ -128,6 +132,8 @@ def test_scene_controls_job_lists_scene_and_common_documents(tmp_path):
         "previous_latest_frame_t": 3.0,
         "latest_frame_t": 8.0,
         "documents": ["scenes/scene-001/controls.md", "common/controls.md"],
+        # map 以外の種類のジョブでは、マップの型は null
+        "map_layout": None,
     }
 
 
@@ -247,9 +253,11 @@ MAP_DOCUMENTS = ["map/map.json", "map/places.md"]
 
 
 def test_map_job_targets_map_json_and_places_md_even_before_they_exist(tmp_path):
-    # まだ無い文書も対象に並べる (deep が Write で作る)
+    # まだ無い文書も対象に並べる (deep が Write で作る)。マップの型は、ジョブの値を書く
     root = make_run(tmp_path)
-    job_dir = create_job_directory(RunPaths(root), job(DocumentKind.MAP))
+    job_dir = create_job_directory(
+        RunPaths(root), job(DocumentKind.MAP, map_layout=MapLayout.GRID)
+    )
     assert read_json(job_dir / "job.json") == {
         "kind": "map",
         "scene_id": None,
@@ -258,8 +266,17 @@ def test_map_job_targets_map_json_and_places_md_even_before_they_exist(tmp_path)
         "previous_latest_frame_t": None,
         "latest_frame_t": 8.0,
         "documents": MAP_DOCUMENTS,
+        "map_layout": "grid",
     }
     assert list((root / "notes" / "map").iterdir()) == []
+
+
+def test_map_job_json_has_the_free_layout(tmp_path):
+    root = make_run(tmp_path)
+    job_dir = create_job_directory(
+        RunPaths(root), job(DocumentKind.MAP, map_layout=MapLayout.FREE)
+    )
+    assert read_json(job_dir / "job.json")["map_layout"] == "free"
 
 
 def test_map_job_targets_only_the_two_documents(tmp_path):
@@ -299,6 +316,7 @@ def test_game_job_targets_only_game_md(tmp_path):
         "previous_latest_frame_t": None,
         "latest_frame_t": 8.0,
         "documents": ["game.md"],
+        "map_layout": None,
     }
     assert job_directory_entries(job_dir) == ["job.json"]
     # まだ無い文書は作らない (deep が Write で作る)
@@ -501,6 +519,7 @@ MAP_KEY = DocumentKey(DocumentKind.MAP, None)
 GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型\n- 2D で真上から見る\n"
 FREE_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: 自由型\n"
 UNCONFIRMED_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: 未確認\n"
+GUESSED_GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型 (推測)\n"
 GRID_MAP_JSON = {"layout": "grid", "places": [], "connections": []}
 FREE_MAP_JSON = {"layout": "free", "places": [], "connections": []}
 # layout の無い map.json は free として読む
@@ -525,67 +544,102 @@ def make_run_with_previous_map_job(tmp_path: Path) -> tuple[Path, RunPaths]:
 
 
 @pytest.mark.parametrize(
-    "game, map_json",
+    "game, layout",
     [
-        (GRID_GAME, FREE_MAP_JSON),
-        (GRID_GAME, NO_LAYOUT_MAP_JSON),
-        (FREE_GAME, GRID_MAP_JSON),
-        (UNCONFIRMED_GAME, GRID_MAP_JSON),
+        (GRID_GAME, MapLayout.GRID),
+        (FREE_GAME, MapLayout.FREE),
+        (UNCONFIRMED_GAME, MapLayout.FREE),
+        # 最初の行が `- 型: マス目型` と一致しなければ free (推測の印が付いた行も)
+        (GUESSED_GRID_GAME, MapLayout.FREE),
+        (None, MapLayout.FREE),
     ],
-    ids=["free-to-grid", "no-layout-to-grid", "grid-to-free", "grid-to-unconfirmed"],
+    ids=["grid", "free", "unconfirmed", "guessed-grid", "no-game-md"],
 )
-def test_map_job_without_previous_time_when_the_layout_changes(
-    tmp_path, game, map_json
-):
-    root, paths = make_run_with_previous_map_job(tmp_path)
-    write_game(root, game)
-    # 型が同じなら、前回の正常に終わったジョブの時刻
-    write_map_json(root, GRID_MAP_JSON if game == GRID_GAME else FREE_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) == 5.0
-    # map.json の layout とゲームの性質から読んだ型が違えば、記録とフレームを最初から読ませる
-    write_map_json(root, map_json)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) is None
+def test_map_job_layout_is_read_from_the_game_document(tmp_path, game, layout):
+    root = make_run(tmp_path)
+    if game is not None:
+        write_game(root, game)
+    assert read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP) is layout
 
 
-def test_map_job_without_game_md_and_grid_map_rereads_everything(tmp_path):
-    # ゲームの性質の文書が無ければ free として比べる
-    root, paths = make_run_with_previous_map_job(tmp_path)
-    write_map_json(root, FREE_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) == 5.0
-    write_map_json(root, GRID_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) is None
-
-
-def test_map_job_with_game_md_symlinked_outside_of_notes_reads_it_as_free(tmp_path):
-    # notes/ の外を指すゲームの性質の文書は無い文書として扱い、free として比べる
-    root, paths = make_run_with_previous_map_job(tmp_path)
+def test_map_job_layout_of_game_md_symlinked_outside_of_notes_is_free(tmp_path):
+    # notes/ の外を指すゲームの性質の文書は無い文書として扱う
+    root = make_run(tmp_path)
     outside = tmp_path / "outside-game.md"
     outside.write_text(GRID_GAME, encoding="utf-8")
     (root / "notes" / "game.md").symlink_to(outside)
-    write_map_json(root, FREE_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) == 5.0
-    write_map_json(root, GRID_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) is None
+    assert (
+        read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP)
+        is MapLayout.FREE
+    )
 
 
 @pytest.mark.parametrize(
-    "game, map_json",
-    [
-        (GRID_GAME, GRID_MAP_JSON),
-        (FREE_GAME, FREE_MAP_JSON),
-        (FREE_GAME, NO_LAYOUT_MAP_JSON),
-        (None, FREE_MAP_JSON),
-    ],
-    ids=["grid", "free", "no-layout", "no-game-md"],
+    "kind", [kind for kind in DocumentKind if kind is not DocumentKind.MAP]
 )
-def test_map_job_keeps_previous_time_when_the_layout_is_the_same(
-    tmp_path, game, map_json
+def test_other_kinds_have_no_map_layout(tmp_path, kind):
+    root = make_run(tmp_path)
+    write_game(root, GRID_GAME)
+    assert read_job_map_layout(RunPaths(root).notes_dir, kind) is None
+
+
+@pytest.mark.parametrize(
+    "map_layout, map_json",
+    [
+        (MapLayout.GRID, FREE_MAP_JSON),
+        (MapLayout.GRID, NO_LAYOUT_MAP_JSON),
+        (MapLayout.FREE, GRID_MAP_JSON),
+    ],
+    ids=["free-to-grid", "no-layout-to-grid", "grid-to-free"],
+)
+def test_map_job_without_previous_time_when_the_layout_changes(
+    tmp_path, map_layout, map_json
 ):
     root, paths = make_run_with_previous_map_job(tmp_path)
-    if game is not None:
-        write_game(root, game)
+    # 型が同じなら、前回の正常に終わったジョブの時刻
+    write_map_json(
+        root, GRID_MAP_JSON if map_layout is MapLayout.GRID else FREE_MAP_JSON
+    )
+    assert find_previous_latest_frame_t(paths, MAP_KEY, map_layout) == 5.0
+    # map.json の layout がこのジョブの型と違えば、記録とフレームを最初から読ませる
     write_map_json(root, map_json)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, map_layout) is None
+
+
+def test_previous_time_compares_with_the_job_layout_not_the_game_document(tmp_path):
+    # 型の違いは、渡したジョブの型で確かめる (ゲームの性質の文書を読み直さない)
+    root, paths = make_run_with_previous_map_job(tmp_path)
+    write_game(root, GRID_GAME)
+    write_map_json(root, FREE_MAP_JSON)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.FREE) == 5.0
+    write_game(root, FREE_GAME)
+    write_map_json(root, GRID_MAP_JSON)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.FREE) is None
+
+
+def test_map_job_without_layout_does_not_compare(tmp_path):
+    # map_layout を渡さなければ、型の違いを確かめずに前回の正常に終わったジョブから決める
+    root, paths = make_run_with_previous_map_job(tmp_path)
+    write_game(root, GRID_GAME)
+    write_map_json(root, FREE_MAP_JSON)
     assert find_previous_latest_frame_t(paths, MAP_KEY) == 5.0
+
+
+@pytest.mark.parametrize(
+    "map_layout, map_json",
+    [
+        (MapLayout.GRID, GRID_MAP_JSON),
+        (MapLayout.FREE, FREE_MAP_JSON),
+        (MapLayout.FREE, NO_LAYOUT_MAP_JSON),
+    ],
+    ids=["grid", "free", "no-layout"],
+)
+def test_map_job_keeps_previous_time_when_the_layout_is_the_same(
+    tmp_path, map_layout, map_json
+):
+    root, paths = make_run_with_previous_map_job(tmp_path)
+    write_map_json(root, map_json)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, map_layout) == 5.0
 
 
 @pytest.mark.parametrize(
@@ -602,24 +656,23 @@ def test_map_job_keeps_previous_time_when_the_layout_is_the_same(
     ids=["missing", "not-json", "not-utf8", "wrong-shape"],
 )
 def test_map_job_keeps_previous_time_when_map_json_cannot_be_read(tmp_path, content):
-    # map.json が無い・読めない・形に合わないときは、ゲームの性質がマス目型でも、前回の正常に終わったジョブの時刻
+    # map.json が無い・読めない・形に合わないときは、ジョブの型がマス目型でも、前回の正常に終わったジョブの時刻
     root, paths = make_run_with_previous_map_job(tmp_path)
-    write_game(root, GRID_GAME)
     if content is not None:
         (root / "notes" / "map" / "map.json").write_bytes(content)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) == 5.0
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) == 5.0
 
 
 def test_map_job_without_previous_successful_job_is_none_whatever_the_layout(tmp_path):
     root = make_run(tmp_path)
     paths = RunPaths(root)
-    write_game(root, GRID_GAME)
     write_map_json(root, GRID_MAP_JSON)
-    assert find_previous_latest_frame_t(paths, MAP_KEY) is None
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) is None
 
 
 def test_other_kinds_do_not_check_the_map_layout(tmp_path):
-    # map 以外の種類は、map.json の layout とゲームの性質の型が違っても、前回の正常に終わったジョブの時刻
+    # map 以外の種類 (map_layout は None) は、map.json の layout とゲームの性質の型が違っても、前回の正常に
+    # 終わったジョブの時刻
     root = make_run(tmp_path)
     paths = RunPaths(root)
     write_game(root, GRID_GAME)
@@ -646,19 +699,23 @@ def test_other_kinds_do_not_check_the_map_layout(tmp_path):
 
 
 def test_map_job_json_has_null_previous_time_when_the_layout_changes(tmp_path):
-    # job.json の previous_latest_frame_t は、型を書き換えるときは null
+    # job.json の previous_latest_frame_t は、型を書き換えるときは null。map_layout はコードが決めた型
     root, paths = make_run_with_previous_map_job(tmp_path)
     write_game(root, GRID_GAME)
     write_map_json(root, FREE_MAP_JSON)
+    map_layout = read_job_map_layout(paths.notes_dir, DocumentKind.MAP)
     job_dir = create_job_directory(
         paths,
         job(
             DocumentKind.MAP,
             latest=9.0,
-            previous=find_previous_latest_frame_t(paths, MAP_KEY),
+            previous=find_previous_latest_frame_t(paths, MAP_KEY, map_layout),
+            map_layout=map_layout,
         ),
     )
-    assert read_json(job_dir / "job.json")["previous_latest_frame_t"] is None
+    value = read_json(job_dir / "job.json")
+    assert value["previous_latest_frame_t"] is None
+    assert value["map_layout"] == "grid"
 
 
 # --- 実行ディレクトリー ---

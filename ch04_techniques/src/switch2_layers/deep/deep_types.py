@@ -8,7 +8,12 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    # 型注釈のためだけに読む (notes.map_document は notes.note_paths を通してこのモジュールを読むため、
+    # 実行時に読むと循環する)
+    from switch2_layers.notes.map_document import MapLayout
 
 
 class DocumentKind(StrEnum):
@@ -65,6 +70,8 @@ class DeepJob:
     previous_latest_frame_t   前回の、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻。正常に終わった前回が
                               無い、または前回にフレームが無ければ None
     latest_frame_t            今回の最新のフレームの時刻 (frames.jsonl の最後の t)。まだフレームが無ければ None
+    map_layout                map のジョブで書くマップの型。ジョブを作るときにコードがゲームの性質の文書から 1 回だけ
+                              決める (deep_job_directory.read_job_map_layout)。map 以外の種類では None
     """
 
     kind: DocumentKind
@@ -73,6 +80,7 @@ class DeepJob:
     requested_t: float
     previous_latest_frame_t: float | None
     latest_frame_t: float | None
+    map_layout: "MapLayout | None" = None
 
     @property
     def key(self) -> DocumentKey:

@@ -2,7 +2,9 @@
 
 - 連番は種類ごとに 1 から振る (deep/ にある同じ種類のディレクトリーの番号の最大 + 1)
 - job.json: {"kind", "scene_id", "trigger", "requested_t", "previous_latest_frame_t", "latest_frame_t",
-  "documents": [notes/ からの / 区切りの相対パス, ...]}
+  "documents": [notes/ からの / 区切りの相対パス, ...], "map_layout"}
+- map_layout は、map のジョブで書くマップの型 ("grid" か "free")。map 以外の種類では null。ジョブを作る側が
+  read_job_map_layout で 1 回だけ決め、DeepJob.map_layout に入れる
 - documents は、そのジョブの対象の文書 (deep が Edit・Write で直接編集してよい文書) の相対パスの文字列のリスト
   (note_paths.deep_document_notes の結果をそのまま並べる)。controls と tips で場面がある場合は、場面の文書と
   共通の文書の両方 (tips の場面は box_targets.md も)。map は map/map.json と map/places.md、game は game.md。
@@ -12,8 +14,8 @@
 - ジョブのディレクトリーの用意 (create_job_directory) では文書の中身を読まない
 - 次のジョブの previous_latest_frame_t は、同じ文書の前回の正常に終わったジョブ (deep_job_success) の
   job.json の latest_frame_t から取る (find_previous_latest_frame_t)。ただし map の文書で、notes/map/map.json の
-  layout がゲームの性質の文書 (notes/game.md) から読んだ型と違う (deep がマップの型を書き換える) ときは None にし、
-  deep に記録とフレームを最初から読ませる
+  layout がそのジョブの map_layout と違う (deep がマップの型を書き換える) ときは None にし、deep に記録とフレームを
+  最初から読ませる
 """
 
 import json
@@ -27,7 +29,7 @@ from switch2_layers.deep.deep_job_success import is_succeeded_job, read_succeede
 from switch2_layers.deep.deep_types import DeepJob, DocumentKey, DocumentKind
 from switch2_layers.file_io import write_json_atomic
 from switch2_layers.notes.game_map_layout import read_game_map_layout
-from switch2_layers.notes.map_document import read_map_document
+from switch2_layers.notes.map_document import MapLayout, read_map_document
 from switch2_layers.notes.note_paths import deep_document_notes
 from switch2_layers.run_directory import DEEP_DIR, RunPaths
 
@@ -123,7 +125,22 @@ def read_job_file(job_dir: Path) -> dict[str, object]:
     raise ValueError(f"{path} is not a JSON object")
 
 
-def find_previous_latest_frame_t(paths: RunPaths, key: DocumentKey) -> float | None:
+def read_job_map_layout(notes_dir: Path, kind: DocumentKind) -> MapLayout | None:
+    """種類 kind のジョブで書くマップの型 (DeepJob.map_layout) を返す。
+
+    kind が map なら、notes.game_map_layout.read_game_map_layout(notes_dir) (ゲームの性質の文書の「マップの形式」の
+    節の最初の空でない行が `- 型: マス目型` なら grid、それ以外は free)。map 以外の種類では、文書を読まずに None。
+    ジョブを作る側 (deep.deep_scheduler の request・保留した要求の起動・deep-once) が、ジョブごとに 1 回だけ呼び、
+    同じ結果を DeepJob.map_layout と find_previous_latest_frame_t の map_layout に渡す。
+    """
+    if kind is DocumentKind.MAP:
+        return read_game_map_layout(notes_dir)
+    return None
+
+
+def find_previous_latest_frame_t(
+    paths: RunPaths, key: DocumentKey, map_layout: MapLayout | None = None
+) -> float | None:
     """同じ文書 key の、前回の正常に終わったジョブに渡した最新のフレームの時刻を返す。
 
     deep/ の同じ種類のジョブのディレクトリーのうち、job.json の scene_id が key.scene_id と同じで、正常に終わったもの
@@ -131,14 +148,19 @@ def find_previous_latest_frame_t(paths: RunPaths, key: DocumentKey) -> float | N
     連番の大きい順に見て、最初に見つかったジョブの job.json の latest_frame_t (数でなければ None) を返す。
     失敗・起動の拒否・stop・kill で終わったジョブと、まだ実行中のジョブは飛ばす (そのジョブに渡した期間は、次のジョブが
     読み直す)。正常に終わった同じ文書のジョブが無ければ None。
-    key.kind が map のときは、先に型の違いを確かめる (map_layout_will_change): notes.map_document.read_map_document(
-    paths.notes_dir) がマップを返し、その layout が notes.game_map_layout.read_game_map_layout(paths.notes_dir) と
-    違えば、前回のジョブを見ずに None を返す (deep がマップの型を書き換えるときに、記録とフレームを最初から読ませるため)。
+    map_layout は、これから作るジョブの DeepJob.map_layout (read_job_map_layout の結果)。key.kind が map で
+    map_layout が None でないときは、先に型の違いを確かめる (map_layout_will_change): map.json を
+    notes.map_document.read_map_document(paths.notes_dir) で読めて、その layout が map_layout と違えば、前回の
+    ジョブを見ずに None を返す (deep がマップの型を書き換えるときに、記録とフレームを最初から読ませるため)。
     map.json が無い・読めない・形に合わない (read_map_document が None) ときと、型が同じときは、上の規則で決める。
-    map 以外の種類では、map.json とゲームの性質の文書を読まない。
-    request と deep-once (deep.deep_scheduler) の両方が、この関数で previous_latest_frame_t を決める。
+    この関数はゲームの性質の文書を読まない。map 以外の種類では map.json も読まない。
+    request・保留した要求の起動・deep-once (deep.deep_scheduler) が、この関数で previous_latest_frame_t を決める。
     """
-    if key.kind is DocumentKind.MAP and map_layout_will_change(paths.notes_dir):
+    if (
+        key.kind is DocumentKind.MAP
+        and map_layout is not None
+        and map_layout_will_change(paths.notes_dir, map_layout)
+    ):
         return None
     same_kind = sorted(
         (
@@ -165,17 +187,16 @@ def find_previous_latest_frame_t(paths: RunPaths, key: DocumentKey) -> float | N
     return None
 
 
-def map_layout_will_change(notes_dir: Path) -> bool:
-    """deep の map のジョブがマップの型を書き換えるなら True を返す。
+def map_layout_will_change(notes_dir: Path, map_layout: MapLayout) -> bool:
+    """型 map_layout で書く map のジョブが、マップの型を書き換えるなら True を返す。
 
-    notes_dir の map.json を notes.map_document.read_map_document で読めて、その layout が
-    notes.game_map_layout.read_game_map_layout(notes_dir) (ゲームの性質の文書から読んだ型) と違えば True。
+    notes_dir の map.json を notes.map_document.read_map_document で読めて、その layout が map_layout と違えば True。
     map.json が無い・読めない・形に合わない (read_map_document が None) ときと、型が同じときは False。
     """
     document = read_map_document(notes_dir)
     if document is None:
         return False
-    return document.layout is not read_game_map_layout(notes_dir)
+    return document.layout is not map_layout
 
 
 def _job_directories(deep_dir: Path) -> list[tuple[DocumentKind, int, Path]]:
@@ -215,6 +236,7 @@ def _job_file_value(job: DeepJob, documents: list[str]) -> dict[str, object]:
         "previous_latest_frame_t": job.previous_latest_frame_t,
         "latest_frame_t": job.latest_frame_t,
         "documents": documents,
+        "map_layout": None if job.map_layout is None else job.map_layout.value,
     }
 
 
