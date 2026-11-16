@@ -535,6 +535,32 @@ def test_report_text(paths):
     )
 
 
+def test_report_reads_agent_log_with_a_line_cut_in_a_character(paths):
+    # 日本語の文字の途中 (3 バイトの文字の 2 バイト目まで) で切れた行の後に、正しい result の行がある
+    broken = '{"type": "assistant", "message": {"text": "日本'.encode()[:-1]
+    valid = json.dumps(
+        {
+            "type": "result",
+            "session_id": "s1",
+            "total_cost_usd": 0.25,
+            "num_turns": 4,
+            "duration_ms": 2000,
+        }
+    ).encode()
+    paths.agent_log_file.write_bytes(broken + b"\n" + valid + b"\n")
+    result = handle_report(paths, as_json=True)
+    assert result.exit_code == 0
+    agent = json.loads(result.stdout_lines[0])["agent"]
+    assert agent == {
+        "launches": 0,
+        "results": 1,
+        "total_cost_usd": 0.25,
+        "num_turns": 4,
+        "duration_ms": 2000,
+        "responses": 0,
+    }
+
+
 def test_report_of_a_new_workspace(paths):
     result = handle_report(paths, as_json=False)
     assert result.exit_code == 0

@@ -21,7 +21,10 @@ from harness_fakes import (
 from switch2_harness.agent_launcher import (
     BUDGET_EXHAUSTED_SUBTYPE,
     CLAUDE_ENV_OVERRIDES,
+    CLAUDE_SETTINGS_JSON,
     DEFAULT_MODEL,
+    KEPT_API_KEY_ENV_NAME,
+    KEPT_CLAUDE_ENV_NAMES,
     MAX_RESUMES,
     MIN_REMAINING_S,
     POLL_INTERVAL_S,
@@ -30,14 +33,19 @@ from switch2_harness.agent_launcher import (
     TERMINATE_GRACE_S,
     LaunchOptions,
     RunOutcome,
+    agent_log_size,
     allowed_tools,
     build_claude_args,
     build_claude_env,
     first_prompt,
+    format_budget_usd,
     last_result_subtype,
     last_session_id,
+    last_total_cost_usd,
+    read_agent_log_lines,
     read_last_result_subtype,
     read_last_session_id,
+    read_last_total_cost_usd,
     run_agent_until,
     start_claude_process,
     stop_process,
@@ -56,15 +64,25 @@ def session_line(session_id: str) -> str:
     return json.dumps({"type": "system", "subtype": "init", "session_id": session_id})
 
 
-def result_line(session_id: str, subtype: str = "success") -> str:
+def result_line(
+    session_id: str, subtype: str = "success", total_cost_usd: float = 0.1
+) -> str:
     return json.dumps(
         {
             "type": "result",
             "subtype": subtype,
             "session_id": session_id,
-            "total_cost_usd": 0.1,
+            "total_cost_usd": total_cost_usd,
         }
     )
+
+
+# 日本語の文字の途中 (3 バイトの文字の 2 バイト目まで) で切れた行。強制終了したプロセスの出力に現れる
+BROKEN_LINE = '{"type": "assistant", "message": {"text": "日本'.encode()[:-1]
+
+
+def write_log_bytes(path: Path, *lines: bytes) -> None:
+    path.write_bytes(b"".join(line + b"\n" for line in lines))
 
 
 # --- 定数とプロンプト ---
@@ -79,6 +97,22 @@ def test_constants():
     assert MIN_REMAINING_S == 30.0
     assert MAX_RESUMES == 20
     assert BUDGET_EXHAUSTED_SUBTYPE == "error_max_budget_usd"
+    assert KEPT_CLAUDE_ENV_NAMES == (
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    )
+    assert KEPT_API_KEY_ENV_NAME == "ANTHROPIC_API_KEY"
+
+
+def test_claude_settings_json_blocks_reads_outside_the_workspace():
+    assert CLAUDE_SETTINGS_JSON == json.dumps(
+        {"permissions": {"blockReadsOutsideWorkingDirectories": True}}
+    )
+    assert json.loads(CLAUDE_SETTINGS_JSON) == {
+        "permissions": {"blockReadsOutsideWorkingDirectories": True}
+    }
 
 
 def test_launch_options_defaults():
@@ -93,12 +127,25 @@ def test_first_prompt():
     )
 
 
-def test_allowed_tools():
+def test_allowed_tools_lists_only_harness_commands():
     assert allowed_tools(("look", "press")) == [
         "Bash(uv run switch2-harness look *)",
         "Bash(uv run switch2-harness press *)",
-        "Read",
     ]
+
+
+@pytest.mark.parametrize(
+    ("budget", "text"),
+    [
+        (2.5, "2.5000"),
+        (1.0, "1.0000"),
+        (1.0 - 0.4, "0.6000"),
+        (1.0 - 0.7, "0.3000"),
+        (12.0, "12.0000"),
+    ],
+)
+def test_format_budget_usd(budget, text):
+    assert format_budget_usd(budget) == text
 
 
 # --- 起動引数と環境変数 ---
@@ -127,18 +174,20 @@ def test_build_claude_args_in_order():
         "Bash(uv run switch2-harness press *)",
         "Bash(uv run switch2-harness status *)",
         "Bash(uv run switch2-harness finish *)",
-        "Read",
         "--disallowedTools",
         "Skill",
         "--disable-slash-commands",
         "--strict-mcp-config",
-        "--setting-sources",
-        "project,local",
+        "--restricted",
+        "--settings",
+        '{"permissions": {"blockReadsOutsideWorkingDirectories": true}}',
         "--append-system-prompt-file",
         "/w/CLAUDE.md",
         "--model",
         "claude-opus-5-5",
     ]
+    assert "--setting-sources" not in args
+    assert "Read" not in args
 
 
 def test_build_claude_args_with_options_and_resume():
@@ -156,7 +205,7 @@ def test_build_claude_args_with_options_and_resume():
         "--effort",
         "high",
         "--max-budget-usd",
-        "2.5",
+        "2.5000",
         "--resume",
         "abc",
     ]
@@ -169,7 +218,7 @@ def test_build_claude_args_adds_only_given_options():
         Path("/w/CLAUDE.md"),
         LaunchOptions(model="m", max_budget_usd=1.0),
     )
-    assert args[-4:] == ["--model", "m", "--max-budget-usd", "1.0"]
+    assert args[-4:] == ["--model", "m", "--max-budget-usd", "1.0000"]
     assert "--effort" not in args
     assert "--resume" not in args
 
@@ -189,7 +238,6 @@ def test_build_claude_args_puts_feature_commands_in_allowed_tools():
         "Bash(uv run switch2-harness status *)",
         "Bash(uv run switch2-harness finish *)",
         "Bash(uv run switch2-harness history *)",
-        "Read",
     ]
 
 
@@ -209,6 +257,74 @@ def test_build_claude_env_copies_and_adds():
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     }
     assert base == {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0"}
+
+
+# run を起動した親の Claude Code のセッションの環境にある変数
+PARENT_SESSION_ENV = {
+    "CLAUDECODE": "1",
+    "CLAUDE_CODE_CHILD_SESSION": "1",
+    "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/claude-messaging.sock",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "secret-token",
+    "CLAUDE_CODE_SESSION_ID": "parent-session",
+    "CLAUDE_EFFORT": "high",
+    "CLAUDE_PID": "1234",
+}
+OVERRIDES = {
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
+
+def test_build_claude_env_removes_parent_session_variables():
+    env = build_claude_env({"PATH": "/usr/bin", **PARENT_SESSION_ENV})
+    assert env == {"PATH": "/usr/bin", **OVERRIDES}
+
+
+def test_build_claude_env_keeps_claude_code_auth_and_config():
+    kept = {
+        "CLAUDE_CONFIG_DIR": "/home/u/.claude-eval",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "ANTHROPIC_API_KEY": "anthropic-key",
+    }
+    assert build_claude_env(kept) == {**kept, **OVERRIDES}
+
+
+def test_build_claude_env_removes_other_api_keys():
+    env = build_claude_env(
+        {
+            "OPENAI_API_KEY": "openai-key",
+            "GEMINI_API_KEY": "gemini-key",
+            "ANTHROPIC_API_KEY": "anthropic-key",
+            "PATH": "/usr/bin",
+        }
+    )
+    assert env == {
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "PATH": "/usr/bin",
+        **OVERRIDES,
+    }
+
+
+def test_build_claude_env_keeps_unrelated_variables():
+    unrelated = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+        "LANG": "ja_JP.UTF-8",
+        "MY_CLAUDE_NOTE": "x",
+        "API_KEY_FILE": "/etc/key",
+        "OPENAI_API_KEY_FILE": "/etc/openai",
+        "claude_lowercase": "y",
+    }
+    assert build_claude_env(unrelated) == {**unrelated, **OVERRIDES}
+
+
+def test_build_claude_env_does_not_change_base():
+    base = {"PATH": "/usr/bin", "OPENAI_API_KEY": "o", **PARENT_SESSION_ENV}
+    copy = dict(base)
+    build_claude_env(base)
+    assert base == copy
 
 
 # --- session_id の読み取り ---
@@ -236,11 +352,69 @@ def test_last_session_id_without_session_is_none():
 def test_read_last_session_id_from_file(tmp_path):
     path = tmp_path / "agent.jsonl"
     path.write_text(session_line("s1") + "\n" + result_line("s2") + "\n", "utf-8")
-    assert read_last_session_id(path) == "s2"
+    assert read_last_session_id(path, 0) == "s2"
 
 
 def test_read_last_session_id_of_missing_file_is_none(tmp_path):
-    assert read_last_session_id(tmp_path / "agent.jsonl") is None
+    assert read_last_session_id(tmp_path / "agent.jsonl", 0) is None
+
+
+def test_read_last_session_id_reads_only_after_offset(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    earlier = (session_line("前の run") + "\n").encode()
+    write_log_bytes(path, earlier.rstrip(b"\n"), session_line("today").encode())
+    assert read_last_session_id(path, len(earlier)) == "today"
+
+
+def test_read_last_session_id_after_offset_without_session_is_none(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    write_log_bytes(path, session_line("old").encode())
+    assert read_last_session_id(path, path.stat().st_size) is None
+
+
+def test_read_last_session_id_skips_a_line_cut_in_a_character(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    write_log_bytes(path, BROKEN_LINE, session_line("s1").encode())
+    assert read_last_session_id(path, 0) == "s1"
+
+
+# --- agent.jsonl の大きさと行の読み込み ---
+
+
+def test_agent_log_size(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    assert agent_log_size(path) == 0
+    path.write_bytes("日本\n".encode())
+    assert agent_log_size(path) == 7
+
+
+def test_read_agent_log_lines_from_offset(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    path.write_bytes("前の行\n今回の行 1\n今回の行 2\n".encode())
+    offset = len("前の行\n".encode())
+    assert read_agent_log_lines(path, offset) == ["今回の行 1", "今回の行 2"]
+    assert read_agent_log_lines(path, 0) == ["前の行", "今回の行 1", "今回の行 2"]
+
+
+def test_read_agent_log_lines_of_missing_file_is_empty(tmp_path):
+    assert read_agent_log_lines(tmp_path / "agent.jsonl", 0) == []
+
+
+def test_read_agent_log_lines_replaces_broken_bytes(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    write_log_bytes(path, BROKEN_LINE, session_line("s1").encode())
+    first, second = read_agent_log_lines(path, 0)
+    assert first.endswith("日\N{REPLACEMENT CHARACTER}")
+    assert second == session_line("s1")
+
+
+def test_read_agent_log_lines_splits_only_on_newline(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    # stream-json の文字列の中には U+2028 (行区切り) がエスケープされずに入ることがある
+    line = '{"type": "system", "session_id": "s1", "text": "a\N{LINE SEPARATOR}b"}'
+    path.write_bytes((line + "\n").encode())
+    assert read_agent_log_lines(path, 0) == [line]
+    assert read_last_session_id(path, 0) == "s1"
 
 
 # --- 最後の result の subtype の読み取り ---
@@ -278,11 +452,70 @@ def test_read_last_result_subtype_from_file(tmp_path):
         result_line("s1") + "\n" + result_line("s1", "error_max_budget_usd") + "\n",
         "utf-8",
     )
-    assert read_last_result_subtype(path) == "error_max_budget_usd"
+    assert read_last_result_subtype(path, 0) == "error_max_budget_usd"
 
 
 def test_read_last_result_subtype_of_missing_file_is_none(tmp_path):
-    assert read_last_result_subtype(tmp_path / "agent.jsonl") is None
+    assert read_last_result_subtype(tmp_path / "agent.jsonl", 0) is None
+
+
+def test_read_last_result_subtype_reads_only_after_offset(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    earlier = (result_line("old", "error_max_budget_usd") + "\n").encode()
+    path.write_bytes(earlier + (result_line("new", "success") + "\n").encode())
+    assert read_last_result_subtype(path, len(earlier)) == "success"
+    assert read_last_result_subtype(path, path.stat().st_size) is None
+
+
+def test_read_last_result_subtype_skips_a_line_cut_in_a_character(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    write_log_bytes(path, BROKEN_LINE, result_line("s1", "success").encode())
+    assert read_last_result_subtype(path, 0) == "success"
+
+
+# --- 最後の result の total_cost_usd の読み取り ---
+
+
+def test_last_total_cost_usd_returns_the_last_number():
+    lines = [
+        result_line("s1", total_cost_usd=0.25),
+        json.dumps({"type": "result", "total_cost_usd": 1}),
+        json.dumps({"type": "result", "total_cost_usd": True}),
+        json.dumps({"type": "result", "total_cost_usd": "0.7"}),
+        json.dumps({"type": "result", "total_cost_usd": None}),
+        json.dumps({"type": "result"}),
+        json.dumps({"type": "assistant", "total_cost_usd": 9.9}),
+        "not json",
+        json.dumps([{"type": "result", "total_cost_usd": 3.0}]),
+        '{"type": "result", "total_cost_usd": 4.',
+    ]
+    cost = last_total_cost_usd(lines)
+    assert cost == 1.0
+    assert isinstance(cost, float)
+
+
+def test_last_total_cost_usd_without_result_is_none():
+    assert last_total_cost_usd([]) is None
+    assert last_total_cost_usd([session_line("s1")]) is None
+
+
+def test_read_last_total_cost_usd_reads_only_after_offset(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    earlier = (result_line("old", total_cost_usd=0.9) + "\n").encode()
+    path.write_bytes(earlier + (result_line("new", total_cost_usd=0.2) + "\n").encode())
+    assert read_last_total_cost_usd(path, 0) == pytest.approx(0.2)
+    assert read_last_total_cost_usd(path, len(earlier)) == pytest.approx(0.2)
+    assert read_last_total_cost_usd(path, path.stat().st_size) is None
+
+
+def test_read_last_total_cost_usd_of_missing_file_is_none(tmp_path):
+    assert read_last_total_cost_usd(tmp_path / "agent.jsonl", 0) is None
+
+
+def test_read_last_total_cost_usd_skips_a_line_cut_in_a_character(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    write_log_bytes(path, BROKEN_LINE, result_line("s1", total_cost_usd=0.4).encode())
+    assert read_last_total_cost_usd(path, 0) == pytest.approx(0.4)
 
 
 # --- --minutes の検証 ---
@@ -617,6 +850,121 @@ def test_run_looks_at_the_last_result_for_the_budget(tmp_path):
     outcome = run_scenario(scenario, minutes=1.0)
     assert outcome == RunOutcome(reason="budget_exhausted", launches=2)
     assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+# --- run 全体の予算 ---
+
+
+def budget_arg(args: list[str]) -> str:
+    return args[args.index("--max-budget-usd") + 1]
+
+
+def test_run_passes_the_remaining_budget_when_resuming(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", total_cost_usd=0.4)),
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    options = LaunchOptions(max_budget_usd=1.0)
+    outcome = run_scenario(scenario, minutes=1.0, options=options)
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    first_launch, second_launch = scenario.starter.launches
+    assert budget_arg(first_launch.args) == "1.0000"
+    assert budget_arg(second_launch.args) == "0.6000"
+    assert second_launch.args == build_claude_args(
+        RESUME_PROMPT,
+        BASE_AGENT_COMMANDS,
+        scenario.paths.instructions_file,
+        LaunchOptions(max_budget_usd=0.6),
+        resume_session_id="s1",
+    )
+
+
+def test_run_stops_when_the_run_budget_is_used_up(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", total_cost_usd=0.4)),
+    )
+    second = ProcessPlan(
+        runs_for_s=10.0, output_lines=(result_line("s1", total_cost_usd=1.0),)
+    )
+    scenario = make_scenario(tmp_path, [first, second, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=2)
+    assert len(scenario.starter.launches) == 2
+    assert scenario.events[-2].args == ("stop", "budget_exhausted")
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_checks_the_run_budget_before_session_id(tmp_path):
+    used_up = json.dumps(
+        {"type": "result", "subtype": "success", "total_cost_usd": 1.5}
+    )
+    plan = ProcessPlan(runs_for_s=10.0, output_lines=(used_up,))
+    scenario = make_scenario(tmp_path, [plan])
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=1)
+
+
+def test_run_keeps_the_whole_budget_without_result(tmp_path):
+    first = ProcessPlan(runs_for_s=10.0, output_lines=(session_line("s1"),))
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    run_scenario(scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0))
+    assert budget_arg(scenario.starter.launches[1].args) == "1.0000"
+
+
+def test_run_without_budget_does_not_pass_max_budget_usd(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", total_cost_usd=5.0)),
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(scenario, minutes=1.0, options=LaunchOptions())
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    for launch in scenario.starter.launches:
+        assert "--max-budget-usd" not in launch.args
+
+
+# --- 前の run の出力を判定に使わない ---
+
+
+def test_run_ignores_the_previous_run_session_and_budget_mark(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=10.0)])
+    previous_run = [
+        session_line("previous"),
+        result_line("previous", "error_max_budget_usd", total_cost_usd=0.9),
+    ]
+    scenario.paths.agent_log_file.write_text(
+        "\n".join(previous_run) + "\n", encoding="utf-8"
+    )
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="no_session", launches=1)
+    assert scenario.events[1].args == ("stop", "no_session")
+
+
+def test_run_uses_this_run_session_and_cost(tmp_path):
+    first = ProcessPlan(runs_for_s=10.0, output_lines=(session_line("today"),))
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    previous_run = [
+        session_line("previous"),
+        result_line("previous", "success", total_cost_usd=0.9),
+    ]
+    scenario.paths.agent_log_file.write_text(
+        "\n".join(previous_run) + "\n", encoding="utf-8"
+    )
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    second_launch = scenario.starter.launches[1]
+    assert second_launch.args[-2:] == ["--resume", "today"]
+    assert budget_arg(second_launch.args) == "1.0000"
 
 
 def test_run_stops_running_process_before_release_on_keyboard_interrupt(tmp_path):

@@ -323,7 +323,7 @@ def test_run_dispatch_with_options(workspace, harness):
         "--effort",
         "high",
         "--max-budget-usd",
-        "2.5",
+        "2.5000",
     ]
 
 
