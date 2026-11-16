@@ -5,6 +5,8 @@
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
       "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
+      "progress": {"measured": 画面の停滞の計測の値の時刻のラベル (無ければ NOT_MEASURED_TEXT),
+                   "text": 2 つの値の文 (progress.progress_text。無ければ NO_PROGRESS_TEXT)},
       "recent_actions": [{"time": 時刻のラベル, "held": [...], "hold_seconds": {ボタン名: 秒}, "taps": [...],
                           "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
       "frames": [{"label": 時刻のラベル, "image": <画像の参照文字列>}, ...]
@@ -45,6 +47,10 @@ from typing import Protocol
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.pad_action import action_to_json
 from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.progress_text import (
+    NO_PROGRESS_TEXT,
+    describe_progress_values,
+)
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
@@ -182,7 +188,12 @@ def progress_to_state(
     「直近 300 秒に見た画面だけが出ている: 85.0 秒」の 2 行)。
     progress が None (値が無い) なら、measured は NOT_MEASURED_TEXT、text は progress.progress_text.NO_PROGRESS_TEXT。
     """
-    raise NotImplementedError
+    if progress is None:
+        return {"measured": NOT_MEASURED_TEXT, "text": NO_PROGRESS_TEXT}
+    return {
+        "measured": relative_time_label(progress.t, request_t),
+        "text": describe_progress_values(progress),
+    }
 
 
 def recent_actions_to_state(
@@ -240,6 +251,7 @@ def _state_with_images(
         "timeline": timeline_to_state(
             surface_input.timeline, surface_input.timeline_generated_t, request_t
         ),
+        "progress": progress_to_state(surface_input.progress, request_t),
         "recent_actions": recent_actions_to_state(
             surface_input.recent_actions, request_t
         ),

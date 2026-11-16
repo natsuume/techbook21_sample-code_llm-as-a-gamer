@@ -16,4 +16,7 @@ NO_PROGRESS_TEXT = "画面の停滞の計測の値はまだ無い"
 
 def describe_progress_values(state: ProgressState) -> str:
     """state の 2 つの値を、モジュールの docstring の 2 行の文 (改行 1 つでつなぎ、末尾に改行を付けない) にする。"""
-    raise NotImplementedError
+    return (
+        f"画面が変わっていない: {state.static_s:.1f} 秒\n"
+        f"直近 {state.window_s:g} 秒に見た画面だけが出ている: {state.no_novel_s:.1f} 秒"
+    )

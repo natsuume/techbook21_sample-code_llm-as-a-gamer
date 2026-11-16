@@ -14,10 +14,14 @@ window_s を超えない。no_novel_s は時刻だけで数えるため、window
 no_novel_s は増え続ける。
 """
 
+import math
+from collections import deque
+
 import numpy as np
 
 from switch2_layers.progress.progress_state import ProgressState
-from switch2_layers.progress.screen_hash import NEAR_DISTANCE_MAX
+from switch2_layers.progress.screen_hash import NEAR_DISTANCE_MAX, is_near, screen_hash
+from switch2_layers.run_clock import round_to_milliseconds
 
 # --progress-window の既定値 (秒)
 DEFAULT_PROGRESS_WINDOW_S = 300.0
@@ -32,22 +36,30 @@ class ScreenProgressTracker:
 
     def __init__(self, window_s: float, max_distance: int = NEAR_DISTANCE_MAX) -> None:
         """フレームを持たない状態で作る。window_s が 0 より大きい有限の値でなければ ValueError。"""
-        raise NotImplementedError
+        if not (math.isfinite(window_s) and window_s > 0):
+            raise ValueError(
+                f"window_s must be a finite number more than 0: {window_s}"
+            )
+        self.window_s = window_s
+        self.max_distance = max_distance
+        # 窓の中のフレームの (時刻, ハッシュ)。古い順
+        self._kept: deque[tuple[float, int]] = deque()
+        self._last_novel_t: float | None = None
 
     @property
     def kept_count(self) -> int:
         """持っているフレームのハッシュの数 (最新のフレームを含む)。"""
-        raise NotImplementedError
+        return len(self._kept)
 
     def add_frame(self, t: float, image: np.ndarray) -> ProgressState:
         """時刻 t のフレームの画像 image を足し、最新のフレームの値を返す。
 
         add_hash(t, screen_hash.screen_hash(image)) と同じ。
         """
-        raise NotImplementedError
+        return self.add_hash(t, screen_hash(image))
 
-    def add_hash(self, t: float, screen_hash: int) -> ProgressState:
-        """時刻 t のフレームのハッシュ screen_hash を足し、最新のフレームの値を返す。
+    def add_hash(self, t: float, frame_hash: int) -> ProgressState:
+        """時刻 t のフレームのハッシュ frame_hash を足し、最新のフレームの値を返す。
 
         1. t が前に足したフレームの時刻以下なら ValueError (何も変えない)
         2. t との時刻の差 (run_clock.round_to_milliseconds で丸めた値) が window_s を超えるフレームのハッシュを捨てる
@@ -58,4 +70,29 @@ class ScreenProgressTracker:
         戻り値は ProgressState(t, static_s, no_novel_s = t − 最後に新しい画面が出た時刻, window_s) で、
         t・static_s・no_novel_s は run_clock.round_to_milliseconds で小数第 3 位に丸める。
         """
-        raise NotImplementedError
+        kept = self._kept
+        if kept and t <= kept[-1][0]:
+            raise ValueError(
+                f"frame time {t} is not after the previous frame {kept[-1][0]}"
+            )
+        while kept and round_to_milliseconds(t - kept[0][0]) > self.window_s:
+            kept.popleft()
+        if not any(self._near(frame_hash, kept_hash) for _, kept_hash in kept):
+            self._last_novel_t = t
+        static_start_t = t
+        for kept_t, kept_hash in reversed(kept):
+            if not self._near(frame_hash, kept_hash):
+                break
+            static_start_t = kept_t
+        kept.append((t, frame_hash))
+        last_novel_t = t if self._last_novel_t is None else self._last_novel_t
+        return ProgressState(
+            t=round_to_milliseconds(t),
+            static_s=round_to_milliseconds(t - static_start_t),
+            no_novel_s=round_to_milliseconds(t - last_novel_t),
+            window_s=self.window_s,
+        )
+
+    def _near(self, first: int, second: int) -> bool:
+        """2 つのハッシュが近い (ハミング距離が max_distance 以下) なら True。"""
+        return is_near(first, second, self.max_distance)

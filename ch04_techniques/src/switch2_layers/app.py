@@ -18,7 +18,8 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
 
 スレッド:
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
-    surface のループ、middle のループ、deep の自動の呼び出し (DeepScheduler) とジョブ。
+    surface のループ、middle のループ、画面の停滞の計測のループ (progress.progress_loop)、
+    deep の自動の呼び出し (DeepScheduler) とジョブ。
     wait を呼んだスレッド (run ではメインスレッド) が、止まる条件を MONITOR_INTERVAL_S ごとに確かめる。
 """
 
@@ -49,6 +50,9 @@ from switch2_layers.middle.middle_loop import (
     MiddleLoopSettings,
 )
 from switch2_layers.middle.middle_types import MiddleAnalyzer
+from switch2_layers.progress.progress_loop import ProgressLoop
+from switch2_layers.progress.progress_state import read_progress_state
+from switch2_layers.progress.screen_progress import ScreenProgressTracker
 from switch2_layers.records.operation_log import OperationLog
 from switch2_layers.records.run_log import (
     EVENT_FRAMES_DROPPED,
@@ -78,7 +82,7 @@ REASON_INTERRUPTED = "interrupted"
 REASON_BRIDGE_FAILED = "bridge recovery failed"
 REASON_CLOSED = "closed"  # 止まる条件より前に close が呼ばれた
 MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
-# 終了時に surface と middle のループのスレッドの終わりを待つ上限 (秒)
+# 終了時に surface・middle・画面の停滞の計測のループのスレッドの終わりを待つ上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
 BRIDGE_FAILED = "failed"  # bridge_state が返す、ブリッジの復旧が失敗した状態
 
@@ -144,7 +148,8 @@ class _PartsBuiltSoFar:
     frame_store      FrameStore (作る前は None)
     capture_source   CaptureSource (作る前は None)
     deep_scheduler   DeepScheduler (作る前は None)
-    loop_threads     作った surface と middle のループのスレッド (起動したかどうかは Thread.is_alive で見分ける)
+    loop_threads     作った surface・middle・画面の停滞の計測のループのスレッド (起動したかどうかは Thread.is_alive で
+                     見分ける)
     """
 
     run_log: RunLog | None = None
@@ -179,7 +184,7 @@ class LayersApp:
     settings       run の起動引数
     parts          注入する部品
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
-    start_thread   start が surface と middle のループのスレッドを起動する関数 (既定 threading.Thread.start)。
+    start_thread   start が surface・middle・画面の停滞の計測のループのスレッドを起動する関数 (既定 threading.Thread.start)。
                    テストでは、起動の途中で例外を出す関数を渡せる
     """
 
@@ -196,7 +201,7 @@ class LayersApp:
         self.sleep = sleep
         self.start_thread = start_thread
         self._lock = threading.Lock()
-        # ループの停止の合図 (surface と middle のループが見る)
+        # ループの停止の合図 (surface・middle・画面の停滞の計測のループが見る)
         self._stop_event = threading.Event()
         self._stop_reason: str | None = None
         # 停止の処理 (PadOutput.stop_output) を終えたか。理由が決まっただけで処理の途中に割り込まれた場合
@@ -219,11 +224,14 @@ class LayersApp:
         5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …,
            on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
-           timeout_s は deep_timeout_s) を作って start する (タイムアウトと自動の呼び出しの判定のスレッド)
+           progress_state は progress/state.json の値 (progress.progress_state.read_progress_state)、
+           timeout_s は deep_timeout_s、stuck_advice_seconds は stuck_advice_seconds) を作って start する
+           (タイムアウト・自動の呼び出し・きっかけ progress の判定のスレッド)
         7. SurfaceLoop (max_errors = max_surface_errors、boxes_at = parts.surface_boxes_at、
            plan_boxes = parts.surface_plan_boxes) と
-           MiddleLoop (interval_s・window_s・max_errors) を作り、それぞれのスレッドを start_thread で起動する。
-           on_stop には request_stop を渡す
+           MiddleLoop (interval_s・window_s・max_errors) と、画面の停滞の計測の
+           ProgressLoop (ScreenProgressTracker(progress_window_s)) を作り、それぞれのスレッドを start_thread で
+           この順に起動する。surface と middle の on_stop には request_stop を渡す
         2 回目以降の呼び出しは RuntimeError にする。
 
         途中で例外 (KeyboardInterrupt などの BaseException を含む) が出たら、次の後片付けをしてから、その例外を
@@ -301,16 +309,18 @@ class LayersApp:
                     read_surface_context(paths.middle_state).scene_id
                 ),
                 latest_frame_t=lambda: latest_frame_t(paths),
+                progress_state=lambda: read_progress_state(paths.progress_state),
             ),
             DeepSchedulerSettings(
                 min_start_interval_s=settings.deep_min_start_interval_s,
                 auto_seconds=settings.deep_auto_seconds,
                 timeout_s=settings.deep_timeout_s,
+                stuck_advice_seconds=settings.stuck_advice_seconds,
             ),
         )
         built.deep_scheduler = deep_scheduler
         deep_scheduler.start()
-        # 7: surface と middle のループ
+        # 7: surface・middle・画面の停滞の計測のループ
         surface_loop = SurfaceLoop(
             SurfaceLoopParts(
                 paths=paths,
@@ -343,6 +353,9 @@ class LayersApp:
                 max_errors=settings.max_middle_errors,
             ),
         )
+        progress_loop = ProgressLoop(
+            paths, ScreenProgressTracker(settings.progress_window_s)
+        )
         loop_threads = (
             threading.Thread(
                 target=surface_loop.run,
@@ -354,6 +367,12 @@ class LayersApp:
                 target=middle_loop.run,
                 args=(self._stop_event,),
                 name="middle-loop",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=progress_loop.run,
+                args=(self._stop_event,),
+                name="progress-loop",
                 daemon=True,
             ),
         )
@@ -481,7 +500,8 @@ class LayersApp:
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。
 
-        1. ループの停止の合図を立て、surface と middle のループのスレッドの終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
+        1. ループの停止の合図を立て、surface・middle・画面の停滞の計測のループのスレッドの終わりを
+           最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
         2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)
         3. CaptureSource.close()、FrameStore.close()
         4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書いて、

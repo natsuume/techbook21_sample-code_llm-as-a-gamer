@@ -11,6 +11,7 @@ run の middle のループと middle-once は、同じ build_middle_input で�
     notes/scenes/<場面ID>/controls.md     現在の場面の操作説明 (無いか空なら notes/common/controls.md)
     notes/map/map.json                   マップ (場所とつながりの一覧)。場所の名前の一覧にも使う
     middle/map_records.jsonl             middle のマップの記録。記録の場所の名前を、場所の名前の一覧に使う
+    progress/state.json                  画面の停滞の計測の最新の値 (progress.progress_loop が書く)
 
 「前回の middle の実行以降」の行の決め方 (surface.jsonl と operations.jsonl のそれぞれで同じ):
     - 行の時刻ではなく、ファイルのバイト位置で区切る。前回の middle/state.json の surface_rows_offset・
@@ -50,6 +51,7 @@ from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, sc
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.notes.surface_documents import read_surface_documents
+from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.run_directory import RunPaths
 
 MIDDLE_MAX_FRAMES = 4  # middle に渡すフレームの最大の枚数
@@ -118,6 +120,8 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
       middle の実行は失敗にしない)
     - place_names: middle.place_names.collect_place_names(map_document,
       middle.map_records.read_recorded_place_names(middle/map_records.jsonl))
+    - progress: progress.progress_state.read_progress_state(progress/state.json)。無い・読めない・形に合わないときは
+      None (値なし。middle の実行は失敗にしない)
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0・None) にする。
     strategy・current_tasks・map.json の文書は notes.note_reader で読み、シンボリックリンクを解決した先が
     notes/ の中の通常のファイルでなければ、無い文書 (空文字列。map.json は None) として扱う。
@@ -161,6 +165,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         current_controls=current_controls,
         place_names=tuple(place_names),
         map_document=map_document,
+        progress=read_progress_state(paths.progress_state),
     )
 
 

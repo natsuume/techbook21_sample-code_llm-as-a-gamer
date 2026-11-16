@@ -8,6 +8,8 @@
 - 自動の呼び出し (check_auto) は、種類ごとに現在の対象の文書について判定し、次の 2 つを満たしたら、きっかけ auto で起動する
     - その文書のジョブが実行中でない
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
+- 画面の停滞の計測による呼び出し (check_progress) は、新しい画面が出ていない秒数が stuck_advice_seconds を超えたら、
+  advice の文書をきっかけ progress で要求する (progress.stuck_advice_trigger の規則。最小の起動間隔は request が当てる)
 - ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
@@ -44,7 +46,10 @@ from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_store import latest_frame_t
 from switch2_layers.notes.note_paths import document_key, is_scene_id
 from switch2_layers.progress.progress_state import ProgressState
-from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    StuckAdviceTrigger,
+)
 from switch2_layers.records.run_log import (
     EVENT_DEEP_END,
     EVENT_DEEP_REQUEST_ERROR,
@@ -217,7 +222,8 @@ class DeepScheduler:
     """deep のジョブを起動し、止める。
 
     request・check_auto・check_timeouts・close は複数のスレッドから呼んでよい (判断と記録は 1 つのロックの中で行う。
-    DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。
+    DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。check_progress は 1 つのスレッドから
+    だけ呼ぶ。
     DeepRequestSink の実装。作ったときの t を、最初の対象の文書が対象になった時刻とする。
     ジョブは request で起動してから、run が戻るか kill を呼ぶまで「実行中」に数える。
     """
@@ -240,6 +246,8 @@ class DeepScheduler:
         self._closed = False
         self._stop_checks = threading.Event()
         self._thread: threading.Thread | None = None
+        # きっかけ progress で要求するかの判定 (check_progress だけが使う)
+        self._stuck_advice = StuckAdviceTrigger(settings.stuck_advice_seconds)
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -377,8 +385,32 @@ class DeepScheduler:
             4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "progress",
                "kind": "advice", "trigger": "progress", "scene_id": null, "error": 説明} を書き、None を返す
         要求しなければ None を返す。close の後は何もせず None を返す。
+        判定の状態 (前回の要求の時刻) を持つため、1 つのスレッド (start で起動する判定のスレッド) からだけ呼ぶ。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._closed:
+                return None
+        state = self.parts.progress_state()
+        advice_key = document_key(DocumentKind.ADVICE, None)
+        advice_running = self.is_running(advice_key)
+        no_novel_s = None if state is None else state.no_novel_s
+        if not self._stuck_advice.check(
+            self.parts.clock.now(), no_novel_s, advice_running
+        ):
+            return None
+        try:
+            return self.request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None)
+        except Exception as error:
+            logger.debug("progress deep request failed", exc_info=True)
+            self.parts.run_log.write(
+                EVENT_DEEP_REQUEST_ERROR,
+                source="progress",
+                kind=DocumentKind.ADVICE.value,
+                trigger=DeepTrigger.PROGRESS.value,
+                scene_id=None,
+                error=describe_exception(error),
+            )
+            return None
 
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
@@ -417,10 +449,10 @@ class DeepScheduler:
             return any(running.job.key == key for running in self._running)
 
     def start(self) -> None:
-        """CHECK_INTERVAL_S ごとに check_timeouts を呼んでから check_auto を呼ぶスレッド (daemon) を起動する。
+        """CHECK_INTERVAL_S ごとに check_timeouts・check_auto・check_progress をこの順に呼ぶスレッド (daemon) を起動する。
 
-        2 回目以降は何もしない。check_timeouts と check_auto の想定外の例外 (Exception) は、スレッドを止めずに
-        logging で警告を書く。
+        2 回目以降は何もしない。check_timeouts・check_auto・check_progress の想定外の例外 (Exception) は、スレッドを
+        止めずに logging で警告を書く。
         """
         with self._lock:
             if self._thread is not None or self._closed:
@@ -558,7 +590,8 @@ class DeepScheduler:
             return bool(self._running)
 
     def _run_checks(self) -> None:
-        """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts と check_auto を呼ぶ。"""
+        """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts・check_auto・
+        check_progress を呼ぶ。"""
         while not self._stop_checks.wait(CHECK_INTERVAL_S):
             try:
                 self.check_timeouts()
@@ -568,6 +601,10 @@ class DeepScheduler:
                 self.check_auto()
             except Exception:
                 logger.warning("checking automatic deep requests failed", exc_info=True)
+            try:
+                self.check_progress()
+            except Exception:
+                logger.warning("checking progress deep requests failed", exc_info=True)
 
 
 def _call_runner(action: Callable[[Path], None], job_dir: Path) -> None:

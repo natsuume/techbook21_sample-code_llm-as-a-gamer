@@ -11,7 +11,7 @@
           {"type": "input_text", "text": luna_instructions.LUNA_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 12>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 13>},
           {"type": "input_text", "text": frame_label(フレーム 1 の t)},
           {"type": "input_image", "image_url": jpeg_data_url(フレーム 1 の JPEG)},
           ...]}
@@ -37,7 +37,9 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     10. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
     11. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
                                         SCENE_CHANGE_NOT_REPORTED_TEXT
-    12. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
+    12. 画面の停滞 (コードの計測)       describe_progress(middle_input.progress)。surface に渡すものと同じ文
+                                        (progress.progress_text) に、値の時刻を添える
+    13. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
                                         0 枚なら NO_FRAMES_TEXT
 節の後ろに、middle_input.frames の順 (古い順) に、時刻のラベル (frame_label) と画像 (input_image) を 1 組ずつ置く。
 画像の detail は指定しない (既定の auto)。
@@ -58,6 +60,10 @@ from switch2_layers.middle.record_summary import (
 from switch2_layers.notes.map_document import MapDocument, map_document_to_json
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.progress_text import (
+    NO_PROGRESS_TEXT,
+    describe_progress_values,
+)
 
 LUNA_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
@@ -74,6 +80,7 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "前回以降の surface の記録",
     "前回以降の操作の記録",
     "場面転換の印",
+    "画面の停滞 (コードの計測)",
     "フレーム",
 )
 EMPTY_TEXT = "(無い)"
@@ -142,7 +149,12 @@ def describe_progress(progress: ProgressState | None) -> str:
         画面が変わっていない: <static_s> 秒                     ここから 2 行は
         直近 <window_s> 秒に見た画面だけが出ている: <no_novel_s> 秒     progress_text.describe_progress_values
     """
-    raise NotImplementedError
+    if progress is None:
+        return NO_PROGRESS_TEXT
+    return (
+        f"計測した時刻: {format_frame_label(progress.t)}\n"
+        f"{describe_progress_values(progress)}"
+    )
 
 
 def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
@@ -197,7 +209,7 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
 
 
 def build_user_sections(middle_input: MiddleInput) -> list[str]:
-    """user メッセージの 12 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 13 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     frame_count = len(middle_input.frames)
     if frame_count:
         frames_text = (
@@ -220,6 +232,7 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
         SCENE_CHANGE_REPORTED_TEXT
         if middle_input.scene_change_reported
         else SCENE_CHANGE_NOT_REPORTED_TEXT,
+        describe_progress(middle_input.progress),
         frames_text,
     ]
     return [

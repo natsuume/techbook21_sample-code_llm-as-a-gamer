@@ -12,6 +12,8 @@
 時刻は deep のスケジューラーの時計 (実行の経過秒) の値を渡す。
 """
 
+import math
+
 # --stuck-advice-seconds の既定値 (秒)
 DEFAULT_STUCK_ADVICE_SECONDS = 60.0
 
@@ -25,7 +27,12 @@ class StuckAdviceTrigger:
 
     def __init__(self, threshold_s: float) -> None:
         """前回の要求が無い状態で作る。threshold_s が 0 より大きい有限の値でなければ ValueError。"""
-        raise NotImplementedError
+        if not (math.isfinite(threshold_s) and threshold_s > 0):
+            raise ValueError(
+                f"threshold_s must be a finite number more than 0: {threshold_s}"
+            )
+        self.threshold_s = threshold_s
+        self._last_request_t: float | None = None
 
     def check(self, now: float, no_novel_s: float | None, advice_running: bool) -> bool:
         """時刻 now に要求するかを決め、要求するなら True を返す (モジュールの docstring の規則)。
@@ -37,4 +44,13 @@ class StuckAdviceTrigger:
         3. 前回の要求が無いか、now − 前回の要求の時刻 >= threshold_s なら、前回の要求の時刻を now にして True
         4. それ以外は False
         """
-        raise NotImplementedError
+        if no_novel_s is None or no_novel_s <= self.threshold_s:
+            self._last_request_t = None
+            return False
+        if advice_running:
+            return False
+        last = self._last_request_t
+        if last is not None and now - last < self.threshold_s:
+            return False
+        self._last_request_t = now
+        return True

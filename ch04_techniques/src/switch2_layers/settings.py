@@ -178,7 +178,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
-    --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
+    --box-requery-every は 1 以上。--progress-window と --stuck-advice-seconds は 0 より大きい有限の値。
+    surface は値の型 (SurfaceKind) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -234,6 +235,16 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     if settings.box_requery_every < 1:
         errors.append(
             f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
+        )
+    if not _is_finite_positive(settings.progress_window_s):
+        errors.append(
+            "--progress-window must be a finite number more than 0: "
+            f"{settings.progress_window_s}"
+        )
+    if not _is_finite_positive(settings.stuck_advice_seconds):
+        errors.append(
+            "--stuck-advice-seconds must be a finite number more than 0: "
+            f"{settings.stuck_advice_seconds}"
         )
     return errors
 

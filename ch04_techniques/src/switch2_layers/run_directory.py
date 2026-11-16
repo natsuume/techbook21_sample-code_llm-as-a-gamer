@@ -199,7 +199,8 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
     - 同じ名前のファイルかディレクトリーが既にあれば、末尾に -2、-3 … を付けた最初の無い名前で作る
       (例: 20261115-142233 → 20261115-142233-2 → 20261115-142233-3)
     - 作るのは mkdir(exist_ok=False) で行い、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
-    - 中に frames/interval/、frames/surface/、middle/、deep/ も作る。notes/ は write_initial_notes で作る
+    - 中に frames/interval/、frames/surface/、middle/、deep/、progress/ も作る。notes/ は write_initial_notes で作る。
+      progress/state.json は作らない (最初の一定間隔のフレームの値を計算したときに progress.progress_loop が書く)
     """
     runs_dir.mkdir(parents=True, exist_ok=True)
     base_name = run_directory_name(started_at)
@@ -220,6 +221,7 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
         paths.surface_frames_dir,
         paths.middle_dir,
         paths.deep_dir,
+        paths.progress_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return paths
