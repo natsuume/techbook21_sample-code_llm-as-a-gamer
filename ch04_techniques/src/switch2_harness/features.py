@@ -24,8 +24,18 @@ class Feature:
     commands: tuple[str, ...]
 
 
+# 行動履歴の要素の名前。有効にすると、look が直近の行動 (look と press) を表示する (action_history)
+ACTION_HISTORY_FEATURE = "action-history"
+
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順とサブコマンドの順になる
-FEATURES: tuple[Feature, ...] = ()
+FEATURES: tuple[Feature, ...] = (
+    Feature(
+        name=ACTION_HISTORY_FEATURE,
+        title="行動履歴",
+        instruction_file="action-history.md",
+        commands=(),
+    ),
+)
 
 # 要素によらずエージェントが使えるサブコマンド
 BASE_AGENT_COMMANDS: tuple[str, ...] = ("look", "press", "status", "finish")

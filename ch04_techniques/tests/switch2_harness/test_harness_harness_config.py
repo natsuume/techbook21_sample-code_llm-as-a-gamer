@@ -81,12 +81,12 @@ def test_config_from_json_text_rejects_unknown_feature():
     assert "zoom" in str(error.value)
 
 
-def test_config_from_json_text_rejects_any_feature_with_the_empty_features():
+def test_config_from_json_text_rejects_a_feature_not_in_features_by_default():
     text = json.dumps(
         {
             "game": "G",
             "goal": "X",
-            "features": ["action-history"],
+            "features": ["memo-files"],
             "created_at": "2026-11-16T21:00:05+09:00",
         }
     )

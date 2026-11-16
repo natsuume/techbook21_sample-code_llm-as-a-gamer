@@ -1,8 +1,8 @@
 """switch2-harness の各サブコマンド (init / look / press / status / finish / report / run) の処理本体。
 
 デーモンへの送信 (send)・時計 (clock / now)・待機 (sleep)・プロセスの起動 (start_process)・
-テンプレートの読み込み (read_template) は引数で受け取る。各処理は表示する行と終了コードを
-CommandResult で返し、表示は cli が行う。
+テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed) は引数で受け取る。
+各処理は表示する行と終了コードを CommandResult で返し、表示は cli が行う。
 
 表示の規則:
     - デーモンへの送信の結果 (send が返した 1 行。接続できないときの error 行を含む) と ok 行は標準出力に出す
@@ -21,6 +21,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from switch2_harness.action_history import FramesChanged
 from switch2_harness.agent_launcher import (
     LaunchOptions,
     StartProcess,
@@ -173,7 +174,11 @@ def handle_init(
 
 
 def handle_look(
-    paths: WorkspacePaths, *, send: SendCommand, clock: Callable[[], float]
+    paths: WorkspacePaths,
+    *,
+    send: SendCommand,
+    clock: Callable[[], float],
+    frames_changed: FramesChanged | None = None,
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
 
@@ -184,6 +189,12 @@ def handle_look(
     frames/ に空の PNG を残さない。そうでなければ終了コード 0。
     イベント: command="look"、args=()、frame=<作業ディレクトリーからの相対パス (例: "frames/000001.png")>。
     応答が error なら frame は None。
+
+    frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら上のとおり応答だけを出す。
+    None でなく応答が error でなければ、イベントを記録した後に event_log.read_events(paths.events_file) を読み、
+    最後のイベントを今回の look (current)、それより前のイベントを previous として、
+    action_history.build_history_lines(previous, current.time, current.frame, frames_changed) の行を、
+    応答の行の後に stdout に続ける。応答が error なら履歴は出さない。どちらでも終了コードは上と同じ。
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     reply = _send_and_record(

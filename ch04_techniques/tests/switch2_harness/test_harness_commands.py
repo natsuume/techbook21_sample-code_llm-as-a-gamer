@@ -284,6 +284,87 @@ def test_report_ignores_frames_of_failed_looks(paths, clock):
     assert json.loads(result.stdout_lines[0])["command_counts"] == {"look": 2}
 
 
+# --- look の行動履歴 ---
+
+HISTORY_HEADER = "直近の行動 (古い順、最大 20 件。秒数はこの撮影の何秒前か):"
+
+
+class RecordingFramesChanged:
+    """frames_changed の fake。呼ばれた (前, 後) の組を calls に記録し、changed を返す。"""
+
+    def __init__(self, changed: bool) -> None:
+        self.changed = changed
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, before: str, after: str) -> bool:
+        self.calls.append((before, after))
+        return self.changed
+
+
+def record_earlier_actions(paths: WorkspacePaths) -> None:
+    """20 秒前の look (frames/000001.png) と 10 秒前の press を events.jsonl に記録する。
+
+    次の look が frames/000002.png に保存するよう、frames/000001.png の場所も埋めておく。
+    """
+    (paths.frames_dir / "000001.png").write_bytes(b"")
+    append_event(
+        paths.events_file,
+        CommandEvent(START_TIME - 20, "look", (), "ok", True, 0.2, "frames/000001.png"),
+    )
+    append_event(
+        paths.events_file,
+        CommandEvent(START_TIME - 10, "press", ("tap", "A"), "ok tap A", True, 0.4),
+    )
+
+
+def test_look_with_frames_changed_prints_the_history_after_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    frames_changed = RecordingFramesChanged(changed=True)
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, frames_changed=frames_changed
+    )
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(
+            f"ok {frame_path}",
+            HISTORY_HEADER,
+            "- 20 秒前 look 000001.png",
+            "- 10 秒前 press tap A: 画面の変化 あり",
+        ),
+    )
+    assert frames_changed.calls == [("frames/000001.png", "frames/000002.png")]
+
+
+def test_look_with_frames_changed_prints_no_actions_in_a_new_workspace(paths, clock):
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        frames_changed=RecordingFramesChanged(changed=True),
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {frame_path}", "直近の行動: なし")
+    )
+
+
+def test_failed_look_with_frames_changed_prints_only_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    frames_changed = RecordingFramesChanged(changed=True)
+    daemon = FakeDaemon(clock, {"shot": "error no frame yet"})
+    result = handle_look(paths, send=daemon, clock=clock, frames_changed=frames_changed)
+    assert result == CommandResult(exit_code=1, stdout_lines=("error no frame yet",))
+    assert frames_changed.calls == []
+
+
+def test_look_without_frames_changed_prints_only_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    result = handle_look(paths, send=FakeDaemon(clock), clock=clock)
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+
+
 # --- press ---
 
 

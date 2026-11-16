@@ -2,16 +2,30 @@ import pytest
 from harness_fakes import FAKE_FEATURES
 
 from switch2_harness.features import (
+    ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    Feature,
     agent_commands,
     available_names_text,
     validate_feature_names,
 )
 
 
-def test_features_is_empty_in_the_base_condition():
-    assert FEATURES == ()
+def test_features_has_action_history():
+    assert ACTION_HISTORY_FEATURE == "action-history"
+    assert FEATURES == (
+        Feature(
+            name="action-history",
+            title="行動履歴",
+            instruction_file="action-history.md",
+            commands=(),
+        ),
+    )
+
+
+def test_action_history_adds_no_agent_command():
+    assert agent_commands(("action-history",)) == BASE_AGENT_COMMANDS
 
 
 def test_base_agent_commands():
@@ -59,9 +73,10 @@ def test_validate_feature_names_lists_all_unknown_names():
 
 
 def test_validate_feature_names_uses_features_by_default():
+    assert validate_feature_names(["action-history"]) == ("action-history",)
     with pytest.raises(ValueError) as error:
-        validate_feature_names(["action-history"])
-    assert "(available: none)" in str(error.value)
+        validate_feature_names(["memo-files"])
+    assert str(error.value) == "unknown feature: memo-files (available: action-history)"
 
 
 def test_agent_commands_without_enabled_features():
