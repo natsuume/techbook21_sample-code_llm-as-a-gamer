@@ -21,6 +21,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from importlib import resources
 
 # 見本の画像を置くパッケージと、その中のディレクトリー
 # (importlib.resources.files(REFERENCES_PACKAGE) / REFERENCES_DIR)
@@ -82,8 +83,9 @@ SYSTEM_SCREEN_REFERENCES: tuple[SystemScreenReference, ...] = (
     SystemScreenReference(
         name="software_close",
         description=(
-            "HOME メニューでソフトを終了するときの確認の画面。"
-            "`references.software_close` と同じ確認の表示がある"
+            "HOME メニューでプレイ中のソフトを終了するときの確認の画面。"
+            "`references.software_close` と同じ、終了の確認の文と"
+            "「キャンセル」「終了する」のボタンの段がある"
         ),
         files=("software_close.jpg",),
     ),
@@ -106,4 +108,10 @@ def load_reference_images(
     ファイルが無ければ FileNotFoundError をそのまま出す (importlib.resources で読む)。
     run の始めに 1 回だけ呼ぶ (safety.safety_assembly.build_safety_assembly)。
     """
-    raise NotImplementedError
+    directory = resources.files(REFERENCES_PACKAGE).joinpath(REFERENCES_DIR)
+    return {
+        reference.name: tuple(
+            directory.joinpath(file).read_bytes() for file in reference.files
+        )
+        for reference in references
+    }

@@ -28,6 +28,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from switch2_layers.error_text import describe_exception
+from switch2_layers.file_io import append_json_line
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.image_encoding import (
     DEFAULT_JPEG_QUALITY,
@@ -36,9 +37,19 @@ from switch2_layers.frames.image_encoding import (
     shrink_to_width,
 )
 from switch2_layers.run_clock import RunClock
-from switch2_layers.safety.safety_judge import MonitorJudge
-from switch2_layers.safety.safety_types import SafetyChecker
-from switch2_layers.system_screen.screen_judgment import SystemScreenJudgment
+from switch2_layers.safety.safety_judge import (
+    MonitorJudge,
+    next_check_wait_s,
+    start_stop_reason,
+    validate_probabilities,
+    validate_system_screen_probabilities,
+)
+from switch2_layers.safety.safety_record import SafetyRecord, safety_row
+from switch2_layers.safety.safety_types import SafetyChecker, SafetyPhase
+from switch2_layers.system_screen.screen_judgment import (
+    SystemScreenJudgment,
+    judge_system_screen,
+)
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -62,6 +73,26 @@ def build_safety_image(
     """
     bgr = shrink_to_width(nv12_to_bgr(frame.nv12), image_width)
     return encode_jpeg(bgr, jpeg_quality).jpeg
+
+
+@dataclass(frozen=True)
+class _CheckResult:
+    """1 回の確かめの結果 (step の 3)。
+
+    t_sent          check を呼んだ時刻
+    t_received      check が戻った (または例外を出した) 時刻
+    probabilities   確かめた 3 つの問いの確率。失敗したら None
+    system_screen   確かめた照合の確率。失敗したら None
+    usage           API の usage。失敗したら None
+    error           失敗の説明。成功したら None
+    """
+
+    t_sent: float
+    t_received: float
+    probabilities: dict[str, float] | None
+    system_screen: dict[str, float] | None
+    usage: object | None
+    error: str | None
 
 
 class SafetyStepOutcome(StrEnum):
@@ -178,7 +209,63 @@ class SafetyMonitor:
         STOP の wait_s は 0.0、PASSED と FAILED の wait_s は safety_judge.next_check_wait_s(interval_s, t_sent, t_received)。
         画像の作成・行の書き込み・on_system_screen・on_stop・on_start_passed の例外は外に出す (run が全体を止める)。
         """
-        raise NotImplementedError
+        parts = self.parts
+        frame = parts.latest_frame()
+        if frame is None:
+            return SafetyStepResult(
+                SafetyStepOutcome.NO_FRAME, FIRST_FRAME_POLL_S, None, None
+            )
+        phase = SafetyPhase.MONITOR if self._start_passed else SafetyPhase.START
+        jpeg = build_safety_image(
+            frame, self.settings.image_width, self.settings.jpeg_quality
+        )
+        result = self._check(jpeg)
+        if stop is not None and stop.is_set():
+            return SafetyStepResult(SafetyStepOutcome.STOPPED, 0.0, None, None)
+        screen = (
+            None
+            if result.system_screen is None
+            else judge_system_screen(result.system_screen)
+        )
+        row = safety_row(
+            SafetyRecord(
+                t_sent=result.t_sent,
+                t_received=result.t_received,
+                frame_t=frame.t,
+                phase=phase,
+                probabilities=result.probabilities,
+                system_screen=result.system_screen,
+                system_screen_result=screen,
+                usage=result.usage,
+                error=result.error,
+            )
+        )
+        append_json_line(parts.safety_log, row)
+        if result.system_screen is not None:
+            parts.on_system_screen(
+                SystemScreenJudgment(
+                    frame_t=frame.t,
+                    t_received=result.t_received,
+                    screen=screen,
+                    probabilities=result.system_screen,
+                )
+            )
+        reason = self._judge_result(phase, result.probabilities)
+        if reason is not None:
+            parts.on_stop(reason)
+            return SafetyStepResult(SafetyStepOutcome.STOP, 0.0, row, reason)
+        if phase is SafetyPhase.START:
+            self._start_passed = True
+            parts.on_start_passed()
+        outcome = (
+            SafetyStepOutcome.FAILED
+            if result.probabilities is None
+            else SafetyStepOutcome.PASSED
+        )
+        wait_s = next_check_wait_s(
+            self.settings.interval_s, result.t_sent, result.t_received
+        )
+        return SafetyStepResult(outcome, wait_s, row, None)
 
     def run(self, stop: threading.Event) -> None:
         """stop が立つまで step を繰り返し、各 step の後に stop.wait(wait_s) で待つ (スレッドの本体)。
@@ -199,3 +286,34 @@ class SafetyMonitor:
         except Exception as error:
             logger.warning("safety monitor failed", exc_info=True)
             self.parts.on_stop(safety_monitor_failure_reason(error))
+
+    def _check(self, jpeg: bytes) -> _CheckResult:
+        """checker.check(jpeg) を呼んで、答えの 3 つの問いの確率と照合の確率を確かめる (step の 3)。
+
+        check か確かめの例外 (Exception) は外に出さず、失敗の結果 (確率・照合の確率・usage が None、error が説明) にする。
+        """
+        clock = self.parts.clock
+        t_sent = clock.now()
+        try:
+            answer = self.parts.checker.check(jpeg)
+            probabilities = validate_probabilities(answer.probabilities)
+            system_screen = validate_system_screen_probabilities(answer.system_screen)
+        except Exception as error:
+            logger.debug("safety check failed", exc_info=True)
+            return _CheckResult(
+                t_sent, clock.now(), None, None, None, describe_exception(error)
+            )
+        return _CheckResult(
+            t_sent, clock.now(), probabilities, system_screen, answer.usage, None
+        )
+
+    def _judge_result(
+        self, phase: SafetyPhase, probabilities: dict[str, float] | None
+    ) -> str | None:
+        """確かめの結果 (3 つの問いの確率) から止まる理由を決める (step の 8)。止めなければ None。"""
+        settings = self.settings
+        if phase is SafetyPhase.START:
+            return start_stop_reason(probabilities, settings.threshold)
+        if probabilities is None:
+            return self._judge.record_failure()
+        return self._judge.record_answer(probabilities)

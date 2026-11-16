@@ -11,7 +11,11 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyPhase
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 
 @dataclass(frozen=True)
@@ -49,4 +53,24 @@ def safety_row(record: SafetyRecord) -> dict[str, object]:
     system_screen.system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES の順の辞書 (どちらも None なら null)。
     system_screen_result と usage はそのまま (None なら null)。
     """
-    raise NotImplementedError
+    probabilities = (
+        None
+        if record.probabilities is None
+        else {name: record.probabilities[name] for name in SAFETY_QUESTION_NAMES}
+    )
+    system_screen = (
+        None
+        if record.system_screen is None
+        else {name: record.system_screen[name] for name in SYSTEM_SCREEN_CHOICE_NAMES}
+    )
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "frame_t": record.frame_t,
+        "phase": record.phase.value,
+        "probabilities": probabilities,
+        "system_screen": system_screen,
+        "system_screen_result": record.system_screen_result,
+        "usage": record.usage,
+        "error": record.error,
+    }

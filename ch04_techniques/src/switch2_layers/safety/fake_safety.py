@@ -1,6 +1,11 @@
 """安全の監視のフェイク (FakeSafetyChecker)。--safety fake で使い、API キーは要らない。"""
 
+from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyAnswer
+from switch2_layers.system_screen.system_screen_references import (
+    NONE_CHOICE,
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 
 class FakeSafetyChecker:
@@ -13,4 +18,11 @@ class FakeSafetyChecker:
         system_screen   {system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES の各名前: 確率} (この順)。
                         確率は NONE_CHOICE が 1.0、ほかの選択肢が 0.0
         """
-        raise NotImplementedError
+        return SafetyAnswer(
+            probabilities=dict.fromkeys(SAFETY_QUESTION_NAMES, 0.0),
+            system_screen={
+                name: 1.0 if name == NONE_CHOICE else 0.0
+                for name in SYSTEM_SCREEN_CHOICE_NAMES
+            },
+            usage=None,
+        )

@@ -8,8 +8,21 @@
 
 from collections.abc import Callable, Mapping
 
+from switch2_layers.safety.safety_questions import (
+    SAFETY_QUESTION_NAMES,
+    SYSTEM_SCREEN_QUESTION_NAME,
+    build_safety_questions,
+    build_safety_state,
+)
 from switch2_layers.safety.safety_types import SafetyAnswer
-from switch2_layers.surface.jev_client import JevClient, new_asset_reference
+from switch2_layers.surface.jev_client import (
+    JevClient,
+    JevImage,
+    new_asset_reference,
+)
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_NAMES,
+)
 
 
 class JevSafetyChecker:
@@ -50,4 +63,43 @@ class JevSafetyChecker:
         HTTP のエラー・JSON として読めない応答・答えの欠け (system_screen の答えが無い、選択肢の確率が無いを含む)・
         答えの型の違い・確率が数でないか 0〜1 の外は、jev_client.JevError をそのまま出す。
         """
-        raise NotImplementedError
+        reference_jpegs = self._reference_jpegs()
+        frame_reference = self.make_reference()
+        reference_references = {
+            name: self.make_reference() for name in SYSTEM_SCREEN_NAMES
+        }
+        images = [
+            JevImage(frame_reference, jpeg),
+            *(
+                JevImage(reference_references[name], reference_jpegs[name])
+                for name in SYSTEM_SCREEN_NAMES
+            ),
+        ]
+        answers = self.client.ask(
+            build_safety_state(frame_reference, reference_references),
+            build_safety_questions(),
+            images,
+        )
+        return SafetyAnswer(
+            probabilities={name: answers.nouls[name] for name in SAFETY_QUESTION_NAMES},
+            system_screen=dict(answers.choices[SYSTEM_SCREEN_QUESTION_NAME]),
+            usage=answers.usage,
+        )
+
+    def _reference_jpegs(self) -> dict[str, bytes]:
+        """reference_images から、見本の名前 → その見本の 1 枚の JPEG を SYSTEM_SCREEN_NAMES の順で返す (check の 1)。
+
+        どれかの名前が無いか、画像が 1 枚でなければ ValueError。
+        """
+        jpegs: dict[str, bytes] = {}
+        for name in SYSTEM_SCREEN_NAMES:
+            if name not in self.reference_images:
+                raise ValueError(f"no reference image for the system screen: {name}")
+            images = self.reference_images[name]
+            if len(images) != 1:
+                raise ValueError(
+                    f"the system screen {name} needs exactly one reference image, "
+                    f"got {len(images)}"
+                )
+            jpegs[name] = images[0]
+        return jpegs

@@ -22,7 +22,18 @@ references のキーは見本の名前で、SYSTEM_SCREEN_NAMES の順。画像�
 
 from collections.abc import Mapping
 
-from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_questions import (
+    Choice,
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
+from switch2_layers.system_screen.system_screen_references import (
+    NONE_CHOICE,
+    NONE_CHOICE_DESCRIPTION,
+    SYSTEM_SCREEN_NAMES,
+    SYSTEM_SCREEN_REFERENCES,
+)
 
 ONLINE = "online"
 PURCHASE = "purchase"
@@ -75,7 +86,32 @@ def build_safety_questions() -> tuple[SurfaceQuestion, ...]:
         Choice(system_screen_references.NONE_CHOICE, NONE_CHOICE_DESCRIPTION) を先頭に、
         SYSTEM_SCREEN_REFERENCES の順の Choice(見本の name, 見本の description)
     """
-    raise NotImplementedError
+    noul_questions = tuple(
+        SurfaceQuestion(
+            name=name,
+            instructions=SAFETY_QUESTION_TEXTS[name],
+            kind=QuestionKind.SAFETY,
+            target=name,
+            question_type=QuestionType.NOUL,
+        )
+        for name in SAFETY_QUESTION_NAMES
+    )
+    system_screen_choices = (
+        Choice(NONE_CHOICE, NONE_CHOICE_DESCRIPTION),
+        *(
+            Choice(reference.name, reference.description)
+            for reference in SYSTEM_SCREEN_REFERENCES
+        ),
+    )
+    system_screen_question = SurfaceQuestion(
+        name=SYSTEM_SCREEN_QUESTION_NAME,
+        instructions=SYSTEM_SCREEN_QUESTION_TEXT,
+        kind=QuestionKind.SAFETY,
+        target=SYSTEM_SCREEN_QUESTION_NAME,
+        question_type=QuestionType.CHOICE,
+        choices=system_screen_choices,
+    )
+    return (*noul_questions, system_screen_question)
 
 
 def build_safety_state(
@@ -88,4 +124,15 @@ def build_safety_state(
     SYSTEM_SCREEN_NAMES の順に置く。reference_references のキーが SYSTEM_SCREEN_NAMES の名前の集合と違えば
     (足りない名前か、見本に無い名前があれば) ValueError。
     """
-    raise NotImplementedError
+    if set(reference_references) != set(SYSTEM_SCREEN_NAMES):
+        raise ValueError(
+            "references must have exactly the system screen names "
+            f"{list(SYSTEM_SCREEN_NAMES)}: {list(reference_references)}"
+        )
+    return {
+        "instructions": SAFETY_INSTRUCTIONS,
+        FRAME_STATE_KEY: frame_reference,
+        REFERENCES_STATE_KEY: {
+            name: reference_references[name] for name in SYSTEM_SCREEN_NAMES
+        },
+    }

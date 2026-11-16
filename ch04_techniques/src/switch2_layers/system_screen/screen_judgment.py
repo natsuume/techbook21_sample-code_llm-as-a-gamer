@@ -16,6 +16,11 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from switch2_layers.system_screen.system_screen_references import (
+    NONE_CHOICE,
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
+
 # 照合の結果を見本の名前にする、確率のしきい値 (この値を超えたら、その見本の画面とする)
 SYSTEM_SCREEN_THRESHOLD = 0.5
 
@@ -44,7 +49,14 @@ def judge_system_screen(probabilities: Mapping[str, float]) -> str | None:
     SYSTEM_SCREEN_CHOICE_NAMES に無い名前は無視する。選択肢の並びは probabilities の並びではなく、
     SYSTEM_SCREEN_CHOICE_NAMES の順とする。
     """
-    raise NotImplementedError
+    missing = [name for name in SYSTEM_SCREEN_CHOICE_NAMES if name not in probabilities]
+    if missing:
+        raise ValueError(f"no probability for the system screen choices: {missing}")
+    # max は、いちばん高い値が並んだら先に見たもの (選択肢の並びで先のもの) を返す
+    best = max(SYSTEM_SCREEN_CHOICE_NAMES, key=lambda name: probabilities[name])
+    if best == NONE_CHOICE or probabilities[best] <= SYSTEM_SCREEN_THRESHOLD:
+        return None
+    return best
 
 
 class LatestSystemScreen:
@@ -65,11 +77,16 @@ class LatestSystemScreen:
         結果をまだ持っていないか、judgment.frame_t が今持っている結果の frame_t より大きければ、judgment に置き換え、
         wait_newer で待っているスレッドに知らせる。frame_t が今持っている結果の frame_t 以下なら、置き換えない。
         """
-        raise NotImplementedError
+        with self._condition:
+            if self._latest is not None and judgment.frame_t <= self._latest.frame_t:
+                return
+            self._latest = judgment
+            self._condition.notify_all()
 
     def latest(self) -> SystemScreenJudgment | None:
         """今持っている結果を返す。まだ受け取っていなければ None。"""
-        raise NotImplementedError
+        with self._condition:
+            return self._latest
 
     def wait_newer(
         self, after_frame_t: float, timeout_s: float
@@ -82,4 +99,19 @@ class LatestSystemScreen:
         timeout_s が 0 以下なら待たない (持っている結果の frame_t が after_frame_t より大きければそれを、そうでなければ
         None を返す)。
         """
-        raise NotImplementedError
+        with self._condition:
+            if timeout_s > 0:
+                # wait_for は、待つ前と知らせを受けるたびに条件を確かめる (条件を満たしていれば待たない)
+                self._condition.wait_for(
+                    lambda: self._newer_than(after_frame_t) is not None, timeout_s
+                )
+            return self._newer_than(after_frame_t)
+
+    def _newer_than(self, after_frame_t: float) -> SystemScreenJudgment | None:
+        """今持っている結果の frame_t が after_frame_t より大きければそれを、そうでなければ None を返す。
+
+        self._condition を持っているときにだけ呼ぶ。
+        """
+        if self._latest is not None and self._latest.frame_t > after_frame_t:
+            return self._latest
+        return None

@@ -21,6 +21,9 @@ import math
 from collections.abc import Mapping
 
 from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 # 同じ問いがしきい値を超えた確かめがこの回数続いたら止める
 UNSAFE_STREAK_TO_STOP = 2
@@ -48,18 +51,9 @@ def validate_probabilities(probabilities: Mapping[str, object]) -> dict[str, flo
     SAFETY_QUESTION_NAMES のどれかの名前が無い、値が数 (int か float。bool は除く) でない、有限でない、0〜1 の外なら
     ValueError (安全の監視は、確かめの失敗として数える)。SAFETY_QUESTION_NAMES に無い名前は無視する。
     """
-    result: dict[str, float] = {}
-    for name in SAFETY_QUESTION_NAMES:
-        if name not in probabilities:
-            raise ValueError(f"no probability for the safety question: {name}")
-        probability = _as_probability(probabilities[name])
-        if probability is None:
-            raise ValueError(
-                f"probability of {name} is not a number in 0..1: "
-                f"{probabilities[name]!r}"
-            )
-        result[name] = probability
-    return result
+    return _validate_named_probabilities(
+        probabilities, SAFETY_QUESTION_NAMES, "the safety question"
+    )
 
 
 def validate_system_screen_probabilities(
@@ -72,7 +66,31 @@ def validate_system_screen_probabilities(
     有限でない、0〜1 の外なら ValueError (安全の監視は、確かめの失敗として数える)。SYSTEM_SCREEN_CHOICE_NAMES に無い
     名前は無視する。確率の合計は確かめない。
     """
-    raise NotImplementedError
+    return _validate_named_probabilities(
+        probabilities, SYSTEM_SCREEN_CHOICE_NAMES, "the system screen choice"
+    )
+
+
+def _validate_named_probabilities(
+    probabilities: Mapping[str, object], names: tuple[str, ...], label: str
+) -> dict[str, float]:
+    """probabilities から names の順の (名前 → 確率) の dict を作る。names に無い名前は無視する。
+
+    names のどれかの名前が無いか、値が 0〜1 の有限の数 (_as_probability) でなければ ValueError。label は、名前が
+    無いときの例外のメッセージに書く、名前の種類の説明。
+    """
+    result: dict[str, float] = {}
+    for name in names:
+        if name not in probabilities:
+            raise ValueError(f"no probability for {label}: {name}")
+        probability = _as_probability(probabilities[name])
+        if probability is None:
+            raise ValueError(
+                f"probability of {name} is not a number in 0..1: "
+                f"{probabilities[name]!r}"
+            )
+        result[name] = probability
+    return result
 
 
 def _as_probability(value: object) -> float | None:
