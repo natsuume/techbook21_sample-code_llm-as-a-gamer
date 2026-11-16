@@ -5,9 +5,11 @@ import pytest
 from switch2_harness.press_args import (
     FORBIDDEN_BUTTON,
     HOME_REJECTED_MESSAGE,
+    MAX_TAP_CHORDS,
     PRESS_ACTIONS,
     press_args_error,
     split_press_args,
+    too_many_tap_chords_message,
     unknown_action_message,
 )
 
@@ -25,6 +27,38 @@ def test_constants():
     assert PRESS_ACTIONS == ("tap", "hold", "down", "up")
     assert FORBIDDEN_BUTTON == "HOME"
     assert HOME_REJECTED_MESSAGE == HOME_ERROR
+    assert MAX_TAP_CHORDS == 10
+
+
+def test_too_many_tap_chords_message():
+    assert (
+        too_many_tap_chords_message(12)
+        == "error press tap accepts up to 10 chords at a time: 12"
+    )
+
+
+def test_tap_with_up_to_the_limit_of_chords_passes():
+    assert check("tap", ["A"] * MAX_TAP_CHORDS) is None
+    assert check("tap", [" ".join(["RIGHT"] * MAX_TAP_CHORDS)]) is None
+
+
+def test_tap_with_more_chords_than_the_limit_is_rejected():
+    too_many = MAX_TAP_CHORDS + 1
+    assert check("tap", ["A"] * too_many) == too_many_tap_chords_message(too_many)
+    # 空白を含む 1 つの引数も、分け直した CHORD の数で数える
+    assert check("tap", [" ".join(["A"] * too_many)]) == too_many_tap_chords_message(
+        too_many
+    )
+
+
+def test_chord_limit_applies_only_to_tap():
+    many = ["LS:0,1"] * (MAX_TAP_CHORDS + 1)
+    assert check("down", many) is None
+    assert check("up", ["A"] * (MAX_TAP_CHORDS + 1)) is None
+
+
+def test_home_is_rejected_before_the_chord_limit():
+    assert check("tap", ["A"] * MAX_TAP_CHORDS + ["HOME"]) == HOME_ERROR
 
 
 def test_unknown_action_message():

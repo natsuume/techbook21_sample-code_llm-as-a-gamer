@@ -45,7 +45,7 @@ from switch2_harness.harness_config import (
 )
 from switch2_harness.instructions import ReadTemplate, render_instructions
 from switch2_harness.press_args import press_args_error, split_press_args
-from switch2_harness.screen_change import load_gray
+from switch2_harness.screen_change import load_sample
 from switch2_harness.session_report import (
     format_summary,
     summarize_session,
@@ -267,13 +267,14 @@ def handle_report(paths: WorkspacePaths, as_json: bool) -> CommandResult:
     (agent_launcher.read_agent_log_lines(paths.agent_log_file, 0)。UTF-8 の errors="replace" でデコードするため、
     強制終了で途中で切れたマルチバイト文字は置換文字になり、JSON として読めない行は集計で読み飛ばされる。
     ファイルが無ければ空の列) を、session_report.summarize_session で集計する。
-    look の画像は screen_change.load_gray(paths.root / frame) で読む。
+    look の画像は screen_change.load_sample(paths.root / frame) で、比較用の大きさに縮小して読む
+    (look が多い記録でも、元の大きさの画像をすべて持たないようにするため)。
     as_json が False なら session_report.format_summary の各行を、
     True なら json.dumps(session_report.summary_to_dict(summary), ensure_ascii=False) の 1 行を出す。
     """
     summary = summarize_session(
         read_events(paths.events_file),
-        lambda frame: load_gray(paths.root / frame),
+        lambda frame: load_sample(paths.root / frame),
         read_agent_log_lines(paths.agent_log_file, 0),
     )
     if as_json:

@@ -9,7 +9,37 @@ from switch2_harness.screen_change import (
     change_ratio,
     is_static,
     load_gray,
+    load_sample,
 )
+
+
+def test_load_sample_reads_a_shrunk_grayscale_image(tmp_path):
+    path = tmp_path / "frame.png"
+    image = np.zeros((720, 1280), dtype=np.uint8)
+    image[:, 640:] = 200
+    assert cv2.imwrite(str(path), image)
+    sample = load_sample(path)
+    assert sample.shape == (SAMPLE_SIZE[1], SAMPLE_SIZE[0])
+    assert sample.dtype == np.uint8
+
+
+def test_load_sample_gives_the_same_ratio_as_the_full_image(tmp_path):
+    rng = np.random.default_rng(0)
+    first = rng.integers(0, 256, size=(720, 1280), dtype=np.uint8)
+    second = first.copy()
+    second[:300, :500] = 255 - second[:300, :500]
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    assert cv2.imwrite(str(first_path), first)
+    assert cv2.imwrite(str(second_path), second)
+    full_ratio = change_ratio(load_gray(first_path), load_gray(second_path))
+    sample_ratio = change_ratio(load_sample(first_path), load_sample(second_path))
+    assert sample_ratio == full_ratio
+
+
+def test_load_sample_rejects_missing_file(tmp_path):
+    with pytest.raises(ValueError):
+        load_sample(tmp_path / "missing.png")
 
 
 def gray(value: int, height: int = 720, width: int = 1280) -> np.ndarray:

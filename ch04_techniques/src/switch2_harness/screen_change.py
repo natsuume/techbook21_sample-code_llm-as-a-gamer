@@ -1,6 +1,6 @@
 """2 枚の画面の画像がどれだけ変わったか (変化の割合) と、PNG のグレースケールでの読み込み。
 
-change_ratio と is_static は純粋関数で、ファイルの読み込みは load_gray だけが行う。
+change_ratio と is_static は純粋関数で、ファイルの読み込みは load_gray と load_sample が行う。
 """
 
 from pathlib import Path
@@ -46,3 +46,12 @@ def load_gray(path: Path) -> np.ndarray:
     if image is None:
         raise ValueError(f"cannot read image: {path}")
     return np.asarray(image)
+
+
+def load_sample(path: Path) -> np.ndarray:
+    """path の画像を load_gray で読み、change_ratio と同じく SAMPLE_SIZE に INTER_AREA で縮小して返す。
+
+    多くの画像を読んで持っておく集計 (report) で、元の大きさのまま持たずにメモリーを抑えるために使う。
+    縮小した画像を change_ratio に渡すと、同じ大きさへの縮小になるため、元の画像を渡したときと同じ割合になる。
+    """
+    return cv2.resize(load_gray(path), SAMPLE_SIZE, interpolation=cv2.INTER_AREA)
