@@ -146,7 +146,9 @@ class SystemOperationRunner:
             2. i が 0 なら、操作の screen と judged_screen の名前を比べ、違えば SCREEN_MISMATCH で打ち切る
             3. i が 1 以上なら:
                a. 操作の buttons に DECISION_BUTTON があれば、照合の結果を待たずに DECISION_NOT_FIRST で打ち切る
-                  (押し続けと同時押しの中の A も同じ)
+                  (押し続けと同時押しの中の A も同じ)。返す前に、clock.now() が前の操作を終えた時刻になるまで
+                  wait_or_stop で待つ (押し続けと wait を終えてから戻るため。stop が立ったら待つのをやめ、理由は
+                  DECISION_NOT_FIRST のまま)
                b. after_frame_t = 前の操作を終えた時刻 + SETTLE_S とする。clock.now() が after_frame_t になるまで
                   wait_or_stop(stop, 残りの秒) で待つ。stop が立ったら STOPPED で打ち切る
                c. clock.now() が after_frame_t + JUDGMENT_WAIT_S を過ぎるまで、judgments.wait_newer(after_frame_t,
@@ -163,8 +165,9 @@ class SystemOperationRunner:
         stop が立ったら、待つのをやめてすぐに同じ結果を返す (送っていない操作は無いため、打ち切りにしない)。
         操作が 0 個なら、何も送らず待たずに SystemRunResult(0, None, None, frozenset()) を返す。
 
-        位置 i で打ち切ったら、待たずに SystemRunResult(sent_count=i, cut_index=i, cut_reason=理由, blocked_buttons) を
-        返す (その操作から後は送らない)。
+        位置 i で打ち切ったら、SystemRunResult(sent_count=i, cut_index=i, cut_reason=理由, blocked_buttons) を返す (その
+        操作から後は送らない)。どの理由でも、送った操作を終えた後に返す (DECISION_NOT_FIRST は 3a の待ちで、
+        SCREEN_MISMATCH と NO_JUDGMENT は 3b の待ちで、前の操作を終えている)。STOPPED は待たずに返す。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
         送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、そのまま外に出す。
 
@@ -220,6 +223,7 @@ class SystemOperationRunner:
                 return SystemCutReason.SCREEN_MISMATCH
             return None
         if DECISION_BUTTON in operation.buttons:
+            self._wait_until(previous_end_t, stop)
             return SystemCutReason.DECISION_NOT_FIRST
         after_frame_t = previous_end_t + SETTLE_S
         if self._wait_until(after_frame_t, stop):

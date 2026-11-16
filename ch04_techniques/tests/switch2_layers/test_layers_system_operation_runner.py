@@ -508,6 +508,25 @@ def test_a_in_the_third_operation_cuts_before_it():
     assert len(system_actions(harness)) == 2
 
 
+def test_a_cut_returns_after_the_previous_hold_is_released():
+    harness = make_harness(steady("controller_order"))
+    result = run(
+        harness,
+        press("controller_order", "L", "R", seconds=0.5),
+        press("controller_order", "A"),
+        judged="controller_order",
+    )
+    assert result == cut(1, SystemCutReason.DECISION_NOT_FIRST)
+    assert harness.now() >= harness.sender.sent_t[0] + 0.5 - 1e-9
+
+
+def test_a_cut_returns_after_the_previous_wait_ends():
+    harness = make_harness(steady("home_menu"))
+    result = run(harness, wait("home_menu", 2.0), press("home_menu", "A"))
+    assert result == cut(1, SystemCutReason.DECISION_NOT_FIRST)
+    assert harness.now() >= START_T + 2.0 - 1e-9
+
+
 def test_a_is_cut_without_waiting_for_a_judgment():
     # 照合の結果が届かなくても、理由は decision_not_first (A は照合の結果を待つ前に確かめる)
     harness = make_harness([])
