@@ -341,6 +341,23 @@ def test_look_prints_no_history_without_features(tmp_path, harness, capsys):
     assert capsys.readouterr().out == f"ok {directory / 'frames' / '000002.png'}\n"
 
 
+# --- メモファイル (notes) ---
+
+
+def test_init_with_notes_writes_the_initial_notes(tmp_path, harness):
+    # 本物の要素の一覧とテンプレートで init する
+    harness.deps = replace(
+        harness.deps, read_template=read_package_template, available=FEATURES
+    )
+    directory = tmp_path / "play"
+    assert harness.run("init", str(directory), "--game", "G", "--enable", "notes") == 0
+    notes = directory / "notes.md"
+    assert notes.is_file()
+    assert notes.read_text(encoding="utf-8") == read_package_template(
+        "notes-initial.md"
+    )
+
+
 # --- report ---
 
 

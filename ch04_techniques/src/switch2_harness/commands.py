@@ -151,8 +151,11 @@ def handle_init(
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1 (ファイルシステムには触れない)
     2. HarnessConfig(game, goal, 検証した名前, format_created_at(now())) を作る
     3. instructions.render_instructions(config, read_template, available) で CLAUDE.md の本文を作る
-    4. workspace.create_workspace で作る。WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
-    5. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
+    4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
+       (置換はしない)、{<name>: <本文>} を作る
+    5. workspace.create_workspace で作る。4. の辞書を initial_files に渡す。
+       WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
+    6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
     """
     try:
         names = validate_feature_names(enable, available)
@@ -342,6 +345,7 @@ def handle_run(
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1
     3. agent_launcher.run_agent_until を、game=config.game、
        agent_commands=features.agent_commands(config.features, available)、
+       writable_files=<features.agent_writable_files(config.features, available) の各 name のタプル>、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で、
        with signal_guard.interrupts_as_exceptions(): の中で呼ぶ。後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら

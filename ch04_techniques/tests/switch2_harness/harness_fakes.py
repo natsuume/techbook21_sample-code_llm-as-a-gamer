@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from switch2_harness.features import Feature
+from switch2_harness.features import Feature, WritableFile
 from switch2_harness.workspace import WorkspacePaths
 
 # テスト用の要素。本物の FEATURES に左右されずに、複数の要素の順やサブコマンドの追加を確かめるため、
@@ -26,14 +26,17 @@ FAKE_NOTES = Feature(
     title="メモファイル",
     instruction_file="memo-files.md",
     commands=("note", "notes"),
+    writable_files=(WritableFile(name="memo.md", template_file="memo-initial.md"),),
 )
 FAKE_FEATURES: tuple[Feature, ...] = (FAKE_HISTORY, FAKE_NOTES)
 
 # テスト用のテンプレート (instructions/ の下のファイル名 → 本文)
+# memo-initial.md の $goal は、書き換えられるファイルの最初の内容が置換されないことを確かめるため
 FAKE_TEMPLATES: dict[str, str] = {
     "base.md": "# 基本 $game\n\n目標: $goal\n",
     "action-history.md": "## 行動履歴 ($game)\n",
     "memo-files.md": "## メモ\n\n$goal を目指す\n\n",
+    "memo-initial.md": "# メモ $goal\n",
 }
 
 

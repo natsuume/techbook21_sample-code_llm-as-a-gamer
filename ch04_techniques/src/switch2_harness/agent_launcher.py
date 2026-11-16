@@ -27,9 +27,12 @@ CLAUDE.md (~/.claude/CLAUDE.md を含む)、自動メモリー、親ディレク
     - --restricted: 設定ファイルはユーザー・プロジェクト・ローカルのものを読まず、managed settings と --settings だけを読む。
       コマンドを実行するツールは --tools で名前を挙げたものだけが残り、ファイルのツールは作業ディレクトリーの中に閉じ込められる
     - --settings CLAUDE_SETTINGS_JSON: 作業ディレクトリーの外の読み取りを、Read と読み取り専用の Bash の両方で止める
-    - --tools Bash,Read: --restricted では Bash も名前を挙げないと使えないため、Bash と Read を挙げる
+    - --tools Bash,Read: --restricted では Bash も名前を挙げないと使えないため、Bash と Read を挙げる。
+      有効な要素に書き換えられるファイル (features.WritableFile) があるときは、Write と Edit も挙げる (tool_names)
     - --allowedTools: 承認なしで通す Bash を switch2-harness のエージェント用サブコマンドだけにする
-      (作業ディレクトリーの中の Read は承認なしで通るため、Read は挙げない)
+      (作業ディレクトリーの中の Read は承認なしで通るため、Read は挙げない)。
+      有効な要素に書き換えられるファイルがあるときは、そのファイルの Edit の規則 (Edit(./<ファイル名>)) を足し、
+      Write・Edit で書けるファイルをそれだけにする (Edit の規則は Write にもかかる。allowed_tools)
     - --strict-mcp-config: --mcp-config で渡したもの以外の MCP を使わない (何も渡さない)
     - --disallowedTools Skill・--disable-slash-commands: Skill とスラッシュコマンドを使わせない
     - 環境変数 CLAUDE_CODE_DISABLE_CLAUDE_MDS・CLAUDE_CODE_DISABLE_AUTO_MEMORY を 1 にし、
@@ -247,12 +250,26 @@ def first_prompt(game: str) -> str:
     return f"指示に従って、ゲーム「{game}」のプレイを始めてください。"
 
 
-def allowed_tools(agent_commands: Sequence[str]) -> list[str]:
+def tool_names(writable_files: Sequence[str]) -> str:
+    """--tools に渡す値を返す。
+
+    writable_files (書き換えられるファイルの名前) が空なら "Bash,Read"、空でなければ "Bash,Read,Write,Edit"。
+    """
+    raise NotImplementedError
+
+
+def allowed_tools(
+    agent_commands: Sequence[str], writable_files: Sequence[str] = ()
+) -> list[str]:
     """--allowedTools に渡す値の列を返す。
 
-    agent_commands の順に `Bash(uv run switch2-harness <サブコマンド> *)` を並べたものだけを返す
-    (Read は作業ディレクトリーの中なら承認なしで通るため、挙げない)。
-    例: ("look",) なら ["Bash(uv run switch2-harness look *)"]。
+    agent_commands の順の `Bash(uv run switch2-harness <サブコマンド> *)` に続けて、
+    writable_files の順に `Edit(./<ファイル名>)` を並べる。`./` は claude を起動したディレクトリー
+    (作業ディレクトリー) からの相対パス。Edit の規則は Write にもかかり、名前を挙げたファイルだけが
+    Write・Edit で書け、作業ディレクトリーのほかのファイル (CLAUDE.md・harness.json・records/ の中など) は
+    dontAsk で拒否される (Claude Code 2.1.325 で 2026-11-17 に確かめた)。
+    Read は作業ディレクトリーの中なら承認なしで通るため挙げない。
+    例: (("look",), ("notes.md",)) なら ["Bash(uv run switch2-harness look *)", "Edit(./notes.md)"]。
     """
     return [f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands]
 
@@ -268,14 +285,16 @@ def build_claude_args(
     instructions_path: Path,
     options: LaunchOptions,
     resume_session_id: str | None = None,
+    *,
+    writable_files: Sequence[str] = (),
 ) -> list[str]:
     """claude -p の起動引数を返す。順序は次のとおり:
 
         claude -p <prompt>
           --output-format stream-json --verbose
           --permission-mode dontAsk
-          --tools Bash,Read
-          --allowedTools <allowed_tools(agent_commands) の各値>
+          --tools <tool_names(writable_files)>
+          --allowedTools <allowed_tools(agent_commands, writable_files) の各値>
           --disallowedTools Skill
           --disable-slash-commands
           --strict-mcp-config
@@ -692,6 +711,7 @@ def run_agent_until(
     send: SendCommand,
     record: Callable[[CommandEvent], None],
     base_env: Mapping[str, str],
+    writable_files: Sequence[str] = (),
     shield: Shield = ignore_interrupts,
     defer: Shield = defer_interrupts,
 ) -> RunOutcome:
@@ -709,6 +729,7 @@ def run_agent_until(
     (本番の defer は signal_guard.defer_interrupts。起動の直後に届いた Ctrl-C・SIGTERM・SIGHUP で、
     起動した claude を見失って止め損ねないように、シグナルを変数に入れた後まで遅らせる)。
     最初の起動のプロンプトは first_prompt(game) で、--resume は付けず、--max-budget-usd には options.max_budget_usd を渡す。
+    最初の起動と起動し直しの両方で、build_claude_args に writable_files (エージェントが書き換えられるファイルの名前) を渡す。
 
     POLL_INTERVAL_S ごとに (sleep(POLL_INTERVAL_S)) 次を確かめる:
         - プロセスが動いていて、monotonic() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)

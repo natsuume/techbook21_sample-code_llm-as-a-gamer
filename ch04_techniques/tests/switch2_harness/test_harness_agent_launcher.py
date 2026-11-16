@@ -5,7 +5,7 @@ import math
 import os
 import signal
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +61,7 @@ from switch2_harness.agent_launcher import (
     start_claude_process,
     stop_process,
     stop_reason_after_exit,
+    tool_names,
     validate_max_budget_usd,
     validate_minutes,
 )
@@ -156,6 +157,22 @@ def test_allowed_tools_lists_only_harness_commands():
         "Bash(uv run switch2-harness look *)",
         "Bash(uv run switch2-harness press *)",
     ]
+
+
+def test_allowed_tools_adds_edit_rules_for_writable_files():
+    assert allowed_tools(("look",), ("notes.md", "map.md")) == [
+        "Bash(uv run switch2-harness look *)",
+        "Edit(./notes.md)",
+        "Edit(./map.md)",
+    ]
+
+
+def test_tool_names_without_writable_files():
+    assert tool_names(()) == "Bash,Read"
+
+
+def test_tool_names_with_writable_files_adds_write_and_edit():
+    assert tool_names(("notes.md",)) == "Bash,Read,Write,Edit"
 
 
 @pytest.mark.parametrize(
@@ -263,6 +280,27 @@ def test_build_claude_args_puts_feature_commands_in_allowed_tools():
         "Bash(uv run switch2-harness finish *)",
         "Bash(uv run switch2-harness history *)",
     ]
+
+
+def test_build_claude_args_with_writable_files_allows_write_and_edit():
+    args = build_claude_args(
+        "P",
+        BASE_AGENT_COMMANDS,
+        Path("/w/CLAUDE.md"),
+        LaunchOptions(),
+        writable_files=("notes.md",),
+    )
+    assert args[args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+    start = args.index("--allowedTools") + 1
+    end = args.index("--disallowedTools")
+    assert args[start:end] == [
+        "Bash(uv run switch2-harness look *)",
+        "Bash(uv run switch2-harness press *)",
+        "Bash(uv run switch2-harness status *)",
+        "Bash(uv run switch2-harness finish *)",
+        "Edit(./notes.md)",
+    ]
+    assert "Read" not in args
 
 
 def test_claude_env_overrides():
@@ -877,6 +915,7 @@ def run_scenario(
     sleep: Callable[[float], None] | None = None,
     shield: Callable[[], AbstractContextManager[None]] = ignore_interrupts,
     defer: Callable[[], AbstractContextManager[None]] = defer_interrupts,
+    writable_files: Sequence[str] = (),
 ) -> RunOutcome:
     """scenario の fake で run_agent_until を呼ぶ。send と sleep は渡したときだけ置き換える。"""
     return run_agent_until(
@@ -892,6 +931,7 @@ def run_scenario(
         send=send if send is not None else scenario.daemon,
         record=scenario.events.append,
         base_env={"PATH": "/usr/bin"},
+        writable_files=writable_files,
         shield=shield,
         defer=defer,
     )
@@ -1009,6 +1049,34 @@ def test_run_resumes_with_the_last_session_id(tmp_path):
     assert resume.args == ("resume", "abc")
     assert resume.reply == "launched claude launch=2 resume=abc"
     assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_passes_writable_files_on_launch_and_resume(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0, output_lines=(session_line("old"), result_line("abc"))
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(scenario, minutes=1.0, writable_files=("notes.md",))
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    first_launch, second_launch = scenario.starter.launches
+    assert first_launch.args == build_claude_args(
+        first_prompt(GAME),
+        BASE_AGENT_COMMANDS,
+        scenario.paths.instructions_file,
+        LaunchOptions(),
+        writable_files=("notes.md",),
+    )
+    assert second_launch.args == build_claude_args(
+        RESUME_PROMPT,
+        BASE_AGENT_COMMANDS,
+        scenario.paths.instructions_file,
+        LaunchOptions(),
+        resume_session_id="abc",
+        writable_files=("notes.md",),
+    )
+    for launch in (first_launch, second_launch):
+        assert launch.args[launch.args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+        assert "Edit(./notes.md)" in launch.args
 
 
 def test_run_resumes_when_exactly_min_remaining_is_left(tmp_path):

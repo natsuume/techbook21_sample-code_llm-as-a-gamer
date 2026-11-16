@@ -4,11 +4,13 @@
     <DIR>/
       harness.json   設定 (harness_config)
       CLAUDE.md      エージェントへの指示 (instructions)
+      <要素のファイル>  要素が置き、エージェントが書き換えられるファイル (features.WritableFile。例: notes.md)
       records/       events.jsonl (全コマンドの記録)、agent.jsonl (claude -p の stream-json)、agent-stderr.log
       frames/        撮影した PNG (000001.png から連番)
 """
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,7 +91,10 @@ def require_workspace(directory: str | Path) -> WorkspacePaths:
 
 
 def create_workspace(
-    paths: WorkspacePaths, config: HarnessConfig, instructions_text: str
+    paths: WorkspacePaths,
+    config: HarnessConfig,
+    instructions_text: str,
+    initial_files: Mapping[str, str] | None = None,
 ) -> None:
     """init の作業ディレクトリーを作る。
 
@@ -98,6 +103,8 @@ def create_workspace(
     paths.root が存在しなければ親も含めて作る。
     続けて harness.json (harness_config.write_config)、CLAUDE.md (instructions_text を UTF-8 で書く)、
     records/、frames/ を作る。records/ の中のファイルは作らない。
+    initial_files (作業ディレクトリーの直下のファイル名 → 本文) があれば、CLAUDE.md の後に、
+    それぞれを UTF-8 で書く。None なら何も足さない。
     """
     root = paths.root
     if root.exists() and (not root.is_dir() or any(root.iterdir())):
