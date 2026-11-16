@@ -795,3 +795,20 @@ def test_instructions_cover_the_grid_map_and_the_route_section():
         "上に 3 マス",
     ]:
         assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase
+
+
+def test_instructions_describe_exits_avoided_by_the_route():
+    # 経路は、目標でない出口のマスを途中で通らない
+    assert (
+        "目標でない出口のマス (tiles の E と、exits の座標のマス) は、乗ると場所を移るため、途中で通りません"
+        in LUNA_DEVELOPER_INSTRUCTIONS
+    )
+
+
+def test_instructions_allow_checking_unknown_tiles_for_unreachable_targets():
+    # 「経路なし」の目標でも、まだ確かめていないマス (?) が残っていれば、? を確かめに行ってよい
+    assert (
+        "「経路なし」の目標でも、その場所のマスの図にまだ確かめていないマス (?) が残っているときは、"
+        "? のマスを確かめに行くタスクにしてよいです"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+    assert "「経路なし」の目標には向かいません" not in LUNA_DEVELOPER_INSTRUCTIONS

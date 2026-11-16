@@ -115,12 +115,13 @@ def test_route_from_the_issue_example():
 
 
 def test_blocked_tile_is_not_passable_even_on_a_passable_character():
-    # 机 (4, 1) は tiles では . だが、blocked にあるので通らない。左に 6 マスの経路の代わりに下の行を回る
+    # 机 (4, 1) は tiles では . だが、blocked にあるので通らない。左に 6 マスの経路の代わりに下の行を回る。
+    # 下の行の左端 (1, 2) は出口なので、その手前で上の行へ戻る
     assert find_grid_route(
         place(HOUSE_TILES), TilePosition(7, 1), TilePosition(1, 1)
     ) == route((LEFT, 6))
     found = find_grid_route(HOUSE, TilePosition(7, 1), TilePosition(1, 1))
-    assert found == route((DOWN, 1), (LEFT, 6), (UP, 1))
+    assert found == route((DOWN, 1), (LEFT, 4), (UP, 1), (LEFT, 2))
     assert found.total_tiles == 8
 
 
@@ -185,9 +186,42 @@ def test_route_with_several_turns():
     assert found == route((RIGHT, 1), (DOWN, 2), (RIGHT, 1))
 
 
-def test_exit_tile_is_passable_on_the_way():
-    found = find_grid_route(place([".E."]), TilePosition(0, 0), TilePosition(2, 0))
-    assert found == route((RIGHT, 2))
+def test_exit_tile_that_is_not_the_goal_is_avoided():
+    # 目標でない出口のマス (E) は、途中で踏まずに回り込む (乗ると場所を移るため)
+    found = find_grid_route(
+        place(["...", ".E.", "..."]), TilePosition(0, 1), TilePosition(2, 1)
+    )
+    assert found == route((UP, 1), (RIGHT, 2), (DOWN, 1))
+    assert found.total_tiles == 4
+
+
+def test_exit_coordinates_on_a_passable_tile_are_avoided():
+    # exits の座標のマスは、tiles の文字が . でも出口として避ける
+    with_exit = place(OPEN_3X3, exits=(TileMark(TilePosition(1, 1), "床のマット"),))
+    assert find_grid_route(
+        place(OPEN_3X3), TilePosition(0, 1), TilePosition(2, 1)
+    ) == route((RIGHT, 2))
+    found = find_grid_route(with_exit, TilePosition(0, 1), TilePosition(2, 1))
+    assert found == route((UP, 1), (RIGHT, 2), (DOWN, 1))
+
+
+@pytest.mark.parametrize(
+    "corridor",
+    [place([".E."]), place(["..."], exits=(TileMark(TilePosition(1, 0), "扉"),))],
+    ids=["exit-tile", "exit-coordinates"],
+)
+def test_route_is_none_when_the_only_way_is_through_another_exit(corridor):
+    assert find_grid_route(corridor, TilePosition(0, 0), TilePosition(2, 0)) is None
+
+
+def test_exit_goal_and_exit_start_are_allowed():
+    # 目標の出口には入ってよい。開始のマスが出口でも問わない
+    assert find_grid_route(
+        place(["..E"]), TilePosition(0, 0), TilePosition(2, 0)
+    ) == route((RIGHT, 2))
+    assert find_grid_route(
+        place([".E."]), TilePosition(1, 0), TilePosition(2, 0)
+    ) == route((RIGHT, 1))
 
 
 @pytest.mark.parametrize("blocking", ["#", "?"])

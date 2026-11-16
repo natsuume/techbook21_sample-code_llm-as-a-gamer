@@ -157,18 +157,22 @@ def test_exit_with_several_destinations():
 
 
 def test_targets_are_at_most_ten():
+    # 上の行に 12 個の出口を並べ、下の行から向かう (下の行には出口が無いので、途中で出口を踏まない)
     wide = dataclasses.replace(
         HOUSE,
-        tiles=("." * 12,),
+        tiles=("." * 12, "." * 12),
         exits=tuple(TileMark(TilePosition(x, 0), f"出口 {x}") for x in range(12)),
+        blocked=(),
     )
     document = GridMapDocument(places=(wide,), connections=())
     lines = describe_route_section(
-        document, state(current_tile=TilePosition(0, 0))
+        document, state(current_tile=TilePosition(0, 1))
     ).split("\n")
     assert len(lines) == 1 + 10
-    assert lines[1] == "- 出口「出口 0」(x=0, y=0)。手順: 移動しない (合計 0 マス)"
-    assert lines[10] == "- 出口「出口 9」(x=9, y=0)。手順: 右に 9 マス (合計 9 マス)"
+    assert lines[1] == "- 出口「出口 0」(x=0, y=0)。手順: 上に 1 マス (合計 1 マス)"
+    assert lines[10] == (
+        "- 出口「出口 9」(x=9, y=0)。手順: 右に 9 マス → 上に 1 マス (合計 10 マス)"
+    )
 
 
 def test_route_section_with_negative_origin():

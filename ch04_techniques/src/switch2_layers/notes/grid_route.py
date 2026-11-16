@@ -4,7 +4,8 @@
 文字は tiles[y - origin.y] の x - origin.x 文字目)。
 経路の決め方 (find_grid_route):
     - 上下左右の隣のマスへ 1 マスずつ動く。通れるマスは、文字が PASSABLE_TILES (. と E) で、場所の blocked の座標に
-      無いマス。目標のマスは、文字と blocked によらず入ってよい
+      無いマス。ただし、出口のマス (文字が E のマスと、場所の exits の座標のマス) は、目標でなければ途中で通らない
+      (乗ると場所を移る扉やマットを踏むと、残りの手順が意味を失うため)。目標のマスは、文字と blocked によらず入ってよい
     - tiles の範囲の外へは動かない。開始のマスが範囲の外なら経路なし (None)。開始のマスの文字と blocked は問わない
     - 場所の landmarks の座標は使わない
     - 最短の経路のうち、向きを変える回数の少ないものを選ぶ。それも同じなら、1 マスずつの移動の向きの列を
@@ -30,7 +31,8 @@ from switch2_layers.notes.map_document import (
     TilePosition,
 )
 
-# 経路の途中で通れるマスの文字 (目標のマスは、文字によらず入ってよい。blocked の座標のマスは、文字によらず通れない)
+# 通れるマスの文字 (目標のマスは、文字によらず入ってよい。blocked の座標のマスは、文字によらず通れない。
+# 出口のマス (E と exits の座標) は通れるマスだが、目標でなければ経路の途中では通らない)
 PASSABLE_TILES: frozenset[str] = frozenset({TILE_PASSABLE, TILE_EXIT})
 # 経路を求める目標の最大の件数
 MAX_ROUTE_TARGETS = 10
@@ -132,7 +134,8 @@ def find_grid_route(
     次のときは None (経路なし) を返す:
         - start が tiles の範囲の外 (tiles が空のときを含む)
         - goal が tiles の範囲の外
-        - 通れるマス (文字が PASSABLE_TILES で、blocked の座標に無いマス) だけを通っては goal にたどり着けない
+        - 途中で通れるマス (文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでないマス) だけを通っては goal に
+          たどり着けない
     start と goal が同じマスなら、手順が空 (0 マス) の経路を返す。
     """
     if tile_at(place, start) is None or tile_at(place, goal) is None:
@@ -234,7 +237,8 @@ def _stripped_names(place: GridMapPlace) -> set[str]:
 class _RouteCells:
     """経路の計算に使うマス。座標は (x, y) のタプル。
 
-    passable   経路の途中で入れるマス (文字が PASSABLE_TILES で、blocked の座標に無いマス)
+    passable   経路の途中で入れるマス (文字が PASSABLE_TILES で、blocked の座標に無く、出口のマス (文字が E のマスと
+               exits の座標のマス) でないマス)
     start      開始のマス (tiles の範囲の中。文字と blocked は問わない)
     goal       目標のマス (tiles の範囲の中。文字と blocked によらず入れる)
     """
@@ -245,14 +249,21 @@ class _RouteCells:
 
 
 def _passable_cells(place: GridMapPlace) -> frozenset[tuple[int, int]]:
-    """場所 place の tiles の範囲の中で、文字が PASSABLE_TILES で、blocked の座標に無いマスの集合を返す。"""
-    blocked = {(mark.position.x, mark.position.y) for mark in place.blocked}
+    """場所 place の tiles の範囲の中で、経路の途中で入れるマスの集合を返す。
+
+    入れるのは、文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでないマス。出口のマスは、文字が TILE_EXIT の
+    マスと、exits の座標のマス (目標のマスは、この集合によらず入れる)。
+    """
+    avoided = {
+        (mark.position.x, mark.position.y) for mark in (*place.blocked, *place.exits)
+    }
     return frozenset(
         (place.origin.x + column, place.origin.y + row)
         for row, line in enumerate(place.tiles)
         for column, character in enumerate(line)
         if character in PASSABLE_TILES
-        and (place.origin.x + column, place.origin.y + row) not in blocked
+        and character != TILE_EXIT
+        and (place.origin.x + column, place.origin.y + row) not in avoided
     )
 
 
