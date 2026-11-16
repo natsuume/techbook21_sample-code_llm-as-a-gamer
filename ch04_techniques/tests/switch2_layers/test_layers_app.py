@@ -354,6 +354,64 @@ def test_keyboard_interrupt_stops_with_interrupted(tmp_path):
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
+def interrupting_sleep(offsets_s: list[float]) -> Callable[[float], None]:
+    """wait の見張りの待ちの代わり。最初の呼び出しから offsets_s の各秒数がたった後の最初の待ちで、KeyboardInterrupt を
+    1 回ずつ出す (Ctrl+C の SIGINT が届いたときと同じ)。"""
+    started: list[float] = []
+    pending = list(offsets_s)
+
+    def sleep(seconds: float) -> None:
+        now = time.monotonic()
+        if not started:
+            started.append(now)
+        if pending and now - started[0] >= pending[0]:
+            pending.pop(0)
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    return sleep
+
+
+def run_with_interrupts(
+    app: LayersApp,
+) -> tuple[str, list[dict]]:
+    """app を run で動かし、(止まった理由, run.jsonl の行) を返す。止まらなければ SAFETY_TIMEOUT_S 秒で止める。"""
+    safety = threading.Timer(SAFETY_TIMEOUT_S, app.request_stop, args=(SAFETY_REASON,))
+    safety.start()
+    try:
+        reason = app.run()
+    finally:
+        safety.cancel()
+    assert app.paths is not None
+    return reason, read_rows(app.paths.root / "run.jsonl")
+
+
+def test_interrupt_repeated_within_the_window_does_not_end_the_clean_up(tmp_path):
+    # timeout -s INT と uv run の下では、1 回の割り込みで SIGINT が 0.2 秒ほどの間をあけて 2 回届く。2 回目は数えない
+    app = LayersApp(
+        settings(tmp_path), parts(FakeSender()), sleep=interrupting_sleep([1.5, 1.7])
+    )
+    reason, run_rows = run_with_interrupts(app)
+    assert reason == REASON_INTERRUPTED
+    [end] = [row for row in run_rows if row["event"] == "clean_up_end"]
+    # 片付けは 2 回目の SIGINT では終わらず、時間切れ (TEST_PHASE_TIMINGS の 0.5 秒) まで続く
+    assert end["result"] == CleanUpResult.TIMEOUT.value
+
+
+def test_interrupt_after_the_window_ends_the_clean_up(tmp_path):
+    long_clean_up = dataclasses.replace(
+        parts(FakeSender()),
+        phase_timings=PhaseTimings(exit_streak=1, clean_up_timeout_s=10.0),
+    )
+    app = LayersApp(
+        settings(tmp_path), long_clean_up, sleep=interrupting_sleep([1.5, 3.0])
+    )
+    reason, run_rows = run_with_interrupts(app)
+    assert reason == REASON_INTERRUPTED
+    [end] = [row for row in run_rows if row["event"] == "clean_up_end"]
+    assert end["result"] == CleanUpResult.INTERRUPTED.value
+
+
 class InterruptOnceSender(FakeSender):
     """armed の後、テストのスレッドからの最初の送信で KeyboardInterrupt を出す (停止の処理の途中の Ctrl+C)。"""
 

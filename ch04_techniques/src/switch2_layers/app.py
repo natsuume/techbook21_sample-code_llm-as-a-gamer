@@ -156,6 +156,9 @@ REASON_INTERRUPTED = "interrupted"
 REASON_BRIDGE_FAILED = "bridge recovery failed"
 REASON_CLOSED = "closed"  # 止まる条件より前に close が呼ばれた
 MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
+# 数えた Ctrl+C (SIGINT) からこの秒数以内に届いた SIGINT は、同じ割り込みとして数えない。timeout -s INT と uv run の
+# 下では、1 回の割り込みで SIGINT が 2 回 (プロセスグループへの送信と uv の転送) 届くため
+INTERRUPT_REPEAT_WINDOW_S = 1.0
 # 終了時に surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッドの終わりを待つ
 # 上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
@@ -964,13 +967,15 @@ class LayersApp:
             - 段階に入っていれば、PhaseTracker.check_time(clock.now()) の時間切れ (止める理由は request_stop(理由)、
               片付けの時間切れは片付けを timeout で終える)
         待っている間の KeyboardInterrupt (Ctrl+C) は外に出さずに確かめを続ける。1 回目は request_stop(REASON_INTERRUPTED)
-        にし、片付けの間の 2 回目は片付けを interrupted で終える。
+        にし、片付けの間の 2 回目は片付けを interrupted で終える。前に数えた KeyboardInterrupt から
+        INTERRUPT_REPEAT_WINDOW_S 秒以内 (parts.monotonic で測る) のものは、同じ割り込みとして数えない。
         start の前に呼んだら RuntimeError にする。
         """
         with self._lock:
             started = self._started
         if started is None:
             raise RuntimeError("LayersApp.wait must be called after start")
+        counted_interrupt_t: float | None = None
         while not self._stop_event.is_set():
             try:
                 capture_reason = started.capture_watcher.check_once()
@@ -982,6 +987,13 @@ class LayersApp:
                     self._check_phase_time(started)
                     self.sleep(MONITOR_INTERVAL_S)
             except KeyboardInterrupt:
+                interrupt_t = self.parts.monotonic()
+                if (
+                    counted_interrupt_t is not None
+                    and interrupt_t - counted_interrupt_t <= INTERRUPT_REPEAT_WINDOW_S
+                ):
+                    continue
+                counted_interrupt_t = interrupt_t
                 if self._in_clean_up():
                     self._end_clean_up_by_interrupt()
                 else:
