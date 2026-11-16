@@ -94,6 +94,15 @@ def test_help_of_each_command_exits_with_zero(command, capsys):
     assert command in capsys.readouterr().out
 
 
+def test_run_help_says_min_start_interval_neither_starts_nor_holds(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--help"])
+    assert exit_info.value.code == 0
+    # argparse が折り返した行を、空白を除いてつなぎ直してから確かめる
+    help_text = "".join(capsys.readouterr().out.split())
+    assert "起動も保留もしない" in help_text
+
+
 def test_command_is_required():
     with pytest.raises(SystemExit) as exit_info:
         main([])
@@ -109,7 +118,7 @@ def test_run_defaults_follow_the_issue():
     assert args.middle_interval == DEFAULT_MIDDLE_INTERVAL_S == 5.0
     assert args.middle_window == DEFAULT_MIDDLE_WINDOW_S == 10
     assert args.max_middle_errors == DEFAULT_MAX_MIDDLE_ERRORS == 5
-    assert args.deep_min_start_interval == DEFAULT_DEEP_MIN_START_INTERVAL_S == 15
+    assert args.deep_min_start_interval == DEFAULT_DEEP_MIN_START_INTERVAL_S == 30
     assert args.deep_auto_seconds == DEFAULT_DEEP_AUTO_SECONDS == 60
     assert args.deep_timeout == DEFAULT_DEEP_TIMEOUT_S == 300
     assert args.allow_home is False

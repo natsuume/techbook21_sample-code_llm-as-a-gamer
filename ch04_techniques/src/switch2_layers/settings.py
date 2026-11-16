@@ -56,7 +56,7 @@ MIDDLE_INTERVAL_MIN_S = 1.0
 MIDDLE_INTERVAL_MAX_S = 10.0
 DEFAULT_MIDDLE_WINDOW_S = 10.0
 DEFAULT_MAX_MIDDLE_ERRORS = 5
-DEFAULT_DEEP_MIN_START_INTERVAL_S = 15.0
+DEFAULT_DEEP_MIN_START_INTERVAL_S = 30.0
 DEFAULT_DEEP_AUTO_SECONDS = 60.0
 DEFAULT_DEEP_TIMEOUT_S = 300.0
 DEFAULT_THRESHOLD_ADVISOR = 0.5
@@ -115,8 +115,8 @@ class RunSettings:
     middle_interval_s           middle の前回の応答から次を始めるまでの秒数 (--middle-interval、既定 5.0。1〜10)
     middle_window_s             middle に渡す一定間隔のフレームの範囲 (直近の秒数) (--middle-window、既定 10。0 より大きい有限の値)
     max_middle_errors           middle の analyze の失敗がこの回数続いたら全体を止める (--max-middle-errors、既定 5。1 以上)
-    deep_min_start_interval_s   同じ文書の deep のジョブを、前回の起動からこの秒数たつまで起動しない
-                                (--deep-min-start-interval、既定 15。0 以上の有限の値)
+    deep_min_start_interval_s   同じ文書の deep のジョブを、前回の起動からこの秒数たつまで、起動も保留もしない
+                                (--deep-min-start-interval、既定 30。0 以上の有限の値)
     deep_auto_seconds           同じ文書の前回のジョブの終了からこの秒数たったら、自動で deep を呼ぶ
                                 (--deep-auto-seconds、既定 60。0 より大きい有限の値で、deep_min_start_interval_s 以上。
                                 最小間隔より短いと、自動の呼び出しが判定の周期ごとに最小間隔で捨てられ続けるため)

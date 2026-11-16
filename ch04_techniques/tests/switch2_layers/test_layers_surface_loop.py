@@ -96,6 +96,7 @@ class FakeSender:
 IDLE_STATUS = DeepDocumentStatus(
     running_count=0,
     latest_running_start_t=None,
+    pending_request_t=None,
     last_end=None,
     min_interval_remaining_s=0.0,
     last_surface_request=None,
