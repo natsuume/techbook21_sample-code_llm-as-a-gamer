@@ -361,7 +361,8 @@ class DeepScheduler:
            DeepRequestResult(started=False, reason=REQUEST_PENDING) を返す。ジョブのディレクトリーはまだ作らない
         4. 起動する: DeepJob(kind, key.scene_id, trigger, requested_t=now, previous_latest_frame_t=
            deep_job_directory.find_previous_latest_frame_t(paths, key) (同じ文書の、前回の正常に終わったジョブの
-           latest_frame_t。失敗・stop・kill のジョブは飛ばす), latest_frame_t=latest_frame_t()) を作り、
+           latest_frame_t。失敗・stop・kill のジョブは飛ばす。map の文書で、map.json の layout がゲームの性質の型と
+           違えば None), latest_frame_t=latest_frame_t()) を作り、
            prepare_job_directory(paths, job) でディレクトリーを用意し、key の前回の起動の t を now にし、実行中に数え、
            run_log に deep_start {"kind", "scene_id", "trigger", "job": 実行ディレクトリーからの相対パス,
            "pending_t": null} を書いてから、start_job_thread(ジョブの本体) を呼ぶ。
@@ -838,7 +839,8 @@ class DeepScheduler:
         そうでなければ、保留中の要求 (trigger, requested_t) を取り出し (key の保留中の要求は無くなる)、次を行う:
         1. DeepJob(key.kind, key.scene_id, trigger, requested_t=保留した要求の t, previous_latest_frame_t=
            deep_job_directory.find_previous_latest_frame_t(paths, key) (終わったばかりのジョブが正常に終わっていれば、
-           その latest_frame_t), latest_frame_t=latest_frame_t()) を作り、prepare_job_directory(paths, job) で
+           その latest_frame_t。map の文書で、map.json の layout がゲームの性質の型と違えば None),
+           latest_frame_t=latest_frame_t()) を作り、prepare_job_directory(paths, job) で
            ディレクトリーを用意する。最小の起動間隔は確かめ直さない (保留した要求は、前回の起動から
            min_start_interval_s 秒たった後に来たものであるため)
         2. 1 が例外 (Exception) を出したら、key の前回の終了を (now, DeepJobStatus.ERROR) にし (前回の起動の t は
@@ -989,7 +991,8 @@ def run_deep_once(
        (surface.middle_state_reader.read_surface_context の scene_id。無ければ None = 共通の文書) を使う
     2. 時刻 now は frames.jsonl の最新の t (frame_store.latest_frame_t。無ければ 0.0)
     3. DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL, requested_t=now,
-       previous_latest_frame_t=find_previous_latest_frame_t (同じ文書の、前回の正常に終わったジョブの latest_frame_t),
+       previous_latest_frame_t=find_previous_latest_frame_t (同じ文書の、前回の正常に終わったジョブの latest_frame_t。
+       map の文書で、map.json の layout がゲームの性質の型と違えば None),
        latest_frame_t=frames.jsonl の最新の t (無ければ None)) で create_job_directory → execute_deep_job を呼び、
        結果を返す
     最小の起動間隔とタイムアウトは確かめない (run が戻るまで待つ)。run.jsonl には書かない。
