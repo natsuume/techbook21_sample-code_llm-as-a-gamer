@@ -54,6 +54,8 @@ PREVIOUS_STATE = MiddleState(
     timeline="## 操作のまとめ\n- 上を押した",
     surface_rows_offset=120,
     operations_rows_offset=40,
+    first_task="宿屋に入る",
+    first_task_since_t=4.75,
 )
 SURFACE_ROWS = (
     {"t_received": 12.0, "scene_changed": True, "error": None},
@@ -291,7 +293,7 @@ def test_section_contents_of_full_input():
     # マップ (notes/map/map.json) の全体を JSON で渡す
     assert json.loads(section_body(sections, "マップ")) == MAP_JSON
     assert section_body(sections, "前回の middle の出力") == describe_previous_state(
-        PREVIOUS_STATE
+        PREVIOUS_STATE, FULL_INPUT.t
     )
     # 前後の空白を除く
     assert section_body(sections, "大方針") == "# 大方針\n\n北の城へ向かう"
@@ -312,6 +314,20 @@ def test_section_contents_of_full_input():
     assert section_body(sections, "フレーム") == (
         "一定間隔で保存したフレーム 2 枚 (古い順)。各画像の直前に時刻のラベルがある"
     )
+
+
+def test_previous_state_section_has_first_task_and_its_time_from_input_time():
+    # 最初のタスクの文と、その文になった時刻を載せる。経過秒は今回の入力の時刻 (t=15.25) から数える
+    # (前回の出力の作成時刻 t=10.6 や、前回の入力の時刻 t=10.0 からではない)
+    lines = section_body(build_user_sections(FULL_INPUT), "前回の middle の出力").split(
+        "\n"
+    )
+    assert lines[4:8] == [
+        "surface の待ち時間: 0.4 秒",
+        "最初のタスク: 宿屋に入る",
+        "最初のタスクが今の文になった時刻: t=4.750 (入力の時刻まで 10.5 秒)",
+        "系列情報:",
+    ]
 
 
 def test_section_contents_of_empty_input():
@@ -379,13 +395,15 @@ def test_describe_map_document():
 
 
 def test_describe_previous_state():
-    assert describe_previous_state(PREVIOUS_STATE) == lines_of(
+    assert describe_previous_state(PREVIOUS_STATE, 15.25) == lines_of(
         [
             "作成時刻: t=10.600 (入力の時刻 t=10.000)",
             "場面: 町 (scene-001)",
             "止まっているか: いいえ",
             "詰まり方: (無い)",
             "surface の待ち時間: 0.4 秒",
+            "最初のタスク: 宿屋に入る",
+            "最初のタスクが今の文になった時刻: t=4.750 (入力の時刻まで 10.5 秒)",
             "系列情報:",
             "## 操作のまとめ",
             "- 上を押した",
@@ -402,19 +420,65 @@ def test_describe_previous_state_without_scene_and_timeline():
         stuck_description="壁に向かって歩き続けている",
         surface_wait_s=1.25,
         timeline="",
+        first_task="",
+        first_task_since_t=None,
     )
-    assert describe_previous_state(state) == lines_of(
+    assert describe_previous_state(state, 15.25) == lines_of(
         [
             "作成時刻: t=10.600 (入力の時刻 t=10.000)",
             "場面: (決まっていない)",
             "止まっているか: はい",
             "詰まり方: 壁に向かって歩き続けている",
             "surface の待ち時間: 1.25 秒",
+            "最初のタスク: (無い)",
+            "最初のタスクが今の文になった時刻: (無い)",
             "系列情報:",
             "(無い)",
         ]
     )
-    assert describe_previous_state(None) == "(無い)"
+    assert describe_previous_state(None, 15.25) == "(無い)"
+
+
+def first_task_line(first_task: str) -> str:
+    """describe_previous_state の「最初のタスク」の行 (6 行目) を返す。"""
+    state = dataclasses.replace(PREVIOUS_STATE, first_task=first_task)
+    return describe_previous_state(state, 15.25).split("\n")[5]
+
+
+def test_first_task_line_shows_the_text_or_empty_text():
+    assert first_task_line("宿屋に入る") == "最初のタスク: 宿屋に入る"
+    assert first_task_line("") == "最初のタスク: (無い)"
+
+
+def first_task_time_line(first_task_since_t: float | None, now_t: float) -> str:
+    """describe_previous_state の「最初のタスクが今の文になった時刻」の行 (7 行目) を返す。"""
+    state = dataclasses.replace(PREVIOUS_STATE, first_task_since_t=first_task_since_t)
+    return describe_previous_state(state, now_t).split("\n")[6]
+
+
+def test_first_task_time_is_counted_to_input_time_with_one_decimal():
+    assert first_task_time_line(605.0, 640.2) == (
+        "最初のタスクが今の文になった時刻: t=605.000 (入力の時刻まで 35.2 秒)"
+    )
+    assert first_task_time_line(3.0, 33.0) == (
+        "最初のタスクが今の文になった時刻: t=3.000 (入力の時刻まで 30.0 秒)"
+    )
+
+
+def test_first_task_time_after_input_time_counts_as_zero():
+    # 入力の時刻より後の時刻 (経過が負) は 0.0 秒にする
+    assert first_task_time_line(20.0, 15.25) == (
+        "最初のタスクが今の文になった時刻: t=20.000 (入力の時刻まで 0.0 秒)"
+    )
+    assert first_task_time_line(15.25, 15.25) == (
+        "最初のタスクが今の文になった時刻: t=15.250 (入力の時刻まで 0.0 秒)"
+    )
+
+
+def test_first_task_time_without_record_is_empty_text():
+    assert (
+        first_task_time_line(None, 15.25) == "最初のタスクが今の文になった時刻: (無い)"
+    )
 
 
 # --- 変わらない指示 ---
@@ -455,3 +519,90 @@ def test_instructions_cover_the_map():
     # 場所の名前の一覧とマップを入力として説明し、マップを使って現在地から行き先までの手順をタスクにする
     for phrase in ["場所の名前の一覧", "マップ", "現在地"]:
         assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase
+
+
+def test_instructions_describe_first_task_and_its_time_in_previous_output():
+    assert (
+        "\n- 前回の middle の出力: 前回あなたが書いた場面・詰まり・待ち時間・系列情報と、"
+        "それを作った時刻。最初のタスクの文と、その文になった時刻と、そこから入力の時刻までの"
+        "秒数も含みます\n"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+    assert (
+        "前回あなたが書いた場面・詰まり・待ち時間・系列情報と、それを作った時刻\n"
+        not in LUNA_DEVELOPER_INSTRUCTIONS
+    )
+
+
+def test_instructions_weigh_first_task_progress_for_stuck():
+    # 例の箇条の直後、短い停止の箇条の前に、最初のタスクの進み具合を重視する 2 つの箇条を置く
+    assert (
+        "  - 壁にぶつかり続けている、同じ場所を回り続けている\n"
+        "- 最初のタスクが進んでいるかを、画面の動きより重視します。前回の middle の出力の"
+        "「最初のタスクが今の文になった時刻」から、最初のタスクが同じ文のまま何秒続いているかを"
+        "見ます。目安として 30 秒以上続いていれば、画面や主人公が動いていても is_stuck を true に"
+        "します。ただし、会話の文字送り・演出・ロードを待つこと自体が最初のタスクで、その表示が"
+        "進んでいるときは除きます\n"
+        "- 詰まりを解くために最初のタスクを書き換えたときも、詰まりが解けたことをフレームで"
+        "確かめるまでは is_stuck を true のままにします\n"
+        "- 会話の文字送り・演出・ロードによる短い停止は"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+    assert (
+        "いつから何秒間続いているか (最初のタスクが同じ文のまま続いている秒数を含む)、"
+        in LUNA_DEVELOPER_INSTRUCTIONS
+    )
+
+
+def test_instructions_keep_first_task_text_unchanged():
+    assert (
+        "\n- 前回のタスクリストのうち、終わったものは消し、続いているものは前回の文を一字一句"
+        "そのまま引き継ぎます。最初のタスクの文が変わると、タスクが進んだとみなされます。"
+        "最初のタスクの文を変えるのは、そのタスクを終えたときと、詰まりを解くためにやり方を"
+        "変えるときと、確かめていないボタンを試すタスクを先頭に入れるときだけにします\n"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+    assert "続いているものは引き継ぎます" not in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def test_instructions_keep_first_task_short_enough_to_finish():
+    assert (
+        "\n- 各タスクは、画面で達成を確かめられる具体的な行動にします (例: 「- 右の扉に入る」"
+        "「- メニューを開いて所持品を確かめる」)。最初のタスクは、20 秒ほどで終えられる大きさに"
+        "します。遠くへの移動のように長くかかることは、途中の目印までの手順に分けます\n"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+SURFACE_WAIT_SECTION_BODY = lines_of(
+    [
+        (
+            "surface が応答を受け取ってから次の要求を送るまでの待ち秒です。0.2〜2.0 の範囲で、"
+            "次の 3 つを見て決めます。場面の種類 (フィールド・会話・メニューなど) だけでは決めません。"
+        ),
+        "",
+        (
+            "- 素早い反応が要るか: 動く敵や障害物を避ける、タイミングを合わせて押す、制限時間があるなど、"
+            "画面の変化に遅れずに操作を変える必要があるときは短くします (0.2〜0.5)。文字送り・メニュー・"
+            "ロード・演出のように、待っても困らないときは長くします (1.0〜2.0)"
+        ),
+        (
+            "- 押し続けが長すぎないか: 押し続けは、surface の次の判断まで続きます。待ち時間が長いほど "
+            "1 回の押し続けが長くなり、遠くまで進みます。操作の記録で押し続けが続いているのに、フレームで"
+            "目標 (出口・入口・話しかける相手など) を通り過ぎている、壁に当たり続けている、目標の前後を"
+            "行き来しているときは、前回より短くします"
+        ),
+        (
+            "- タスクが進んでいるか: 最初のタスクが同じ文のまま長く続き、位置を細かく合わせる必要が"
+            "あるときは短くします。タスクが順に進んでいるときは、前回の値を引き継ぎます"
+        ),
+        "",
+        "迷ったときは前回の値を引き継ぎます。",
+    ]
+)
+
+
+def test_instructions_decide_surface_wait_by_reaction_holding_and_progress():
+    # 見出しの次の行から次の見出し「# 出力」の前までが、待ち時間の節の本文
+    section = LUNA_DEVELOPER_INSTRUCTIONS.split("\n# 待ち時間 (surface_wait_s)\n", 1)[
+        1
+    ].split("\n# 出力\n", 1)[0]
+    assert section == "\n" + SURFACE_WAIT_SECTION_BODY + "\n"
+    # 場面の種類ごとの固定の表は使わない
+    assert "0.5〜1.0: フィールドの移動、パズルなど" not in LUNA_DEVELOPER_INSTRUCTIONS
