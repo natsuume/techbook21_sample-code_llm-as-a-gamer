@@ -3,10 +3,14 @@ import dataclasses
 import pytest
 
 from switch2_layers.middle.middle_types import (
+    MapObservation,
+    MiddleOutput,
     MiddleState,
+    ObservationKind,
     middle_state_from_json,
     middle_state_to_json,
 )
+from switch2_layers.notes.map_document import TilePosition
 
 STATE = MiddleState(
     generated_t=5.5,
@@ -53,6 +57,8 @@ def test_round_trip():
         "operations_rows_offset",
         "first_task",
         "first_task_since_t",
+        "place_name",
+        "current_tile",
     ]
     assert value["surface_rows_offset"] == 120
     assert value["operations_rows_offset"] == 40
@@ -194,3 +200,103 @@ def test_wrong_first_task_types_are_rejected(changes):
 )
 def test_first_task_round_trip(state):
     assert middle_state_from_json(middle_state_to_json(state)) == state
+
+
+# --- 現在地の場所とマス ---
+
+STATE_WITH_PLACE = dataclasses.replace(
+    STATE, place_name="家の 1 階", current_tile=TilePosition(7, -1)
+)
+
+
+def test_state_without_place_has_defaults():
+    assert STATE.place_name is None
+    assert STATE.current_tile is None
+
+
+def test_place_keys_are_written():
+    value = middle_state_to_json(STATE_WITH_PLACE)
+    assert value["place_name"] == "家の 1 階"
+    assert value["current_tile"] == {"x": 7, "y": -1}
+    assert list(value["current_tile"]) == ["x", "y"]
+    # 決まっていない場所とマスは null
+    value = middle_state_to_json(STATE)
+    assert value["place_name"] is None
+    assert value["current_tile"] is None
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        STATE_WITH_PLACE,
+        dataclasses.replace(STATE_WITH_PLACE, current_tile=None),
+        dataclasses.replace(STATE_WITH_PLACE, place_name=None, current_tile=None),
+    ],
+)
+def test_place_round_trip(state):
+    assert middle_state_from_json(middle_state_to_json(state)) == state
+
+
+def test_missing_place_keys_are_read_as_null():
+    # place_name と current_tile のキーが無い middle/state.json は、どちらも null として読む
+    state = middle_state_from_json(STATE_JSON_WITHOUT_FIRST_TASK)
+    assert state.place_name is None
+    assert state.current_tile is None
+    value = {**middle_state_to_json(STATE_WITH_PLACE)}
+    del value["place_name"]
+    del value["current_tile"]
+    assert middle_state_from_json(value) == STATE
+
+
+def test_place_keys_are_read():
+    value = {
+        **STATE_JSON_WITHOUT_FIRST_TASK,
+        "place_name": "家の 1 階",
+        "current_tile": {"x": -3, "y": 4, "floor": 1},
+    }
+    state = middle_state_from_json(value)
+    assert state.place_name == "家の 1 階"
+    # 座標の object のほかのキーは無視する
+    assert state.current_tile == TilePosition(-3, 4)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"place_name": 1},
+        {"place_name": ["家の 1 階"]},
+        {"current_tile": {"x": 1.0, "y": 2}},
+        {"current_tile": {"x": 1, "y": True}},
+        {"current_tile": {"x": "1", "y": 2}},
+        {"current_tile": {"x": 1}},
+        {"current_tile": [1, 2]},
+        {"current_tile": "1,2"},
+        {"current_tile": 1},
+    ],
+)
+def test_wrong_place_types_are_rejected(changes):
+    value = {
+        **STATE_JSON_WITHOUT_FIRST_TASK,
+        "place_name": "家の 1 階",
+        "current_tile": {"x": 1, "y": 2},
+    }
+    assert middle_state_from_json(value).current_tile == TilePosition(1, 2)
+    with pytest.raises(ValueError):
+        middle_state_from_json({**value, **changes})
+
+
+def test_output_and_observation_tiles_have_defaults():
+    # フェイクやテストのように、座標を書かない出力と観察の既定値は None
+    output = MiddleOutput(
+        scene_name=None,
+        is_stuck=False,
+        stuck_description="",
+        surface_wait_s=0.5,
+        timeline="",
+        tasks="",
+    )
+    assert output.current_tile is None
+    observation = MapObservation(
+        kind=ObservationKind.EXIT, place="家の 1 階", description="扉"
+    )
+    assert observation.tile is None

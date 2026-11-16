@@ -1,5 +1,12 @@
 from switch2_layers.middle.place_names import collect_place_names
-from switch2_layers.notes.map_document import MapConnection, MapDocument, MapPlace
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    GridMapPlace,
+    MapConnection,
+    MapDocument,
+    MapPlace,
+    TilePosition,
+)
 
 
 def place(name: str, *aliases: str) -> MapPlace:
@@ -68,3 +75,24 @@ def test_names_are_stripped_and_blank_names_are_skipped():
 def test_nothing_gives_an_empty_list():
     assert collect_place_names(None, []) == []
     assert collect_place_names(MapDocument(places=(), connections=()), []) == []
+
+
+def test_names_and_aliases_of_a_grid_map():
+    grid_place = GridMapPlace(
+        name="家の 1 階",
+        aliases=("1 階の部屋",),
+        description="",
+        state="",
+        changes_on_entry=False,
+        origin=TilePosition(0, 0),
+        tiles=(),
+        exits=(),
+        blocked=(),
+        landmarks=(),
+    )
+    map_document = GridMapDocument(places=(grid_place,), connections=())
+    assert collect_place_names(map_document, ["町", "家の 1 階"]) == [
+        "家の 1 階",
+        "1 階の部屋",
+        "町",
+    ]

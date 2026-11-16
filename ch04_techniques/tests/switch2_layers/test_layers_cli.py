@@ -658,6 +658,7 @@ LUNA_OUTPUT = {
     "scene_name": "タイトル画面",
     # タイトル画面にはゲームの世界の中の場所が映っていない
     "place_name": "",
+    "current_tile": None,
     "new_connections": [],
     "new_observations": [],
     "is_stuck": False,
@@ -817,7 +818,15 @@ def test_middle_once_with_luna_reads_and_records_the_map(tmp_path, monkeypatch, 
         **LUNA_OUTPUT,
         "scene_name": "フィールド",
         "place_name": "家の 1 階",
-        "new_connections": [{"from": "自分の部屋", "to": "家の 1 階", "how": "階段"}],
+        "new_connections": [
+            {
+                "from": "自分の部屋",
+                "to": "家の 1 階",
+                "how": "階段",
+                "from_tile": None,
+                "to_tile": None,
+            }
+        ],
     }
     body = luna_response_body()
     body["output"][0]["content"][0]["text"] = json.dumps(output, ensure_ascii=False)
@@ -848,7 +857,16 @@ def test_middle_once_with_luna_reads_and_records_the_map(tmp_path, monkeypatch, 
         places_section == "## 場所の名前の一覧\n- 家の 1 階\n- 1 階の部屋\n- 自分の部屋"
     )
     [map_section] = [text for text in texts if text.startswith("## マップ\n")]
-    assert json.loads(map_section.split("\n", 1)[1]) == map_json
+    # layout の無い map.json は free として読み、layout を最初のキーにして渡す
+    assert json.loads(map_section.split("\n", 1)[1]) == {"layout": "free", **map_json}
+    [route_section] = [
+        text
+        for text in texts
+        if text.startswith("## 現在地からの経路 (コードの計算)\n")
+    ]
+    assert route_section.split("\n", 1)[1] == (
+        "マップが自由型 (layout が free) のため、経路を計算しない"
+    )
     # 送った画像の時刻で、マップの記録を 1 行足す
     rows = [
         json.loads(line)
@@ -861,7 +879,16 @@ def test_middle_once_with_luna_reads_and_records_the_map(tmp_path, monkeypatch, 
             "t": 5.0,
             "scene_id": "scene-001",
             "place_name": "家の 1 階",
-            "connections": [{"from": "自分の部屋", "to": "家の 1 階", "how": "階段"}],
+            "current_tile": None,
+            "connections": [
+                {
+                    "from": "自分の部屋",
+                    "to": "家の 1 階",
+                    "how": "階段",
+                    "from_tile": None,
+                    "to_tile": None,
+                }
+            ],
             "observations": [],
         }
     ]

@@ -13,12 +13,14 @@ from switch2_layers.middle.middle_types import (
     MiddleOutput,
     ObservationKind,
 )
-from switch2_layers.notes.map_document import MapConnection
+from switch2_layers.notes.map_document import MapConnection, TilePosition
 
-# 出力のキー。場所 (place_name・new_connections・new_observations) は、短期タスクリスト (tasks) より前に書かせる
+# 出力のキー。場所 (place_name・current_tile・new_connections・new_observations) は、短期タスクリスト (tasks) より前に
+# 書かせる
 OUTPUT_KEYS = [
     "scene_name",
     "place_name",
+    "current_tile",
     "new_connections",
     "new_observations",
     "is_stuck",
@@ -30,13 +32,35 @@ OUTPUT_KEYS = [
 VALID_OUTPUT = {
     "scene_name": "フィールド",
     "place_name": "家の 1 階",
+    "current_tile": {"x": 7, "y": 1},
     "new_connections": [
-        {"from": "自分の部屋 (2 階)", "to": "家の 1 階", "how": "右上の階段を下に"}
+        {
+            "from": "自分の部屋 (2 階)",
+            "to": "家の 1 階",
+            "how": "右上の階段を下に",
+            "from_tile": {"x": 7, "y": 0},
+            "to_tile": {"x": 7, "y": 1},
+        }
     ],
     "new_observations": [
-        {"kind": "exit", "place": "家の 1 階", "description": "左下の赤いマット"},
-        {"kind": "landmark", "place": "家の 1 階", "description": "中央のテーブル"},
-        {"kind": "blocked", "place": "家の 1 階", "description": "下側の壁"},
+        {
+            "kind": "exit",
+            "place": "家の 1 階",
+            "description": "左下の赤いマット",
+            "tile": {"x": 1, "y": 2},
+        },
+        {
+            "kind": "landmark",
+            "place": "家の 1 階",
+            "description": "中央のテーブル",
+            "tile": None,
+        },
+        {
+            "kind": "blocked",
+            "place": "家の 1 階",
+            "description": "下側の壁",
+            "tile": {"x": -1, "y": 3},
+        },
     ],
     "is_stuck": True,
     "stuck_description": "t=100.000 から 12 秒間、壁に向かって歩き続けている",
@@ -52,25 +76,49 @@ VALID_PARSED = MiddleOutput(
     timeline="## 操作のまとめ\n- 上を押し続けた",
     tasks="- 右の扉に入る\n- B を試す\n",
     place_name="家の 1 階",
+    current_tile=TilePosition(7, 1),
     new_connections=(
         MapConnection(
-            from_place="自分の部屋 (2 階)", to_place="家の 1 階", how="右上の階段を下に"
+            from_place="自分の部屋 (2 階)",
+            to_place="家の 1 階",
+            how="右上の階段を下に",
+            from_tile=TilePosition(7, 0),
+            to_tile=TilePosition(7, 1),
         ),
     ),
     new_observations=(
         MapObservation(
-            kind=ObservationKind.EXIT, place="家の 1 階", description="左下の赤いマット"
+            kind=ObservationKind.EXIT,
+            place="家の 1 階",
+            description="左下の赤いマット",
+            tile=TilePosition(1, 2),
         ),
         MapObservation(
             kind=ObservationKind.LANDMARK,
             place="家の 1 階",
             description="中央のテーブル",
+            tile=None,
         ),
         MapObservation(
-            kind=ObservationKind.BLOCKED, place="家の 1 階", description="下側の壁"
+            kind=ObservationKind.BLOCKED,
+            place="家の 1 階",
+            description="下側の壁",
+            tile=TilePosition(-1, 3),
         ),
     ),
 )
+# 座標か null の値のスキーマ (説明の注釈を除いたもの)。object と null の union は anyOf で書く
+TILE_OR_NULL = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+            "required": ["x", "y"],
+            "additionalProperties": False,
+        },
+        {"type": "null"},
+    ]
+}
 
 
 def without_descriptions(node: object) -> object:
@@ -96,12 +144,13 @@ def without_descriptions(node: object) -> object:
 # --- スキーマ ---
 
 
-def test_schema_has_nine_required_fields_without_additional_properties():
+def test_schema_has_ten_required_fields_without_additional_properties():
     assert without_descriptions(MIDDLE_OUTPUT_SCHEMA) == {
         "type": "object",
         "properties": {
             "scene_name": {"type": "string"},
             "place_name": {"type": "string"},
+            "current_tile": TILE_OR_NULL,
             "new_connections": {
                 "type": "array",
                 "items": {
@@ -110,8 +159,10 @@ def test_schema_has_nine_required_fields_without_additional_properties():
                         "from": {"type": "string"},
                         "to": {"type": "string"},
                         "how": {"type": "string"},
+                        "from_tile": TILE_OR_NULL,
+                        "to_tile": TILE_OR_NULL,
                     },
-                    "required": ["from", "to", "how"],
+                    "required": ["from", "to", "how", "from_tile", "to_tile"],
                     "additionalProperties": False,
                 },
             },
@@ -126,8 +177,9 @@ def test_schema_has_nine_required_fields_without_additional_properties():
                         },
                         "place": {"type": "string"},
                         "description": {"type": "string"},
+                        "tile": TILE_OR_NULL,
                     },
-                    "required": ["kind", "place", "description"],
+                    "required": ["kind", "place", "description", "tile"],
                     "additionalProperties": False,
                 },
             },
@@ -141,14 +193,32 @@ def test_schema_has_nine_required_fields_without_additional_properties():
         "additionalProperties": False,
     }
     # 出力はスキーマのキーの順に書かれる
-    assert list(MIDDLE_OUTPUT_SCHEMA["properties"]) == OUTPUT_KEYS
+    properties = MIDDLE_OUTPUT_SCHEMA["properties"]
+    assert list(properties) == OUTPUT_KEYS
+    assert list(properties["new_connections"]["items"]["properties"]) == [
+        "from",
+        "to",
+        "how",
+        "from_tile",
+        "to_tile",
+    ]
+    assert list(properties["new_observations"]["items"]["properties"]) == [
+        "kind",
+        "place",
+        "description",
+        "tile",
+    ]
     assert json.loads(json.dumps(MIDDLE_OUTPUT_SCHEMA)) == MIDDLE_OUTPUT_SCHEMA
 
 
 def test_map_fields_have_descriptions():
     properties = MIDDLE_OUTPUT_SCHEMA["properties"]
-    for key in ["place_name", "new_connections", "new_observations"]:
+    for key in ["place_name", "current_tile", "new_connections", "new_observations"]:
         assert properties[key]["description"], key
+    connection = properties["new_connections"]["items"]["properties"]
+    observation = properties["new_observations"]["items"]["properties"]
+    for item in [connection["from_tile"], connection["to_tile"], observation["tile"]]:
+        assert item["description"]
 
 
 def test_observation_kinds_match_the_schema_enum():
@@ -265,9 +335,12 @@ def test_text_that_is_not_a_json_object_is_an_error(text):
 
 def test_empty_map_fields():
     result = parse_middle_output(
-        output_text(place_name="", new_connections=[], new_observations=[])
+        output_text(
+            place_name="", current_tile=None, new_connections=[], new_observations=[]
+        )
     )
     assert result.place_name is None
+    assert result.current_tile is None
     assert result.new_connections == ()
     assert result.new_observations == ()
     # ほかの項目はそのまま
@@ -286,8 +359,20 @@ def test_blank_place_name_means_no_place(place_name):
 
 def test_items_keep_their_order():
     connections = [
-        {"from": "町", "to": "草原", "how": "北の出口"},
-        {"from": "草原", "to": "洞窟", "how": "右上の穴"},
+        {
+            "from": "町",
+            "to": "草原",
+            "how": "北の出口",
+            "from_tile": None,
+            "to_tile": None,
+        },
+        {
+            "from": "草原",
+            "to": "洞窟",
+            "how": "右上の穴",
+            "from_tile": None,
+            "to_tile": None,
+        },
     ]
     result = parse_middle_output(output_text(new_connections=connections))
     assert [item.to_place for item in result.new_connections] == ["草原", "洞窟"]
@@ -296,13 +381,22 @@ def test_items_keep_their_order():
 @pytest.mark.parametrize("kind", ["door", "", "EXIT", "Exit", None, 1, ["exit"]])
 def test_wrong_observation_kind_is_an_error(kind):
     assert_valid_output_parses()
-    observations = [{"kind": kind, "place": "家の 1 階", "description": "右の扉"}]
+    observations = [
+        {"kind": kind, "place": "家の 1 階", "description": "右の扉", "tile": None}
+    ]
     with pytest.raises(ValueError):
         parse_middle_output(output_text(new_observations=observations))
 
 
 def wrong_connections() -> list[object]:
-    good = {"from": "町", "to": "草原", "how": "北の出口"}
+    good = {
+        "from": "町",
+        "to": "草原",
+        "how": "北の出口",
+        "from_tile": {"x": 3, "y": 0},
+        "to_tile": None,
+    }
+    without_tiles = {"from": "町", "to": "草原", "how": "北の出口"}
     return [
         ["町から草原"],
         [None],
@@ -313,6 +407,12 @@ def wrong_connections() -> list[object]:
         [{**good, "to": 1}],
         [{**good, "how": ["北"]}],
         [good, "extra"],
+        # from_tile と to_tile も required
+        [without_tiles],
+        [{**without_tiles, "from_tile": None}],
+        [{**without_tiles, "to_tile": None}],
+        [{**good, "from_tile": {"x": 3}}],
+        [{**good, "to_tile": {"x": 1.0, "y": 2}}],
     ]
 
 
@@ -324,7 +424,7 @@ def test_wrong_connection_items_are_errors(connections):
 
 
 def wrong_observations() -> list[object]:
-    good = {"kind": "exit", "place": "町", "description": "北の出口"}
+    good = {"kind": "exit", "place": "町", "description": "北の出口", "tile": None}
     return [
         ["exit"],
         [{"kind": "exit", "place": "町"}],
@@ -333,6 +433,10 @@ def wrong_observations() -> list[object]:
         [{**good, "place": None}],
         [{**good, "description": 3}],
         [good, None],
+        # tile も required
+        [{"kind": "exit", "place": "町", "description": "北の出口"}],
+        [{**good, "tile": {"x": True, "y": 0}}],
+        [{**good, "tile": "3,0"}],
     ]
 
 
@@ -341,3 +445,79 @@ def test_wrong_observation_items_are_errors(observations):
     assert_valid_output_parses()
     with pytest.raises(ValueError):
         parse_middle_output(output_text(new_observations=observations))
+
+
+# --- 座標の項目 (current_tile・from_tile・to_tile・tile) ---
+
+
+def test_tiles_are_read_as_positions_or_none():
+    assert_valid_output_parses()
+    result = parse_middle_output(output_text(current_tile={"x": -4, "y": 0}))
+    assert result.current_tile == TilePosition(-4, 0)
+    assert parse_middle_output(output_text(current_tile=None)).current_tile is None
+    # 要素の座標は、出力の順のまま
+    assert [item.tile for item in VALID_PARSED.new_observations] == [
+        TilePosition(1, 2),
+        None,
+        TilePosition(-1, 3),
+    ]
+
+
+def test_current_tile_is_kept_when_place_name_is_blank():
+    # 出力の値のまま読む (middle/state.json と記録に書くときに、place_name が無ければ null にする)
+    result = parse_middle_output(output_text(place_name=" "))
+    assert result.place_name is None
+    assert result.current_tile == TilePosition(7, 1)
+
+
+def wrong_tiles() -> list[object]:
+    return [
+        {"x": 1.0, "y": 2},
+        {"x": 1, "y": 2.5},
+        {"x": True, "y": 2},
+        {"x": 1, "y": False},
+        {"x": "1", "y": 2},
+        {"x": 1},
+        {"y": 2},
+        {},
+        {"x": 1, "y": 2, "z": 0},
+        [1, 2],
+        "1,2",
+        1,
+        True,
+    ]
+
+
+@pytest.mark.parametrize("tile", wrong_tiles())
+def test_wrong_current_tile_is_an_error(tile):
+    assert_valid_output_parses()
+    with pytest.raises(ValueError):
+        parse_middle_output(output_text(current_tile=tile))
+
+
+@pytest.mark.parametrize("key", ["from_tile", "to_tile"])
+@pytest.mark.parametrize("tile", wrong_tiles())
+def test_wrong_connection_tile_is_an_error(key, tile):
+    assert_valid_output_parses()
+    connections = [{**VALID_OUTPUT["new_connections"][0], key: tile}]
+    with pytest.raises(ValueError):
+        parse_middle_output(output_text(new_connections=connections))
+
+
+@pytest.mark.parametrize("tile", wrong_tiles())
+def test_wrong_observation_tile_is_an_error(tile):
+    assert_valid_output_parses()
+    observations = [{**VALID_OUTPUT["new_observations"][0], "tile": tile}]
+    with pytest.raises(ValueError):
+        parse_middle_output(output_text(new_observations=observations))
+
+
+def test_float_tile_literal_is_an_error():
+    # JSON の 1.0 は小数点を含む数なので、座標の整数として読まない
+    assert_valid_output_parses()
+    text = output_text().replace(
+        '"current_tile": {"x": 7,', '"current_tile": {"x": 7.0,'
+    )
+    assert '"x": 7.0' in text
+    with pytest.raises(ValueError):
+        parse_middle_output(text)

@@ -4,5 +4,5 @@
 短期タスクリストの最初のタスクの文とその文になった時刻 (task_progress)。
 
 gpt-6-luna の実装 (luna_middle) は次の部品でできている: 変わらない指示 (luna_instructions)、出力のスキーマと読み取り
-(luna_output_schema)、要求の組み立て (luna_request)、surface と操作の記録の要約 (record_summary)、HTTP と応答の読み取り
-(luna_client)、usage と概算の費用 (luna_usage)。"""
+(luna_output_schema)、要求の組み立て (luna_request)、現在地からの経路の節 (route_section)、surface と操作の記録の要約
+(record_summary)、HTTP と応答の読み取り (luna_client)、usage と概算の費用 (luna_usage)。"""
