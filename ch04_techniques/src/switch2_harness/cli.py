@@ -9,7 +9,9 @@
     uv run switch2-harness report [--json] [--workspace DIR]
     uv run switch2-harness run --minutes 30 [--model MODEL] [--effort LEVEL] [--max-budget-usd X] [--workspace DIR]
 
-init 以外の --workspace の既定はカレントディレクトリー。
+init 以外の --workspace の既定はカレントディレクトリー。ただし、エージェント用のサブコマンド
+(look / press / status / finish) は、環境変数 workspace_pin.PINNED_WORKSPACE_ENV があるときはその作業ディレクトリーに固定する
+(run が起動した claude からは、この作業ディレクトリーにしか書けない)。
 終了コードは成功 0、失敗 1、使い方の誤り (argparse) 2。
 """
 
@@ -38,7 +40,7 @@ from switch2_harness.commands import (
     handle_status,
 )
 from switch2_harness.daemon_client import SendCommand, send_command
-from switch2_harness.features import FEATURES, Feature
+from switch2_harness.features import BASE_AGENT_COMMANDS, FEATURES, Feature
 from switch2_harness.harness_config import DEFAULT_GOAL
 from switch2_harness.instructions import ReadTemplate, read_package_template
 from switch2_harness.workspace import (
@@ -46,6 +48,7 @@ from switch2_harness.workspace import (
     WorkspacePaths,
     require_workspace,
 )
+from switch2_harness.workspace_pin import WorkspacePinError, resolve_agent_workspace
 
 PROG = "switch2-harness"
 
@@ -59,7 +62,7 @@ class CliDependencies:
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
-    environ: claude に渡す環境変数の元 (本番は os.environ)
+    environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
     read_template: CLAUDE.md のテンプレートの読み込み (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     """
@@ -96,7 +99,7 @@ def production_dependencies() -> CliDependencies:
 def _add_workspace_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workspace",
-        default=".",
+        default=None,
         metavar="DIR",
         help="作業ディレクトリー (既定: カレントディレクトリー)",
     )
@@ -107,13 +110,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     init: DIR (位置引数)、--game NAME (必須)、--goal TEXT (既定 harness_config.DEFAULT_GOAL)、
         --enable NAME ... (action="extend"、nargs="+"、既定は空のリスト。--enable a b と --enable a --enable b のどちらも書ける)
-    look / status / finish: --workspace DIR (既定 ".")
-    press: ACTION (位置引数)、ARGS (位置引数、1 つ以上)、--workspace DIR (既定 ".")。
+    look / status / finish: --workspace DIR
+    press: ACTION (位置引数)、ARGS (位置引数、1 つ以上)、--workspace DIR。
         ACTION の値は argparse では制限せず、commands.handle_press で検証する
-    report: --json (指定すると集計を JSON で出す)、--workspace DIR (既定 ".")
+    report: --json (指定すると集計を JSON で出す)、--workspace DIR
     run: --minutes N (必須、float)、--model MODEL (既定 agent_launcher.DEFAULT_MODEL)、--effort LEVEL (既定 None)、
-        --max-budget-usd X (float、既定 None)、--workspace DIR (既定 ".")。
+        --max-budget-usd X (float、既定 None)、--workspace DIR。
         --minutes と --max-budget-usd の値の範囲は commands.handle_run で検証する
+    --workspace は、省いたかどうかを見分けるため既定を None にする (どの作業ディレクトリーにするかは run_cli が決める)。
     """
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -226,7 +230,12 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     """argv を解釈して commands の処理を呼び、結果を表示して終了コードを返す。
 
     argv が None なら sys.argv[1:] を使う。使い方の誤りは argparse が使い方を表示して SystemExit(2) を送出する。
-    init 以外は、まず workspace.require_workspace(--workspace) で作業ディレクトリーを確かめる。
+    init 以外は、まず作業ディレクトリーを決める:
+        - エージェント用のサブコマンド (features.BASE_AGENT_COMMANDS: look / press / status / finish) は、
+          workspace_pin.resolve_agent_workspace(--workspace, deps.environ) で決める。WorkspacePinError なら
+          `error <メッセージ>` を stderr に出して 1 を返す (デーモンには送らず、どの作業ディレクトリーにも記録しない)
+        - 人用のサブコマンド (report / run) は、固定の環境変数を見ずに --workspace (省けば ".") を使う
+    続けて workspace.require_workspace で作業ディレクトリーを確かめる。
     NotAWorkspaceError なら `error <メッセージ>` を stderr に出して 1 を返す (デーモンには送らない)。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
@@ -242,8 +251,17 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
             available=deps.available,
         )
     else:
+        requested: str | None = args.workspace
+        if args.command in BASE_AGENT_COMMANDS:
+            try:
+                directory = resolve_agent_workspace(requested, deps.environ)
+            except WorkspacePinError as e:
+                print(f"error {e}", file=sys.stderr)
+                return 1
+        else:
+            directory = requested if requested is not None else "."
         try:
-            paths = require_workspace(args.workspace)
+            paths = require_workspace(directory)
         except NotAWorkspaceError as e:
             print(f"error {e}", file=sys.stderr)
             return 1

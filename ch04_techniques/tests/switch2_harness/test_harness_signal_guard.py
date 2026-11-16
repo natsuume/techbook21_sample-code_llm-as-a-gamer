@@ -19,6 +19,7 @@ from switch2_harness.signal_guard import (
     INTERRUPT_SIGNALS,
     TERMINATE_SIGNALS,
     RunTerminated,
+    defer_interrupts,
     ignore_interrupts,
     terminate_signals_as_exception,
 )
@@ -208,3 +209,88 @@ def test_guards_do_nothing_outside_the_main_thread():
     assert completed == [True]
     assert seen == [before]
     assert {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS} == before
+
+
+# --- defer_interrupts ---
+
+
+def test_defer_interrupts_delivers_sigint_after_leaving():
+    reached_end: list[bool] = []
+    with recording_handlers((signal.SIGINT,)):
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        # 中で KeyboardInterrupt にならず最後まで進み、抜けた時点で KeyboardInterrupt になる
+        with pytest.raises(KeyboardInterrupt), defer_interrupts():
+            send_to_self(signal.SIGINT)
+            reached_end.append(True)
+    assert reached_end == [True]
+
+
+def test_defer_interrupts_redelivers_sigterm_to_the_original_handler():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with defer_interrupts():
+            send_to_self(signal.SIGTERM)
+            assert recorder.received == []
+        # 抜けた時点で送り直され、元のハンドラーが受ける
+        deadline = time.monotonic() + HANDLER_WAIT_S
+        while not recorder.received and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert recorder.received == [signal.SIGTERM]
+
+
+def test_defer_interrupts_redelivers_each_signal_once():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with defer_interrupts():
+            send_to_self(signal.SIGHUP)
+            send_to_self(signal.SIGTERM)
+            send_to_self(signal.SIGHUP)
+        deadline = time.monotonic() + HANDLER_WAIT_S
+        while len(recorder.received) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        send_to_self(signal.SIGINT)  # 送り直しが終わったことを確かめるための目印
+        assert recorder.received == [signal.SIGHUP, signal.SIGTERM, signal.SIGINT]
+
+
+def test_defer_interrupts_restores_handlers():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with defer_interrupts():
+            for sig in INTERRUPT_SIGNALS:
+                assert signal.getsignal(sig) is not recorder
+        for sig in INTERRUPT_SIGNALS:
+            assert signal.getsignal(sig) is recorder
+        assert recorder.received == []
+
+
+def test_defer_interrupts_restores_handlers_after_an_exception():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with pytest.raises(ValueError), defer_interrupts():
+            raise ValueError("launch failed")
+        for sig in INTERRUPT_SIGNALS:
+            assert signal.getsignal(sig) is recorder
+
+
+def test_defer_interrupts_leaves_ignored_signals_alone():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        with defer_interrupts():
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+            send_to_self(signal.SIGHUP)
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        send_to_self(signal.SIGTERM)  # 送り直しが無いことを確かめるための目印
+        assert recorder.received == [signal.SIGTERM]
+
+
+def test_defer_interrupts_does_nothing_outside_the_main_thread():
+    before = {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS}
+    seen: list[dict[signal.Signals, object]] = []
+    completed: list[bool] = []
+
+    def use_defer() -> None:
+        with defer_interrupts():
+            seen.append({sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS})
+        completed.append(True)
+
+    thread = threading.Thread(target=use_defer)
+    thread.start()
+    thread.join(timeout=10)
+    assert completed == [True]
+    assert seen == [before]

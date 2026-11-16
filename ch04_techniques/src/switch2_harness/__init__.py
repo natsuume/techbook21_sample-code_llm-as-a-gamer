@@ -11,6 +11,7 @@
     daemon_client     デーモンに 1 行コマンドを送り、応答の 1 行を返す
     harness_config    harness.json の型 HarnessConfig と読み書き
     workspace         作業ディレクトリーのパスの組み立てと、init での作成
+    workspace_pin     エージェント用のサブコマンドを、run が起動した作業ディレクトリーに固定する
     features          要素の一覧 (Feature と FEATURES) と名前の検証
     instructions      有効な要素から CLAUDE.md の本文を組み立てる
     press_args        press の引数の検証 (純粋関数)

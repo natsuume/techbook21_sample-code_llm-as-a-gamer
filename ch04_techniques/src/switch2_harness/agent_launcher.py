@@ -31,6 +31,8 @@ CLAUDE.md (~/.claude/CLAUDE.md を含む)、自動メモリー、親ディレク
     - --disallowedTools Skill・--disable-slash-commands: Skill とスラッシュコマンドを使わせない
     - 環境変数 CLAUDE_CODE_DISABLE_CLAUDE_MDS・CLAUDE_CODE_DISABLE_AUTO_MEMORY を 1 にし、
       親のセッションの変数とほかの API キーを除く (build_claude_env)
+    - 環境変数 workspace_pin.PINNED_WORKSPACE_ENV に作業ディレクトリーを入れ、エージェント用のサブコマンドを
+      その作業ディレクトリーに固定する (--workspace で別の実験の作業ディレクトリーに書かせない)
 作業ディレクトリーの CLAUDE.md も CLAUDE_CODE_DISABLE_CLAUDE_MDS で読まれなくなるため、
 --append-system-prompt-file で渡す。
 
@@ -58,8 +60,9 @@ from switch2_harness.process_tree import (
     kill_if_unchanged,
     read_descendants,
 )
-from switch2_harness.signal_guard import ignore_interrupts
+from switch2_harness.signal_guard import defer_interrupts, ignore_interrupts
 from switch2_harness.workspace import WorkspacePaths
+from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
 CLAUDE_COMMAND = "claude"
 
@@ -126,7 +129,8 @@ BUDGET_EXHAUSTED_SUBTYPE = "error_max_budget_usd"
 # resumes_exhausted: 起動し直した回数が MAX_RESUMES に達した
 StopReason = Literal["deadline", "budget_exhausted", "no_session", "resumes_exhausted"]
 
-# 後片付けを割り込みから守るコンテキストマネージャーを作る関数の型 (本番は signal_guard.ignore_interrupts)
+# シグナルの扱いを一時的に変えるコンテキストマネージャーを作る関数の型
+# (後片付けを守る shield の本番は signal_guard.ignore_interrupts、起動を守る defer の本番は signal_guard.defer_interrupts)
 Shield = Callable[[], AbstractContextManager[None]]
 
 
@@ -324,14 +328,19 @@ def is_kept_env_name(name: str) -> bool:
     return True
 
 
-def build_claude_env(base_env: Mapping[str, str]) -> dict[str, str]:
+def build_claude_env(
+    base_env: Mapping[str, str], workspace_root: Path
+) -> dict[str, str]:
     """claude に渡す環境変数の辞書を返す。base_env は変えない。
 
-    base_env のうち is_kept_env_name に当たる変数だけを残し、CLAUDE_ENV_OVERRIDES を足した
-    (同じ名前は上書きした) ものを返す。
+    base_env のうち is_kept_env_name に当たる変数だけを残し、CLAUDE_ENV_OVERRIDES と、
+    workspace_pin.PINNED_WORKSPACE_ENV = str(workspace_root) (作業ディレクトリーの絶対パス) を足した
+    (同じ名前は上書きした) ものを返す。PINNED_WORKSPACE_ENV により、claude が使うエージェント用のサブコマンドは
+    この作業ディレクトリーに固定される (workspace_pin.resolve_agent_workspace)。
     """
     env = {name: value for name, value in base_env.items() if is_kept_env_name(name)}
     env.update(CLAUDE_ENV_OVERRIDES)
+    env[PINNED_WORKSPACE_ENV] = str(workspace_root)
     return env
 
 
@@ -382,7 +391,9 @@ def max_total_cost_usd(lines: Iterable[str]) -> float | None:
     """agent.jsonl の行のうち、JSON のオブジェクトで "type" が "result" の行にある "total_cost_usd" (数値) の最大のものを返す。
 
     クラッシュや起動時のエラーで終わった result は total_cost_usd が 0 になることがあるため、最後の値ではなく最大の値を返す
-    (--resume で続けたセッションの total_cost_usd は累計のため、最大の値がそれまでに使った費用になる)。
+    (--resume で続けたセッションの total_cost_usd は累計のため、最大の値がそれまでに使った費用になる。
+    --resume で続けても session_id は同じで、result の total_cost_usd はセッションの累計になることを、
+    Claude Code 2.1.325 で 2026-11-17 に確かめた)。
     値は float にして返す。JSON として読めない行、JSON のオブジェクトでない行、"type" が "result" でない行、
     "total_cost_usd" が無いか数値でない行 (bool は数値とみなさない) は読み飛ばす。見つからなければ None。
     例: result の total_cost_usd が 0.4、0.0 の順なら 0.4。
@@ -453,12 +464,13 @@ def validate_minutes(minutes: float) -> None:
 def validate_max_budget_usd(value: float | None) -> None:
     """run の --max-budget-usd を検証する。None (指定なし) は通す。
 
-    None でなければ、正の有限の数 (0 より大きく、NaN・inf でない) でなければ ValueError にする。
-    メッセージは `--max-budget-usd must be a positive finite number: <値>`。
+    None でなければ、正の有限の数 (0 より大きく、NaN・inf でない) で、さらに float(format_budget_usd(値)) が
+    0 より大きく (--max-budget-usd に渡す小数 4 桁の文字列が "0.0000" にならない) なければ ValueError にする
+    (例: 0.00004 は拒否し、0.0001 は通す)。メッセージは `--max-budget-usd must be a positive finite number: <値>`。
     """
     if value is None:
         return
-    if not (math.isfinite(value) and value > 0):
+    if not (math.isfinite(value) and value > 0 and float(format_budget_usd(value)) > 0):
         raise ValueError(f"--max-budget-usd must be a positive finite number: {value}")
 
 
@@ -511,7 +523,8 @@ def stop_process(
        process.wait(timeout=TERMINATE_GRACE_S) で待つ
     3. まだ終わっていなければ、snapshot_descendants(process.pid) で claude の子孫を控えてから、グループに
        signal.SIGKILL を送り、process.wait() で終わるのを待つ。その後、控えた子孫それぞれに
-       kill_descendant(<子孫>, signal.SIGKILL) を送る
+       kill_descendant(<子孫>, signal.SIGKILL) を送る。snapshot_descendants が OSError か ValueError を
+       送出したときは、控えた子孫を空として扱い、必ずグループへの SIGKILL を送る
     SIGINT か SIGTERM で claude が終わったときは、Bash ツールのコマンドは claude 自身が止めるため、子孫を控えない。
     SIGKILL で止めた claude は後始末できず、別のセッションにいる Bash ツールのコマンドが残りうるため、控えて止める
     (Claude Code 2.1.325 で 2026-11-17 に確かめた)。
@@ -529,7 +542,11 @@ def stop_process(
             return
         except subprocess.TimeoutExpired:
             continue
-    descendants = snapshot_descendants(process.pid)
+    try:
+        descendants = snapshot_descendants(process.pid)
+    except (OSError, ValueError):
+        # 子孫を控えられなくても、claude を止める SIGKILL は送り損ねない
+        descendants = []
     _signal_group_if_present(process, signal.SIGKILL)
     process.wait()
     for descendant in descendants:
@@ -596,12 +613,17 @@ def run_agent_until(
     record: Callable[[CommandEvent], None],
     base_env: Mapping[str, str],
     shield: Shield = ignore_interrupts,
+    defer: Shield = defer_interrupts,
 ) -> RunOutcome:
     """claude -p を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
 
     最初の起動の前に offset = agent_log_size(paths.agent_log_file) を覚える。以下の read_last_* と
     read_max_total_cost_usd には (paths.agent_log_file, offset) を渡し、今回の run の出力だけを読む。
-    起動は start_process(args, paths.root, build_claude_env(base_env), paths.agent_log_file, paths.agent_stderr_file)。
+    起動は start_process(args, paths.root, build_claude_env(base_env, paths.root), paths.agent_log_file,
+    paths.agent_stderr_file) (claude のエージェント用のサブコマンドは paths.root に固定される)。
+    起動 (最初の起動と起動し直し) は、プロセスを作って後片付けが参照する変数に入れるまでを with defer(): の中で行う
+    (本番の defer は signal_guard.defer_interrupts。起動の直後に届いた Ctrl-C・SIGTERM・SIGHUP で、
+    起動した claude を見失って止め損ねないように、シグナルを変数に入れた後まで遅らせる)。
     最初の起動のプロンプトは first_prompt(game) で、--resume は付けず、--max-budget-usd には options.max_budget_usd を渡す。
 
     POLL_INTERVAL_S ごとに (sleep(POLL_INTERVAL_S)) 次を確かめる:
@@ -639,7 +661,7 @@ def run_agent_until(
     """
     log_path = paths.agent_log_file
     offset = agent_log_size(log_path)
-    env = build_claude_env(base_env)
+    env = build_claude_env(base_env, paths.root)
     deadline = clock() + minutes * 60.0
     launches = 0
     resumes = 0
@@ -655,7 +677,8 @@ def run_agent_until(
         return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
 
     try:
-        process = launch(options, first_prompt(game), None)
+        with defer():
+            process = launch(options, first_prompt(game), None)
         launches = 1
         record(_run_event(clock(), ("start",), "launched claude launch=1"))
         while True:
@@ -688,7 +711,8 @@ def run_agent_until(
                 if remaining_budget is None
                 else replace(options, max_budget_usd=remaining_budget)
             )
-            process = launch(resume_options, RESUME_PROMPT, session_id)
+            with defer():
+                process = launch(resume_options, RESUME_PROMPT, session_id)
             launches += 1
             resumes += 1
             record(

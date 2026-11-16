@@ -58,6 +58,8 @@ class AgentSummary:
         クラッシュや起動時のエラーで終わった result は total_cost_usd が 0 になることがあるため、最後の値ではなく最大の値を使う)。
         result メッセージを書いた起動の分だけで、期限で止めた起動の分は含まない
     num_turns: すべての result の num_turns の合計 (result メッセージを書いた起動の分だけ)
+    --resume で続けても session_id は同じで、total_cost_usd はセッションの累計、num_turns はその起動の分になることを、
+    Claude Code 2.1.325 で 2026-11-17 に確かめた。
     duration_ms: すべての result の duration_ms の合計 (result メッセージを書いた起動の分だけ)
     responses: 応答の数 (同じ message.id の assistant の行は 1 つと数える)
     """

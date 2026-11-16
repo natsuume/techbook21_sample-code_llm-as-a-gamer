@@ -735,13 +735,16 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - MCP サーバー (`--strict-mcp-config`)、Skill とスラッシュコマンド (`--disable-slash-commands`、`--disallowedTools Skill`) を読み込ませません。作業ディレクトリーは `ch04_techniques/` の下にあり、Claude Code は親ディレクトリーの `.claude/skills/` も読むため、既存の第4章の Skill を読ませないようにしています
 - 環境変数 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` で、`~/.claude/CLAUDE.md` を含むどの `CLAUDE.md` も読ませず、作業ディレクトリーの `CLAUDE.md` だけを `--append-system-prompt-file` で渡します。自動メモリーも `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` で無効にします
 - 子のプロセスには、起動した人の環境変数から、`CLAUDE` で始まる変数 (Claude Code の認証・設定の場所・プロバイダーの選択に使うものを除く) と、`ANTHROPIC_` で始まらない `*_API_KEY` を除いて渡します。Claude Code のセッションの中から `run` を起動しても、そのセッションの変数は子に渡りません
+- 子のプロセスの環境変数 `SWITCH2_HARNESS_WORKSPACE` に作業ディレクトリーのパスを入れます。この変数があるとき、`look`・`press`・`status`・`finish` はその作業ディレクトリーだけを使い、別の `--workspace` を指定するとエラーにします。エージェントが別の実験の作業ディレクトリーに画像や記録を書かないようにするためです
 - 使える組み込みのツールを Bash と Read に限り (`--tools Bash,Read`)、Bash は `uv run switch2-harness <サブコマンド>` だけを許可します。`--permission-mode dontAsk` で、許可していない呼び出しは確認なしで拒否します。Web 検索はできません
 
-2026-11-16 に Claude Code 2.1.325 で起動し、次のことを確かめました。
+2026-11-16〜17 に Claude Code 2.1.325 で起動し、次のことを確かめました。
 
 - 読み込まれたツールは Bash と Read だけで、MCP サーバー・スラッシュコマンド・Skill は空、plugin は Claude Code の組み込みのものだけ
 - `uv run switch2-harness status` は許可されて実行され、許可したサブコマンドの後ろに付けた出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・変数の展開 (`$HOME`・`"$PATH"`・`${USER}`)・`~` と、`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
 - 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
+- `uv run switch2-harness status --workspace ..` と、環境変数を書き換えて起動する形 (`SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`・`env SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`) は拒否される
+- `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる
 
 エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
 
@@ -789,7 +792,7 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 | 変化なしが続いた最長の時間 | 画面がほぼ変わらない組が続いた区間の、最も長い時間 |
 | press の後も変化なしの組 | 間に成功した `press` がある組のうち、画面がほぼ変わらなかった組の数 / 間に成功した `press` がある組の数 |
 | エージェント | `run` で起動した回数 / Claude Code の応答の数 / 終わったときに出る result の数 |
-| result を出した起動の分 | result に書かれた費用・ターン数・時間。費用は、セッションごとに最も大きい値を取って合計する (`--resume` で続けたセッションの費用は累計で書かれ、途中で異常終了した result には 0 が書かれることがあるため)。ターン数と時間は合計 |
+| result を出した起動の分 | result に書かれた費用・ターン数・時間。費用は、セッションごとに最も大きい値を取って合計する (`--resume` で続けたセッションの費用は累計で書かれ、途中で異常終了した result には 0 が書かれることがあるため)。ターン数と時間は、起動ごとの値を合計する |
 
 画面の変化は、2 枚をグレースケールにして 160x90 に縮小し、明るさの差が 24 を超える画素の割合で測ります。割合が 1% 未満の組を「変化なし」とします。期限で止めた起動は result を出さないことがあり (Claude Code のドキュメントには、SIGTERM で止めると result を記録しないとある)、その起動の分は費用・ターン数・時間に含まれません。起動の回数と応答の数は、result の有無によらず数えます。
 

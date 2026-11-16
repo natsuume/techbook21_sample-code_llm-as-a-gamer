@@ -6,8 +6,10 @@ finally の後片付けを通す。ただし、すでに無視されているシ
 また、後片付け (claude を止める待ちと up ALL の送信) の途中で 2 回目の Ctrl-C などが来ると up ALL の前で
 抜けてしまうため、後片付けの間は SIGINT・SIGTERM・SIGHUP を無視する。RunTerminated を送出するハンドラーも、
 送出の前にこれらを無視に切り替え、後片付けに入るまでの間の 2 回目のシグナルで後片付けが飛ばされないようにする。
+claude を起動してから、後片付けが参照する変数に入れるまでの間は、SIGINT・SIGTERM・SIGHUP を遅らせる (defer_interrupts)。
+その間に届いたシグナルで例外になると、起動したばかりの claude を見失い、止め損ねるためである。
 
-signal.signal はメインスレッドでしか使えない。どちらのコンテキストマネージャーも、メインスレッド以外で
+signal.signal はメインスレッドでしか使えない。どのコンテキストマネージャーも、メインスレッド以外で
 使われたときはハンドラーを変えず、何もしないコンテキストマネージャーとして動く (例外にしない)。
 """
 
@@ -115,3 +117,35 @@ def ignore_interrupts() -> Iterator[None]:
     """
     with _replaced_handlers(INTERRUPT_SIGNALS, signal.SIG_IGN):
         yield
+
+
+@contextmanager
+def defer_interrupts() -> Iterator[None]:
+    """with の中にいる間、SIGINT・SIGTERM・SIGHUP を遅らせる。
+
+    入るときにハンドラーが signal.SIG_IGN でないシグナルを、受けたシグナルを記録するだけのハンドラーにする
+    (SIG_IGN のシグナルには触れない)。抜けるときに (例外のときも) 元のハンドラーに戻し、記録したシグナルがあれば
+    1 種類につき 1 回ずつ、受けた順に signal.raise_signal で送り直す (元のハンドラーで KeyboardInterrupt や
+    RunTerminated になる)。メインスレッド以外では何もしない。
+    Python で書いたハンドラーは子のプロセスの exec で既定に戻るため、この中で起動した claude には影響しない
+    (SIG_IGN は exec で受け継がれるが、ここでは SIG_IGN にはしない)。
+    """
+    if not _in_main_thread():
+        yield
+        return
+    received: list[int] = []
+
+    def remember(signal_number: int, frame: FrameType | None) -> None:
+        received.append(signal_number)
+
+    previous = {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS}
+    deferred = [sig for sig in INTERRUPT_SIGNALS if previous[sig] != signal.SIG_IGN]
+    try:
+        for sig in deferred:
+            signal.signal(sig, remember)
+        yield
+    finally:
+        for sig in deferred:
+            signal.signal(sig, _restorable(previous[sig]))
+        for signal_number in dict.fromkeys(received):
+            signal.raise_signal(signal_number)

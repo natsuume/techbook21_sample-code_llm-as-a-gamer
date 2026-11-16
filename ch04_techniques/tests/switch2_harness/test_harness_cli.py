@@ -7,6 +7,7 @@ main (本番の依存) を呼ぶのは、デーモンにも claude にも触れ�
 import json
 import os
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from switch2_harness.cli import (
 from switch2_harness.daemon_client import send_command
 from switch2_harness.features import FEATURES
 from switch2_harness.instructions import read_package_template
+from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
 JST = timezone(timedelta(hours=9))
 HOME_ERROR = (
@@ -62,6 +64,11 @@ class Harness:
     def run(self, *argv: str) -> int:
         return run_cli(list(argv), self.deps)
 
+    def pin(self, value: str) -> None:
+        """環境に、エージェント用のサブコマンドを固定する環境変数を入れる (run が起動した claude の中と同じ)。"""
+        environ = {**self.deps.environ, PINNED_WORKSPACE_ENV: value}
+        self.deps = replace(self.deps, environ=environ)
+
 
 @pytest.fixture
 def harness() -> Harness:
@@ -71,7 +78,12 @@ def harness() -> Harness:
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """init を使わずに作った作業ディレクトリー (harness.json・records/・frames/)。"""
-    paths = make_paths(tmp_path / "play")
+    return make_workspace(tmp_path / "play")
+
+
+def make_workspace(root: Path) -> Path:
+    """init を使わずに root に作業ディレクトリー (harness.json・records/・frames/) を作る。"""
+    paths = make_paths(root)
     paths.harness_file.write_text(
         json.dumps(
             {
@@ -376,3 +388,114 @@ def test_main_init_uses_the_package_template(tmp_path, capsys):
     ]
     assert datetime.fromisoformat(created_at).utcoffset() is not None
     assert len(created_at) == len("2026-11-16T21:00:05+09:00")
+
+
+# --- エージェント用のサブコマンドの作業ディレクトリーの固定 ---
+
+AGENT_ARGVS = [
+    ["look"],
+    ["press", "tap", "A"],
+    ["status"],
+    ["finish"],
+]
+
+
+def events_file(workspace: Path) -> Path:
+    return workspace / "records" / "events.jsonl"
+
+
+@pytest.mark.parametrize("argv", AGENT_ARGVS)
+def test_pinned_command_uses_the_pinned_workspace_without_option(
+    tmp_path, workspace, harness, monkeypatch, argv
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    harness.pin(str(workspace))
+    assert harness.run(*argv) == 0
+    assert harness.daemon.sent
+    assert events_file(workspace).exists()
+
+
+def test_pinned_look_shoots_into_the_pinned_workspace(
+    tmp_path, workspace, harness, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    harness.pin(str(workspace))
+    assert harness.run("look") == 0
+    assert harness.daemon.sent == [["shot", str(workspace / "frames" / "000001.png")]]
+
+
+@pytest.mark.parametrize("argv", AGENT_ARGVS)
+def test_pinned_command_rejects_another_workspace(
+    tmp_path, workspace, harness, capsys, argv
+):
+    other = make_workspace(tmp_path / "other")
+    harness.pin(str(workspace))
+    assert harness.run(*argv, "--workspace", str(other)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        captured.err == f"error this command is pinned to the workspace: {workspace}\n"
+    )
+    assert harness.daemon.sent == []
+    assert not events_file(workspace).exists()
+    assert not events_file(other).exists()
+
+
+@pytest.mark.parametrize(
+    ("cwd", "written"),
+    [(".", "play"), (".", "play/"), (".", "./play/"), ("sub", "../play")],
+)
+def test_pinned_command_accepts_the_same_path_written_differently(
+    tmp_path, workspace, harness, monkeypatch, cwd, written
+):
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path / cwd)
+    harness.pin(str(workspace))
+    assert harness.run("status", "--workspace", written) == 0
+    assert harness.daemon.sent == [["status"]]
+
+
+def test_pinned_command_accepts_a_symlink_to_the_workspace(
+    tmp_path, workspace, harness
+):
+    link = tmp_path / "link"
+    link.symlink_to(workspace)
+    harness.pin(str(workspace))
+    assert harness.run("status", "--workspace", str(link)) == 0
+    assert harness.daemon.sent == [["status"]]
+
+
+@pytest.mark.parametrize("argv", [["look"], ["status", "--workspace", "play"]])
+def test_empty_pin_is_rejected(tmp_path, workspace, harness, capsys, monkeypatch, argv):
+    monkeypatch.chdir(tmp_path)
+    harness.pin("")
+    assert harness.run(*argv) == 1
+    assert (
+        capsys.readouterr().err == "error this command is pinned to the workspace: \n"
+    )
+    assert harness.daemon.sent == []
+    assert not events_file(workspace).exists()
+
+
+def test_report_ignores_the_pin(tmp_path, workspace, harness, capsys):
+    other = make_workspace(tmp_path / "other")
+    harness.pin(str(workspace))
+    assert harness.run("report", "--json", "--workspace", str(other)) == 0
+    assert json.loads(capsys.readouterr().out)["command_counts"] == {}
+
+
+def test_run_ignores_the_pin(tmp_path, workspace, harness):
+    other = make_workspace(tmp_path / "other")
+    harness.pin(str(workspace))
+    assert harness.run("run", "--minutes", "1", "--workspace", str(other)) == 0
+    [launch] = harness.starter.launches
+    assert launch.cwd == other
+    assert launch.env[PINNED_WORKSPACE_ENV] == str(other)
+
+
+def test_init_ignores_the_pin(tmp_path, workspace, harness):
+    harness.pin(str(workspace))
+    assert harness.run("init", str(tmp_path / "new"), "--game", "G") == 0
+    assert (tmp_path / "new" / "harness.json").exists()

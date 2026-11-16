@@ -69,8 +69,9 @@ from switch2_harness.process_tree import (
     kill_if_unchanged,
     read_descendants,
 )
-from switch2_harness.signal_guard import ignore_interrupts
+from switch2_harness.signal_guard import defer_interrupts, ignore_interrupts
 from switch2_harness.workspace import WorkspacePaths
+from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
 GAME = "ゲーム A"
 START_TIME = 1000.0
@@ -264,15 +265,27 @@ def test_claude_env_overrides():
     }
 
 
+# build_claude_env に渡す作業ディレクトリー
+WORKSPACE = Path("/plays/one")
+
+
 def test_build_claude_env_copies_and_adds():
     base = {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0"}
-    env = build_claude_env(base)
+    env = build_claude_env(base, WORKSPACE)
     assert env == {
         "PATH": "/usr/bin",
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "SWITCH2_HARNESS_WORKSPACE": "/plays/one",
     }
     assert base == {"PATH": "/usr/bin", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0"}
+
+
+def test_build_claude_env_pins_the_workspace():
+    env = build_claude_env(
+        {"PATH": "/usr/bin", PINNED_WORKSPACE_ENV: "/plays/other"}, WORKSPACE
+    )
+    assert env[PINNED_WORKSPACE_ENV] == "/plays/one"
 
 
 # run を起動した親の Claude Code のセッションの環境にある変数
@@ -288,11 +301,12 @@ PARENT_SESSION_ENV = {
 OVERRIDES = {
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "SWITCH2_HARNESS_WORKSPACE": "/plays/one",
 }
 
 
 def test_build_claude_env_removes_parent_session_variables():
-    env = build_claude_env({"PATH": "/usr/bin", **PARENT_SESSION_ENV})
+    env = build_claude_env({"PATH": "/usr/bin", **PARENT_SESSION_ENV}, WORKSPACE)
     assert env == {"PATH": "/usr/bin", **OVERRIDES}
 
 
@@ -304,7 +318,7 @@ def test_build_claude_env_keeps_claude_code_auth_and_config():
         "CLAUDE_CODE_USE_VERTEX": "1",
         "ANTHROPIC_API_KEY": "anthropic-key",
     }
-    assert build_claude_env(kept) == {**kept, **OVERRIDES}
+    assert build_claude_env(kept, WORKSPACE) == {**kept, **OVERRIDES}
 
 
 def test_build_claude_env_removes_other_api_keys():
@@ -314,7 +328,8 @@ def test_build_claude_env_removes_other_api_keys():
             "GEMINI_API_KEY": "gemini-key",
             "ANTHROPIC_API_KEY": "anthropic-key",
             "PATH": "/usr/bin",
-        }
+        },
+        WORKSPACE,
     )
     assert env == {
         "ANTHROPIC_API_KEY": "anthropic-key",
@@ -333,13 +348,13 @@ def test_build_claude_env_keeps_unrelated_variables():
         "OPENAI_API_KEY_FILE": "/etc/openai",
         "claude_lowercase": "y",
     }
-    assert build_claude_env(unrelated) == {**unrelated, **OVERRIDES}
+    assert build_claude_env(unrelated, WORKSPACE) == {**unrelated, **OVERRIDES}
 
 
 def test_build_claude_env_does_not_change_base():
     base = {"PATH": "/usr/bin", "OPENAI_API_KEY": "o", **PARENT_SESSION_ENV}
     copy = dict(base)
-    build_claude_env(base)
+    build_claude_env(base, WORKSPACE)
     assert base == copy
 
 
@@ -352,7 +367,7 @@ def test_build_claude_env_keeps_provider_selection_and_auth_variables():
         "AWS_REGION": "us-east-1",
         "GOOGLE_CLOUD_PROJECT": "project",
     }
-    assert build_claude_env(provider) == {**provider, **OVERRIDES}
+    assert build_claude_env(provider, WORKSPACE) == {**provider, **OVERRIDES}
 
 
 def test_build_claude_env_removes_unknown_skip_variables_and_other_keys():
@@ -362,7 +377,8 @@ def test_build_claude_env_removes_unknown_skip_variables_and_other_keys():
             "CLAUDE_CODE_SKIP_AUTH_LATER": "1",
             "OPENAI_API_KEY": "openai-key",
             "PATH": "/usr/bin",
-        }
+        },
+        WORKSPACE,
     )
     assert env == {"PATH": "/usr/bin", **OVERRIDES}
 
@@ -625,6 +641,19 @@ def test_validate_max_budget_usd_rejects_non_positive_and_non_finite(budget, sho
     )
 
 
+def test_validate_max_budget_usd_rejects_a_budget_that_rounds_to_zero():
+    # 0.00004 は --max-budget-usd に渡す文字列が "0.0000" になる
+    with pytest.raises(ValueError) as error:
+        validate_max_budget_usd(0.00004)
+    assert str(error.value).startswith(
+        "--max-budget-usd must be a positive finite number: "
+    )
+
+
+def test_validate_max_budget_usd_accepts_the_smallest_rounded_budget():
+    assert validate_max_budget_usd(0.0001) is None
+
+
 # --- 終わったプロセスを起動し直すかの判定 ---
 
 
@@ -825,6 +854,7 @@ def run_scenario(
     send: SendCommand | None = None,
     sleep: Callable[[float], None] | None = None,
     shield: Callable[[], AbstractContextManager[None]] = ignore_interrupts,
+    defer: Callable[[], AbstractContextManager[None]] = defer_interrupts,
 ) -> RunOutcome:
     """scenario の fake で run_agent_until を呼ぶ。send と sleep は渡したときだけ置き換える。"""
     return run_agent_until(
@@ -840,6 +870,7 @@ def run_scenario(
         record=scenario.events.append,
         base_env={"PATH": "/usr/bin"},
         shield=shield,
+        defer=defer,
     )
 
 
@@ -924,6 +955,7 @@ def test_run_starts_claude_in_the_workspace(tmp_path):
         "PATH": "/usr/bin",
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "SWITCH2_HARNESS_WORKSPACE": str(scenario.paths.root),
     }
     assert launch.stdout_path == scenario.paths.agent_log_file
     assert launch.stderr_path == scenario.paths.agent_stderr_file
@@ -1405,3 +1437,90 @@ def test_run_keeps_the_spent_budget_after_a_crashed_result(tmp_path):
     assert outcome == RunOutcome(reason="deadline", launches=3)
     budgets = [budget_arg(launch.args) for launch in scenario.starter.launches]
     assert budgets == ["1.0000", "0.6000", "0.6000"]
+
+
+# --- エージェント用のサブコマンドの作業ディレクトリーの固定 ---
+
+
+def test_run_pins_agent_commands_to_the_workspace(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    run_scenario(scenario, minutes=1.0)
+    [launch] = scenario.starter.launches
+    assert launch.env[PINNED_WORKSPACE_ENV] == str(scenario.paths.root)
+
+
+# --- 起動の直後に届いたシグナル ---
+
+
+def interrupting_defer(
+    interrupt_on_use: int,
+) -> Callable[[], AbstractContextManager[None]]:
+    """interrupt_on_use 回目に使われたとき、抜ける時点で KeyboardInterrupt を送出する fake の defer を返す。
+
+    defer_interrupts が遅らせた Ctrl-C を、抜けるときに送り直した状況の代わり。
+    """
+    uses: list[int] = []
+
+    @contextmanager
+    def defer() -> Iterator[None]:
+        uses.append(1)
+        yield
+        if len(uses) == interrupt_on_use:
+            raise KeyboardInterrupt
+
+    return defer
+
+
+def test_run_stops_a_claude_interrupted_right_after_the_first_launch(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    with pytest.raises(KeyboardInterrupt):
+        run_scenario(scenario, minutes=1.0, defer=interrupting_defer(1))
+    [process] = scenario.starter.processes
+    assert process.calls == [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["release"]
+
+
+def test_run_stops_a_claude_interrupted_right_after_resuming(tmp_path):
+    first = ProcessPlan(runs_for_s=10.0, output_lines=(session_line("s1"),))
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    with pytest.raises(KeyboardInterrupt):
+        run_scenario(scenario, minutes=1.0, defer=interrupting_defer(2))
+    first_process, second_process = scenario.starter.processes
+    assert first_process.calls == []
+    assert second_process.calls == [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["start", "release"]
+
+
+# --- 子孫を控えるときの失敗 ---
+
+
+def test_stop_process_sends_sigkill_even_if_snapshotting_fails():
+    plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
+    process = FakeAgentProcess(FakeClock(), plan)
+    killed: list[ProcessEntry] = []
+
+    def failing_snapshot(root_pid: int) -> list[ProcessEntry]:
+        raise PermissionError("cannot read /proc")
+
+    def kill_descendant(entry: ProcessEntry, sig: int) -> bool:
+        killed.append(entry)
+        return True
+
+    stop_process(
+        process, snapshot_descendants=failing_snapshot, kill_descendant=kill_descendant
+    )
+    assert process.calls[-2:] == [("signal", signal.SIGKILL), ("wait", None)]
+    assert killed == []
+
+
+def test_stop_process_sends_sigkill_even_if_parsing_fails():
+    plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
+    process = FakeAgentProcess(FakeClock(), plan)
+
+    def failing_snapshot(root_pid: int) -> list[ProcessEntry]:
+        raise ValueError("unexpected /proc stat line")
+
+    stop_process(process, snapshot_descendants=failing_snapshot)
+    assert process.calls[-2:] == [("signal", signal.SIGKILL), ("wait", None)]
