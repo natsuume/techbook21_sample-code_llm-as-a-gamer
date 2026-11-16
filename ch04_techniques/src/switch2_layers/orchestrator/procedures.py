@@ -19,8 +19,15 @@
 
 from collections.abc import Mapping
 
+from switch2_remote.controller_state import BUTTON_ORDER
+
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
 from switch2_layers.orchestrator.decision_types import PressAction, WaitAction
+from switch2_layers.orchestrator.json_values import (
+    is_integer,
+    is_number,
+    seconds_problem,
+)
 
 TAP_REPEAT = "tap_repeat"
 WALK = "walk"
@@ -48,7 +55,39 @@ def procedure_argument_errors(name: str, args: Mapping[str, object]) -> list[str
         - 引数の値が、モジュールの docstring の値の規則に合わない
     name が PROCEDURE_NAMES に無ければ ValueError (名前は呼び出し側が先に確かめる)。
     """
-    raise NotImplementedError
+    if name not in PROCEDURE_ARGUMENTS:
+        raise ValueError(f"unknown procedure: {name!r}")
+    expected = PROCEDURE_ARGUMENTS[name]
+    errors: list[str] = []
+    for key in expected:
+        if key not in args:
+            errors.append(f"{key}: missing")
+            continue
+        problem = _argument_problem(key, args[key])
+        if problem is not None:
+            errors.append(f"{key}: {problem}")
+    errors.extend(f"{key}: unknown argument" for key in args if key not in expected)
+    return errors
+
+
+def _argument_problem(key: str, value: object) -> str | None:
+    """引数 key の値 value がモジュールの docstring の値の規則に合わなければ、その理由の文を返す。合えば None。"""
+    if key == "button":
+        if not isinstance(value, str) or value not in BUTTON_ORDER:
+            return f"unknown button {value!r}"
+        return None
+    if key == "direction":
+        if not isinstance(value, str) or value not in WALK_DIRECTIONS:
+            return f"must be one of {', '.join(WALK_DIRECTIONS)}"
+        return None
+    if key == "count":
+        if not is_integer(value) or not 1 <= value <= MAX_PROCEDURE_COUNT:
+            return f"must be an integer from 1 to {MAX_PROCEDURE_COUNT}"
+        return None
+    if key == "seconds":
+        return seconds_problem(value, MAX_PROCEDURE_SECONDS, allow_zero=False)
+    # interval_seconds
+    return seconds_problem(value, MAX_PROCEDURE_SECONDS, allow_zero=True)
 
 
 def expand_procedure(
@@ -60,4 +99,25 @@ def expand_procedure(
     walk         (PressAction(buttons=(direction,), seconds=seconds), WaitAction(interval_seconds)) を count 回
     秒数は float にする。procedure_argument_errors(name, args) が空でなければ (引数が合わなければ) ValueError。
     """
-    raise NotImplementedError
+    errors = procedure_argument_errors(name, args)
+    if errors:
+        raise ValueError(f"invalid arguments for {name}: {'; '.join(errors)}")
+    wait = WaitAction(seconds=_checked_number(args["interval_seconds"]))
+    if name == TAP_REPEAT:
+        press = PressAction(buttons=(str(args["button"]),))
+    else:
+        press = PressAction(
+            buttons=(str(args["direction"]),),
+            seconds=_checked_number(args["seconds"]),
+        )
+    count = args["count"]
+    if not is_integer(count):
+        raise ValueError(f"count of {name} is not an integer: {count!r}")
+    return (press, wait) * count
+
+
+def _checked_number(value: object) -> float:
+    """確かめ済みの秒数の値 value を float にして返す。数でなければ ValueError。"""
+    if not is_number(value):
+        raise ValueError(f"not a number: {value!r}")
+    return float(value)

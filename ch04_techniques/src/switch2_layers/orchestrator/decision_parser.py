@@ -66,10 +66,35 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
     説明の文は英語にする。
 """
 
-from collections.abc import Collection
+import json
+import math
+import re
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+
+from switch2_remote.controller_state import BUTTON_ORDER, DPAD_DIRECTIONS
 
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
-from switch2_layers.orchestrator.decision_types import Decision, DecisionError
+from switch2_layers.orchestrator.decision_types import (
+    Action,
+    Decision,
+    DecisionError,
+    MacroAction,
+    MonitorCase,
+    MonitorCreate,
+    MonitorStop,
+    PressAction,
+    ProcedureAction,
+    RepeatMode,
+    StickName,
+    WaitAction,
+)
+from switch2_layers.orchestrator.json_values import is_number, seconds_problem
+from switch2_layers.orchestrator.procedures import (
+    PROCEDURE_NAMES,
+    procedure_argument_errors,
+)
+from switch2_layers.pad_action import sort_buttons
 
 # 最上位のキー
 TOP_LEVEL_KEYS: tuple[str, ...] = ("actions", "macros", "monitor")
@@ -85,6 +110,57 @@ MONITOR_STOP = "stop"
 # 監視の条件の repeat
 REPEAT_MODES: tuple[str, ...] = ("every", "once")
 
+# 操作の type ごとの、使えるキー
+_ACTION_KEYS: dict[str, tuple[str, ...]] = {
+    "press": ("type", "buttons", "sticks", "seconds"),
+    "wait": ("type", "seconds"),
+    "procedure": ("type", "name", "args"),
+    "macro": ("type", "name"),
+}
+_MACROS_KEYS = ("set", "delete")
+_MONITOR_CREATE_KEYS = ("action", "name", "cases")
+_MONITOR_STOP_KEYS = ("action",)
+_CASE_KEYS = ("condition", "actions", "repeat")
+_STICK_AXES = ("x", "y")
+# コードブロックの開きの行と閉じの行 (行の末尾の \r は、行に分けるときに外す)
+_OPEN_FENCE = re.compile(r"```json[ \t]*")
+_CLOSE_FENCE = re.compile(r"```[ \t]*")
+
+NO_BLOCK_MESSAGE = "no ```json block in the response"
+UNCLOSED_BLOCK_MESSAGE = (
+    "the last ```json block is not closed (the response may be cut off)"
+)
+NOT_OBJECT_MESSAGE = "the JSON in the ```json block must be an object"
+
+
+@dataclass(frozen=True)
+class _ScannedBlocks:
+    """本文から見つけた ```json のブロック。
+
+    blocks          閉じたブロックの中身 (出てくる順)
+    unclosed_tail   最後の閉じたブロックより後に、閉じていない開きの行があれば True
+    """
+
+    blocks: tuple[str, ...]
+    unclosed_tail: bool
+
+
+def _scan_json_blocks(text: str) -> _ScannedBlocks:
+    """text を行に分けて、モジュールの docstring の「コードブロック」の規則で ```json のブロックを探す。"""
+    blocks: list[str] = []
+    content: list[str] | None = None
+    for raw_line in text.split("\n"):
+        line = raw_line.removesuffix("\r")
+        if content is None:
+            if _OPEN_FENCE.fullmatch(line):
+                content = []
+        elif _CLOSE_FENCE.fullmatch(line):
+            blocks.append("\n".join(content))
+            content = None
+        else:
+            content.append(line)
+    return _ScannedBlocks(blocks=tuple(blocks), unclosed_tail=content is not None)
+
 
 def find_last_json_block(text: str) -> str | None:
     """text の最後の ```json のコードブロックの中身 (開きと閉じの行を除いた行) を返す。無ければ None。
@@ -92,7 +168,8 @@ def find_last_json_block(text: str) -> str | None:
     ブロックの見つけ方はモジュールの docstring の「コードブロック」のとおり。最後の閉じたブロックより後の閉じていない
     開きの行は、この関数では見ない (has_unclosed_json_block_at_end で確かめる)。
     """
-    raise NotImplementedError
+    blocks = _scan_json_blocks(text).blocks
+    return blocks[-1] if blocks else None
 
 
 def has_unclosed_json_block_at_end(text: str) -> bool:
@@ -100,7 +177,7 @@ def has_unclosed_json_block_at_end(text: str) -> bool:
     ```json の開きの行があれば True を返す。開きと閉じの行の見分け方は、モジュールの docstring の「コードブロック」の
     とおり。
     """
-    raise NotImplementedError
+    return _scan_json_blocks(text).unclosed_tail
 
 
 def parse_decision(
@@ -114,4 +191,336 @@ def parse_decision(
     誤りが 1 つでもあれば DecisionError を返し、Decision は返さない (操作・マクロ・監視のどれも変えないため)。
     例外は出さない (どんな text でも Decision か DecisionError を返す)。
     """
-    raise NotImplementedError
+    scanned = _scan_json_blocks(text)
+    if scanned.unclosed_tail:
+        return DecisionError((UNCLOSED_BLOCK_MESSAGE,))
+    if not scanned.blocks:
+        return DecisionError((NO_BLOCK_MESSAGE,))
+    try:
+        value = json.loads(scanned.blocks[-1])
+    except (ValueError, RecursionError) as error:
+        return DecisionError((f"the ```json block is not valid JSON: {error}",))
+    if not isinstance(value, dict):
+        return DecisionError((NOT_OBJECT_MESSAGE,))
+    reader = _DecisionReader(frozenset(registered_macros))
+    decision = reader.read(value)
+    if reader.errors:
+        return DecisionError(tuple(reader.errors))
+    return decision
+
+
+class _DecisionReader:
+    """JSON の object を、モジュールの docstring の規則で確かめながら Decision にする。誤りは errors に溜める。"""
+
+    def __init__(self, registered_macros: frozenset[str]) -> None:
+        self.registered_macros = registered_macros
+        self.errors: list[str] = []
+        # この JSON の macros を当てた後に呼べるマクロの名前 (read の中で決める)
+        self.available_macros: frozenset[str] = registered_macros
+
+    def error(self, path: str, message: str) -> None:
+        self.errors.append(f"{path}: {message}")
+
+    def reject_unknown_keys(
+        self, value: Mapping[str, object], allowed: tuple[str, ...], prefix: str
+    ) -> None:
+        """value の allowed に無いキーを、`<prefix><キー>` のパスの誤りにする。"""
+        for key in value:
+            if key not in allowed:
+                self.error(f"{prefix}{key}", "unknown key")
+
+    def read(self, value: Mapping[str, object]) -> Decision:
+        self.reject_unknown_keys(value, TOP_LEVEL_KEYS, "")
+        set_value, delete_names = self.read_macro_names(value)
+        self.available_macros = (
+            self.registered_macros | frozenset(set_value or {})
+        ) - frozenset(delete_names)
+        macros_set: dict[str, tuple[Action, ...]] = {}
+        if set_value is not None:
+            for name, actions in set_value.items():
+                macros_set[name] = self.read_actions(
+                    actions, f"macros.set.{name}", in_macro=True
+                )
+        actions: tuple[Action, ...] = ()
+        if "actions" in value:
+            actions = self.read_actions(value["actions"], "actions", in_macro=False)
+        monitor = self.read_monitor(value)
+        return Decision(
+            actions=actions,
+            macros_set=macros_set,
+            macros_delete=tuple(delete_names),
+            monitor=monitor,
+        )
+
+    def read_macro_names(
+        self, value: Mapping[str, object]
+    ) -> tuple[dict[str, object] | None, list[str]]:
+        """macros を確かめ、set の object (無いか誤りなら None) と delete の名前の並びを返す。"""
+        if "macros" not in value:
+            return None, []
+        macros = value["macros"]
+        if not isinstance(macros, dict):
+            self.error("macros", "must be an object")
+            return None, []
+        self.reject_unknown_keys(macros, _MACROS_KEYS, "macros.")
+        set_value: dict[str, object] | None = None
+        if "set" in macros:
+            if isinstance(macros["set"], dict):
+                set_value = macros["set"]
+            else:
+                self.error("macros.set", "must be an object of macro names")
+        delete_names: list[str] = []
+        if "delete" in macros:
+            raw_delete = macros["delete"]
+            if not isinstance(raw_delete, list):
+                self.error("macros.delete", "must be an array of macro names")
+            else:
+                for index, name in enumerate(raw_delete):
+                    if isinstance(name, str):
+                        delete_names.append(name)
+                    else:
+                        self.error(f"macros.delete[{index}]", "must be a string")
+        return set_value, delete_names
+
+    def read_actions(
+        self, value: object, path: str, *, in_macro: bool
+    ) -> tuple[Action, ...]:
+        if not isinstance(value, list):
+            self.error(path, "must be an array of actions")
+            return ()
+        actions: list[Action] = []
+        for index, item in enumerate(value):
+            action = self.read_action(item, f"{path}[{index}]", in_macro=in_macro)
+            if action is not None:
+                actions.append(action)
+        return tuple(actions)
+
+    def read_action(self, value: object, path: str, *, in_macro: bool) -> Action | None:
+        if not isinstance(value, dict):
+            self.error(path, "must be an object")
+            return None
+        if "type" not in value:
+            self.error(f"{path}.type", "missing")
+            return None
+        action_type = value["type"]
+        if not isinstance(action_type, str) or action_type not in ACTION_TYPES:
+            self.error(f"{path}.type", f"must be one of {', '.join(ACTION_TYPES)}")
+            return None
+        self.reject_unknown_keys(value, _ACTION_KEYS[action_type], f"{path}.")
+        if action_type == "press":
+            return self.read_press(value, path)
+        if action_type == "wait":
+            return self.read_wait(value, path)
+        if action_type == "procedure":
+            return self.read_procedure(value, path)
+        return self.read_macro_call(value, path, in_macro=in_macro)
+
+    def read_seconds(self, value: object, path: str) -> float | None:
+        problem = seconds_problem(value, MAX_ACTION_SECONDS, allow_zero=False)
+        if problem is not None or not is_number(value):
+            self.error(path, problem or "must be a number")
+            return None
+        return float(value)
+
+    def read_press(self, value: Mapping[str, object], path: str) -> PressAction | None:
+        buttons: tuple[str, ...] = ()
+        has_buttons = False
+        if "buttons" in value:
+            raw_buttons = value["buttons"]
+            has_buttons = not isinstance(raw_buttons, list) or bool(raw_buttons)
+            buttons = self.read_buttons(raw_buttons, f"{path}.buttons")
+        sticks: dict[StickName, tuple[float, float]] = {}
+        has_sticks = False
+        if "sticks" in value:
+            raw_sticks = value["sticks"]
+            has_sticks = not isinstance(raw_sticks, dict) or bool(raw_sticks)
+            sticks = self.read_sticks(raw_sticks, f"{path}.sticks")
+        if not has_buttons and not has_sticks:
+            self.error(path, "press needs buttons or sticks")
+        seconds: float | None = None
+        if "seconds" in value:
+            seconds = self.read_seconds(value["seconds"], f"{path}.seconds")
+        return PressAction(buttons=buttons, sticks=sticks, seconds=seconds)
+
+    def read_buttons(self, value: object, path: str) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            self.error(path, "must be an array of button names")
+            return ()
+        names: list[str] = []
+        for index, name in enumerate(value):
+            if not isinstance(name, str):
+                self.error(f"{path}[{index}]", "must be a string")
+            elif name not in BUTTON_ORDER:
+                self.error(f"{path}[{index}]", f"unknown button {name!r}")
+            else:
+                names.append(name)
+        directions = {name for name in names if name in DPAD_DIRECTIONS}
+        if len(directions) >= 2:
+            self.error(path, "must not have two or more d-pad directions")
+        return tuple(sort_buttons(names))
+
+    def read_sticks(
+        self, value: object, path: str
+    ) -> dict[StickName, tuple[float, float]]:
+        if not isinstance(value, dict):
+            self.error(path, "must be an object of left and right")
+            return {}
+        sticks: dict[StickName, tuple[float, float]] = {}
+        for key, stick_value in value.items():
+            stick_path = f"{path}.{key}"
+            if key == "left" or key == "right":
+                position = self.read_stick(stick_value, stick_path)
+                if position is not None:
+                    sticks[key] = position
+            else:
+                self.error(stick_path, "unknown stick (must be left or right)")
+        return sticks
+
+    def read_stick(self, value: object, path: str) -> tuple[float, float] | None:
+        if not isinstance(value, dict):
+            self.error(path, "must be an object with x and y")
+            return None
+        self.reject_unknown_keys(value, _STICK_AXES, f"{path}.")
+        coordinates: list[float] = []
+        for axis in _STICK_AXES:
+            axis_path = f"{path}.{axis}"
+            if axis not in value:
+                self.error(axis_path, "missing")
+                continue
+            coordinate = value[axis]
+            if not is_number(coordinate):
+                self.error(axis_path, "must be a number")
+                continue
+            number = float(coordinate)
+            if not math.isfinite(number) or not -1.0 <= number <= 1.0:
+                self.error(axis_path, "must be between -1 and 1")
+                continue
+            coordinates.append(number)
+        if len(coordinates) != len(_STICK_AXES):
+            return None
+        x, y = coordinates
+        if math.hypot(x, y) > 1.0:
+            self.error(path, "the length of (x, y) must be 1 or less")
+            return None
+        return (x, y)
+
+    def read_wait(self, value: Mapping[str, object], path: str) -> WaitAction | None:
+        if "seconds" not in value:
+            self.error(f"{path}.seconds", "missing")
+            return None
+        seconds = self.read_seconds(value["seconds"], f"{path}.seconds")
+        return None if seconds is None else WaitAction(seconds=seconds)
+
+    def read_procedure(
+        self, value: Mapping[str, object], path: str
+    ) -> ProcedureAction | None:
+        name = value.get("name")
+        if not isinstance(name, str) or name not in PROCEDURE_NAMES:
+            self.error(f"{path}.name", f"must be one of {', '.join(PROCEDURE_NAMES)}")
+            return None
+        if "args" not in value:
+            self.error(f"{path}.args", "missing")
+            return None
+        args = value["args"]
+        if not isinstance(args, dict):
+            self.error(f"{path}.args", "must be an object")
+            return None
+        for message in procedure_argument_errors(name, args):
+            self.errors.append(f"{path}.args.{message}")
+        return ProcedureAction(name=name, args=dict(args))
+
+    def read_macro_call(
+        self, value: Mapping[str, object], path: str, *, in_macro: bool
+    ) -> MacroAction | None:
+        if in_macro:
+            self.error(f"{path}.type", "a macro cannot call a macro")
+            return None
+        if "name" not in value:
+            self.error(f"{path}.name", "missing")
+            return None
+        name = value["name"]
+        if not isinstance(name, str):
+            self.error(f"{path}.name", "must be a string")
+            return None
+        if name not in self.available_macros:
+            self.error(f"{path}.name", f"macro {name!r} is not registered")
+            return None
+        return MacroAction(name=name)
+
+    def read_monitor(
+        self, value: Mapping[str, object]
+    ) -> MonitorCreate | MonitorStop | None:
+        monitor = value.get("monitor")
+        if monitor is None:
+            return None
+        if not isinstance(monitor, dict):
+            self.error("monitor", "must be an object or null")
+            return None
+        if "action" not in monitor:
+            self.error("monitor.action", "missing")
+            return None
+        action = monitor["action"]
+        if action == MONITOR_STOP:
+            self.reject_unknown_keys(monitor, _MONITOR_STOP_KEYS, "monitor.")
+            return MonitorStop()
+        if action != MONITOR_CREATE:
+            self.error("monitor.action", f"must be {MONITOR_CREATE} or {MONITOR_STOP}")
+            return None
+        self.reject_unknown_keys(monitor, _MONITOR_CREATE_KEYS, "monitor.")
+        name = monitor.get("name")
+        if "name" not in monitor:
+            self.error("monitor.name", "missing")
+        elif not isinstance(name, str):
+            self.error("monitor.name", "must be a string")
+        cases = self.read_cases(monitor)
+        if not isinstance(name, str):
+            return None
+        return MonitorCreate(name=name, cases=cases)
+
+    def read_cases(self, monitor: Mapping[str, object]) -> tuple[MonitorCase, ...]:
+        if "cases" not in monitor:
+            self.error("monitor.cases", "missing")
+            return ()
+        raw_cases = monitor["cases"]
+        if not isinstance(raw_cases, list):
+            self.error("monitor.cases", "must be an array of cases")
+            return ()
+        if not 1 <= len(raw_cases) <= MAX_MONITOR_CASES:
+            self.error("monitor.cases", f"must have 1 to {MAX_MONITOR_CASES} cases")
+        cases: list[MonitorCase] = []
+        for index, raw_case in enumerate(raw_cases):
+            case = self.read_case(raw_case, f"monitor.cases[{index}]")
+            if case is not None:
+                cases.append(case)
+        return tuple(cases)
+
+    def read_case(self, value: object, path: str) -> MonitorCase | None:
+        if not isinstance(value, dict):
+            self.error(path, "must be an object")
+            return None
+        self.reject_unknown_keys(value, _CASE_KEYS, f"{path}.")
+        condition = value.get("condition")
+        if "condition" not in value:
+            self.error(f"{path}.condition", "missing")
+        elif not isinstance(condition, str):
+            self.error(f"{path}.condition", "must be a string")
+        elif not condition.strip():
+            self.error(f"{path}.condition", "must not be empty")
+        actions: tuple[Action, ...] = ()
+        if "actions" in value:
+            actions = self.read_actions(
+                value["actions"], f"{path}.actions", in_macro=False
+            )
+        else:
+            self.error(f"{path}.actions", "missing")
+        repeat = value.get("repeat")
+        repeat_mode: RepeatMode | None = None
+        if "repeat" not in value:
+            self.error(f"{path}.repeat", "missing")
+        elif repeat == "every" or repeat == "once":
+            repeat_mode = repeat
+        else:
+            self.error(f"{path}.repeat", f"must be one of {', '.join(REPEAT_MODES)}")
+        if not isinstance(condition, str) or repeat_mode is None:
+            return None
+        return MonitorCase(condition=condition, actions=actions, repeat=repeat_mode)

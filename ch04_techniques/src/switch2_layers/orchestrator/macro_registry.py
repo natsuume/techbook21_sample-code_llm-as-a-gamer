@@ -16,7 +16,7 @@ class MacroRegistry:
 
     def __init__(self) -> None:
         """マクロの無い一覧を作る。"""
-        raise NotImplementedError
+        self._macros: dict[str, tuple[Action, ...]] = {}
 
     def apply_changes(
         self, set_macros: Mapping[str, tuple[Action, ...]], delete_names: Iterable[str]
@@ -25,22 +25,27 @@ class MacroRegistry:
 
         同じ名前が両方にあれば、消えた状態になる。
         """
-        raise NotImplementedError
+        for name, actions in set_macros.items():
+            self._macros[name] = tuple(actions)
+        for name in delete_names:
+            self._macros.pop(name, None)
 
     def names_after(
         self, set_macros: Mapping[str, tuple[Action, ...]], delete_names: Iterable[str]
     ) -> frozenset[str]:
         """apply_changes(set_macros, delete_names) を当てた後の名前の集合を、一覧を変えずに返す。"""
-        raise NotImplementedError
+        return (frozenset(self._macros) | frozenset(set_macros)) - frozenset(
+            delete_names
+        )
 
     def names(self) -> frozenset[str]:
         """登録している名前の集合を返す。"""
-        raise NotImplementedError
+        return frozenset(self._macros)
 
     def get(self, name: str) -> tuple[Action, ...] | None:
         """name のマクロの操作の列を返す。無ければ None。"""
-        raise NotImplementedError
+        return self._macros.get(name)
 
     def snapshot(self) -> dict[str, tuple[Action, ...]]:
         """登録しているマクロ (名前 → 操作の列) を、名前の順に並べた新しい辞書で返す。"""
-        raise NotImplementedError
+        return {name: self._macros[name] for name in sorted(self._macros)}

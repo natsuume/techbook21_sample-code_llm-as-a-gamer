@@ -19,6 +19,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from switch2_layers.file_io import append_json_line
+from switch2_layers.orchestrator.monitor_questions import case_option_name
+
 
 @dataclass(frozen=True)
 class MonitorRecord:
@@ -43,7 +46,18 @@ def monitor_row(record: MonitorRecord) -> dict[str, object]:
     probabilities は record の順のままの新しい辞書 (None なら null)、hit は monitor_questions.case_option_name(位置)
     (None なら null)。
     """
-    raise NotImplementedError
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "monitor": record.monitor,
+        "frame_t": record.frame_t,
+        "probabilities": (
+            None if record.probabilities is None else dict(record.probabilities)
+        ),
+        "hit": None if record.hit is None else case_option_name(record.hit),
+        "usage": record.usage,
+        "error": record.error,
+    }
 
 
 class MonitorLog:
@@ -55,11 +69,12 @@ class MonitorLog:
 
     def __init__(self, path: Path) -> None:
         """パスを持つ。ファイルとディレクトリーはまだ作らない。"""
-        raise NotImplementedError
+        self.path = path
 
     def write(self, record: MonitorRecord) -> None:
         """monitor_row(record) を 1 行追記する (file_io.append_json_line)。
 
         親のディレクトリー (orchestrator/) が無ければ、先に作る。追記の例外はそのまま出す。
         """
-        raise NotImplementedError
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        append_json_line(self.path, monitor_row(record))

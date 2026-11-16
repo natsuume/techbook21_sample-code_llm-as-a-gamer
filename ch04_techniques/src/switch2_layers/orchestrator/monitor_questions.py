@@ -17,7 +17,12 @@
 from collections.abc import Mapping
 
 from switch2_layers.orchestrator.decision_types import MonitorCreate
-from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_questions import (
+    Choice,
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
 
 # 問いの ID (要求の questions のキー、応答の answers のキー)
 MONITOR_QUESTION_NAME = "monitor"
@@ -45,7 +50,9 @@ MONITOR_QUESTION_TEXT = (
 
 def case_option_name(case_index: int) -> str:
     """条件の位置 case_index (0 始まり) の選択肢の名前 `C<case_index>` を返す。case_index が負なら ValueError。"""
-    raise NotImplementedError
+    if case_index < 0:
+        raise ValueError(f"case index must not be negative: {case_index}")
+    return f"{CASE_OPTION_PREFIX}{case_index}"
 
 
 def monitor_option_names(case_count: int) -> tuple[str, ...]:
@@ -53,7 +60,9 @@ def monitor_option_names(case_count: int) -> tuple[str, ...]:
 
     case_count が 1 未満なら ValueError。
     """
-    raise NotImplementedError
+    if case_count < 1:
+        raise ValueError(f"case count must be 1 or more: {case_count}")
+    return (NONE_OPTION, *(case_option_name(index) for index in range(case_count)))
 
 
 def build_monitor_question(monitor: MonitorCreate) -> SurfaceQuestion:
@@ -62,12 +71,26 @@ def build_monitor_question(monitor: MonitorCreate) -> SurfaceQuestion:
     instructions は MONITOR_QUESTION_TEXT、選択肢は monitor_option_names(条件の数) の順で、NONE_OPTION の説明は
     NONE_OPTION_DESCRIPTION、C<i> の説明は monitor.cases[i].condition。
     """
-    raise NotImplementedError
+    choices = (
+        Choice(NONE_OPTION, NONE_OPTION_DESCRIPTION),
+        *(
+            Choice(case_option_name(index), case.condition)
+            for index, case in enumerate(monitor.cases)
+        ),
+    )
+    return SurfaceQuestion(
+        name=MONITOR_QUESTION_NAME,
+        instructions=MONITOR_QUESTION_TEXT,
+        kind=QuestionKind.MONITOR,
+        target=monitor.name,
+        question_type=QuestionType.CHOICE,
+        choices=choices,
+    )
 
 
 def build_monitor_state(reference: str) -> dict[str, object]:
     """要求の state {"instructions": MONITOR_INSTRUCTIONS, FRAME_STATE_KEY: reference} (キーはこの順) を返す。"""
-    raise NotImplementedError
+    return {"instructions": MONITOR_INSTRUCTIONS, FRAME_STATE_KEY: reference}
 
 
 def find_hit(
@@ -78,4 +101,13 @@ def find_hit(
     規則はモジュールの docstring の「当たった条件」のとおり。選択肢は monitor_option_names(case_count) の順に比べる。
     probabilities にどれかの選択肢の名前が無ければ KeyError。
     """
-    raise NotImplementedError
+    names = monitor_option_names(case_count)
+    best_position = 0
+    for position, name in enumerate(names):
+        # 同じ確率なら、選択肢の順で先のものを残す
+        if probabilities[name] > probabilities[names[best_position]]:
+            best_position = position
+    if best_position == 0 or probabilities[names[best_position]] <= threshold:
+        return None
+    # 選択肢の位置 1 が条件 C0
+    return best_position - 1

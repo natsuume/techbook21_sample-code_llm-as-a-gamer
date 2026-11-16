@@ -11,17 +11,31 @@
 ActiveMonitor は I/O・スレッド・時刻を扱わない (ループのロックの中で使う)。
 """
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.orchestrator.action_executor import PrimitiveAction
 from switch2_layers.orchestrator.decision_types import MonitorCreate
+from switch2_layers.orchestrator.monitor_questions import (
+    MONITOR_QUESTION_NAME,
+    build_monitor_question,
+    build_monitor_state,
+    case_option_name,
+    find_hit,
+    monitor_option_names,
+)
 from switch2_layers.orchestrator.orchestrator_events import MonitorEnd
 from switch2_layers.run_clock import RunClock
+from switch2_layers.safety.safety_monitor import build_safety_image
 from switch2_layers.surface.jev_client import JevAnswers, JevImage
 from switch2_layers.surface.surface_questions import SurfaceQuestion
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 
 class MonitorAsker(Protocol):
@@ -83,18 +97,79 @@ def ask_monitor(
     error_text.describe_exception(例外) にした結果を返す。ask を呼ぶ前に失敗したときは、t_sent と t_received を、
     失敗したときの clock.now() にする。
     """
-    raise NotImplementedError
+
+    def failure(t_sent: float, error: Exception) -> MonitorRequestResult:
+        return MonitorRequestResult(
+            monitor=monitor,
+            generation=generation,
+            frame_t=frame.t,
+            t_sent=t_sent,
+            t_received=clock.now(),
+            probabilities=None,
+            usage=None,
+            error=describe_exception(error),
+        )
+
+    try:
+        jpeg = build_safety_image(frame, image_width, jpeg_quality)
+        reference = make_reference()
+    except Exception as error:
+        logger.debug("building the monitor request failed", exc_info=True)
+        return failure(clock.now(), error)
+    t_sent = clock.now()
+    try:
+        answers = asker.ask(
+            build_monitor_state(reference),
+            [build_monitor_question(monitor)],
+            [JevImage(reference, jpeg)],
+        )
+    except Exception as error:
+        logger.debug("monitor request failed", exc_info=True)
+        return failure(t_sent, error)
+    t_received = clock.now()
+    try:
+        probabilities = read_monitor_probabilities(answers, len(monitor.cases))
+    except (ValueError, TypeError) as error:
+        return failure(t_sent, error)
+    return MonitorRequestResult(
+        monitor=monitor,
+        generation=generation,
+        frame_t=frame.t,
+        t_sent=t_sent,
+        t_received=t_received,
+        probabilities=probabilities,
+        usage=answers.usage,
+        error=None,
+    )
+
+
+def read_monitor_probabilities(
+    answers: JevAnswers, case_count: int
+) -> dict[str, float]:
+    """答え answers から、監視の問いの選択肢の確率を、monitor_option_names(case_count) の順の辞書で返す。
+
+    問いの答え (choices[MONITOR_QUESTION_NAME]) が無いか、どれかの選択肢の確率が無ければ ValueError。
+    """
+    choices = answers.choices.get(MONITOR_QUESTION_NAME)
+    if choices is None:
+        raise ValueError(f"jev answer has no choice for {MONITOR_QUESTION_NAME}")
+    probabilities: dict[str, float] = {}
+    for name in monitor_option_names(case_count):
+        if name not in choices:
+            raise ValueError(f"jev answer has no probability for {name}")
+        probabilities[name] = float(choices[name])
+    return probabilities
 
 
 def monitor_failure_detail(count: int, last_error: str) -> str:
     """Jev の失敗が count 回続いて監視を止めたときの MonitorEnd.detail `jev failed <count> times in a row: <last_error>`。"""
-    raise NotImplementedError
+    return f"jev failed {count} times in a row: {last_error}"
 
 
 def monitor_completed_detail(case_index: int, condition: str) -> str:
     """once の条件 case_index の操作を実行し終えて監視を終えたときの MonitorEnd.detail
     `case C<case_index> ran once: <condition>`。"""
-    raise NotImplementedError
+    return f"case {case_option_name(case_index)} ran once: {condition}"
 
 
 class ActiveMonitor:
@@ -116,26 +191,44 @@ class ActiveMonitor:
         max_errors: int,
     ) -> None:
         """失敗の回数 0 で作る。case_operations の数が条件の数と違えば ValueError。"""
-        raise NotImplementedError
+        if len(case_operations) != len(monitor.cases):
+            raise ValueError(
+                f"case operations ({len(case_operations)}) do not match the cases "
+                f"({len(monitor.cases)})"
+            )
+        self._monitor = monitor
+        self._generation = generation
+        self._case_operations = tuple(case_operations)
+        self._threshold = threshold
+        self._max_errors = max_errors
+        self._errors_in_a_row = 0
 
     @property
     def monitor(self) -> MonitorCreate:
         """監視の指示。"""
-        raise NotImplementedError
+        return self._monitor
 
     @property
     def generation(self) -> int:
         """監視の世代。"""
-        raise NotImplementedError
+        return self._generation
 
     def record_answer(self, probabilities: Mapping[str, float]) -> int | None:
         """答えのあった要求を記録する。失敗の回数を 0 に戻し、当たった条件の位置 (monitor_questions.find_hit) を返す。"""
-        raise NotImplementedError
+        self._errors_in_a_row = 0
+        return find_hit(probabilities, len(self._monitor.cases), self._threshold)
 
     def record_failure(self, error: str) -> MonitorEnd | None:
         """失敗した要求を記録する。失敗の回数を 1 足し、max_errors 回になったら
         MonitorEnd(name, "failed", monitor_failure_detail(回数, error)) を返す。ならなければ None。"""
-        raise NotImplementedError
+        self._errors_in_a_row += 1
+        if self._errors_in_a_row < self._max_errors:
+            return None
+        return MonitorEnd(
+            name=self._monitor.name,
+            reason="failed",
+            detail=monitor_failure_detail(self._errors_in_a_row, error),
+        )
 
     def operations_of(self, case_index: int) -> tuple[PrimitiveAction, ...]:
         """条件 case_index の展開した操作の列を返す。
@@ -143,7 +236,7 @@ class ActiveMonitor:
         空のこともある (条件の actions が空のときと、展開すると空になるマクロのとき)。空なら、呼び出し側は列を始めずに、
         その場で case_finished を呼ぶ。
         """
-        raise NotImplementedError
+        return self._case_operations[case_index]
 
     def case_finished(self, case_index: int) -> MonitorEnd | None:
         """条件 case_index の操作の列を最後まで実行し終えたことを記録する。
@@ -151,4 +244,11 @@ class ActiveMonitor:
         その条件が once なら MonitorEnd(name, "completed", monitor_completed_detail(case_index, 条件の文)) を返し、
         every なら None を返す。
         """
-        raise NotImplementedError
+        case = self._monitor.cases[case_index]
+        if case.repeat != "once":
+            return None
+        return MonitorEnd(
+            name=self._monitor.name,
+            reason="completed",
+            detail=monitor_completed_detail(case_index, case.condition),
+        )
