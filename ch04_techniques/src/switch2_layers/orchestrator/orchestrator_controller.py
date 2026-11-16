@@ -42,7 +42,7 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
         - 返っていない要求が無い (同時に送る要求は 1 つまで。監視を置き換えた後も、前の監視の要求が返るまで次を送らない)
         - latest_frame() がフレームを返し、そのフレームの時刻 (CapturedFrame.t) が、最後に操作を離した時刻
           (ActionExecutor.last_release_t。主ループの操作と監視の操作の両方) に MONITOR_FRAME_SETTLE_S を足した時刻
-          より後である。まだ何も離していなければ、時刻は問わない。後のフレームが無ければ、届くまで要求を送らない
+          (ミリ秒に丸めた値) より後である。まだ何も離していなければ、時刻は問わない。後のフレームが無ければ、届くまで要求を送らない
           (キャプチャーとゲームの反応の遅れの分、操作の前の画面が映ったフレームで問い、every の条件を二重に実行
           しないため)
     前の応答を処理した回りのうちに、出せるなら次の要求を送る。要求には、その時点の監視の世代を付ける。
@@ -107,7 +107,7 @@ from switch2_layers.orchestrator.orchestrator_events import (
     OrchestratorEvents,
 )
 from switch2_layers.pad_action import sort_buttons
-from switch2_layers.run_clock import RunClock
+from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.safety.safety_monitor import SAFETY_IMAGE_WIDTH
 from switch2_layers.surface.jev_client import new_asset_reference
@@ -481,9 +481,10 @@ class OrchestratorController:
         if frame is None:
             return
         last_release_t = self._executor.last_release_t
-        if (
-            last_release_t is not None
-            and frame.t <= last_release_t + MONITOR_FRAME_SETTLE_S
+        # 時刻はどちらもミリ秒に丸めた値なので、足した値も丸めてから比べる (丸めないと、float の和が
+        # ミリ秒の境界よりわずかに小さくなり、境界ちょうどのフレームで問うことがある)
+        if last_release_t is not None and frame.t <= round_to_milliseconds(
+            last_release_t + MONITOR_FRAME_SETTLE_S
         ):
             return
         self._request_in_flight = True

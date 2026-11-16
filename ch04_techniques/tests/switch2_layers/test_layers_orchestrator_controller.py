@@ -1138,6 +1138,30 @@ def test_no_request_until_a_frame_after_the_settle_time_of_main_actions(
     h.wait_request(1)
 
 
+def test_no_request_for_a_frame_exactly_at_the_settle_time(tmp_path, cleanups):
+    # 1.751 + 0.3 は float では 2.051 よりわずかに小さい。ミリ秒の境界ちょうどのフレームでも問わない
+    assert 1.751 + MONITOR_FRAME_SETTLE_S < 2.051
+    h = make_harness(tmp_path, cleanups, frame=frame_at(1.0))
+    h.set_time(1.5)
+    h.controller.apply(
+        Decision(
+            actions=(tap("A"),),
+            monitor=MonitorCreate("dialog", (case("c0", tap("B")),)),
+        )
+    )
+    h.wait_pressed({"A"})
+    h.set_time(1.751)
+    h.wait_neutral()
+    assert h.sender.release_times("A") == [1.751]
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(2.051)
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(2.052)
+    h.wait_request(1)
+
+
 def test_frame_must_be_after_the_settle_time_of_a_cancel_too(tmp_path, cleanups):
     h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
     h.set_time(10.0)
