@@ -13,6 +13,8 @@ deep の map のジョブは、この型と notes/map/map.json の layout を比
 from pathlib import Path
 
 from switch2_layers.notes.map_document import MapLayout
+from switch2_layers.notes.note_paths import GAME_NOTE
+from switch2_layers.notes.note_reader import read_note_text
 
 # 「マップの形式」の節の見出しの行
 GAME_MAP_FORMAT_HEADING = "## マップの形式"
@@ -25,7 +27,20 @@ def parse_game_map_layout(text: str) -> MapLayout:
 
     見出しの行が複数あれば、最初のものを使う。空文字列は MapLayout.FREE。
     """
-    raise NotImplementedError
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != GAME_MAP_FORMAT_HEADING:
+            continue
+        for section_line in lines[index + 1 :]:
+            if section_line.startswith("## "):
+                # 節の中に空でない行が無いまま、次の見出しになった
+                return MapLayout.FREE
+            if section_line.strip():
+                if section_line.strip() == GAME_GRID_LAYOUT_LINE:
+                    return MapLayout.GRID
+                return MapLayout.FREE
+        return MapLayout.FREE
+    return MapLayout.FREE
 
 
 def read_game_map_layout(notes_dir: Path) -> MapLayout:
@@ -34,4 +49,4 @@ def read_game_map_layout(notes_dir: Path) -> MapLayout:
     文書は notes.note_reader.read_note_text で読む。読めない文書 (無い・シンボリックリンクを解決した先が notes/ の中の
     通常のファイルでない・OSError・UTF-8 として読めない) は空文字列になり、MapLayout.FREE を返す。例外は出さない。
     """
-    raise NotImplementedError
+    return parse_game_map_layout(read_note_text(notes_dir, GAME_NOTE))

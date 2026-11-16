@@ -700,3 +700,18 @@ def test_unknown_tile_route_counts_every_unknown_tile_on_the_way():
     assert find_unknown_tile_route(
         place([".???."]), TilePosition(0, 0), TilePosition(4, 0)
     ) == unknown_route(3, (RIGHT, 4))
+
+
+def test_unknown_tile_route_counts_the_goal_tile():
+    # 目標のマスが ? なら、そのマスも数える (途中の (1, 0) と目標の (2, 0) で 2 マス)
+    assert find_unknown_tile_route(
+        place([".??"]), TilePosition(0, 0), TilePosition(2, 0)
+    ) == unknown_route(2, (RIGHT, 2))
+    # 途中で ? を通らない経路があっても、目標のマスの ? は数える (経路は find_grid_route と同じ)
+    detour = place([".??", "..."])
+    assert find_grid_route(detour, TilePosition(0, 0), TilePosition(2, 0)) == route(
+        (DOWN, 1), (RIGHT, 2), (UP, 1)
+    )
+    assert find_unknown_tile_route(
+        detour, TilePosition(0, 0), TilePosition(2, 0)
+    ) == unknown_route(1, (DOWN, 1), (RIGHT, 2), (UP, 1))

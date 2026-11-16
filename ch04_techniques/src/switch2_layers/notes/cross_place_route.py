@@ -14,8 +14,10 @@
 場所は places の中の位置で区別する (同じ中身の場所が 2 つあっても、別の場所として扱う)。
 """
 
+from collections import deque
 from dataclasses import dataclass
 
+from switch2_layers.notes.grid_route import find_grid_place
 from switch2_layers.notes.map_document import (
     GridMapDocument,
     GridMapPlace,
@@ -60,4 +62,61 @@ def find_cross_place_routes(
     ときは空のタプル。
     start は document.places の中で、同じオブジェクト (is) の要素の位置で探す。document.places に無ければ ValueError。
     """
-    raise NotImplementedError
+    start_index = _place_index(document, start)
+    if start_index is None:
+        raise ValueError(f"the start place is not in the map: {start.name!r}")
+    links = _usable_links(document)
+    # 見つけた場所 (places の位置) ごとの、開始の場所からの区間
+    legs_to: dict[int, tuple[CrossPlaceLeg, ...]] = {start_index: ()}
+    queue = deque([start_index])
+    while queue:
+        current = queue.popleft()
+        for from_index, to_index, connection in links:
+            if from_index != current or to_index in legs_to:
+                continue
+            leg = CrossPlaceLeg(place=document.places[current], connection=connection)
+            legs_to[to_index] = (*legs_to[current], leg)
+            # 入るたびに構造が変わる場所は、行き先にはするが、その先へはたどらない
+            if not document.places[to_index].changes_on_entry:
+                queue.append(to_index)
+    found = sorted(
+        (index for index in legs_to if index != start_index),
+        key=lambda index: (len(legs_to[index]), index),
+    )
+    return tuple(
+        CrossPlaceRoute(destination=document.places[index], legs=legs_to[index])
+        for index in found
+    )
+
+
+def _place_index(document: GridMapDocument, place: GridMapPlace) -> int | None:
+    """place が document.places の何番目 (0 から) の要素か (同じオブジェクト (is) で比べる) を返す。無ければ None。"""
+    for index, candidate in enumerate(document.places):
+        if candidate is place:
+            return index
+    return None
+
+
+def _usable_links(
+    document: GridMapDocument,
+) -> list[tuple[int, int, MapConnection]]:
+    """document.connections のうち、たどるのに使えるつながりを (from の場所の位置, to の場所の位置, つながり) にして、
+    connections の順に返す。
+
+    from と to は find_grid_place でマップの場所に当てはめる。どちらかが当てはまらないつながりと、from と to が
+    同じ場所に当てはまるつながりは除く。
+    """
+    links: list[tuple[int, int, MapConnection]] = []
+    for connection in document.connections:
+        from_index = _matched_place_index(document, connection.from_place)
+        to_index = _matched_place_index(document, connection.to_place)
+        if from_index is None or to_index is None or from_index == to_index:
+            continue
+        links.append((from_index, to_index, connection))
+    return links
+
+
+def _matched_place_index(document: GridMapDocument, name: str) -> int | None:
+    """名前 name を find_grid_place でマップの場所に当てはめ、その場所の places の位置を返す。当てはまらなければ None。"""
+    place = find_grid_place(document, name)
+    return None if place is None else _place_index(document, place)

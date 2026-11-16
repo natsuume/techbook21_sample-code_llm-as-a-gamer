@@ -52,6 +52,11 @@ from collections.abc import Collection, Sequence
 
 from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.middle.middle_types import MiddleState
+from switch2_layers.notes.cross_place_route import (
+    CrossPlaceLeg,
+    CrossPlaceRoute,
+    find_cross_place_routes,
+)
 from switch2_layers.notes.grid_route import (
     GridRoute,
     MoveDirection,
@@ -61,6 +66,7 @@ from switch2_layers.notes.grid_route import (
     connection_from_tiles,
     find_grid_place,
     find_grid_route,
+    find_unknown_tile_route,
     list_route_targets,
     tile_at,
 )
@@ -117,13 +123,7 @@ def format_route(route: GridRoute | None) -> str:
     """
     if route is None:
         return NO_ROUTE_TEXT
-    if not route.steps:
-        return "移動しない (合計 0 マス)"
-    steps = " → ".join(
-        f"{DIRECTION_LABELS[step.direction]}に {step.tiles} マス"
-        for step in route.steps
-    )
-    return f"{steps} (合計 {route.total_tiles} マス)"
+    return f"{_steps_text(route)} (合計 {route.total_tiles} マス)"
 
 
 def format_unknown_tile_route(route: UnknownTileRoute | None) -> str:
@@ -136,7 +136,12 @@ def format_unknown_tile_route(route: UnknownTileRoute | None) -> str:
       例: 「経路なし (通れるマスだけではたどり着けない)。未確認のマス (?) も通れるとすると: 上に 3 マス → 左に 2 マス
       (合計 5 マス、うち未確認 1 マス)」
     """
-    raise NotImplementedError
+    if route is None:
+        return NO_ROUTE_THROUGH_UNKNOWN_TEXT
+    return (
+        f"{NO_ROUTE_TEXT}。未確認のマス (?) も通れるとすると: {_steps_text(route.route)} "
+        f"(合計 {route.route.total_tiles} マス、うち未確認 {route.unknown_tiles} マス)"
+    )
 
 
 def describe_route_in_place(
@@ -152,7 +157,12 @@ def describe_route_in_place(
     で行ける目標の文)。None なら、notes.grid_route.find_unknown_tile_route(place, start, goal, avoided) の結果を
     format_unknown_tile_route にした文。
     """
-    raise NotImplementedError
+    route = find_grid_route(place, start, goal, avoided)
+    if route is not None:
+        return format_route(route)
+    return format_unknown_tile_route(
+        find_unknown_tile_route(place, start, goal, avoided)
+    )
 
 
 def describe_cross_place_routes(
@@ -184,7 +194,20 @@ def describe_cross_place_routes(
     例: 「- 「港町」まで (つながり 2 件): 「始まりの町」の「北の道へ進む」(x=10, y=0)へ 上に 7 マス (合計 7 マス) →
     「北の道」の「北の端」(x=8, y=0)へ (マスの手順なし) → 「港町」」
     """
-    raise NotImplementedError
+    # 目標の行の行き先に出ている場所 (つながり 1 件で行けるなら、場所をまたぐ経路に重ねて書かない)
+    on_target_lines = _destination_places(document, targets)
+    lines: list[str] = []
+    for route in find_cross_place_routes(document, place):
+        if len(route.legs) == 1 and any(
+            route.destination is found for found in on_target_lines
+        ):
+            continue
+        lines.append(_cross_place_line(document, route, current_tile))
+        if len(lines) == MAX_CROSS_PLACE_DESTINATIONS:
+            break
+    if not lines:
+        return NO_CROSS_PLACE_DESTINATION_TEXT
+    return "\n".join([CROSS_PLACE_ROUTES_HEADING, *lines])
 
 
 def describe_route_section(
@@ -206,40 +229,65 @@ def describe_route_section(
         return ROUTE_FREE_LAYOUT_TEXT
     if state is None:
         return ROUTE_NO_PREVIOUS_OUTPUT_TEXT
-    if state.place_name is None or state.current_tile is None:
-        return ROUTE_NO_CURRENT_TILE_TEXT
-    place = find_grid_place(document, state.place_name)
+    place = (
+        None
+        if state.place_name is None
+        else find_grid_place(document, state.place_name)
+    )
+    lines: list[str] = []
+    if state.place_name is not None and state.current_tile is not None:
+        lines.append(
+            _header_line(state.place_name, state.based_on_t, place, state.current_tile)
+        )
+    place_lines, targets = _place_route_lines(document, state, place)
+    lines += place_lines
+    if place is not None and not place.changes_on_entry:
+        lines.append(
+            describe_cross_place_routes(document, place, state.current_tile, targets)
+        )
+    return "\n".join(lines)
+
+
+def _place_route_lines(
+    document: GridMapDocument, state: MiddleState, place: GridMapPlace | None
+) -> tuple[list[str], tuple[RouteTarget, ...]]:
+    """節の B (場所の中の経路) の行と、その行に書いた目標を返す (モジュールの docstring)。
+
+    place は state.place_name をマップの場所に当てはめたもの (place_name が None か、マップに無ければ None)。
+    経路を計算しないときは、理由の 1 行と空の目標を返す (理由はモジュールの docstring の 4. から順に確かめ、最初に
+    当たったもの。1.〜3. は呼び出し側が先に確かめる)。
+    """
+    start = state.current_tile
+    if state.place_name is None or start is None:
+        return [ROUTE_NO_CURRENT_TILE_TEXT], ()
     if place is None:
-        return (
+        reason = (
             f"前回の middle の出力の現在地「{state.place_name}」がマップの場所 (name と aliases) に無いため、"
             "経路を計算しない"
         )
-    if place.changes_on_entry:
-        return (
+    elif place.changes_on_entry:
+        reason = (
             f"マップの場所「{place.name}」は入るたびに構造が変わる (changes_on_entry が true) ため、"
             "経路を計算しない"
         )
-    if not place.tiles:
-        return f"マップの場所「{place.name}」のマスの図 (tiles) が空のため、経路を計算しない"
-    start = state.current_tile
-    if tile_at(place, start) is None:
-        return (
+    elif not place.tiles:
+        reason = f"マップの場所「{place.name}」のマスの図 (tiles) が空のため、経路を計算しない"
+    elif tile_at(place, start) is None:
+        reason = (
             f"現在地のマス {_position_text(start)} がマップの場所「{place.name}」のマスの図 (tiles) の"
             "範囲の外のため、経路を計算しない"
         )
-    targets = list_route_targets(document, place)
-    if not targets:
-        return (
+    else:
+        targets = list_route_targets(document, place)
+        if targets:
+            avoided = connection_from_tiles(document, place)
+            lines = [_target_line(place, start, target, avoided) for target in targets]
+            return lines, targets
+        reason = (
             f"マップの場所「{place.name}」に、マスの図 (tiles) の範囲の中の出口とつながりが無いため、"
             "経路を計算しない"
         )
-    avoided = connection_from_tiles(document, place)
-    return "\n".join(
-        [
-            _header_line(state, place, start),
-            *(_target_line(place, start, target, avoided) for target in targets),
-        ]
-    )
+    return [reason], ()
 
 
 def _position_text(position: TilePosition) -> str:
@@ -247,14 +295,33 @@ def _position_text(position: TilePosition) -> str:
     return f"(x={position.x}, y={position.y})"
 
 
-def _header_line(state: MiddleState, place: GridMapPlace, start: TilePosition) -> str:
-    """節の A の行 (前回の出力の現在地の場所・マスと、その出力の入力の時刻) を返す (モジュールの docstring)。"""
-    place_name = state.place_name or ""
-    if place.name.strip() != place_name:
-        place_name += f" (マップの場所「{place.name}」)"
+def _steps_text(route: GridRoute) -> str:
+    """経路 route の手順を、手順ごとの「<向き>に <マス数> マス」を「 → 」でつないだ文にする。手順が空なら「移動しない」。"""
+    if not route.steps:
+        return "移動しない"
+    return " → ".join(
+        f"{DIRECTION_LABELS[step.direction]}に {step.tiles} マス"
+        for step in route.steps
+    )
+
+
+def _header_line(
+    place_name: str,
+    based_on_t: float,
+    place: GridMapPlace | None,
+    start: TilePosition,
+) -> str:
+    """節の A の行 (前回の出力の現在地の場所・マスと、その出力の入力の時刻) を返す (モジュールの docstring)。
+
+    place は place_name を当てはめたマップの場所 (マップに無ければ None。そのときは「 (マップの場所「<name>」)」を
+    足さない)。
+    """
+    shown_name = place_name
+    if place is not None and place.name.strip() != place_name:
+        shown_name += f" (マップの場所「{place.name}」)"
     return (
-        f"前回の middle の出力 (入力の時刻 {format_frame_label(state.based_on_t)}) の現在地: "
-        f"{place_name} のマス {_position_text(start)}"
+        f"前回の middle の出力 (入力の時刻 {format_frame_label(based_on_t)}) の現在地: "
+        f"{shown_name} のマス {_position_text(start)}"
     )
 
 
@@ -266,13 +333,71 @@ def _target_line(
 ) -> str:
     """目標 target の 1 行 (種類・説明・座標・行き先・手順) を返す (モジュールの docstring)。
 
-    avoided は、経路の途中で通らないマス (その場所から出るつながりの from_tile)。
+    avoided は、経路の途中で通らないマス (その場所から出るつながりの from_tile)。手順は describe_route_in_place の文。
     """
     destinations = (
         f"。行き先: {'、'.join(target.destinations)}" if target.destinations else ""
     )
-    route = find_grid_route(place, start, target.position, avoided)
+    steps = describe_route_in_place(place, start, target.position, avoided)
     return (
         f"- {_TARGET_KIND_LABELS[target.kind]}「{target.description}」"
-        f"{_position_text(target.position)}{destinations}。手順: {format_route(route)}"
+        f"{_position_text(target.position)}{destinations}。手順: {steps}"
     )
+
+
+def _destination_places(
+    document: GridMapDocument, targets: Sequence[RouteTarget]
+) -> list[GridMapPlace]:
+    """targets の destinations の名前を、find_grid_place でマップの場所に当てはめたもの (当てはまらない名前は除く)
+    を返す。"""
+    places: list[GridMapPlace] = []
+    for target in targets:
+        for name in target.destinations:
+            found = find_grid_place(document, name)
+            if found is not None:
+                places.append(found)
+    return places
+
+
+def _cross_place_line(
+    document: GridMapDocument,
+    route: CrossPlaceRoute,
+    current_tile: TilePosition | None,
+) -> str:
+    """場所をまたぐ道筋 route の 1 行 (describe_cross_place_routes の書き方) を返す。
+
+    区間の開始のマスは、1 つ目の区間では current_tile、2 つ目からは 1 つ前の区間のつながりの to_tile。
+    """
+    legs: list[str] = []
+    start = current_tile
+    for leg in route.legs:
+        legs.append(_leg_text(document, leg, start))
+        start = leg.connection.to_tile
+    destination = f"「{route.destination.name}」"
+    return (
+        f"- {destination}まで (つながり {len(route.legs)} 件): "
+        f"{' → '.join(legs)} → {destination}"
+    )
+
+
+def _leg_text(
+    document: GridMapDocument, leg: CrossPlaceLeg, start: TilePosition | None
+) -> str:
+    """区間 leg の文 (「<場所の name>」の「<how>」(x=<x>, y=<y>)へ <手順の文>) を返す。start は区間の開始のマス。
+
+    開始のマスとつながりの from_tile がどちらもあり、どちらも区間の場所の tiles の範囲の中にあるときだけ、
+    describe_route_in_place で手順の文を求める。それ以外は NO_TILE_STEPS_TEXT。
+    """
+    goal = leg.connection.from_tile
+    position = "" if goal is None else _position_text(goal)
+    steps = NO_TILE_STEPS_TEXT
+    if (
+        start is not None
+        and goal is not None
+        and tile_at(leg.place, start) is not None
+        and tile_at(leg.place, goal) is not None
+    ):
+        steps = describe_route_in_place(
+            leg.place, start, goal, connection_from_tiles(document, leg.place)
+        )
+    return f"「{leg.place.name}」の「{leg.connection.how}」{position}へ {steps}"
