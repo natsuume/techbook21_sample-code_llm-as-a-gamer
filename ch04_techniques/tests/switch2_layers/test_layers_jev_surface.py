@@ -26,6 +26,7 @@ from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.settings import DEFAULT_HOLD_MARGIN
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS
 from switch2_layers.surface.box_tracker import NormalizedBox, TrackingFrame, TrackResult
 from switch2_layers.surface.box_tracking_state import BoxTrackingState
@@ -61,6 +62,7 @@ from switch2_layers.surface.surface_questions import (
     QuestionType,
     SurfaceQuestion,
 )
+from switch2_layers.surface.surface_record import answers_to_json
 from switch2_layers.surface.surface_types import (
     Box,
     BoxSource,
@@ -214,6 +216,7 @@ def make_decider(
     requery_every: int = 5,
     threshold: float = 0.5,
     with_notes: bool = True,
+    hold_margin: float = DEFAULT_HOLD_MARGIN,
 ) -> tuple[JevSurfaceDecider, BoxTrackingState]:
     tracking = BoxTrackingState(tracker_factory=StillTracker)
     notes_dir = tmp_path / "notes"
@@ -225,6 +228,7 @@ def make_decider(
             allowed_buttons=allowed,
             threshold_advisor=threshold,
             box_requery_every=requery_every,
+            hold_margin=hold_margin,
         ),
         notes_dir=notes_dir if with_notes else None,
         make_reference=references(),
@@ -243,6 +247,29 @@ def names_of(questions: Sequence[SurfaceQuestion], kind: QuestionKind) -> list[s
 
 def all_visible() -> dict[str, float]:
     return {f"box_exists_{i}": 0.9 for i in range(1, len(DEFAULT_BOX_TARGETS) + 1)}
+
+
+# 十字キーの方向の問いの選択肢の名前 (この順)
+DPAD_DIRECTION_NAMES = (
+    "none",
+    "up",
+    "right",
+    "down",
+    "left",
+    "up_right",
+    "down_right",
+    "down_left",
+    "up_left",
+)
+
+
+def dpad_answer(direction: str) -> dict[str, float]:
+    """dpad_direction の答えのうち、direction の確率を 0.9、none を 0.1、ほかを 0.0 にしたもの。"""
+    assert direction in DPAD_DIRECTION_NAMES and direction != "none"
+    return {
+        name: 0.9 if name == direction else 0.1 if name == "none" else 0.0
+        for name in DPAD_DIRECTION_NAMES
+    }
 
 
 # --- state の部品 ---
@@ -722,7 +749,12 @@ def test_request_sends_state_images_and_all_question_kinds(tmp_path):
     assert [image.jpeg for image in images] == [b"jpeg-9.0", b"jpeg-9.5", b"jpeg-10.0"]
     assert [frame["image"] for frame in state["frames"]] == ["ref-1", "ref-2", "ref-3"]
     assert state["recent_actions"][0]["time"] == "t=9.800 秒 (0.2 秒前)"
-    assert len(names_of(questions, QuestionKind.BUTTON)) == 16
+    # 十字キーの 4 方向はボタンの問いにせず、方向と押し方の 2 問で問う
+    assert len(names_of(questions, QuestionKind.BUTTON)) == 12
+    for button in ["UP", "RIGHT", "DOWN", "LEFT"]:
+        assert f"button_{button}" not in names_of(questions, QuestionKind.BUTTON)
+    assert names_of(questions, QuestionKind.DPAD_DIRECTION) == ["dpad_direction"]
+    assert names_of(questions, QuestionKind.DPAD_PRESS) == ["dpad_press"]
     assert "button_HOME" not in names_of(questions, QuestionKind.BUTTON)
     assert len(names_of(questions, QuestionKind.STICK_DIRECTION)) == 4
     assert len(names_of(questions, QuestionKind.STICK_STRENGTH)) == 12
@@ -839,7 +871,9 @@ def test_request_json_through_mock_transport(tmp_path):
 def test_output_follows_answers(tmp_path):
     asker = FakeAsker(
         {
-            "button_A": {"none": 0.1, "tap": 0.1, "hold_short": 0.0, "hold_long": 0.8},
+            "button_A": {"none": 0.1, "tap": 0.1, "hold": 0.8},
+            "dpad_direction": dpad_answer("down_right"),
+            "dpad_press": {"tap": 0.9, "hold": 0.1},
             "stick_LS_x": {"none": 0.0, "left": 0.0, "right": 1.0},
             "advisor_tips": 0.6,
             "advisor_advice": 0.5,
@@ -849,8 +883,12 @@ def test_output_follows_answers(tmp_path):
     )
     decider, _ = make_decider(tmp_path, asker)
     output = decider.decide(surface_input())
+    # 押し続けは秒数を付けない。斜めの十字キーは 2 つのボタンを同じ押し方で押す
     assert output.action == PadAction(
-        held=frozenset({"A"}), hold_seconds={"A": 1.0}, left_stick=(0.25, 0.0)
+        held=frozenset({"A"}),
+        taps=frozenset({"DOWN", "RIGHT"}),
+        left_stick=(0.25, 0.0),
+        hold_seconds={},
     )
     assert output.deep_kinds == frozenset({DocumentKind.TIPS})
     assert output.info_labels == (
@@ -861,6 +899,42 @@ def test_output_follows_answers(tmp_path):
         InfoLabel("map", 0.0),
     )
     assert output.scene_changed is True
+
+
+def test_hold_margin_defaults_to_the_run_default():
+    assert JevSurfaceSettings(allowed_buttons=ALLOWED).hold_margin == 0.1
+    assert DEFAULT_HOLD_MARGIN == 0.1
+
+
+def test_hold_margin_setting_is_used(tmp_path):
+    # hold − tap = 0.15。同じ答えでも、margin 0.1 なら押し続け、margin 0.2 なら短押し
+    answers = {
+        "button_A": {"none": 0.15, "tap": 0.35, "hold": 0.5},
+        "dpad_direction": dpad_answer("left"),
+        "dpad_press": {"tap": 0.35, "hold": 0.5},
+    }
+    small, _ = make_decider(tmp_path, FakeAsker(answers), hold_margin=0.1)
+    assert small.decide(surface_input()).action == PadAction(
+        held=frozenset({"A", "LEFT"})
+    )
+    large, _ = make_decider(tmp_path, FakeAsker(answers), hold_margin=0.2)
+    assert large.decide(surface_input()).action == PadAction(
+        taps=frozenset({"A", "LEFT"})
+    )
+
+
+def test_recorded_answers_have_dpad_choice_probabilities(tmp_path):
+    direction = dpad_answer("up_left")
+    dpad_press = {"tap": 0.3, "hold": 0.7}
+    asker = FakeAsker({"dpad_direction": direction, "dpad_press": dpad_press})
+    decider, _ = make_decider(tmp_path, asker)
+    output = decider.decide(surface_input())
+    assert output.exchange is not None
+    # surface.jsonl の answers.choices (surface_record.answers_to_json) に、2 問の選択肢ごとの確率が入る
+    recorded = answers_to_json(output.exchange.answers)["choices"]
+    assert recorded["dpad_direction"] == direction
+    assert recorded["dpad_press"] == dpad_press
+    assert "button_UP" not in recorded
 
 
 def test_advisor_game_above_threshold_asks_for_the_game_document(tmp_path):
@@ -1159,7 +1233,7 @@ def test_sent_and_recorded_requests_carry_the_advisor_of_the_input(tmp_path):
 
 
 def test_output_exchange_has_the_sent_request_and_the_answers(tmp_path):
-    button_a = {"none": 0.1, "tap": 0.05, "hold_short": 0.8, "hold_long": 0.05}
+    button_a = {"none": 0.1, "tap": 0.05, "hold": 0.85}
     asker = FakeAsker({"button_A": button_a, "scene_changed": 0.8})
     asker.usage = {"input_tokens": 100, "output_tokens": 2}
     decider, _ = make_decider(tmp_path, asker)

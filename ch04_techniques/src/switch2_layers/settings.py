@@ -61,6 +61,8 @@ DEFAULT_DEEP_AUTO_SECONDS = 60.0
 DEFAULT_DEEP_TIMEOUT_S = 300.0
 DEFAULT_THRESHOLD_ADVISOR = 0.5
 DEFAULT_BOX_REQUERY_EVERY = 5
+# surface の押し方の選び方で、押し続けにするのに要る hold と tap の確率の差
+DEFAULT_HOLD_MARGIN = 0.1
 
 
 class SurfaceKind(StrEnum):
@@ -129,6 +131,8 @@ class RunSettings:
                                 (--threshold-advisor、既定 0.5。0 以上 1 以下)
     box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
                                 (--box-requery-every、既定 5。1 以上)
+    hold_margin                 surface のボタンと十字キーで、hold の確率が tap の確率をこの値より大きく上回ったときだけ
+                                押し続けにする (--hold-margin、既定 0.1。0 以上 1 以下)
     deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
     safety                      安全の監視の実装 (--safety、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
                                 (safety_api_key_errors)
@@ -159,6 +163,7 @@ class RunSettings:
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
+    hold_margin: float = DEFAULT_HOLD_MARGIN
     deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
     safety: SafetyKind = DEFAULT_SAFETY
     safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S

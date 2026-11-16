@@ -2,7 +2,9 @@
 
 問いの型は Jev の 3 つ (QuestionType): choice (選択肢の確率)、noul (真である確率)、box (画像の中の位置)。
 問いの種類 (QuestionKind) と ID は次のとおり。並びもこの順にする (build_surface_questions):
-    button            button_<ボタン>                         choice  押せるボタンごと (BUTTON_ORDER の順)
+    button            button_<ボタン>                         choice  押せるボタンごと (BUTTON_ORDER の順。十字キーの 4 方向を除く)
+    dpad_direction    dpad_direction                          choice  1 (十字キーの方向)
+    dpad_press        dpad_press                              choice  1 (十字キーの押し方)
     stick_direction   stick_<LS|RS>_<x|y>                     choice  2 本 × 横・縦 = 4
     stick_strength    stick_<LS|RS>_<x|y>_at_least_<段階>      noul    4 軸 × 50・75・100 = 12
     advisor           advisor_<種類>                           noul    ADVISOR_KINDS の 5 つ
@@ -11,10 +13,13 @@
     box_exists        box_exists_<番号>                        noul    box の対象ごと
     box               box_<番号>                               box     問い直す対象ごと
 <番号> は対象の一覧 (surface.box_targets) の中の 1 始まりの位置。
+十字キーは、方向 (dpad_direction) と押し方 (dpad_press) の 2 問で問い、allowed_buttons に依らず送る。
 選択肢の問いは「なし」(NONE_CHOICE) を先頭に置く。公式ドキュメント
 (https://docs.typesafe.ai/model-jaggedness.md の "Choice option order") に、Jev は先頭の選択肢に寄ることがあると
-書かれているため、寄ったときに何もしない側に倒す。ボタンの選択肢は none・tap・hold_short・hold_long の順
-(押す時間の短い順)、スティックの向きの選択肢は none・負の向き・正の向きの順。
+書かれているため、寄ったときに何もしない側に倒す。ただし dpad_press には none が無い (押さないかは dpad_direction で
+決まるため)。ボタンの選択肢は none・tap・hold の順 (押す時間の短い順)、十字キーの方向の選択肢は none・4 方向・斜めの
+4 方向の順 (DPAD_DIRECTION_CHOICES)、十字キーの押し方の選択肢は tap・hold の順、スティックの向きの選択肢は
+none・負の向き・正の向きの順。hold の押し続けは次の判断まで続く (秒数を指定しない)。
 最新のフレームを指す問いの文には、画像の参照文字列ではなく state の中のパス (latest_frame_path) を書く
 (参照文字列は書くたびに同じ画像が足されるため)。
 """
@@ -34,17 +39,26 @@ FRAMES_STATE_KEY = "frames"
 
 NONE_CHOICE = "none"
 TAP_CHOICE = "tap"
-HOLD_SHORT_CHOICE = "hold_short"
-HOLD_LONG_CHOICE = "hold_long"
-# ボタンの問いの押す側の選択肢 (押す時間の短い順。確率の最大が同率なら、先にあるものを選ぶ)
-PRESS_CHOICES = (TAP_CHOICE, HOLD_SHORT_CHOICE, HOLD_LONG_CHOICE)
-# hold_short と hold_long で押し続ける秒数
-HOLD_SHORT_SECONDS = 0.3
-HOLD_LONG_SECONDS = 1.0
-# 押し続けの選択肢の名前 → 押し続ける秒数
-HOLD_CHOICE_SECONDS = {
-    HOLD_SHORT_CHOICE: HOLD_SHORT_SECONDS,
-    HOLD_LONG_CHOICE: HOLD_LONG_SECONDS,
+HOLD_CHOICE = "hold"
+# ボタンの問いの押す側の選択肢と、十字キーの押し方の問いの選択肢 (押す時間の短い順)
+PRESS_CHOICES = (TAP_CHOICE, HOLD_CHOICE)
+# 十字キーの方向の問いと押し方の問いの ID
+DPAD_DIRECTION_QUESTION_NAME = "dpad_direction"
+DPAD_PRESS_QUESTION_NAME = "dpad_press"
+# 十字キーの 2 つの問いの target
+DPAD_TARGET = "dpad"
+# 十字キーの方向の選択肢の名前 → 押すボタン名 (none は押さない。斜めは縦の方向を先にした 2 つを同時に押す)。
+# 並びは DPAD_DIRECTION_CHOICES と同じ
+DPAD_DIRECTION_BUTTONS: dict[str, tuple[str, ...]] = {
+    NONE_CHOICE: (),
+    "up": ("UP",),
+    "right": ("RIGHT",),
+    "down": ("DOWN",),
+    "left": ("LEFT",),
+    "up_right": ("UP", "RIGHT"),
+    "down_right": ("DOWN", "RIGHT"),
+    "down_left": ("DOWN", "LEFT"),
+    "up_left": ("UP", "LEFT"),
 }
 # スティック名と軸。並びは問いの順でもある
 STICKS = ("LS", "RS")
@@ -106,6 +120,8 @@ class QuestionKind(StrEnum):
     """
 
     BUTTON = "button"
+    DPAD_DIRECTION = "dpad_direction"
+    DPAD_PRESS = "dpad_press"
     STICK_DIRECTION = "stick_direction"
     STICK_STRENGTH = "stick_strength"
     ADVISOR = "advisor"
@@ -136,14 +152,16 @@ class SurfaceQuestion:
     name            問いの ID (モジュールの docstring の表。英数字と _ だけで、一覧の中で重複しない)
     instructions    日本語の問いの文
     kind            問いの種類
-    target          button はボタン名、stick_direction は `LS_x` の形、stick_strength は `LS_x_50` の形、
+    target          button はボタン名、dpad_direction と dpad_press は DPAD_TARGET、stick_direction は `LS_x` の形、
+                    stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
                     scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
                     safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素か
                     SYSTEM_SCREEN_QUESTION_NAME)、monitor は監視の名前
-    question_type   Jev の問いの型。button・stick_direction・monitor と、safety の SYSTEM_SCREEN_QUESTION_NAME は
-                    choice、box は box、ほかは noul
-    choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE)。ほかの型では空のタプル
+    question_type   Jev の問いの型。button・dpad_direction・dpad_press・stick_direction・monitor と、safety の
+                    SYSTEM_SCREEN_QUESTION_NAME は choice、box は box、ほかは noul
+    choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE。ただし dpad_press には none が無く、先頭は TAP_CHOICE。
+                    押さないかは dpad_direction で決まるため)。ほかの型では空のタプル
     """
 
     name: str
@@ -154,24 +172,39 @@ class SurfaceQuestion:
     choices: tuple[Choice, ...] = ()
 
 
-# 押し続けの選択肢の説明の、秒数の後に続く文
-_HOLD_CONTINUES_TEXT = (
-    "まだ離していないうちに、次の判断でもこのボタンの押し続け (hold_short か hold_long) を選ぶと、"
-    "離さずに続けて押し、その選択肢の秒数を数え直す。離した後に選ぶと、押し直す"
+# hold の選択肢の説明 (ボタンの問いと、十字キーの押し方の問いで共通)
+HOLD_CHOICE_DESCRIPTION = (
+    "押した状態にする。押した状態は次の判断まで続く。"
+    "次の判断でも hold を選ぶと、離さずに押し続ける"
 )
 # ボタンの問いの選択肢 (この順)
 BUTTON_CHOICES = (
     Choice(NONE_CHOICE, "押さない"),
     Choice(TAP_CHOICE, "1 回だけ短く押す"),
-    Choice(
-        HOLD_SHORT_CHOICE,
-        f"{HOLD_SHORT_SECONDS} 秒押し続けてから離す。{_HOLD_CONTINUES_TEXT}",
-    ),
-    Choice(
-        HOLD_LONG_CHOICE,
-        f"{HOLD_LONG_SECONDS} 秒押し続けてから離す。{_HOLD_CONTINUES_TEXT}",
-    ),
+    Choice(HOLD_CHOICE, HOLD_CHOICE_DESCRIPTION),
 )
+# 十字キーの方向の問いの選択肢 (この順。名前は DPAD_DIRECTION_BUTTONS のキーと同じ並び)
+DPAD_DIRECTION_CHOICES = (
+    Choice(NONE_CHOICE, "十字キーを押さない"),
+    Choice("up", "上を押す"),
+    Choice("right", "右を押す"),
+    Choice("down", "下を押す"),
+    Choice("left", "左を押す"),
+    Choice("up_right", "右上 (上と右を同時に押す)"),
+    Choice("down_right", "右下 (下と右を同時に押す)"),
+    Choice("down_left", "左下 (下と左を同時に押す)"),
+    Choice("up_left", "左上 (上と左を同時に押す)"),
+)
+# 十字キーの押し方の問いの選択肢 (この順。none は無い)
+DPAD_PRESS_CHOICES = (
+    Choice(TAP_CHOICE, "1 回だけ短く押す"),
+    Choice(HOLD_CHOICE, HOLD_CHOICE_DESCRIPTION),
+)
+# 十字キーの方向の問いと押し方の問いの文
+DPAD_DIRECTION_QUESTION_TEXT = (
+    "今、十字キーをどの方向に押すか。斜めは 2 つの方向を同時に押す。"
+)
+DPAD_PRESS_QUESTION_TEXT = "十字キーを押す場合、短く押すか、押し続けるか。"
 # スティックの軸 → その軸の向きの問いの選択肢 (none・負の向き・正の向きの順)
 STICK_DIRECTION_CHOICES = {
     "x": (
@@ -291,7 +324,8 @@ def build_button_questions(allowed_buttons: Collection[str]) -> list[SurfaceQues
 
     name は button_<ボタン>、target はボタン名、型は choice、選択肢は BUTTON_CHOICES。
     文は「今、<BUTTON_LABELS の呼び名>をどうするか。」(例: 「今、A ボタンをどうするか。」)。
-    allowed_buttons の中の BUTTON_ORDER に無い名前は無視する。
+    allowed_buttons の中の BUTTON_ORDER に無い名前は無視する。十字キーの 4 方向 (UP・RIGHT・DOWN・LEFT) は、
+    allowed_buttons にあっても返さない (十字キーは build_dpad_questions の 2 問で問う)。
     """
     return [
         SurfaceQuestion(
@@ -305,6 +339,18 @@ def build_button_questions(allowed_buttons: Collection[str]) -> list[SurfaceQues
         for button in BUTTON_ORDER
         if button in allowed_buttons
     ]
+
+
+def build_dpad_questions() -> list[SurfaceQuestion]:
+    """十字キーの問い 2 問を、方向の問い・押し方の問いの順で返す。
+
+    方向の問い: name は DPAD_DIRECTION_QUESTION_NAME、種類は QuestionKind.DPAD_DIRECTION、選択肢は
+    DPAD_DIRECTION_CHOICES、文は DPAD_DIRECTION_QUESTION_TEXT。
+    押し方の問い: name は DPAD_PRESS_QUESTION_NAME、種類は QuestionKind.DPAD_PRESS、選択肢は DPAD_PRESS_CHOICES
+    (none は無い)、文は DPAD_PRESS_QUESTION_TEXT。
+    どちらも target は DPAD_TARGET、型は choice。
+    """
+    raise NotImplementedError
 
 
 def build_stick_direction_questions() -> list[SurfaceQuestion]:
@@ -464,6 +510,8 @@ def build_surface_questions(
 ) -> tuple[SurfaceQuestion, ...]:
     """1 回の要求の問いの一覧を、モジュールの docstring の表の順で返す。
 
+    十字キーの 2 問 (build_dpad_questions) は、allowed_buttons に依らず、ボタンの問いの直後
+    (スティックの向きの問いの前) に入れる。
     frame_path = latest_frame_path(frame_count) を、情報ラベル・box の存在・box の問いの文に使う。
     ボタンの問いは allowed_buttons のボタンだけ (HOME は --allow-home のときだけ allowed_buttons に入る)。
     """
