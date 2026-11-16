@@ -756,7 +756,7 @@ Claude Code の Bash ツールは、コマンドを別のセッションで起�
 
 `run` は HOME 画面には戻さないため、プレイを終えるときは人がゲームを終了するか、エージェントに `finish` を指示してください。
 
-`run` が止まった理由は、表示の `reason=` で確かめられます。
+期限などで止まったときは `ok run finished reason=<理由> ...` を表示して終了コード 0 で終わり、止まった理由は `reason=` で確かめられます。Ctrl+C で止めたときは `error run interrupted`、SIGTERM・SIGHUP で止めたときは `error run terminated by signal` を表示して、終了コード 1 で終わります。
 
 | `reason` | 止まった理由 |
 |---|---|

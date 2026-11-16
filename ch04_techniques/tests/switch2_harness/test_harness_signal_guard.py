@@ -21,7 +21,7 @@ from switch2_harness.signal_guard import (
     RunTerminated,
     defer_interrupts,
     ignore_interrupts,
-    terminate_signals_as_exception,
+    interrupts_as_exceptions,
 )
 
 # os.kill で送ったシグナルのハンドラーが動くまで待つ秒数の上限 (ハンドラーが例外を送出すると待ちは途中で終わる)
@@ -67,14 +67,14 @@ def test_constants():
     assert INTERRUPT_SIGNALS == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
-# --- terminate_signals_as_exception ---
+# --- interrupts_as_exceptions ---
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
 def test_terminate_signal_raises_run_terminated(sig):
     with recording_handlers(TERMINATE_SIGNALS) as recorder:
         with (
-            terminate_signals_as_exception(),
+            interrupts_as_exceptions(),
             pytest.raises(RunTerminated) as error,
         ):
             os.kill(os.getpid(), sig)
@@ -83,9 +83,9 @@ def test_terminate_signal_raises_run_terminated(sig):
         assert recorder.received == []
 
 
-def test_terminate_signals_as_exception_restores_handlers():
+def test_interrupts_as_exceptions_restores_handlers():
     with recording_handlers(TERMINATE_SIGNALS) as recorder:
-        with terminate_signals_as_exception():
+        with interrupts_as_exceptions():
             pass
         assert signal.getsignal(signal.SIGTERM) is recorder
         assert signal.getsignal(signal.SIGHUP) is recorder
@@ -93,27 +93,68 @@ def test_terminate_signals_as_exception_restores_handlers():
         assert recorder.received == [signal.SIGTERM]
 
 
-def test_terminate_signals_as_exception_restores_handlers_after_an_exception():
+def test_interrupts_as_exceptions_restores_handlers_after_an_exception():
     with recording_handlers(TERMINATE_SIGNALS) as recorder:
-        with pytest.raises(RunTerminated), terminate_signals_as_exception():
+        with pytest.raises(RunTerminated), interrupts_as_exceptions():
             os.kill(os.getpid(), signal.SIGHUP)
             time.sleep(HANDLER_WAIT_S)
         assert signal.getsignal(signal.SIGTERM) is recorder
         assert signal.getsignal(signal.SIGHUP) is recorder
 
 
-def test_terminate_signals_as_exception_leaves_sigint_alone():
-    before = signal.getsignal(signal.SIGINT)
-    with terminate_signals_as_exception():
-        assert signal.getsignal(signal.SIGINT) is before
-    assert signal.getsignal(signal.SIGINT) is before
+def test_sigint_raises_keyboard_interrupt_after_ignoring_interrupts():
+    ignored_when_raised: list[dict[signal.Signals, object]] = []
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        with interrupts_as_exceptions():
+            # 記録用のハンドラーが残っていれば KeyboardInterrupt にならず、pytest.raises が失敗する
+            with pytest.raises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGINT)
+                time.sleep(HANDLER_WAIT_S)
+            ignored_when_raised.append(
+                {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS}
+            )
+            # 後片付けに入るまでの間の 2 回目の Ctrl-C は無視される
+            # (KeyboardInterrupt がテストの外に出るとテストの実行全体が止まるため、ここで受けて失敗にする)
+            try:
+                send_to_self(signal.SIGINT)
+            except KeyboardInterrupt:
+                pytest.fail("the second SIGINT raised KeyboardInterrupt")
+        assert ignored_when_raised == [dict.fromkeys(INTERRUPT_SIGNALS, signal.SIG_IGN)]
+        for sig in INTERRUPT_SIGNALS:
+            assert signal.getsignal(sig) is recorder
+        assert recorder.received == []
+
+
+def test_interrupts_as_exceptions_restores_sigint():
+    with recording_handlers((signal.SIGINT,)) as recorder:
+        with interrupts_as_exceptions():
+            assert signal.getsignal(signal.SIGINT) is not recorder
+        assert signal.getsignal(signal.SIGINT) is recorder
+        send_to_self(signal.SIGINT)
+        assert recorder.received == [signal.SIGINT]
+
+
+def test_interrupts_as_exceptions_leaves_an_ignored_sigint_ignored():
+    with recording_handlers(INTERRUPT_SIGNALS) as recorder:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        with interrupts_as_exceptions():
+            assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+            # 無視されたままなら KeyboardInterrupt にならない
+            # (KeyboardInterrupt がテストの外に出るとテストの実行全体が止まるため、ここで受けて失敗にする)
+            try:
+                send_to_self(signal.SIGINT)
+            except KeyboardInterrupt:
+                pytest.fail("an ignored SIGINT raised KeyboardInterrupt")
+        assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is recorder
+        assert recorder.received == []
 
 
 def test_terminate_guard_leaves_an_ignored_signal_ignored():
     # nohup で起動した run のように、SIGHUP が無視されている状態で入る
     with recording_handlers(TERMINATE_SIGNALS) as recorder:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        with terminate_signals_as_exception():
+        with interrupts_as_exceptions():
             assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
             assert signal.getsignal(signal.SIGTERM) is not recorder
             # 無視されたままなら RunTerminated にならない (なれば、ここで例外になってテストが失敗する)
@@ -125,7 +166,7 @@ def test_terminate_guard_leaves_an_ignored_signal_ignored():
 
 def test_terminate_handler_ignores_interrupts_before_raising():
     with recording_handlers(INTERRUPT_SIGNALS) as recorder:
-        with terminate_signals_as_exception():
+        with interrupts_as_exceptions():
             with pytest.raises(RunTerminated):
                 os.kill(os.getpid(), signal.SIGTERM)
                 time.sleep(HANDLER_WAIT_S)
@@ -182,7 +223,7 @@ def test_ignore_interrupts_restores_handlers_after_an_exception():
 
 
 def test_ignore_interrupts_inside_terminate_guard_restores_the_guard():
-    with recording_handlers(INTERRUPT_SIGNALS), terminate_signals_as_exception():
+    with recording_handlers(INTERRUPT_SIGNALS), interrupts_as_exceptions():
         guard_handler = signal.getsignal(signal.SIGTERM)
         with ignore_interrupts():
             assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
@@ -199,7 +240,7 @@ def test_guards_do_nothing_outside_the_main_thread():
 
     def use_guards() -> None:
         # signal.signal を呼ぶと ValueError になるスレッドで、例外にならずに最後まで進むこと
-        with terminate_signals_as_exception(), ignore_interrupts():
+        with interrupts_as_exceptions(), ignore_interrupts():
             seen.append({sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS})
         completed.append(True)
 

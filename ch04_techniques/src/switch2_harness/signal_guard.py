@@ -1,10 +1,11 @@
-"""run の間のシグナルの扱い (SIGTERM・SIGHUP を例外にすることと、後片付けの間の割り込みの無視)。
+"""run の間のシグナルの扱い (割り込みを例外にすることと、後片付けの間の割り込みの無視)。
 
 Python の既定では、SIGTERM と SIGHUP を受けると finally を通らずにプロセスが終わる。それでは
 デーモンへの up ALL が送られず、起動した claude も残るため、run の間はこれらを例外 RunTerminated にして
-finally の後片付けを通す。ただし、すでに無視されているシグナル (nohup の SIGHUP など) は無視のままにする。
+finally の後片付けを通す。SIGINT (Ctrl-C) は KeyboardInterrupt にする。ただし、すでに無視されている
+シグナル (nohup の SIGHUP など) は無視のままにする (interrupts_as_exceptions)。
 また、後片付け (claude を止める待ちと up ALL の送信) の途中で 2 回目の Ctrl-C などが来ると up ALL の前で
-抜けてしまうため、後片付けの間は SIGINT・SIGTERM・SIGHUP を無視する。RunTerminated を送出するハンドラーも、
+抜けてしまうため、後片付けの間は SIGINT・SIGTERM・SIGHUP を無視する。例外を送出するハンドラーも、
 送出の前にこれらを無視に切り替え、後片付けに入るまでの間の 2 回目のシグナルで後片付けが飛ばされないようにする。
 claude を起動してから、後片付けが参照する変数に入れるまでの間は、SIGINT・SIGTERM・SIGHUP を遅らせる (defer_interrupts)。
 その間に届いたシグナルで例外になると、起動したばかりの claude を見失い、止め損ねるためである。
@@ -41,15 +42,26 @@ class RunTerminated(Exception):
         self.signal_number = signal_number
 
 
-def _raise_run_terminated(signal_number: int, frame: FrameType | None) -> None:
-    """INTERRUPT_SIGNALS を無視に切り替えてから RunTerminated を送出するハンドラー。
+def _ignore_all_interrupts() -> None:
+    """INTERRUPT_SIGNALS を signal.SIG_IGN にする。
 
     例外が後片付け (ignore_interrupts の中) に届くまでの間に 2 回目のシグナルが来ても、
-    後片付けが飛ばされないように、例外を送出する前に無視に切り替える。
+    後片付けが飛ばされないように、例外を送出するハンドラーが送出の前に呼ぶ。
     """
     for sig in INTERRUPT_SIGNALS:
         signal.signal(sig, signal.SIG_IGN)
+
+
+def _raise_run_terminated(signal_number: int, frame: FrameType | None) -> None:
+    """INTERRUPT_SIGNALS を無視に切り替えてから RunTerminated を送出するハンドラー (SIGTERM・SIGHUP 用)。"""
+    _ignore_all_interrupts()
     raise RunTerminated(signal_number)
+
+
+def _raise_keyboard_interrupt(signal_number: int, frame: FrameType | None) -> None:
+    """INTERRUPT_SIGNALS を無視に切り替えてから KeyboardInterrupt を送出するハンドラー (SIGINT 用)。"""
+    _ignore_all_interrupts()
+    raise KeyboardInterrupt
 
 
 def _restorable(handler: SignalHandler | None) -> SignalHandler:
@@ -84,12 +96,12 @@ def _replaced_handlers(
 
 
 @contextmanager
-def terminate_signals_as_exception() -> Iterator[None]:
-    """with の中にいる間、SIGTERM と SIGHUP を受けたら RunTerminated を送出する。
+def interrupts_as_exceptions() -> Iterator[None]:
+    """with の中にいる間、SIGTERM と SIGHUP を受けたら RunTerminated を、SIGINT を受けたら KeyboardInterrupt を送出する。
 
     入るときにすでに無視されている (ハンドラーが signal.SIG_IGN の) シグナルは替えない
     (例: nohup で起動した run の SIGHUP は無視されたままにする)。
-    ハンドラーは、RunTerminated を送出する前に SIGINT・SIGTERM・SIGHUP を signal.SIG_IGN にする。
+    どちらのハンドラーも、例外を送出する前に SIGINT・SIGTERM・SIGHUP を signal.SIG_IGN にする。
     抜けるときに (例外のときも)、入ったときと違うハンドラーになっている SIGINT・SIGTERM・SIGHUP を、
     入る前のハンドラーに戻す (替えなかったシグナルには触れない)。メインスレッド以外では何もしない。
     """
@@ -97,10 +109,14 @@ def terminate_signals_as_exception() -> Iterator[None]:
         yield
         return
     previous = {sig: signal.getsignal(sig) for sig in INTERRUPT_SIGNALS}
+    handlers: dict[signal.Signals, SignalHandler] = {
+        signal.SIGINT: _raise_keyboard_interrupt
+    }
+    handlers.update(dict.fromkeys(TERMINATE_SIGNALS, _raise_run_terminated))
     try:
-        for sig in TERMINATE_SIGNALS:
+        for sig, handler in handlers.items():
             if previous[sig] != signal.SIG_IGN:
-                signal.signal(sig, _raise_run_terminated)
+                signal.signal(sig, handler)
         yield
     finally:
         for sig, old_handler in previous.items():

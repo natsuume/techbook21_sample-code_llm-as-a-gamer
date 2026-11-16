@@ -37,7 +37,7 @@ from switch2_harness.features import (
     agent_commands,
     validate_feature_names,
 )
-from switch2_harness.frame_files import next_frame_path
+from switch2_harness.frame_files import reserve_next_frame_path
 from switch2_harness.harness_config import (
     HarnessConfig,
     format_created_at,
@@ -51,7 +51,7 @@ from switch2_harness.session_report import (
     summarize_session,
     summary_to_dict,
 )
-from switch2_harness.signal_guard import RunTerminated, terminate_signals_as_exception
+from switch2_harness.signal_guard import RunTerminated, interrupts_as_exceptions
 from switch2_harness.workspace import (
     WorkspaceNotEmptyError,
     WorkspacePaths,
@@ -61,6 +61,9 @@ from switch2_harness.workspace import (
 
 # SIGTERM・SIGHUP で run が終わったときに出す error 行
 RUN_TERMINATED_MESSAGE = "error run terminated by signal"
+
+# Ctrl-C (SIGINT・KeyboardInterrupt) で run が終わったときに出す error 行
+RUN_INTERRUPTED_MESSAGE = "error run interrupted"
 
 
 @dataclass(frozen=True)
@@ -166,12 +169,15 @@ def handle_look(
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
 
-    frame_files.next_frame_path(paths.frames_dir) の絶対パスで send(["shot", <絶対パス>]) を送り、応答を stdout に出す。
-    応答が error で始まれば終了コード 1、そうでなければ 0。
+    frame_files.reserve_next_frame_path(paths.frames_dir) で次の連番のパスを確保し (空のファイルを排他的に作る。
+    Claude Code はツールを並行して呼ぶことがあり、重なった look が同じパスに上書きしないようにするため)、
+    その絶対パスで send(["shot", <絶対パス>]) を送り、応答を stdout に出す。
+    応答が error で始まれば終了コード 1 にし、確保した空のファイルを消す (FileNotFoundError は無視する) ので、
+    frames/ に空の PNG を残さない。そうでなければ終了コード 0。
     イベント: command="look"、args=()、frame=<作業ディレクトリーからの相対パス (例: "frames/000001.png")>。
     応答が error なら frame は None。
     """
-    frame_path = next_frame_path(paths.frames_dir)
+    frame_path = reserve_next_frame_path(paths.frames_dir)
     reply = _send_and_record(
         paths,
         "look",
@@ -181,6 +187,8 @@ def handle_look(
         clock=clock,
         frame_on_success=frame_path.relative_to(paths.root).as_posix(),
     )
+    if is_error_reply(reply):
+        frame_path.unlink(missing_ok=True)
     return _reply_result(reply)
 
 
@@ -282,12 +290,16 @@ def handle_run(
     *,
     start_process: StartProcess,
     clock: Callable[[], float],
+    monotonic: Callable[[], float],
     sleep: Callable[[float], None],
     send: SendCommand,
     base_env: Mapping[str, str],
     available: tuple[Feature, ...] = FEATURES,
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
+
+    clock は記録の時刻 (本番は time.time)、monotonic は期限と経過時間を計る単調時計 (本番は time.monotonic) で、
+    どちらもそのまま run_agent_until に渡す。
 
     1. agent_launcher.validate_minutes(minutes) と agent_launcher.validate_max_budget_usd(options.max_budget_usd) を
        この順に呼ぶ。ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1
@@ -297,9 +309,9 @@ def handle_run(
     3. agent_launcher.run_agent_until を、game=config.game、
        agent_commands=features.agent_commands(config.features, available)、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で、
-       with signal_guard.terminate_signals_as_exception(): の中で呼ぶ。
-       RunTerminated (SIGTERM・SIGHUP) で抜けたら (後片付けは run_agent_until の finally で済んでいる)、
-       RUN_TERMINATED_MESSAGE を stderr に出し、終了コード 1
+       with signal_guard.interrupts_as_exceptions(): の中で呼ぶ。後片付けは run_agent_until の finally で済んでいるので、
+       RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら
+       RUN_INTERRUPTED_MESSAGE を stderr に出し、終了コード 1 (例外は外に出さない)
     4. `ok run finished reason=<理由> launches=<起動した回数> log=<paths.agent_log_file>` を stdout に出し、終了コード 0。
        理由は agent_launcher.StopReason のいずれか (deadline / budget_exhausted / no_session / resumes_exhausted)
     """
@@ -313,7 +325,7 @@ def handle_run(
     except ValueError as e:
         return _error_result(e)
     try:
-        with terminate_signals_as_exception():
+        with interrupts_as_exceptions():
             outcome = run_agent_until(
                 minutes,
                 paths,
@@ -322,6 +334,7 @@ def handle_run(
                 options,
                 start_process=start_process,
                 clock=clock,
+                monotonic=monotonic,
                 sleep=sleep,
                 send=send,
                 record=partial(append_event, paths.events_file),
@@ -329,6 +342,8 @@ def handle_run(
             )
     except RunTerminated:
         return CommandResult(exit_code=1, stderr_lines=(RUN_TERMINATED_MESSAGE,))
+    except KeyboardInterrupt:
+        return CommandResult(exit_code=1, stderr_lines=(RUN_INTERRUPTED_MESSAGE,))
     finished = (
         f"ok run finished reason={outcome.reason} launches={outcome.launches} "
         f"log={paths.agent_log_file}"

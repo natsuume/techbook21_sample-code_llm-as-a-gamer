@@ -53,6 +53,7 @@ class Harness:
         self.deps = CliDependencies(
             send=self.daemon,
             clock=self.clock,
+            monotonic=self.clock,
             now=lambda: datetime(2026, 11, 16, 21, 0, 5, tzinfo=JST),
             sleep=FakeSleep(self.clock),
             start_process=self.starter,
@@ -368,6 +369,7 @@ def test_production_dependencies():
     deps = production_dependencies()
     assert deps.send is send_command
     assert deps.clock is time.time
+    assert deps.monotonic is time.monotonic
     assert deps.sleep is time.sleep
     assert deps.start_process is start_claude_process
     assert deps.environ is os.environ
@@ -499,3 +501,15 @@ def test_init_ignores_the_pin(tmp_path, workspace, harness):
     harness.pin(str(workspace))
     assert harness.run("init", str(tmp_path / "new"), "--game", "G") == 0
     assert (tmp_path / "new" / "harness.json").exists()
+
+
+def test_run_interrupted_by_ctrl_c_exits_with_1(workspace, harness, capsys):
+    # 3 回目の待ちの間に Ctrl-C を受けたことにする
+    harness.deps = replace(
+        harness.deps, sleep=FakeSleep(harness.clock, interrupt_at_call=3)
+    )
+    assert harness.run("run", "--minutes", "1", "--workspace", str(workspace)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error run interrupted\n"
+    assert harness.daemon.sent == [["up", "ALL"]]

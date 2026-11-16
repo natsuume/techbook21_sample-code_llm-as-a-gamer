@@ -58,7 +58,8 @@ class CliDependencies:
     """サブコマンドの処理に渡す外部とのやり取り。テストでは fake を渡す。
 
     send: デーモンへの送信 (本番は daemon_client.send_command)
-    clock: 現在の epoch 秒 (本番は time.time)
+    clock: 現在の epoch 秒。記録の時刻に使う (本番は time.time)
+    monotonic: run の期限と経過時間を計る単調時計 (本番は time.monotonic)
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
@@ -69,6 +70,7 @@ class CliDependencies:
 
     send: SendCommand
     clock: Callable[[], float]
+    monotonic: Callable[[], float]
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     start_process: StartProcess
@@ -87,6 +89,7 @@ def production_dependencies() -> CliDependencies:
     return CliDependencies(
         send=send_command,
         clock=time.time,
+        monotonic=time.monotonic,
         now=_local_now,
         sleep=time.sleep,
         start_process=start_claude_process,
@@ -218,6 +221,7 @@ def _dispatch(
             options,
             start_process=deps.start_process,
             clock=deps.clock,
+            monotonic=deps.monotonic,
             sleep=deps.sleep,
             send=deps.send,
             base_env=deps.environ,

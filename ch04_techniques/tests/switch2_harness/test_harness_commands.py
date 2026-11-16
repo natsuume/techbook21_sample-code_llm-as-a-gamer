@@ -25,6 +25,7 @@ from switch2_harness.agent_launcher import (
     first_prompt,
 )
 from switch2_harness.commands import (
+    RUN_INTERRUPTED_MESSAGE,
     CommandResult,
     handle_finish,
     handle_init,
@@ -234,6 +235,52 @@ def test_look_error_reply_fails_and_records_no_frame(paths, clock):
     assert event.ok is False
     assert event.frame is None
     assert event.reply == "error no frame yet"
+
+
+def test_look_error_reply_removes_the_reserved_frame(paths, clock):
+    daemon = FakeDaemon(clock, {"shot": "error no frame yet"})
+    handle_look(paths, send=daemon, clock=clock)
+    assert list(paths.frames_dir.iterdir()) == []
+
+
+def test_look_reserves_the_frame_before_shooting(paths, clock):
+    reserved: list[bool] = []
+
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
+        # shot を送る時点で、パスはもう確保されている (空のファイルがある)
+        reserved.append(Path(args[1]).is_file())
+        return f"ok {args[1]}"
+
+    handle_look(paths, send=send, clock=clock)
+    assert reserved == [True]
+    assert (paths.frames_dir / "000001.png").is_file()
+
+
+def test_overlapping_looks_get_different_frames(paths, clock):
+    sent: list[list[str]] = []
+
+    def send(args: list[str], *, timeout_s: float | None = None) -> str:
+        sent.append(list(args))
+        if len(sent) == 1:
+            # 1 回目の shot の応答を待つ間に、もう 1 つの look が動く
+            handle_look(paths, send=FakeDaemon(clock), clock=clock)
+        return f"ok {args[1]}"
+
+    handle_look(paths, send=send, clock=clock)
+    frames = sorted(event.frame for event in read_events(paths.events_file))
+    assert frames == ["frames/000001.png", "frames/000002.png"]
+
+
+def test_report_ignores_frames_of_failed_looks(paths, clock):
+    handle_look(
+        paths, send=FakeDaemon(clock, {"shot": "error no frame yet"}), clock=clock
+    )
+    handle_look(
+        paths, send=FakeDaemon(clock, {"shot": "error no frame yet"}), clock=clock
+    )
+    result = handle_report(paths, as_json=True)
+    assert result.exit_code == 0
+    assert json.loads(result.stdout_lines[0])["command_counts"] == {"look": 2}
 
 
 # --- press ---
@@ -615,6 +662,7 @@ def test_run_launches_and_reports_the_outcome(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={"PATH": "/usr/bin"},
@@ -648,6 +696,7 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -681,6 +730,7 @@ def test_run_reports_budget_exhausted(paths, clock):
         LaunchOptions(max_budget_usd=1.0),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -704,6 +754,7 @@ def test_run_rejects_non_positive_minutes(paths, clock, minutes):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -726,6 +777,7 @@ def test_run_rejects_unknown_feature_in_harness_json(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -750,6 +802,7 @@ def test_run_rejects_invalid_max_budget_usd(paths, clock, budget, shown):
         LaunchOptions(max_budget_usd=budget),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -783,6 +836,7 @@ def test_run_terminated_by_signal_reports_an_error_after_cleanup(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
+        monotonic=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -797,3 +851,60 @@ def test_run_terminated_by_signal_reports_an_error_after_cleanup(paths, clock):
         "start",
         "release",
     ]
+
+
+def test_run_interrupted_by_ctrl_c_reports_an_error_after_cleanup(paths, clock):
+    write_harness_json(paths, [])
+    starter, daemon, _ = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        # 3 回目の待ちの間に Ctrl-C を受けたことにする
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 3:
+            raise KeyboardInterrupt
+        clock.advance(seconds)
+
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        monotonic=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    assert result == CommandResult(exit_code=1, stderr_lines=("error run interrupted",))
+    assert RUN_INTERRUPTED_MESSAGE == "error run interrupted"
+    assert starter.processes[0].calls == [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert daemon.sent == [["up", "ALL"]]
+    assert [event.args[0] for event in read_events(paths.events_file)] == [
+        "start",
+        "release",
+    ]
+
+
+def test_run_uses_the_monotonic_clock_for_the_deadline(paths):
+    write_harness_json(paths, [])
+    wall = FakeClock(START_TIME)
+    mono = FakeClock(50.0)
+    starter = FakeProcessStarter(mono, [ProcessPlan(runs_for_s=None)])
+    sleep = FakeSleep(mono)
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=wall,
+        monotonic=mono,
+        sleep=sleep,
+        send=FakeDaemon(mono),
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    assert result.exit_code == 0
+    assert len(sleep.calls) == 60
+    assert {event.time for event in read_events(paths.events_file)} == {START_TIME}
