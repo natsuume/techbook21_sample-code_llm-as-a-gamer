@@ -38,9 +38,9 @@ apply まで押したままにする。押し続けている (held にある) �
 方向は、例外にせず両方とも外して送る。
 
 送信先は set_report(report) を持つもの (ReportSender)。run では switch2_remote.bridge_supervisor.BridgeSupervisor、
-テストでは偽物を渡す。apply は surface のスレッド、start_due_taps・release_due_taps・start_due_holds・
-release_due_holds はタイマースレッド、neutral と stop_output は終了処理のスレッドから呼ぶため、状態の変更と送信は
-1 つのロックの中で行う。
+テストでは偽物を渡す。apply は surface のスレッドと本体の画面の操作のスレッド (system_screen.system_operation_runner)、
+start_due_taps・release_due_taps・start_due_holds・release_due_holds はタイマースレッド、neutral と stop_output は
+終了処理のスレッドから呼ぶため、状態の変更と送信は 1 つのロックの中で行う。
 """
 
 import logging
@@ -61,7 +61,11 @@ from switch2_remote.controller_state import (
 from switch2_layers.buttons import FilteredAction, filter_action
 from switch2_layers.error_text import describe_exception
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
-from switch2_layers.records.operation_log import OperationEvent, OperationSource
+from switch2_layers.records.operation_log import (
+    ApplySource,
+    OperationEvent,
+    OperationSource,
+)
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -176,6 +180,8 @@ class PadOutput:
         # 期限で離したボタン → 離した時刻 (押し続けを始める前に間をあけるため)
         self._deadline_released: dict[str, float] = {}
         self._last_error: str | None = None
+        # タイマーから呼ぶ 4 つの処理の送信が失敗した回数 (timer_send_failures)
+        self._timer_send_failures = 0
         self._output_stopped = False
         self._stop_timer = threading.Event()
         self._timer_thread: threading.Thread | None = None
@@ -186,12 +192,13 @@ class PadOutput:
             self._timer_thread.start()
 
     def apply(
-        self, action: PadAction, source: OperationSource = "apply"
+        self, action: PadAction, *, source: ApplySource = "apply"
     ) -> FilteredAction:
         """action をボタンの制限に通してから、押下状態を置き換えて送る。送った操作と、制限で外したボタンを返す。
 
-        source は、on_operation に渡す OperationEvent の source (送った処理)。既定は "apply" (surface の操作)。
-        Orchestrator 型の操作は "orchestrator" (主ループの操作) か "monitor" (監視の操作) を渡す。
+        source は記録 (OperationEvent と operations.jsonl の行の source) に入れる、送った処理の名前。surface の操作は
+        "apply" (既定)、本体の画面の操作 (system_screen.system_operation_runner) は "system"、Orchestrator 型の操作は
+        "orchestrator" (主ループの操作) か "monitor" (監視の操作)。source は記録だけに使い、送り方は変えない。
 
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す
@@ -336,7 +343,7 @@ class PadOutput:
                 return
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
                 return
             sent_at = self.clock()
             for button in started:
@@ -361,7 +368,7 @@ class PadOutput:
                 del self._tapping[button]
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             released_at = now if error is not None else self.clock()
             for button in due:
                 if button not in self._held.buttons:
@@ -395,7 +402,7 @@ class PadOutput:
             )
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             sent_at = now if error is not None else self.clock()
             self._set_hold_deadlines_locked(frozenset(started), started, sent_at)
 
@@ -423,7 +430,7 @@ class PadOutput:
             )
             error = self._send_locked()
             if error is not None:
-                self._last_error = describe_exception(error)
+                self._record_timer_send_failure_locked(error)
             released_at = now if error is not None else self.clock()
             for button in due:
                 # 短押しの最中のボタンは、このレポートでは離れていない
@@ -452,6 +459,22 @@ class PadOutput:
             self._output_stopped = True
             self._send_neutral_locked("stop")
 
+    def pressing_buttons(self) -> frozenset[str]:
+        """押している、または押す予定のボタンの集合を返す。
+
+        ロックの中で、held (押し続けているボタン。期限を過ぎてタイマーがまだ離していないものを含む)・tapping
+        (短押しの最中のボタン)・pending_taps (いったん離してから始める短押しのボタン)・pending_holds (間をあけてから
+        始める押し続けのボタン) の和集合を返す。スティックは含めない。どのボタンも押していなければ空の集合。
+        送ったボタンを実際に離し終えたか (タイマースレッドが離すレポートを送ったか) を確かめるのに使う。
+        """
+        with self._lock:
+            return (
+                self._held.buttons
+                | frozenset(self._tapping)
+                | frozenset(self._pending_taps)
+                | frozenset(self._pending_holds)
+            )
+
     @property
     def allowed_buttons(self) -> frozenset[str]:
         """押せるボタンの集合 (作るときに受け取ったもの)。"""
@@ -471,6 +494,18 @@ class PadOutput:
         最後の失敗の説明。無ければ None。"""
         with self._lock:
             return self._last_error
+
+    @property
+    def timer_send_failures(self) -> int:
+        """タイマーから呼ぶ 4 つの処理 (start_due_taps・release_due_taps・start_due_holds・release_due_holds) の
+        送信が失敗した回数 (作ったときは 0)。ロックの中で読む。
+
+        失敗するたびに 1 増え、減らさない。apply・neutral・stop_output の送信の失敗は数えない。last_error は最後の
+        失敗の説明だけを持つため、新しい失敗があったかは、この回数を前後で比べて確かめる (タイマーの離すレポートが
+        失敗すると、押下の記録からボタンを外しても、ブリッジ側では押されたままのことがある)。
+        """
+        with self._lock:
+            return self._timer_send_failures
 
     def close(self) -> None:
         """タイマースレッドを止め、終わるのを待つ。タイマースレッドが無ければ何もしない。レポートは送らない。"""
@@ -545,6 +580,14 @@ class PadOutput:
             logger.debug("set_report failed", exc_info=True)
             return error
         return None
+
+    def _record_timer_send_failure_locked(self, error: Exception) -> None:
+        """タイマーから呼ぶ処理の送信の失敗 error を、last_error に記録し、timer_send_failures を 1 増やす。
+
+        呼び出し側がロックを持つ。
+        """
+        self._last_error = describe_exception(error)
+        self._timer_send_failures += 1
 
     def _send_neutral_locked(self, source: OperationSource) -> None:
         """押下状態を空にして中立のレポートを送り、on_operation に知らせる。呼び出し側がロックを持つ。"""
