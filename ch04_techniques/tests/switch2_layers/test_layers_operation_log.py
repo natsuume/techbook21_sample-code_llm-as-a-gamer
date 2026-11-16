@@ -42,6 +42,25 @@ def test_operation_row():
     }
 
 
+def test_operation_log_writes_orchestrator_and_monitor_sources(tmp_path):
+    path = tmp_path / "operations.jsonl"
+    log = OperationLog(path, RunClock(FakeMonotonic(0.0)))
+    log.write(
+        OperationEvent(
+            source="orchestrator", action=PadAction(taps=frozenset({"A"})), ok=True
+        )
+    )
+    log.write(
+        OperationEvent(
+            source="monitor", action=PadAction(held=frozenset({"B"})), ok=True
+        )
+    )
+    rows = read_rows(path)
+    assert [row["source"] for row in rows] == ["orchestrator", "monitor"]
+    assert rows[0]["taps"] == ["A"]
+    assert rows[1]["held"] == ["B"]
+
+
 def test_operation_log_appends_rows(tmp_path):
     monotonic = FakeMonotonic(10.0)
     path = tmp_path / "operations.jsonl"

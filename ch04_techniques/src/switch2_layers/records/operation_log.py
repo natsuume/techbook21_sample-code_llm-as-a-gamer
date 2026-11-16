@@ -1,8 +1,10 @@
 """コントローラーに送った操作の記録 operations.jsonl。
 
-1 件を {"t", "source": "apply" | "neutral" | "stop", "held", "hold_seconds", "taps", "sticks", "ok", "error"} の
-1 行で追記する。
+1 件を {"t", "source": "apply" | "neutral" | "stop" | "orchestrator" | "monitor", "held", "hold_seconds", "taps",
+"sticks", "ok", "error"} の 1 行で追記する。
 hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent を on_operation に渡し、OperationLog.write が書く。
+Orchestrator 型の操作 (orchestrator.orchestrator_controller) は、PadOutput.apply で送るたびに、source を
+orchestrator か monitor にした OperationEvent を OperationLog.write に渡す。
 surface のスレッド (apply) と終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
 """
 
@@ -15,8 +17,9 @@ from switch2_layers.file_io import append_json_line
 from switch2_layers.pad_action import PadAction, action_to_json
 from switch2_layers.run_clock import RunClock
 
-# 操作を送った処理: apply (surface の操作)、neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)
-OperationSource = Literal["apply", "neutral", "stop"]
+# 操作を送った処理: apply (surface の操作)、neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)、
+# orchestrator (Orchestrator 型の主ループの操作)、monitor (Orchestrator 型の監視の操作)
+OperationSource = Literal["apply", "neutral", "stop", "orchestrator", "monitor"]
 
 
 @dataclass(frozen=True)
@@ -24,7 +27,8 @@ class OperationEvent:
     """コントローラーに送ろうとした 1 回分の操作。
 
     source   送った処理
-    action   送ろうとした操作 (apply ではボタンの制限を通した後の操作。neutral と stop では pad_action.NEUTRAL_ACTION)
+    action   送ろうとした操作 (apply・orchestrator・monitor ではボタンの制限を通した後の操作。neutral と stop では
+             pad_action.NEUTRAL_ACTION)
     ok       送信に成功したら True
     error    送信の失敗の説明。成功なら None
     """

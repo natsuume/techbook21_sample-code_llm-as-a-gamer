@@ -19,6 +19,8 @@
                                             (deep.claude_stream_log)
     progress/state.json                     画面の停滞の計測の最新の値 (progress.progress_state)。
                                             まだフレームが無いときは無い
+    orchestrator/monitor.jsonl              Orchestrator 型の監視が Jev に送った要求の記録 (orchestrator.monitor_record)。
+                                            monitor_record は、orchestrator/ が無ければ作ってから書く
 """
 
 from collections.abc import Collection
@@ -63,6 +65,9 @@ DEEP_DIR = "deep"
 # 画面の停滞の計測 (progress.progress_loop)
 PROGRESS_DIR = "progress"
 PROGRESS_STATE_FILE = "state.json"
+# Orchestrator 型の記録 (orchestrator/)
+ORCHESTRATOR_DIR = "orchestrator"
+ORCHESTRATOR_MONITOR_LOG_FILE = "monitor.jsonl"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
 
@@ -161,6 +166,16 @@ class RunPaths:
     def progress_state(self) -> Path:
         """root / PROGRESS_DIR / PROGRESS_STATE_FILE"""
         return self.root / PROGRESS_DIR / PROGRESS_STATE_FILE
+
+    @property
+    def orchestrator_dir(self) -> Path:
+        """root / ORCHESTRATOR_DIR"""
+        return self.root / ORCHESTRATOR_DIR
+
+    @property
+    def orchestrator_monitor_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE
 
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
