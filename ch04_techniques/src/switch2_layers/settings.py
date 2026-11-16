@@ -210,7 +210,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
-    --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
+    --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
+    surface は値の型 (SurfaceKind) で決まるため確かめない。
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
@@ -271,6 +272,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
         )
+    if not 0.0 <= settings.hold_margin <= 1.0:
+        errors.append(f"--hold-margin must be 0..1: {settings.hold_margin}")
     if not SAFETY_INTERVAL_MIN_S <= settings.safety_interval_s <= SAFETY_INTERVAL_MAX_S:
         errors.append(
             f"--safety-interval must be {SAFETY_INTERVAL_MIN_S:g}..{SAFETY_INTERVAL_MAX_S:g}: "

@@ -28,7 +28,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from switch2_remote.controller_state import BUTTON_ORDER
+from switch2_remote.controller_state import BUTTON_ORDER, DPAD_DIRECTIONS
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.safety.safety_rules import SAFETY_RULES
@@ -235,7 +235,7 @@ SURFACE_INSTRUCTIONS = (
     "前回の終了、今求めたときの扱い、surface が最後に求めた結果) です。\n"
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
-    "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
+    "- 操作の問い (ボタン・十字キー・スティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
     "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
 
@@ -337,7 +337,7 @@ def build_button_questions(allowed_buttons: Collection[str]) -> list[SurfaceQues
             choices=BUTTON_CHOICES,
         )
         for button in BUTTON_ORDER
-        if button in allowed_buttons
+        if button in allowed_buttons and button not in DPAD_DIRECTIONS
     ]
 
 
@@ -350,7 +350,24 @@ def build_dpad_questions() -> list[SurfaceQuestion]:
     (none は無い)、文は DPAD_PRESS_QUESTION_TEXT。
     どちらも target は DPAD_TARGET、型は choice。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=DPAD_DIRECTION_QUESTION_NAME,
+            instructions=DPAD_DIRECTION_QUESTION_TEXT,
+            kind=QuestionKind.DPAD_DIRECTION,
+            target=DPAD_TARGET,
+            question_type=QuestionType.CHOICE,
+            choices=DPAD_DIRECTION_CHOICES,
+        ),
+        SurfaceQuestion(
+            name=DPAD_PRESS_QUESTION_NAME,
+            instructions=DPAD_PRESS_QUESTION_TEXT,
+            kind=QuestionKind.DPAD_PRESS,
+            target=DPAD_TARGET,
+            question_type=QuestionType.CHOICE,
+            choices=DPAD_PRESS_CHOICES,
+        ),
+    ]
 
 
 def build_stick_direction_questions() -> list[SurfaceQuestion]:
@@ -518,6 +535,7 @@ def build_surface_questions(
     frame_path = latest_frame_path(frame_count)
     return (
         *build_button_questions(allowed_buttons),
+        *build_dpad_questions(),
         *build_stick_direction_questions(),
         *build_stick_strength_questions(),
         *build_advisor_questions(),

@@ -40,12 +40,15 @@ from switch2_layers.pad_action import PadAction
 from switch2_layers.surface.box_targets import BoxTarget
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
+    DPAD_DIRECTION_BUTTONS,
+    DPAD_PRESS_QUESTION_NAME,
+    HOLD_CHOICE,
     INFO_LABEL_NAMES,
     NONE_CHOICE,
-    PRESS_CHOICES,
     SCENE_CHANGE_QUESTION_NAME,
     STICK_AXIS_DIRECTIONS,
     STICK_STRENGTH_LEVELS,
+    TAP_CHOICE,
     QuestionKind,
     QuestionType,
     SurfaceQuestion,
@@ -96,26 +99,70 @@ def check_answers(
         raise ValueError(f"missing answers: {' '.join(missing)}")
 
 
-def adopt_buttons(
+def _is_greater(a: float, b: float) -> bool:
+    """a が b より大きく、同じ値 (probabilities_equal) でなければ True を返す。"""
+    return a > b and not probabilities_equal(a, b)
+
+
+def _is_hold(values: Mapping[str, float], hold_margin: float) -> bool:
+    """押し方の答え values (tap と hold の確率) から、押し続けにするなら True を返す (押し方の選び方)。
+
+    hold − tap が hold_margin より大きいときだけ True。同じ値 (probabilities_equal) なら False (短押し)。
+    """
+    return _is_greater(values[HOLD_CHOICE] - values[TAP_CHOICE], hold_margin)
+
+
+def _decide_buttons(
     choices: Mapping[str, Mapping[str, float]],
     questions: Sequence[SurfaceQuestion],
-) -> dict[str, tuple[str, float]]:
-    """ボタンの問いの答えから、押すボタン → (押し方の選択肢の名前, 押す側の合計) を返す (操作の決め方の 1)。
-
-    押し方の選択肢の名前は PRESS_CHOICES のどれか (tap・hold)。押さないボタンは入れない。
-    """
-    adopted: dict[str, tuple[str, float]] = {}
+    hold_margin: float,
+) -> tuple[set[str], set[str]]:
+    """ボタン (十字キー以外) の問いの答えから、(押し続けるボタン, 短押しのボタン) を返す (操作の決め方の 1)。"""
+    held: set[str] = set()
+    taps: set[str] = set()
     for question in questions:
         if question.kind is not QuestionKind.BUTTON:
             continue
         values = choices[question.name]
-        press_side = sum(values[choice] for choice in PRESS_CHOICES)
-        none = values[NONE_CHOICE]
-        if press_side > none and not probabilities_equal(press_side, none):
-            # max は最大の値のうち最初のものを返すので、同率なら PRESS_CHOICES の先 (短い方) になる
-            kind = max(PRESS_CHOICES, key=lambda choice: values[choice])
-            adopted[question.target] = (kind, press_side)
-    return adopted
+        if not _is_greater(
+            values[TAP_CHOICE] + values[HOLD_CHOICE], values[NONE_CHOICE]
+        ):
+            continue
+        (held if _is_hold(values, hold_margin) else taps).add(question.target)
+    return held, taps
+
+
+def _decide_dpad(
+    choices: Mapping[str, Mapping[str, float]],
+    questions: Sequence[SurfaceQuestion],
+    hold_margin: float,
+) -> tuple[set[str], set[str]]:
+    """十字キーの方向と押し方の問いの答えから、(押し続けるボタン, 短押しのボタン) を返す (操作の決め方の 2)。
+
+    押さないときは空の集合 2 つを返し、押し方の答えは見ない。
+    """
+    for question in questions:
+        if question.kind is not QuestionKind.DPAD_DIRECTION:
+            continue
+        values = choices[question.name]
+        directions = [
+            choice.name for choice in question.choices if choice.name != NONE_CHOICE
+        ]
+        if not _is_greater(
+            sum(values[name] for name in directions), values[NONE_CHOICE]
+        ):
+            return set(), set()
+        highest = max(values[name] for name in directions)
+        top = [
+            name for name in directions if probabilities_equal(values[name], highest)
+        ]
+        if len(top) > 1:
+            return set(), set()
+        buttons = set(DPAD_DIRECTION_BUTTONS[top[0]])
+        if _is_hold(choices[DPAD_PRESS_QUESTION_NAME], hold_margin):
+            return buttons, set()
+        return set(), buttons
+    return set(), set()
 
 
 def choose_direction(question: SurfaceQuestion, values: Mapping[str, float]) -> str:
@@ -189,7 +236,16 @@ def decide_pad_action(
     hold_seconds は空、left_stick と right_stick は decide_sticks の LS と RS。
     questions に無い ID と選択肢は無視する。
     """
-    raise NotImplementedError
+    check_answers(choices, nouls, questions)
+    button_held, button_taps = _decide_buttons(choices, questions, hold_margin)
+    dpad_held, dpad_taps = _decide_dpad(choices, questions, hold_margin)
+    sticks = decide_sticks(choices, nouls, questions)
+    return PadAction(
+        held=frozenset(button_held | dpad_held),
+        taps=frozenset(button_taps | dpad_taps),
+        left_stick=sticks.get("LS", (0.0, 0.0)),
+        right_stick=sticks.get("RS", (0.0, 0.0)),
+    )
 
 
 def decide_deep_kinds(
