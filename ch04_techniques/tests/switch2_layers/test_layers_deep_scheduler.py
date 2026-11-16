@@ -1512,6 +1512,28 @@ def test_check_progress_ignores_a_value_older_than_the_max_age(tmp_path):
     assert result is not None and result.started is True
 
 
+def test_check_progress_keeps_the_last_request_while_the_value_is_old(tmp_path):
+    # フレームの間隔 (20 秒) が PROGRESS_STATE_MAX_AGE_S より長く、各間隔の後半は値が古い
+    harness = make_scheduler(tmp_path)
+    harness.at(100.0)
+    harness.stuck_for(61.0)
+    assert harness.scheduler.check_progress().started is True
+    harness.threads.run_all()
+    for frame_t in [120.0, 140.0]:
+        # 値が古い間は判定を見送り、前回の要求の時刻を消さない
+        harness.at(frame_t - 5.0)
+        assert harness.scheduler.check_progress() is None
+        # 次のフレームの値が来ても、前回の要求から 60 秒たつまでは要求しない
+        harness.at(frame_t)
+        harness.stuck_for(frame_t - 39.0)
+        assert harness.scheduler.check_progress() is None
+    harness.at(160.0)
+    harness.stuck_for(121.0)
+    second = harness.scheduler.check_progress()
+    assert second is not None and second.started is True
+    assert len(run_rows(harness.root, "deep_start")) == 2
+
+
 def test_check_progress_uses_the_configured_threshold(tmp_path):
     harness = make_scheduler(tmp_path, stuck_advice_seconds=5.0)
     harness.at(10.0)

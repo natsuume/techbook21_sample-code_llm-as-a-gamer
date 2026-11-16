@@ -77,7 +77,7 @@ CLOSE_POLL_INTERVAL_S = 0.05
 SKIP_MIN_START_INTERVAL = "min_start_interval"
 # deep_skipped の reason: close の後に来た要求
 SKIP_CLOSED = "closed"
-# check_progress は、progress/state.json の t がこの秒数より前の値を、値が無いものとして扱う。
+# check_progress は、progress/state.json の t がこの秒数より前の値では判定を見送る。
 # フレームの保存か値の書き込みが止まったときに、しきい値を超えた古い値で advice を求め続けないため
 PROGRESS_STATE_MAX_AGE_S = 10.0
 
@@ -447,7 +447,8 @@ class DeepScheduler:
 
         判定は progress.stuck_advice_trigger.StuckAdviceTrigger (しきい値は settings.stuck_advice_seconds) で行う:
             1. state = parts.progress_state() (値が無ければ None)。now = clock.now() とし、now - state.t が
-               PROGRESS_STATE_MAX_AGE_S を超える state は None として扱う (ちょうどその秒数なら使う)
+               PROGRESS_STATE_MAX_AGE_S を超える state なら、StuckAdviceTrigger を呼ばずに None を返す
+               (ちょうどその秒数なら使う)。古い値は停滞が解けたことを示さないため、前回の要求の時刻を消さない
             2. advice の文書 (場面に依らない) のジョブが 1 つ以上実行中か (きっかけに依らない) を確かめる
             3. StuckAdviceTrigger.check(now, state の no_novel_s (state が None なら None), 実行中か) が
                True なら、request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None) を呼んで、その結果を返す。
@@ -463,7 +464,7 @@ class DeepScheduler:
         state = self.parts.progress_state()
         now = self.parts.clock.now()
         if state is not None and now - state.t > PROGRESS_STATE_MAX_AGE_S:
-            state = None
+            return None
         advice_key = document_key(DocumentKind.ADVICE, None)
         advice_running = self.is_running(advice_key)
         no_novel_s = None if state is None else state.no_novel_s
