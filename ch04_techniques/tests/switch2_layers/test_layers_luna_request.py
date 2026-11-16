@@ -562,6 +562,14 @@ def test_instructions_keep_first_task_text_unchanged():
     assert "続いているものは引き継ぎます" not in LUNA_DEVELOPER_INSTRUCTIONS
 
 
+def test_instructions_keep_first_task_short_enough_to_finish():
+    assert (
+        "\n- 各タスクは、画面で達成を確かめられる具体的な行動にします (例: 「- 右の扉に入る」"
+        "「- メニューを開いて所持品を確かめる」)。最初のタスクは、30 秒ほどで終えられる大きさに"
+        "します。遠くへの移動のように長くかかることは、途中の目印までの手順に分けます\n"
+    ) in LUNA_DEVELOPER_INSTRUCTIONS
+
+
 SURFACE_WAIT_SECTION_BODY = lines_of(
     [
         (
