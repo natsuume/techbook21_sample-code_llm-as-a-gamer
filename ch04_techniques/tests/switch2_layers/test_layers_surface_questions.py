@@ -3,12 +3,14 @@ import re
 import pytest
 from switch2_remote.controller_state import BUTTON_ORDER
 
+import switch2_layers.surface.surface_questions as surface_questions_module
 from switch2_layers.buttons import allowed_buttons
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, BoxTarget
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
     ADVISOR_QUESTION_TEXTS,
+    ADVISOR_STATUS_RULE_TEXT,
     BUTTON_CHOICES,
     HOLD_LONG_CHOICE,
     HOLD_LONG_SECONDS,
@@ -102,6 +104,25 @@ def test_instructions_say_that_action_and_other_questions_are_independent():
     assert "独立" in SURFACE_INSTRUCTIONS
     for key in ["`frames`", "`documents`", "`timeline`", "`recent_actions`"]:
         assert key in SURFACE_INSTRUCTIONS
+
+
+def test_instructions_explain_advisor_as_deep_status_per_document_kind():
+    assert "`advisor`" in SURFACE_INSTRUCTIONS
+    advisor_part = SURFACE_INSTRUCTIONS[SURFACE_INSTRUCTIONS.index("`advisor`") :]
+    assert "deep" in advisor_part
+    assert "状況" in advisor_part
+
+
+def advisor_rule(kind_value: str) -> str:
+    """種類の値 kind_value の advisor 判定の問いの文の末尾に足す共通の文を、定数を使わずに書いたもの。"""
+    return (
+        f"ただし、`advisor.{kind_value}` に実行中のジョブがあるとき、"
+        "または今求めると捨てられると書かれているときは偽にする。"
+    )
+
+
+def test_advisor_status_rule_text():
+    assert ADVISOR_STATUS_RULE_TEXT.format(kind="tips") == advisor_rule("tips")
 
 
 def test_latest_frame_path():
@@ -209,9 +230,43 @@ def test_advisor_questions_are_the_four_documents():
         "advice",
     ]
     for question, kind in zip(questions, ADVISOR_KINDS, strict=True):
-        assert question.instructions == ADVISOR_QUESTION_TEXTS[kind]
+        # 種類ごとの文の末尾に、間を空けずに共通の文を足す
+        assert question.instructions == (
+            ADVISOR_QUESTION_TEXTS[kind] + advisor_rule(kind.value)
+        )
         assert question.kind is QuestionKind.ADVISOR
         assert question.question_type is QuestionType.NOUL
+
+
+def test_advisor_question_texts_do_not_contain_the_common_rule():
+    # 共通の文は build_advisor_questions が足すので、種類ごとの文には書かない
+    for text in ADVISOR_QUESTION_TEXTS.values():
+        assert "ただし" not in text
+        assert "`advisor." not in text
+
+
+def test_advisor_rule_is_added_for_a_new_advisor_kind(monkeypatch):
+    monkeypatch.setattr(
+        surface_questions_module,
+        "ADVISOR_KINDS",
+        (*ADVISOR_KINDS, DocumentKind.MAP),
+    )
+    monkeypatch.setattr(
+        surface_questions_module,
+        "ADVISOR_QUESTION_TEXTS",
+        {**ADVISOR_QUESTION_TEXTS, DocumentKind.MAP: "マップの更新を求めるべきか。"},
+    )
+    questions = build_advisor_questions()
+    assert [question.target for question in questions] == [
+        "controls",
+        "tips",
+        "strategy",
+        "advice",
+        "map",
+    ]
+    assert questions[-1].instructions == (
+        "マップの更新を求めるべきか。" + advisor_rule("map")
+    )
 
 
 def test_info_label_questions_refer_to_latest_frame_by_path():

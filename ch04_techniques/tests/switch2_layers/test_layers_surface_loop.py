@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -9,6 +10,11 @@ import numpy as np
 import pytest
 from switch2_remote.controller_state import BUTTON_ORDER, NEUTRAL_REPORT
 
+from switch2_layers.deep.deep_scheduler import (
+    DeepDocumentStatus,
+    DeepJobEnd,
+    DeepJobStatus,
+)
 from switch2_layers.deep.deep_types import (
     DeepRequestResult,
     DeepTrigger,
@@ -36,6 +42,7 @@ from switch2_layers.surface.surface_loop import (
     surface_failure_reason,
 )
 from switch2_layers.surface.surface_questions import (
+    ADVISOR_KINDS,
     QuestionKind,
     QuestionType,
     SurfaceQuestion,
@@ -84,8 +91,18 @@ class FakeSender:
         return "ack"
 
 
+# FakeDeepSink.document_status が、statuses に無い種類について返す状況
+IDLE_STATUS = DeepDocumentStatus(
+    running_count=0,
+    latest_running_start_t=None,
+    last_end=None,
+    min_interval_remaining_s=0.0,
+    last_surface_request=None,
+)
+
+
 class FakeDeepSink:
-    """DeepRequestSink の偽物。受け取った要求を記録する。"""
+    """DeepRequestSink と DeepStatusReader の偽物。受け取った要求と、状況を読んだ種類と場面を記録する。"""
 
     def __init__(self):
         self.requests: list[tuple[DocumentKind, DeepTrigger, str | None]] = []
@@ -93,6 +110,10 @@ class FakeDeepSink:
         self.fail_for: dict[DocumentKind, Exception] = {}
         # 要求を記録した後に呼ぶ関数 (要求を処理する間に全体が止められた場合を作る)
         self.on_request: Callable[[], None] | None = None
+        # document_status が種類ごとに返す状況 (無い種類は IDLE_STATUS) と、例外を出す種類
+        self.statuses: dict[DocumentKind, DeepDocumentStatus] = {}
+        self.status_fail_for: dict[DocumentKind, Exception] = {}
+        self.status_calls: list[tuple[DocumentKind, str | None]] = []
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -103,6 +124,14 @@ class FakeDeepSink:
         if kind in self.fail_for:
             raise self.fail_for[kind]
         return DeepRequestResult(started=True)
+
+    def document_status(
+        self, kind: DocumentKind, scene_id: str | None
+    ) -> DeepDocumentStatus:
+        self.status_calls.append((kind, scene_id))
+        if kind in self.status_fail_for:
+            raise self.status_fail_for[kind]
+        return self.statuses.get(kind, IDLE_STATUS)
 
 
 class ScriptedDecider:
@@ -174,6 +203,7 @@ def make_harness(
         frame_store=store,
         pad_output=output,
         deep_requests=deep_sink,
+        deep_status=deep_sink,
         run_log=RunLog(paths.run_log, clock),
         clock=clock,
         bridge_state=lambda: bridge["state"],
@@ -449,6 +479,123 @@ def test_recent_actions_are_passed_to_next_request(tmp_path):
     assert recent[0].t == NOW
     # 記録するのは制限に通した後の操作
     assert recent[0].action == PadAction(held=frozenset({"B"}))
+
+
+# --- advisor の状況 (deep の呼び出しの状況) ---
+
+RUNNING_STATUS = dataclasses.replace(
+    IDLE_STATUS, running_count=2, latest_running_start_t=7.5
+)
+ENDED_STATUS = dataclasses.replace(
+    IDLE_STATUS,
+    last_end=DeepJobEnd(6.0, DeepJobStatus.FAILED),
+    min_interval_remaining_s=4.0,
+)
+
+
+def test_advisor_statuses_are_read_for_advisor_kinds_in_current_scene(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    harness.deep_sink.statuses = {
+        DocumentKind.TIPS: RUNNING_STATUS,
+        DocumentKind.ADVICE: ENDED_STATUS,
+    }
+    write_state(harness.root, scene_id="scene-003")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    # ADVISOR_KINDS の順に、middle/state.json の現在の場面で読む (map は問わない)
+    assert harness.deep_sink.status_calls == [
+        (kind, "scene-003") for kind in ADVISOR_KINDS
+    ]
+    statuses = decider.inputs[0].advisor_statuses
+    assert list(statuses) == list(ADVISOR_KINDS)
+    assert statuses == {
+        DocumentKind.CONTROLS: IDLE_STATUS,
+        DocumentKind.TIPS: RUNNING_STATUS,
+        DocumentKind.STRATEGY: IDLE_STATUS,
+        DocumentKind.ADVICE: ENDED_STATUS,
+    }
+    # 読み取りは deep の要求ではない
+    assert harness.deep_sink.requests == []
+
+
+def test_advisor_statuses_without_scene_use_no_scene(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    assert harness.deep_sink.status_calls == [(kind, None) for kind in ADVISOR_KINDS]
+
+
+def test_advisor_statuses_are_read_again_for_each_request(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    harness.deep_sink.statuses = {DocumentKind.STRATEGY: RUNNING_STATUS}
+    harness.monotonic.now = ORIGIN + NOW + 0.3
+    add_frames(harness, [10.2])
+    harness.loop.step()
+    assert len(harness.deep_sink.status_calls) == 2 * len(ADVISOR_KINDS)
+    assert decider.inputs[0].advisor_statuses[DocumentKind.STRATEGY] == IDLE_STATUS
+    assert decider.inputs[1].advisor_statuses[DocumentKind.STRATEGY] == (RUNNING_STATUS)
+
+
+def test_advisor_status_error_is_unreadable_without_counting_as_failure(
+    tmp_path, caplog
+):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider, max_errors=1)
+    harness.deep_sink.statuses = {DocumentKind.ADVICE: ENDED_STATUS}
+    harness.deep_sink.status_fail_for[DocumentKind.TIPS] = RuntimeError(
+        "status lock broken"
+    )
+    add_frames(harness, [9.9])
+    with caplog.at_level(logging.WARNING, logger="switch2_layers.surface.surface_loop"):
+        result = harness.loop.step()
+    # 例外を出した種類は None にし、残りの種類も読んで要求を続ける
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert harness.deep_sink.status_calls == [(kind, None) for kind in ADVISOR_KINDS]
+    assert decider.inputs[0].advisor_statuses == {
+        DocumentKind.CONTROLS: IDLE_STATUS,
+        DocumentKind.TIPS: None,
+        DocumentKind.STRATEGY: IDLE_STATUS,
+        DocumentKind.ADVICE: ENDED_STATUS,
+    }
+    # surface の失敗には数えず、全体も止めず、run.jsonl にも書かない。logging で警告を書く
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    assert any(
+        record.levelno == logging.WARNING
+        and record.name == "switch2_layers.surface.surface_loop"
+        for record in caplog.records
+    )
+
+
+def test_all_advisor_status_errors_still_send_the_request(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider, max_errors=1)
+    for kind in ADVISOR_KINDS:
+        harness.deep_sink.status_fail_for[kind] = OSError("broken")
+    add_frames(harness, [9.9])
+    for _ in range(2):
+        assert harness.loop.step().outcome is SurfaceStepOutcome.SENT
+    assert decider.inputs[-1].advisor_statuses == dict.fromkeys(ADVISOR_KINDS)
+    assert harness.stops == []
+
+
+def test_advisor_statuses_are_not_read_without_a_request(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    # フレームが無い
+    assert harness.loop.step().outcome is SurfaceStepOutcome.NO_FRAMES
+    # ブリッジの復旧中
+    add_frames(harness, [9.9])
+    harness.bridge["state"] = "recovering"
+    assert harness.loop.step().outcome is SurfaceStepOutcome.BRIDGE_NOT_READY
+    assert harness.deep_sink.status_calls == []
 
 
 def test_send_failure_is_recorded_without_counting_as_decide_error(tmp_path):

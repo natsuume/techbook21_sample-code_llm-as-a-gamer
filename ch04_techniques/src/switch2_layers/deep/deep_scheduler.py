@@ -13,8 +13,10 @@
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
   DeepRunner.stop を呼び (run.jsonl に deep_stop)、stop_grace_s 秒 (既定 5 秒) たっても run が戻らなければ
   DeepRunner.kill を呼ぶ (deep_end の status は killed)。stop の後に run が戻れば kill は呼ばない
+- 文書ごとの呼び出しの状況 (実行中のジョブ・前回の終了・最小間隔の残り・surface が最後に求めた結果) を
+  document_status で読める (surface が advisor 判定の state に入れる)。読み取りはジョブを起動せず、run.jsonl にも書かない
 時計 (RunClock)・スレッドの起動 (start_job_thread)・終了時の待ち (sleep) を注入でき、テストでは時間を進めて
-request・check_auto・check_timeouts・close を直接呼ぶ。
+request・check_auto・check_timeouts・close・document_status を直接呼ぶ。
 """
 
 import logging
@@ -97,6 +99,52 @@ class DeepJobOutcome:
 
     status: DeepJobStatus
     message: str
+
+
+@dataclass(frozen=True)
+class DeepJobEnd:
+    """文書の前回の終了 (DeepDocumentStatus.last_end)。
+
+    t        終わった t (run が戻った・kill した・スレッドを起動できなかった・ジョブのディレクトリーを用意できなかった時刻)
+    status   終わり方。ジョブのディレクトリーを用意できなかった request の失敗は DeepJobStatus.ERROR
+    """
+
+    t: float
+    status: DeepJobStatus
+
+
+@dataclass(frozen=True)
+class DeepRequestOutcome:
+    """要求 1 回の扱い (DeepDocumentStatus.last_surface_request)。
+
+    t         要求の t (request を呼んだときの clock.now())
+    started   ジョブを起動したら True、捨てたら False
+    reason    捨てた理由 (SKIP_MIN_START_INTERVAL か SKIP_CLOSED)。起動したら None
+    """
+
+    t: float
+    started: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DeepDocumentStatus:
+    """文書 1 つの deep の呼び出しの状況 (DeepScheduler.document_status の結果)。
+
+    running_count              実行中のジョブの数 (request で起動してから、run が戻るか kill するまで。stop を呼んで
+                               戻るのを待っているジョブも数える)
+    latest_running_start_t     実行中のジョブのうち、最も新しい起動の t。実行中が無ければ None
+    last_end                   前回の終了 (このスケジューラーで終わったジョブ、または request の失敗)。まだ無ければ None
+    min_interval_remaining_s   最小間隔の残りの秒数。前回の起動から min_start_interval_s 秒たっていなければその残り
+                               (0 より大きい)、たっていれば (前回の起動が無いときを含む) 0.0
+    last_surface_request       きっかけが surface の request の、最後の扱い (起動したか、捨てた理由)。まだ無ければ None
+    """
+
+    running_count: int
+    latest_running_start_t: float | None
+    last_end: DeepJobEnd | None
+    min_interval_remaining_s: float
+    last_surface_request: DeepRequestOutcome | None
 
 
 def execute_deep_job(runner: DeepRunner, job: DeepJob, job_dir: Path) -> DeepJobOutcome:
@@ -202,9 +250,10 @@ class _RunningJob:
 class DeepScheduler:
     """deep のジョブを起動し、止める。
 
-    request・check_auto・check_timeouts・close は複数のスレッドから呼んでよい (判断と記録は 1 つのロックの中で行う。
-    DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。
-    DeepRequestSink の実装。作ったときの t を、最初の対象の文書が対象になった時刻とする。
+    request・check_auto・check_timeouts・close・document_status は複数のスレッドから呼んでよい (判断と記録と読み取りは
+    1 つのロックの中で行う。DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。
+    DeepRequestSink と surface.surface_types.DeepStatusReader の実装。作ったときの t を、最初の対象の文書が対象になった
+    時刻とする。
     ジョブは request で起動してから、run が戻るか kill を呼ぶまで「実行中」に数える。
     """
 
@@ -245,18 +294,22 @@ class DeepScheduler:
            run_log に deep_start {"kind", "scene_id", "trigger", "job": 実行ディレクトリーからの相対パス} を書いてから、
            start_job_thread(ジョブの本体) を呼ぶ。DeepRequestResult(started=True, job_dir=ディレクトリー) を返す
         ジョブの本体: execute_deep_job(runner, job, job_dir) を呼ぶ。戻ったときに、そのジョブがまだ kill されていなければ、
-        実行中から外し、key の前回の終了の t を戻った時刻にして、run_log に deep_end {"kind", "scene_id", "trigger",
-        "job", "status", "message", "stop_reason": 止めた理由 (DeepStopReason の値。止めていなければ null)} を書く。
-        既に kill したジョブなら、戻り値を使わず何も書かない (deep_end は kill のときに書いてある)。
+        実行中から外し、key の前回の終了を (戻った時刻, 終わり方) にして、run_log に deep_end {"kind", "scene_id",
+        "trigger", "job", "status", "message", "stop_reason": 止めた理由 (DeepStopReason の値。止めていなければ null)} を
+        書く。既に kill したジョブなら、戻り値を使わず何も書かない (deep_end は kill のときに書いてある)。
         now は clock.now()。
-        失敗の扱い (どちらも、失敗を「key の前回のジョブの終了」と同じに扱い、key の前回の終了の t を now にする。
-        そのため自動の呼び出しは、失敗した時刻から auto_seconds の間、この文書を対象にしない):
+        trigger が DeepTrigger.SURFACE なら、2 と 3 で捨てたとき (deep_skipped を書いたとき) と、4 で起動したとき
+        (deep_start を書いたとき) に、key の surface の最後の要求を DeepRequestOutcome(now, started, 捨てた理由) にする
+        (document_status の last_surface_request)。ほかのきっかけの要求では変えない。
+        失敗の扱い (どちらも、失敗を「key の前回のジョブの終了」と同じに扱い、key の前回の終了を (now, DeepJobStatus.ERROR)
+        にする。そのため自動の呼び出しは、失敗した時刻から auto_seconds の間、この文書を対象にしない):
             - prepare_job_directory が例外 (Exception) を出したら (作りかけのディレクトリーは
-              deep_job_directory.create_job_directory が消す)、前回の終了の t を now にしてから、例外をそのまま出す。
-              前回の起動の t は変えず (最小間隔の判定に数えない)、run_log にも書かない (呼んだ側が記録する)
-            - start_job_thread が例外を出したら、key を実行中から外し、前回の終了の t を now にし、run_log に
+              deep_job_directory.create_job_directory が消す)、前回の終了を (now, ERROR) にしてから、例外をそのまま出す。
+              前回の起動の t は変えず (最小間隔の判定に数えない)、run_log にも書かない (呼んだ側が記録する)。
+              起動も捨てもしていないため、surface の最後の要求も変えない
+            - start_job_thread が例外を出したら、key を実行中から外し、前回の終了を (now, ERROR) にし、run_log に
               deep_end {..., "status": "error", "message": 説明, "stop_reason": null} を書いてから、例外をそのまま出す
-              (deep_start と対応させるため、ジョブのディレクトリーは残す)
+              (deep_start と対応させるため、ジョブのディレクトリーは残す。surface の最後の要求は、4 で起動したときのまま)
         """
         key = document_key(kind, scene_id)
         parts = self.parts
@@ -386,6 +439,27 @@ class DeepScheduler:
         """文書 key のジョブが 1 つ以上実行中なら True を返す。"""
         with self._lock:
             return any(running.job.key == key for running in self._running)
+
+    def document_status(
+        self, kind: DocumentKind, scene_id: str | None
+    ) -> DeepDocumentStatus:
+        """種類 kind の文書の deep の呼び出しの状況を返す (読み取りだけ)。
+
+        対象の文書は request と同じく key = notes.note_paths.document_key(kind, scene_id) (controls・tips は scene_id の
+        場面の文書、scene_id が None なら共通の文書。ほかの種類では scene_id を無視する)。now = clock.now() として、
+        ロックの中で次を読み、DeepDocumentStatus にする:
+            - running_count: key の実行中のジョブの数。latest_running_start_t: そのうち最も新しい起動の t
+              (実行中が無ければ running_count は 0、latest_running_start_t は None)
+            - last_end: key の前回の終了 DeepJobEnd(t, 終わり方) (request の docstring。ジョブの終わりでは、その時刻と
+              終わり方。request の失敗では、その時刻と DeepJobStatus.ERROR)。まだ無ければ None
+            - min_interval_remaining_s: key の前回の起動の t があり、remaining = min_start_interval_s - (now - 前回の起動の t)
+              が 0 より大きければ remaining、そうでなければ 0.0 (前回の起動が無いときも 0.0)。remaining が 0 より大きいのは、
+              今 request を呼べば最小間隔で捨てられるときと同じ
+            - last_surface_request: key の surface の最後の要求 (request の docstring)。まだ無ければ None
+        ジョブを起動せず、run.jsonl にも書かない。close の後も読める。
+        controls・tips で scene_id が場面 ID の形でなければ ValueError (document_key と同じ)。
+        """
+        raise NotImplementedError
 
     def start(self) -> None:
         """CHECK_INTERVAL_S ごとに check_timeouts を呼んでから check_auto を呼ぶスレッド (daemon) を起動する。
