@@ -23,7 +23,9 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
+from switch2_layers.file_io import append_json_line
 from switch2_layers.run_directory import RunPaths
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
@@ -95,12 +97,24 @@ def last_json_block(text: str | None) -> str | None:
     閉じたブロックのうち最後のものの中身を返す。記録 (turns.jsonl の response_json) のためだけに使い、JSON として
     読めるかは確かめない。
     """
-    raise NotImplementedError
+    if text is None:
+        return None
+    last: str | None = None
+    block: list[str] | None = None
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if JSON_FENCE_OPEN_PATTERN.fullmatch(line):
+            block = []
+        elif block is not None and FENCE_CLOSE_PATTERN.fullmatch(line):
+            last = "\n".join(block)
+            block = None
+        elif block is not None:
+            block.append(line)
+    return last
 
 
 def session_start_row(t: float, session: int, stream: str) -> dict[str, object]:
     """sessions.jsonl の開始の行 {"t", "event": "start", "session", "stream"} を返す。"""
-    raise NotImplementedError
+    return {"t": t, "event": SESSION_EVENT_START, "session": session, "stream": stream}
 
 
 def session_end_row(
@@ -114,12 +128,26 @@ def session_end_row(
 ) -> dict[str, object]:
     """sessions.jsonl の終了の行 {"t", "event": "end", "session", "reason", "usage_tokens", "returncode",
     "completed_turns", "error"} を返す (reason は値の文字列)。"""
-    raise NotImplementedError
+    return {
+        "t": t,
+        "event": SESSION_EVENT_END,
+        "session": session,
+        "reason": reason.value,
+        "usage_tokens": usage_tokens,
+        "returncode": returncode,
+        "completed_turns": completed_turns,
+        "error": error,
+    }
 
 
 def compact_row(t: float, session: int, metadata: object | None) -> dict[str, object]:
     """sessions.jsonl の要約の行 {"t", "event": "compact", "session", "metadata"} を返す。"""
-    raise NotImplementedError
+    return {
+        "t": t,
+        "event": SESSION_EVENT_COMPACT,
+        "session": session,
+        "metadata": metadata,
+    }
 
 
 def turn_row(record: TurnRecord) -> dict[str, object]:
@@ -128,7 +156,23 @@ def turn_row(record: TurnRecord) -> dict[str, object]:
     duration_s は t_result があれば round(t_result - t_sent, 3)、無ければ None。kind と outcome は値の文字列、images と
     errors はリスト (errors が None なら None) にする。
     """
-    raise NotImplementedError
+    duration_s = (
+        None if record.t_result is None else round(record.t_result - record.t_sent, 3)
+    )
+    return {
+        "session": record.session,
+        "turn": record.turn,
+        "kind": record.kind.value,
+        "t_sent": record.t_sent,
+        "t_result": record.t_result,
+        "duration_s": duration_s,
+        "input_text": record.input_text,
+        "images": list(record.images),
+        "response_json": record.response_json,
+        "errors": None if record.errors is None else list(record.errors),
+        "outcome": record.outcome.value,
+        "usage_tokens": record.usage_tokens,
+    }
 
 
 class SessionRecordWriter:
@@ -141,12 +185,20 @@ class SessionRecordWriter:
 
     def __init__(self, paths: RunPaths) -> None:
         """属性を持つ。ファイルはまだ作らない。"""
-        raise NotImplementedError
+        self.paths = paths
 
     def write_session(self, row: dict[str, object]) -> None:
         """sessions.jsonl に row を 1 行追記する。"""
-        raise NotImplementedError
+        self._append(self.paths.orchestrator_sessions_log, row)
 
     def write_turn(self, record: TurnRecord) -> None:
         """turns.jsonl に turn_row(record) を 1 行追記する。"""
-        raise NotImplementedError
+        self._append(self.paths.orchestrator_turns_log, turn_row(record))
+
+    def _append(self, path: Path, row: dict[str, object]) -> None:
+        """orchestrator/ を作ってから path に row を追記する。失敗は logging で警告を書いて外に出さない。"""
+        try:
+            self.paths.orchestrator_dir.mkdir(parents=True, exist_ok=True)
+            append_json_line(path, row)
+        except (OSError, ValueError):
+            logger.warning("failed to write %s", path, exc_info=True)

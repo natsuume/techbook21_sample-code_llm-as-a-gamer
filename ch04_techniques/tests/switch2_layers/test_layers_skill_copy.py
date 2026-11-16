@@ -6,6 +6,9 @@ import pytest
 import switch2_layers.orchestrator as orchestrator_package
 from switch2_layers.orchestrator.skill_copy import (
     DEFAULT_SWITCH_SKILLS_DIR,
+    INVALID_DESCRIPTION_REASON,
+    INVALID_NAME_REASON,
+    MALFORMED_FRONTMATTER_REASON,
     MISSING_KEYS_REASON,
     NO_FRONTMATTER_REASON,
     SHELL_COMMAND_REASON,
@@ -21,6 +24,8 @@ from switch2_layers.orchestrator.skill_copy import (
     copy_switch_skills,
     game_skills_source_dir,
     has_skill_shell_command,
+    is_plain_skill_description,
+    is_plain_skill_name,
     prepare_claude_skills_dir,
     read_skill_bytes,
 )
@@ -681,3 +686,159 @@ def test_game_skill_that_cannot_be_read_is_skipped_and_others_are_copied(tmp_pat
         (bad / "SKILL.md").chmod(0o644)
     assert result == GameSkillCopyResult(copied=("game-good",), skipped=())
     assert not (paths.claude_skills_dir / "game-bad").exists()
+
+
+# --- frontmatter の値の形 ---
+# Claude Code は frontmatter を YAML として読む。YAML で 1 つの文字列として読めない値のスキルを写すと、Claude Code が
+# スキルを読めず、その理由も Claude に届かないため、そのような値は写さずに理由を返す
+
+
+def frontmatter_text(name: str = "game-dialog", description: str = "d") -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n\n本文\n"
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        # 値の途中の ": " (YAML は値の区切りとして読む。タブも同じ)
+        "会話を進める: A を押す",
+        "会話を進める:\tA を押す",
+        # "#" の前の空白 (YAML はコメントの始まりとして読む)
+        "会話の枠 #メモ",
+        "会話の枠\t#メモ",
+        # ":" で終わる
+        "会話を進める:",
+        # YAML の指示子で始まる
+        "- 会話を進める",
+        "? 会話",
+        ": 会話",
+        ", 会話",
+        "[会話]",
+        "{会話}",
+        "#会話",
+        "&会話",
+        "*会話",
+        "!会話",
+        "|会話",
+        ">会話",
+        "'会話を進める'",
+        "%会話",
+        "@会話",
+        "`会話`",
+        # YAML が文字列でない値として読む語 (大文字と小文字を区別しない)
+        "true",
+        "False",
+        "YES",
+        "no",
+        "On",
+        "off",
+        "null",
+        "NULL",
+        "~",
+        # 数
+        "123",
+        "1_000",
+        "1.5",
+        "1e3",
+        "0x1F",
+        "0o17",
+        "0b101",
+        ".5",
+        ".inf",
+        ".NaN",
+        "1:30",
+        # " で囲んだ中に " か \ がある
+        '"会話を "進める""',
+        '"会話を\\進める"',
+        # 閉じていない "
+        '"会話を進める',
+    ],
+)
+def test_description_values_that_yaml_reads_differently_are_rejected(description):
+    assert is_plain_skill_description(description) is False
+    reason = check_game_skill_text(
+        "game-dialog", frontmatter_text(description=description)
+    )
+    assert reason == INVALID_DESCRIPTION_REASON
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        # " で囲めば、: や # を含んでも 1 つの文字列として読める
+        '"会話を進める: A を押す"',
+        '"会話の枠 #メモ"',
+        '"true"',
+        '"123"',
+        '"- 項目"',
+        # 引用符の無い、ふつうの文
+        "会話の枠が出たら A を押す",
+        "A を押す (会話を進める)",
+        "100 歩進む",
+        "会話:進める",
+        "メモ#1",
+        "truely",
+    ],
+)
+def test_description_values_read_as_one_string_pass(description):
+    assert is_plain_skill_description(description) is True
+    assert (
+        check_game_skill_text("game-dialog", frontmatter_text(description=description))
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["game-Dialog", "game-a_b", "game-", "game--x", "game-x-", "game-会話", "game-a.b"],
+)
+def test_names_that_are_not_plain_game_names_are_rejected(name):
+    # ディレクトリーの名前と同じでも、game- で始まり英小文字・数字・ハイフンだけの名前でなければ写さない
+    assert is_plain_skill_name(name) is False
+    assert check_game_skill_text(name, frontmatter_text(name=name)) == (
+        INVALID_NAME_REASON.format(name=name)
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["game-dialog-2", '"game-dialog-2"', "'game-dialog-2'"]
+)
+def test_name_may_be_plain_or_quoted(value):
+    assert is_plain_skill_name(value) is True
+    assert check_game_skill_text("game-dialog-2", frontmatter_text(name=value)) is None
+
+
+def test_key_without_a_space_before_the_value_is_rejected():
+    # YAML は `name:game-dialog` を欄と値ではなく 1 つの文字列として読む
+    text = "---\nname:game-dialog\ndescription: d\n---\n本文\n"
+    assert check_game_skill_text("game-dialog", text) == (
+        MALFORMED_FRONTMATTER_REASON.format(line="name:game-dialog")
+    )
+
+
+def test_quoted_empty_description_is_missing():
+    assert check_game_skill_text("game-dialog", frontmatter_text(description='""')) == (
+        MISSING_KEYS_REASON.format(keys="description")
+    )
+
+
+def test_reasons_tell_how_to_write_the_frontmatter():
+    assert 'description: "' in INVALID_DESCRIPTION_REASON
+    assert "name: game-" in INVALID_NAME_REASON
+
+
+def test_skill_with_a_description_yaml_reads_differently_is_reported(tmp_path):
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    write_skill_text(
+        paths.root / "notes" / "skills",
+        "game-dialog",
+        frontmatter_text(description="会話を進める: A を押す"),
+    )
+    assert copy_game_skills(paths) == GameSkillCopyResult(
+        copied=(),
+        skipped=(
+            SkippedGameSkill(name="game-dialog", reason=INVALID_DESCRIPTION_REASON),
+        ),
+    )
+    assert not (paths.claude_skills_dir / "game-dialog").exists()

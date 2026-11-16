@@ -57,6 +57,7 @@
       [shell command execution disabled by policy] に置き換わり、コマンドの出力は出ない
 """
 
+import json
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -66,9 +67,12 @@ from switch2_layers.deep.claude_code_command import (
     AGENTS_MD_PLUGIN_ID,
     CLAUDE_EXECUTABLE,
     HIDDEN_ENV_NAMES,
+    build_child_env,
+    rule_path,
 )
 from switch2_layers.run_directory import (
     CLAUDE_DIR,
+    CLAUDE_SKILLS_DIR,
     DEEP_DIR,
     FRAMES_DIR,
     FRAMES_LOG_FILE,
@@ -195,7 +199,14 @@ def build_allowed_rules(paths: RunPaths) -> list[str]:
     paths.root はシンボリックリンクを解決した絶対パスにする (呼び出し側が解決する)。paths.root が deep の
     claude_code_command.rule_path で RulePathError なら、そのまま出す。
     """
-    raise NotImplementedError
+    root = rule_path(paths.root)
+    return [
+        f"Read(/{root}/{FRAMES_DIR}/**)",
+        f"Read(/{root}/{NOTES_DIR}/**)",
+        f"Read(/{root}/{CLAUDE_DIR}/{CLAUDE_SKILLS_DIR}/**)",
+        f"Edit(/{root}/{NOTES_DIR}/**)",
+        "Skill",
+    ]
 
 
 def build_disallowed_rules(paths: RunPaths) -> list[str]:
@@ -207,7 +218,14 @@ def build_disallowed_rules(paths: RunPaths) -> list[str]:
         HIDDEN_DIRECTORY の項目   Read(/R/<名前>/**)
     READABLE の項目のルールは作らない。paths.root が RulePathError なら、そのまま出す。
     """
-    raise NotImplementedError
+    root = rule_path(paths.root)
+    rules = list(DISALLOWED_TOOL_NAMES)
+    for name, access in ROOT_ENTRY_ACCESS.items():
+        if access is RootEntryAccess.HIDDEN_FILE:
+            rules.append(f"Read(/{root}/{name})")
+        elif access is RootEntryAccess.HIDDEN_DIRECTORY:
+            rules.append(f"Read(/{root}/{name}/**)")
+    return rules
 
 
 def build_session_settings(parent_skill_names: Collection[str]) -> dict[str, object]:
@@ -220,7 +238,12 @@ def build_session_settings(parent_skill_names: Collection[str]) -> dict[str, obj
     parent_skill_names は、実行ディレクトリーの親のディレクトリーのスキルの名前
     (orchestrator.parent_skill_names.find_parent_skill_names の結果)。
     """
-    raise NotImplementedError
+    hidden = sorted({*parent_skill_names, *BUNDLED_SKILLS_TO_HIDE})
+    return {
+        **SESSION_SETTINGS_BASE,
+        "skillOverrides": {name: SKILL_OFF for name in hidden},
+        "crossSessionInbound": CROSS_SESSION_INBOUND,
+    }
 
 
 def session_settings_json(parent_skill_names: Collection[str]) -> str:
@@ -228,7 +251,11 @@ def session_settings_json(parent_skill_names: Collection[str]) -> str:
 
     json.dumps(…, ensure_ascii=False, separators=(",", ":"))。
     """
-    raise NotImplementedError
+    return json.dumps(
+        build_session_settings(parent_skill_names),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def autocompact_arguments(rotate_tokens: int) -> list[str]:
@@ -240,7 +267,15 @@ def autocompact_arguments(rotate_tokens: int) -> list[str]:
     を返す (この場合の起動は実際には確かめていない)。AUTOCOMPACT_MAX_TOKENS 以上なら、rotate_tokens より大きい値を
     渡せないため ValueError にする。rotate_tokens が 1 未満でも ValueError にする。
     """
-    raise NotImplementedError
+    if rotate_tokens < 1:
+        raise ValueError(f"rotate tokens must be 1 or more: {rotate_tokens}")
+    if rotate_tokens >= AUTOCOMPACT_MAX_TOKENS:
+        raise ValueError(
+            f"rotate tokens must be less than {AUTOCOMPACT_MAX_TOKENS}: {rotate_tokens}"
+        )
+    if rotate_tokens < AUTO_COMPACT_START_TOKENS:
+        return []
+    return ["--autocompact", str(AUTOCOMPACT_MAX_TOKENS)]
 
 
 def build_session_command(
@@ -269,7 +304,37 @@ def build_session_command(
     --dangerously-skip-permissions・--allow-dangerously-skip-permissions・--restricted・--safe-mode・--bare・
     --add-dir・--mcp-config・--plugin-dir・--plugin-url・--agents・--agent は付けない。
     """
-    raise NotImplementedError
+    if not instructions or instructions.startswith("-"):
+        raise ValueError("instructions must not be empty or start with '-'")
+    return [
+        options.executable,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        options.model,
+        "--effort",
+        options.effort,
+        "--permission-mode",
+        ORCHESTRATOR_PERMISSION_MODE,
+        "--setting-sources",
+        ORCHESTRATOR_SETTING_SOURCES,
+        "--strict-mcp-config",
+        "--settings",
+        session_settings_json(parent_skill_names),
+        "--tools",
+        ",".join(ORCHESTRATOR_TOOLS),
+        "--allowedTools",
+        ",".join(build_allowed_rules(paths)),
+        "--disallowedTools",
+        ",".join(build_disallowed_rules(paths)),
+        "--append-system-prompt",
+        instructions,
+        *autocompact_arguments(rotate_tokens),
+    ]
 
 
 def build_session_env(
@@ -281,4 +346,5 @@ def build_session_env(
     PARENT_SESSION_ENV_NAMES・SETTING_OVERRIDE_ENV_NAMES) と、AUTH_ENV_NAMES を除いた新しい辞書を返す
     (environ は変えない)。ほかの変数 (CLAUDE_CODE_OAUTH_TOKEN・CLAUDE_CONFIG_DIR・HOME・PATH など) は残す。
     """
-    raise NotImplementedError
+    env = build_child_env(environ, hidden_names)
+    return {name: value for name, value in env.items() if name not in AUTH_ENV_NAMES}

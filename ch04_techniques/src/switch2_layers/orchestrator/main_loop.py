@@ -18,23 +18,86 @@
 偽の stream-json を返すプロセスと、時間を進められる時計を使う。
 """
 
+import logging
+import os
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from switch2_layers.orchestrator.claude_session_command import ClaudeSessionOptions
+from switch2_layers.deep.claude_stream_log import assistant_text, is_result_message
+from switch2_layers.error_text import describe_exception
+from switch2_layers.frames.frame_store import read_frame_records
+from switch2_layers.notes.note_reader import read_note_text
+from switch2_layers.orchestrator.claude_session_command import (
+    ClaudeSessionOptions,
+    autocompact_arguments,
+    build_session_command,
+    build_session_env,
+)
 from switch2_layers.orchestrator.claude_stream_session import (
     SESSION_CLOSE_GRACE_S,
+    ClaudeStreamSession,
+    SessionLaunch,
+    StreamEnd,
     StreamProcessStarter,
 )
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
 from switch2_layers.orchestrator.orchestrator_events import OrchestratorEvents
-from switch2_layers.orchestrator.skill_copy import DEFAULT_SWITCH_SKILLS_DIR
-from switch2_layers.records.run_log import RunLog
+from switch2_layers.orchestrator.orchestrator_instructions import (
+    HANDOFF_NOTE,
+    handoff_request_text,
+    orchestrator_instructions,
+)
+from switch2_layers.orchestrator.parent_skill_names import find_parent_skill_names
+from switch2_layers.orchestrator.session_record import (
+    SessionEndReason,
+    SessionRecordWriter,
+    TurnKind,
+    TurnOutcome,
+    TurnRecord,
+    compact_row,
+    last_json_block,
+    session_end_row,
+    session_start_row,
+)
+from switch2_layers.orchestrator.skill_copy import (
+    DEFAULT_SWITCH_SKILLS_DIR,
+    SkippedGameSkill,
+    copy_game_skills,
+    copy_switch_skills,
+    prepare_claude_skills_dir,
+)
+from switch2_layers.orchestrator.stream_messages import (
+    assistant_usage_tokens,
+    compact_metadata,
+    is_compact_boundary,
+)
+from switch2_layers.orchestrator.turn_input import (
+    SessionOpening,
+    TurnContext,
+    build_session_opening_text,
+    build_turn_content,
+    build_turn_text,
+    carry_over_events,
+    list_note_files,
+    read_turn_images,
+    select_turn_frames,
+)
+from switch2_layers.progress.progress_state import read_progress_state
+from switch2_layers.records.run_log import (
+    EVENT_ORCHESTRATOR_DECISION_ERROR,
+    EVENT_ORCHESTRATOR_SESSION_END,
+    EVENT_ORCHESTRATOR_SESSION_START,
+    RunLog,
+)
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 DEFAULT_ROTATE_TOKENS = 120_000  # --rotate-tokens の既定値
 DEFAULT_TURN_TIMEOUT_S = 120.0  # --turn-timeout の既定値 (秒)
@@ -136,6 +199,57 @@ class OrchestratorMainLoopParts:
     switch_skills_dir: Path = field(default=DEFAULT_SWITCH_SKILLS_DIR)
 
 
+class _TurnEnd(Enum):
+    """1 ターンを待ち終えた理由 (_wait_for_result の結果)。"""
+
+    RESULT = "result"  # result の行が届いた
+    STOPPED = "stopped"  # 停止の合図が立った
+    TIMEOUT = "timeout"  # 入力を送ってから turn_timeout_s 秒たった
+    ENDED = "ended"  # 標準出力が終わった (子プロセスが終わった)
+
+
+@dataclass
+class _SentTurn:
+    """送った入力 1 つ (result を待っているターン)。
+
+    number        セッションの中の番号 (1 始まり)
+    kind          ふつうのターンか、引き継ぎの依頼か
+    t_sent        送った時刻
+    input_text    送ったテキスト
+    images        送った画像の実行ディレクトリーからの相対パス
+    events        その入力に載せた出来事 (引き継ぎの依頼では None)。result を受け取れなければ繰り越す
+    last_text     そのターンの最後の assistant の文 (まだ無ければ None)
+    """
+
+    number: int
+    kind: TurnKind
+    t_sent: float
+    input_text: str
+    images: tuple[str, ...]
+    events: OrchestratorEvents | None
+    last_text: str | None = None
+
+
+@dataclass
+class _OpenSession:
+    """開いているセッション 1 つ。
+
+    number            セッションの番号 (1 始まり)
+    stream            claude の子プロセス
+    usage_tokens      最後に読んだ assistant の行の使用量
+    turn_count        送った入力の数 (次の入力の番号は turn_count + 1)
+    completed_turns   result を受け取ったターンの数 (引き継ぎの依頼を含む)
+    previous_sent_t   前の入力を送った時刻。まだ送っていなければ None
+    """
+
+    number: int
+    stream: ClaudeStreamSession
+    usage_tokens: int = 0
+    turn_count: int = 0
+    completed_turns: int = 0
+    previous_sent_t: float | None = None
+
+
 class OrchestratorMainLoop:
     """Orchestrator 型の主ループ。run は 1 つのスレッド (主ループのスレッド) から 1 回だけ呼ぶ。set_started は
     ほかのスレッドから呼んでよい。
@@ -218,14 +332,46 @@ class OrchestratorMainLoop:
         claude_session_command.autocompact_arguments が受け付けない値、turn_timeout_s が 0 以下、
         max_decision_errors が 1 未満、close_grace_s が負。
         """
-        raise NotImplementedError
+        if settings.rotate_tokens < 1:
+            raise ValueError(
+                f"rotate tokens must be 1 or more: {settings.rotate_tokens}"
+            )
+        autocompact_arguments(settings.rotate_tokens)
+        if settings.turn_timeout_s <= 0:
+            raise ValueError(
+                f"turn timeout must be more than 0 seconds: {settings.turn_timeout_s}"
+            )
+        if settings.max_decision_errors < 1:
+            raise ValueError(
+                f"max decision errors must be 1 or more: {settings.max_decision_errors}"
+            )
+        if settings.close_grace_s < 0:
+            raise ValueError(
+                f"close grace must not be negative: {settings.close_grace_s}"
+            )
+        self.parts = parts
+        self.settings = settings
+        self._records = SessionRecordWriter(parts.paths)
+        self._started = threading.Event()
+        self._session_number = 0
+        # 開いているセッション (想定外の例外で抜けるときに終えるため)
+        self._open: _OpenSession | None = None
+        # JSON の誤りが続いた回数と、前のターンの JSON の誤り
+        self._decision_errors = 0
+        self._previous_error: DecisionError | None = None
+        # 最初のターンの result を受け取る前に終わったセッションが続いた回数
+        self._session_failures = 0
+        # result を受け取れなかった入力に載せた出来事 (次の入力に繰り越す)
+        self._carried_events: OrchestratorEvents | None = None
+        # 最後にゲームの内容のスキルを写したときに、写さなかったスキル
+        self._skipped_skills: tuple[SkippedGameSkill, ...] = ()
 
     def set_started(self) -> None:
         """実行を始めるときの安全の確かめが通ったことを伝える。これが呼ばれるまで、run は claude を起動しない。
 
         2 回目以降の呼び出しは何もしない。
         """
-        raise NotImplementedError
+        self._started.set()
 
     def run(self, stop: threading.Event) -> None:
         """主ループの本体 (クラスの docstring の流れ)。stop が立ったら、開いているセッションを終えて (理由 close) 戻る。
@@ -233,4 +379,333 @@ class OrchestratorMainLoop:
         set_started が呼ばれるまで、START_POLL_S 秒ごとに stop を確かめながら待つ。その間に stop が立ったら、
         何もせずに (claude を起動せず、記録も書かずに) 戻る。
         """
-        raise NotImplementedError
+        while not self._started.wait(START_POLL_S):
+            if stop.is_set():
+                return
+        try:
+            while not stop.is_set():
+                if not self._run_session(stop):
+                    return
+        except Exception as error:
+            logger.warning("orchestrator main loop failed", exc_info=True)
+            if self._open is not None:
+                try:
+                    self._end_session(self._open, SessionEndReason.CLOSE)
+                except Exception:
+                    logger.warning("failed to close the claude session", exc_info=True)
+            self.parts.on_stop(main_loop_failure_reason(describe_exception(error)))
+
+    def _run_session(self, stop: threading.Event) -> bool:
+        """セッションを 1 つ始めて、終わるまで動かす。主ループを続けるなら True、戻るなら False を返す。"""
+        session = self._start_session()
+        if session is None:
+            return self._count_session_failure()
+        turn = self._send_turn(session, first=True)
+        while True:
+            if turn is None:
+                # 入力を送れなかった: 子プロセスが終わったものとして終える
+                return self._end_unfinished_session(session, SessionEndReason.EXIT)
+            end = self._wait_for_result(session, turn, stop)
+            if end is _TurnEnd.STOPPED:
+                self._write_turn(session, turn, None, None, TurnOutcome.STOPPED)
+                self._end_session(session, SessionEndReason.CLOSE)
+                return False
+            if end is not _TurnEnd.RESULT:
+                return self._finish_cut_turn(session, turn, end)
+            session.completed_turns += 1
+            if session.completed_turns == 1:
+                self._session_failures = 0
+            self._skipped_skills = copy_game_skills(self.parts.paths).skipped
+            if turn.kind is TurnKind.HANDOFF:
+                self._write_turn(
+                    session, turn, self.parts.clock.now(), None, TurnOutcome.HANDOFF
+                )
+                self._end_session(session, SessionEndReason.ROTATE)
+                return True
+            if not self._apply_result(session, turn):
+                self._end_session(session, SessionEndReason.CLOSE)
+                return False
+            if stop.is_set():
+                self._end_session(session, SessionEndReason.CLOSE)
+                return False
+            if session.usage_tokens > self.settings.rotate_tokens:
+                turn = self._send_handoff_request(session)
+            else:
+                turn = self._send_turn(session, first=False)
+
+    def _start_session(self) -> _OpenSession | None:
+        """セッションの流れの 1 (始める)。起動できなければ終了の行を書いて None を返す。"""
+        parts = self.parts
+        paths = parts.paths
+        self._session_number += 1
+        number = self._session_number
+        paths.orchestrator_session_dir(number).mkdir(parents=True, exist_ok=True)
+        prepare_claude_skills_dir(paths)
+        copy_switch_skills(parts.switch_skills_dir, paths)
+        self._skipped_skills = copy_game_skills(paths).skipped
+        run_dir = paths.root.resolve()
+        command = build_session_command(
+            RunPaths(run_dir),
+            orchestrator_instructions(),
+            find_parent_skill_names(run_dir),
+            parts.claude,
+            self.settings.rotate_tokens,
+        )
+        environ = parts.environ if parts.environ is not None else os.environ
+        env = build_session_env(environ, parts.claude.hidden_env_names)
+        stream_path = paths.orchestrator_session_stream(number)
+        stream = ClaudeStreamSession(
+            SessionLaunch(command=command, cwd=run_dir, env=env),
+            stream_path,
+            parts.clock.now,
+            start_process=parts.start_process,
+            signal_process_group=parts.signal_process_group,
+        )
+        try:
+            stream.start()
+        except OSError as error:
+            logger.warning("could not start claude", exc_info=True)
+            self._write_session_end(
+                number,
+                SessionEndReason.EXIT,
+                usage_tokens=0,
+                returncode=None,
+                completed_turns=0,
+                error=describe_exception(error),
+            )
+            return None
+        session = _OpenSession(number=number, stream=stream)
+        self._open = session
+        self._records.write_session(
+            session_start_row(parts.clock.now(), number, paths.relative(stream_path))
+        )
+        parts.run_log.write(EVENT_ORCHESTRATOR_SESSION_START, session=number)
+        return session
+
+    def _send_turn(self, session: _OpenSession, first: bool) -> _SentTurn | None:
+        """ふつうのターンの入力を作って送り、送ったターンを返す。送れなければ出来事を繰り越して None を返す。
+
+        first なら、セッションの開始の節を付け、画像を最新の 1 枚にする (セッションの流れの 2)。
+        """
+        parts = self.parts
+        paths = parts.paths
+        events = carry_over_events(self._carried_events, parts.controller.take_events())
+        self._carried_events = None
+        now = parts.clock.now()
+        text = build_turn_text(
+            TurnContext(
+                now_t=now,
+                events=events,
+                progress=read_progress_state(paths.progress_state),
+                previous_error=self._previous_error,
+                skipped_skills=self._skipped_skills,
+            )
+        )
+        if first:
+            opening = SessionOpening(
+                initial_instruction=parts.initial_instruction,
+                note_files=list_note_files(paths.notes_dir),
+                handoff_text=read_note_text(paths.notes_dir, HANDOFF_NOTE),
+            )
+            text = f"{build_session_opening_text(opening)}\n{text}"
+        frames = select_turn_frames(
+            read_frame_records(paths), None if first else session.previous_sent_t, now
+        )
+        images = read_turn_images(paths, frames)
+        turn = _SentTurn(
+            number=session.turn_count + 1,
+            kind=TurnKind.TURN,
+            t_sent=now,
+            input_text=text,
+            images=tuple(image.file for image in images),
+            events=events,
+        )
+        if not session.stream.send(build_turn_content(text, images)):
+            self._carried_events = events
+            return None
+        session.turn_count = turn.number
+        session.previous_sent_t = now
+        return turn
+
+    def _send_handoff_request(self, session: _OpenSession) -> _SentTurn | None:
+        """引き継ぎの依頼 (テキストだけ) を送り、送ったターンを返す。送れなければ None を返す。"""
+        now = self.parts.clock.now()
+        text = handoff_request_text()
+        turn = _SentTurn(
+            number=session.turn_count + 1,
+            kind=TurnKind.HANDOFF,
+            t_sent=now,
+            input_text=text,
+            images=(),
+            events=None,
+        )
+        if not session.stream.send(build_turn_content(text, [])):
+            return None
+        session.turn_count = turn.number
+        session.previous_sent_t = now
+        return turn
+
+    def _wait_for_result(
+        self, session: _OpenSession, turn: _SentTurn, stop: threading.Event
+    ) -> _TurnEnd:
+        """ターンの result を待つ (セッションの流れの 3)。届いた行から、最後の文・使用量・要約の印を読む。"""
+        clock = self.parts.clock
+        while True:
+            if stop.is_set():
+                return _TurnEnd.STOPPED
+            if clock.now() - turn.t_sent >= self.settings.turn_timeout_s:
+                return _TurnEnd.TIMEOUT
+            item = session.stream.read(READ_POLL_S)
+            if item is None:
+                continue
+            if isinstance(item, StreamEnd):
+                return _TurnEnd.ENDED
+            data = item.data
+            text = assistant_text(data)
+            if text is not None:
+                turn.last_text = text
+            tokens = assistant_usage_tokens(data)
+            if tokens is not None:
+                session.usage_tokens = tokens
+            if is_compact_boundary(data):
+                self._records.write_session(
+                    compact_row(clock.now(), session.number, compact_metadata(data))
+                )
+            if is_result_message(data):
+                return _TurnEnd.RESULT
+
+    def _apply_result(self, session: _OpenSession, turn: _SentTurn) -> bool:
+        """ふつうのターンの result の後に、最後の文を parse_decision に渡して apply し、turns.jsonl に書く。
+
+        JSON の誤りが続いた回数が max_decision_errors に達したら、on_stop を呼んで False を返す (セッションは
+        呼び出し側が終える)。そうでなければ True を返す。
+        """
+        parts = self.parts
+        decision = parts.parse_decision(turn.last_text or "")
+        t_result = parts.clock.now()
+        if isinstance(decision, Decision):
+            parts.controller.apply(decision)
+            self._decision_errors = 0
+            self._previous_error = None
+            self._write_turn(session, turn, t_result, None, TurnOutcome.APPLIED)
+            return True
+        self._decision_errors += 1
+        self._previous_error = decision
+        parts.run_log.write(
+            EVENT_ORCHESTRATOR_DECISION_ERROR,
+            session=session.number,
+            count=self._decision_errors,
+            errors=list(decision.messages),
+        )
+        self._write_turn(
+            session, turn, t_result, decision.messages, TurnOutcome.INVALID
+        )
+        if self._decision_errors >= self.settings.max_decision_errors:
+            parts.on_stop(decision_failure_reason(self._decision_errors))
+            return False
+        return True
+
+    def _finish_cut_turn(
+        self, session: _OpenSession, turn: _SentTurn, end: _TurnEnd
+    ) -> bool:
+        """result を受け取れずに打ち切ったターン (timeout か、子プロセスの終わり) を記録し、セッションを終える。
+
+        ふつうのターンなら、その入力に載せた出来事を繰り越す。理由は timeout か exit (引き継ぎの依頼のターンなら
+        rotate)。主ループを続けるなら True を返す。
+        """
+        outcome = TurnOutcome.TIMEOUT if end is _TurnEnd.TIMEOUT else TurnOutcome.EXITED
+        self._write_turn(session, turn, None, None, outcome)
+        if turn.kind is TurnKind.HANDOFF:
+            reason = SessionEndReason.ROTATE
+        else:
+            self._carried_events = turn.events
+            reason = (
+                SessionEndReason.TIMEOUT
+                if end is _TurnEnd.TIMEOUT
+                else SessionEndReason.EXIT
+            )
+        return self._end_unfinished_session(session, reason)
+
+    def _end_unfinished_session(
+        self, session: _OpenSession, reason: SessionEndReason
+    ) -> bool:
+        """result を待たずにセッションを終え、最初のターンを終えていなければ失敗に数える。続けるなら True を返す。"""
+        self._end_session(session, reason)
+        if session.completed_turns == 0:
+            return self._count_session_failure()
+        return True
+
+    def _count_session_failure(self) -> bool:
+        """最初のターンを終えずに終わったセッションを数える。上限に達したら on_stop を呼んで False を返す。"""
+        self._session_failures += 1
+        if self._session_failures >= MAX_SESSION_FAILURES:
+            self.parts.on_stop(session_failure_reason(self._session_failures))
+            return False
+        return True
+
+    def _end_session(self, session: _OpenSession, reason: SessionEndReason) -> None:
+        """子プロセスを終わらせ、sessions.jsonl と run.jsonl に終了を書く。"""
+        returncode = session.stream.close(self.settings.close_grace_s)
+        self._open = None
+        self._write_session_end(
+            session.number,
+            reason,
+            usage_tokens=session.usage_tokens,
+            returncode=returncode,
+            completed_turns=session.completed_turns,
+            error=None,
+        )
+
+    def _write_session_end(
+        self,
+        number: int,
+        reason: SessionEndReason,
+        usage_tokens: int,
+        returncode: int | None,
+        completed_turns: int,
+        error: str | None,
+    ) -> None:
+        """sessions.jsonl に終了の行、run.jsonl に orchestrator_session_end を書く。"""
+        self._records.write_session(
+            session_end_row(
+                self.parts.clock.now(),
+                number,
+                reason,
+                usage_tokens,
+                returncode,
+                completed_turns,
+                error,
+            )
+        )
+        self.parts.run_log.write(
+            EVENT_ORCHESTRATOR_SESSION_END,
+            session=number,
+            reason=reason.value,
+            returncode=returncode,
+            usage_tokens=usage_tokens,
+        )
+
+    def _write_turn(
+        self,
+        session: _OpenSession,
+        turn: _SentTurn,
+        t_result: float | None,
+        errors: tuple[str, ...] | None,
+        outcome: TurnOutcome,
+    ) -> None:
+        """turns.jsonl に、turn の行を書く。"""
+        self._records.write_turn(
+            TurnRecord(
+                session=session.number,
+                turn=turn.number,
+                kind=turn.kind,
+                t_sent=turn.t_sent,
+                t_result=t_result,
+                input_text=turn.input_text,
+                images=turn.images,
+                response_json=last_json_block(turn.last_text),
+                errors=errors,
+                outcome=outcome,
+                usage_tokens=session.usage_tokens,
+            )
+        )

@@ -16,7 +16,10 @@
 記録するだけで、主ループの判断には使わない。
 """
 
+import json
 from collections.abc import Mapping, Sequence
+
+from switch2_layers.deep.claude_stream_log import ASSISTANT_MESSAGE_TYPE
 
 # 自動の要約の印の行の type と subtype
 SYSTEM_MESSAGE_TYPE = "system"
@@ -34,7 +37,14 @@ def user_message_line(content: Sequence[Mapping[str, object]]) -> str:
 
     json.dumps(…, ensure_ascii=False)。content のブロックは渡された順のまま入れる。content が空なら ValueError。
     """
-    raise NotImplementedError
+    if not content:
+        raise ValueError("user message content must not be empty")
+    message = {
+        "type": "user",
+        "message": {"role": "user", "content": [dict(block) for block in content]},
+        "parent_tool_use_id": None,
+    }
+    return json.dumps(message, ensure_ascii=False) + "\n"
 
 
 def assistant_usage_tokens(data: object) -> int | None:
@@ -44,14 +54,33 @@ def assistant_usage_tokens(data: object) -> int | None:
     object でないときは None を返す。主ループは、最後に読んだ None でない値を、そのセッションの使用量にする
     (足し合わせない)。
     """
-    raise NotImplementedError
+    if not isinstance(data, dict) or data.get("type") != ASSISTANT_MESSAGE_TYPE:
+        return None
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    for key in USAGE_TOKEN_KEYS:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
 
 
 def is_compact_boundary(data: object) -> bool:
     """data が object で、type が SYSTEM_MESSAGE_TYPE、subtype が COMPACT_BOUNDARY_SUBTYPE なら True を返す。"""
-    raise NotImplementedError
+    return (
+        isinstance(data, dict)
+        and data.get("type") == SYSTEM_MESSAGE_TYPE
+        and data.get("subtype") == COMPACT_BOUNDARY_SUBTYPE
+    )
 
 
 def compact_metadata(data: object) -> object | None:
     """compact_boundary の行 data の compact_metadata の値を返す。無ければ (行の形が合わないときを含む) None。"""
-    raise NotImplementedError
+    if not is_compact_boundary(data) or not isinstance(data, dict):
+        return None
+    return data.get("compact_metadata")

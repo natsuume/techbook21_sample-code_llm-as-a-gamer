@@ -28,4 +28,21 @@ def find_parent_skill_names(run_dir: Path) -> tuple[str, ...]:
     たどる) <名前> を集める。run_dir は絶対パス (シンボリックリンクを解決したもの) を渡す。
     .claude/skills/ が無い親は飛ばす。ディレクトリーの一覧を読めない (OSError) 親も飛ばす (例外は出さない)。
     """
-    raise NotImplementedError
+    names: set[str] = set()
+    for parent in run_dir.parents:
+        names.update(_skill_names_in(parent / SKILLS_RELATIVE_DIR))
+    return tuple(sorted(names))
+
+
+def _skill_names_in(skills_dir: Path) -> list[str]:
+    """skills_dir の直下の、SKILL_FILE があるディレクトリーの名前を返す。一覧を読めなければ空のリスト。"""
+    try:
+        if not skills_dir.is_dir():
+            return []
+        return [
+            child.name
+            for child in skills_dir.iterdir()
+            if (child / SKILL_FILE).is_file()
+        ]
+    except OSError:
+        return []

@@ -178,6 +178,13 @@ def test_instructions_state_the_rules_for_copying_game_skills():
     assert sentences_with(text, ("写さなかったスキル",))
 
 
+def test_instructions_show_how_to_write_the_skill_frontmatter():
+    # frontmatter は name: game-<名前> と description: "<どの場面で使うか>" の 2 行で書く
+    assert sentences_with(
+        orchestrator_instructions(), ("name: game-", 'description: "')
+    )
+
+
 def test_handoff_request_asks_for_the_handoff_note_and_json_without_actions():
     text = handoff_request_text()
     assert f"notes/{HANDOFF_NOTE}" in text

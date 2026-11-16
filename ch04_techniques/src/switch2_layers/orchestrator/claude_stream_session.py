@@ -13,11 +13,20 @@ deep.claude_stream_log の関数で行い、このモジュールはプロセス
 同じ形)。
 """
 
+import json
 import logging
+import os
+import queue
+import signal
+import subprocess
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol
+
+from switch2_layers.deep.claude_stream_log import ClaudeStreamLog
+from switch2_layers.orchestrator.stream_messages import user_message_line
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -113,7 +122,24 @@ class ClaudeStreamSession:
         signal_process_group: Callable[[int, int], None] | None = None,
     ) -> None:
         """属性を持つ。子プロセスはまだ起動しない。"""
-        raise NotImplementedError
+        self.launch = launch
+        self.stream_path = stream_path
+        self._clock = clock
+        self._start_process = start_process
+        self._signal_process_group = (
+            signal_process_group if signal_process_group is not None else os.killpg
+        )
+        self._started = False
+        self._process: StreamProcess | None = None
+        self._stream_log: ClaudeStreamLog | None = None
+        self._started_at = 0.0
+        self._items: queue.Queue[StreamLine | StreamEnd] = queue.Queue()
+        self._ended = False
+        self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_text = ""
+        self._closed = False
+        self._close_code: int | None = None
 
     def start(self) -> None:
         """子プロセスを起動し、標準出力と標準エラー出力を読むスレッドを起動する。
@@ -127,7 +153,40 @@ class ClaudeStreamSession:
         StreamEnd() を入れる。経過秒は clock() と、起動した直後の clock() の差。
         2 回目の呼び出しは RuntimeError にする。
         """
-        raise NotImplementedError
+        if self._started:
+            raise RuntimeError("the claude session has already been started")
+        self._started = True
+        stream_log = ClaudeStreamLog(self.stream_path)
+        start_process = (
+            self._start_process if self._start_process is not None else subprocess.Popen
+        )
+        try:
+            process = start_process(
+                self.launch.command,
+                cwd=self.launch.cwd,
+                env=self.launch.env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=True,
+            )
+        except OSError:
+            stream_log.close()
+            raise
+        self._started_at = self._clock()
+        self._process = process
+        self._stream_log = stream_log
+        self._stdout_thread = threading.Thread(
+            target=self._read_stdout, name="claude-session-stdout", daemon=True
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._read_stderr, name="claude-session-stderr", daemon=True
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
 
     def send(self, content: Sequence[Mapping[str, object]]) -> bool:
         """標準入力に orchestrator.stream_messages.user_message_line(content) を書いて flush し、書けたら True を返す。
@@ -135,7 +194,16 @@ class ClaudeStreamSession:
         子プロセスが既に終わっていて書けないとき (BrokenPipeError を含む OSError、閉じた標準入力の ValueError) は、
         例外を出さずに False を返す。start の前と close の後は False を返す。
         """
-        raise NotImplementedError
+        process = self._process
+        if process is None or self._closed or process.stdin is None:
+            return False
+        try:
+            process.stdin.write(user_message_line(content))
+            process.stdin.flush()
+        except (OSError, ValueError):
+            logger.info("failed to write to the stdin of claude", exc_info=True)
+            return False
+        return True
 
     def read(self, timeout_s: float) -> StreamLine | StreamEnd | None:
         """標準出力の次の行を、最大 timeout_s 秒待って返す。
@@ -143,7 +211,15 @@ class ClaudeStreamSession:
         行が届いていれば StreamLine、標準出力が終わっていれば StreamEnd を返す。timeout_s 秒のうちに何も届かなければ
         None を返す。キューに残った行は、StreamEnd より先に、届いた順に返す。start の前は StreamEnd を返す。
         """
-        raise NotImplementedError
+        if self._process is None or self._ended:
+            return StreamEnd()
+        try:
+            item = self._items.get(timeout=max(timeout_s, 0.0))
+        except queue.Empty:
+            return None
+        if isinstance(item, StreamEnd):
+            self._ended = True
+        return item
 
     def close(self, grace_s: float = SESSION_CLOSE_GRACE_S) -> int | None:
         """子プロセスを終わらせ、終了コードを返す。
@@ -159,14 +235,105 @@ class ClaudeStreamSession:
         終わった後に、標準出力を読むスレッドの終わりを最大 READER_JOIN_TIMEOUT_S 秒待ち、ClaudeStreamLog を閉じる。
         start の前に呼んだら何もせずに None を返す。2 回目以降の呼び出しは、1 回目と同じ値を返す (何もしない)。
         """
-        raise NotImplementedError
+        process = self._process
+        if process is None:
+            return None
+        if self._closed:
+            return self._close_code
+        self._closed = True
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        code = _wait_for(process, grace_s)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if code is not None:
+                break
+            self._send_signal(process, sig)
+            code = _wait_for(process, grace_s)
+        if code is None:
+            logger.warning(
+                "claude (process group %s) did not end after SIGKILL", process.pid
+            )
+        for thread in (self._stdout_thread, self._stderr_thread):
+            if thread is not None:
+                thread.join(READER_JOIN_TIMEOUT_S)
+        if self._stream_log is not None:
+            self._stream_log.close()
+        self._close_code = code
+        return code
 
     @property
     def returncode(self) -> int | None:
         """子プロセスの終了コード。起動していないか、まだ終わっていなければ None。"""
-        raise NotImplementedError
+        if self._process is None:
+            return None
+        return self._process.returncode
 
     @property
     def stderr_text(self) -> str:
         """標準エラー出力のうち、読み終えた分 (close の後は最後まで)。"""
-        raise NotImplementedError
+        return self._stderr_text
+
+    def _read_stdout(self) -> None:
+        """標準出力を読むスレッドの本体 (start の docstring)。読む失敗は logging に書き、StreamEnd を入れて終わる。"""
+        process = self._process
+        stream_log = self._stream_log
+        try:
+            if process is not None and process.stdout is not None:
+                for line in process.stdout:
+                    elapsed_s = self._clock() - self._started_at
+                    if stream_log is not None:
+                        stream_log.add_line(line, elapsed_s)
+                    self._items.put(
+                        StreamLine(
+                            data=_parse_line(line), elapsed_s=round(elapsed_s, 3)
+                        )
+                    )
+        except (OSError, ValueError):
+            logger.warning("failed to read the stdout of claude", exc_info=True)
+        finally:
+            self._items.put(StreamEnd())
+
+    def _read_stderr(self) -> None:
+        """標準エラー出力を最後まで読むスレッドの本体。読めなければ logging に書く。"""
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        try:
+            self._stderr_text = process.stderr.read()
+        except (OSError, ValueError):
+            logger.warning("failed to read the stderr of claude", exc_info=True)
+
+    def _send_signal(self, process: StreamProcess, sig: int) -> None:
+        """終わっていない process のプロセスグループに sig を送る。既に無いグループは無視し、ほかの OSError は警告を書く。"""
+        if process.poll() is not None:
+            return
+        try:
+            self._signal_process_group(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            logger.warning(
+                "failed to send signal %s to the process group %s",
+                sig,
+                process.pid,
+                exc_info=True,
+            )
+
+
+def _wait_for(process: StreamProcess, timeout_s: float) -> int | None:
+    """process の終わりを最大 timeout_s 秒待ち、終了コードを返す。終わらなければ None。"""
+    try:
+        return process.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _parse_line(line: str) -> object | None:
+    """行 (末尾の改行を除く) を JSON として読んだ値を返す。読めなければ None。"""
+    try:
+        return json.loads(line.rstrip("\r\n"))
+    except ValueError:
+        return None
