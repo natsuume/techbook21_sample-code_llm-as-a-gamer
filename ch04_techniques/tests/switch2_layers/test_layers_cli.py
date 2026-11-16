@@ -665,7 +665,7 @@ def stub_hardware_and_app(monkeypatch) -> list:
             return REASON_INTERRUPTED
 
     monkeypatch.setattr(cli, "BridgeSupervisor", lambda **kwargs: StubSupervisor())
-    monkeypatch.setattr(cli, "Capture", lambda *args: StubCapture())
+    monkeypatch.setattr(cli, "Capture", lambda *args, **kwargs: StubCapture())
     monkeypatch.setattr(cli, "SwitchCaptureReader", lambda capture: object())
     monkeypatch.setattr(cli, "LayersApp", StubApp)
     return created
@@ -1145,7 +1145,7 @@ class FakeBridgeSupervisor:
 class FakeCapture:
     """switch2_remote.capture.Capture の偽物 (実機に触れない)。"""
 
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         pass
 
     def close(self) -> None:
@@ -1202,6 +1202,51 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
     )
     assert len(parts_seen) == 1
     assert isinstance(parts_seen[0].deep, runner_type)
+
+
+def test_run_starts_the_bridge_and_capture_in_new_sessions(monkeypatch):
+    # 最初の Ctrl+C の SIGINT がブリッジと ffmpeg に届かないよう、どちらも新しいセッションで起動する
+    supervisor_kwargs: list[dict] = []
+    capture_kwargs: list[dict] = []
+
+    class RecordingSupervisor(FakeBridgeSupervisor):
+        def __init__(self, **kwargs):
+            supervisor_kwargs.append(kwargs)
+
+    class RecordingCapture(FakeCapture):
+        def __init__(self, *args, **kwargs):
+            capture_kwargs.append(kwargs)
+
+    class FakeLayersApp:
+        def __init__(self, settings, parts):
+            pass
+
+        def run(self) -> str:
+            return REASON_INTERRUPTED
+
+    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+    monkeypatch.setattr(cli, "BridgeSupervisor", RecordingSupervisor)
+    monkeypatch.setattr(cli, "Capture", RecordingCapture)
+    monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
+    assert (
+        main([*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
+    )
+    assert [kwargs["start_bridge"] for kwargs in supervisor_kwargs] == [
+        cli.start_isolated_bridge
+    ]
+    assert capture_kwargs == [{"new_session": True}]
+
+
+def test_start_isolated_bridge_starts_the_bridge_in_a_new_session(monkeypatch):
+    bridge_kwargs: list[dict] = []
+
+    class RecordingBridge:
+        def __init__(self, **kwargs):
+            bridge_kwargs.append(kwargs)
+
+    monkeypatch.setattr(cli, "Bridge", RecordingBridge)
+    assert isinstance(cli.start_isolated_bridge(), RecordingBridge)
+    assert bridge_kwargs == [{"new_session": True}]
 
 
 # --- --safety (安全の監視) ---

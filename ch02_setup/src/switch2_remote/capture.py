@@ -39,10 +39,12 @@ class Capture:
         process_fps   間引いて残すフレームレート。set_process_fps で変える
     """
 
-    def __init__(self, ffmpeg_fps: int, process_fps: int):
+    def __init__(self, ffmpeg_fps: int, process_fps: int, new_session: bool = False):
         """ffmpeg.exe を起動し、フレームの読み取りと stderr の読み捨てのスレッドを始める。
 
         最新フレームの時刻には time.monotonic() を使う。
+        new_session が True なら、ffmpeg を新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の
+        SIGINT が ffmpeg に届かなくなるため、呼び出し側は Ctrl+C の後も撮影を続けられる。ffmpeg は close で終わらせる。
         """
         cmd, frame_bytes = build_command(
             find_ffmpeg(),
@@ -57,6 +59,7 @@ class Capture:
             stderr=subprocess.PIPE,
             bufsize=8 << 20,
             cwd="/mnt/c",
+            start_new_session=new_session,
         )
         self.frame_bytes = frame_bytes
         self.ffmpeg_fps = ffmpeg_fps

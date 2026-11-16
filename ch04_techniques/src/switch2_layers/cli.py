@@ -545,6 +545,15 @@ def create_system_screen_middle(
     return LunaSystemScreenMiddle(api_key=api_key, screen_names=SYSTEM_SCREEN_NAMES)
 
 
+def start_isolated_bridge() -> Bridge:
+    """ブリッジを新しいセッションで起動して返す (controller_bridge.Bridge(new_session=True))。
+
+    run の BridgeSupervisor の start_bridge に渡し、最初の起動にも起動し直しにも使う。最初の Ctrl+C の SIGINT が
+    ブリッジに届かないので、片付けの操作を送れる。
+    """
+    return Bridge(new_session=True)
+
+
 def run_command(args: argparse.Namespace) -> int:
     """run の処理。終了コードを返す。
 
@@ -562,10 +571,12 @@ def run_command(args: argparse.Namespace) -> int:
        system_middle = create_system_screen_middle(settings.middle, os.environ)
     5. surface.surface_assembly.build_surface_assembly(settings, surface の API キー) で surface の部品を作り、
        safety.safety_assembly.build_safety_assembly(settings.safety, 安全の監視の API キー) で安全の監視の部品を作る
-    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
+    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=start_isolated_bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
+    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True) を作る
+    6 と 7 は、ブリッジと ffmpeg を新しいセッションで起動する。最初の Ctrl+C の SIGINT は端末の前面のプロセスグループの
+    すべてに届くため、同じグループのままだとブリッジと ffmpeg も終わり、片付けの操作を送れないため
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
        bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
        deep=build_deep_runner(settings.deep), safety=安全の監視の部品の checker, system_middle=4 の system_middle,
@@ -631,14 +642,14 @@ def _run_with_hardware(
     """
     try:
         supervisor = BridgeSupervisor(
-            start_bridge=Bridge, reset_radio=reset_bluetooth_radio
+            start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio
         )
     except BridgeStartError as error:
         print(str(error), file=sys.stderr)
         return 1
     capture: Capture | None = None
     try:
-        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS)
+        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True)
         parts = LayersParts(
             frame_reader=SwitchCaptureReader(capture),
             report_sender=supervisor,

@@ -163,6 +163,7 @@ def popen_calls(monkeypatch):
     class Calls:
         def __init__(self):
             self.args: list[list[str]] = []
+            self.kwargs: list[dict] = []
             self.processes: list[StartedProcess] = []
             self.stdout_lines = ["ready COM3 1700000000000\n"]
 
@@ -175,6 +176,7 @@ def popen_calls(monkeypatch):
 
     def fake_popen(args, **kwargs):
         calls.args.append(list(args))
+        calls.kwargs.append(kwargs)
         process = StartedProcess(calls.stdout_lines)
         calls.processes.append(process)
         return process
@@ -197,6 +199,17 @@ BRIDGE_COMMAND = [
 def test_bridge_starts_powershell_with_bridge_script_only(popen_calls):
     Bridge()
     assert popen_calls.args == [BRIDGE_COMMAND]
+
+
+def test_bridge_stays_in_the_same_session_by_default(popen_calls):
+    Bridge()
+    assert [kwargs["start_new_session"] for kwargs in popen_calls.kwargs] == [False]
+
+
+def test_bridge_starts_in_a_new_session_when_asked(popen_calls):
+    # 端末の Ctrl+C の SIGINT がブリッジに届かないようにする
+    Bridge(new_session=True)
+    assert [kwargs["start_new_session"] for kwargs in popen_calls.kwargs] == [True]
 
 
 def test_bridge_does_not_take_keep_sending_neutral_option(popen_calls):
