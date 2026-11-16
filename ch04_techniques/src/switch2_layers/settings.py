@@ -19,6 +19,8 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
+from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
+from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
 
 
@@ -112,6 +114,11 @@ class RunSettings:
     box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
                                 (--box-requery-every、既定 5。1 以上)
     deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
+    progress_window_s           画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数)
+                                (--progress-window、既定 300。0 より大きい有限の値)
+    stuck_advice_seconds        新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で求める。
+                                超えたまま続く間は、この秒数ごとに求める (--stuck-advice-seconds、既定 60。
+                                0 より大きい有限の値)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -130,6 +137,8 @@ class RunSettings:
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
     deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
+    progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
+    stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)

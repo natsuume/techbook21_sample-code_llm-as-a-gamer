@@ -14,6 +14,7 @@ from switch2_layers.middle.middle_input_builder import (
 from switch2_layers.middle.middle_types import MiddleState
 from switch2_layers.notes.map_document import MapConnection, MapDocument, MapPlace
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.run_directory import RunPaths
 
 STATE = {
@@ -579,3 +580,28 @@ def test_map_symlinked_to_outside_of_notes_is_passed_as_no_map(tmp_path):
     middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
     assert middle_input.map_document is None
     assert middle_input.place_names == ("庭",)
+
+
+# --- 画面の停滞の計測 (progress/state.json) ---
+
+
+def test_progress_is_read_from_progress_state_file(tmp_path):
+    root = make_run(tmp_path)
+    # まだ値が無い
+    assert (
+        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
+    )
+    (root / "progress").mkdir()
+    (root / "progress" / "state.json").write_text(
+        json.dumps({"t": 19.8, "static_s": 4.0, "no_novel_s": 75.5, "window_s": 300.0}),
+        encoding="utf-8",
+    )
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.progress == ProgressState(
+        t=19.8, static_s=4.0, no_novel_s=75.5, window_s=300.0
+    )
+    # 壊れていれば値が無いものとして扱い、middle の実行は失敗にしない
+    (root / "progress" / "state.json").write_text("{broken", encoding="utf-8")
+    assert (
+        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
+    )

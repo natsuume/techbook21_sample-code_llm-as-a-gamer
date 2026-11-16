@@ -19,6 +19,7 @@ from typing import Protocol
 from switch2_layers.notes.map_document import MapConnection, MapDocument
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
 
 
 class ObservationKind(StrEnum):
@@ -113,6 +114,8 @@ class MiddleInput:
                              並べたもの。既定値の空のタプルは、マップを渡さない入力 (テストなど) のため
     map_document             notes/map/map.json の全体 (notes.map_document.read_map_document)。無い・読めない・形に
                              合わないときは None (マップなし)。既定値の None は、マップを渡さない入力 (テストなど) のため
+    progress                 画面の停滞の計測の最新の値 (progress/state.json。progress.progress_state.read_progress_state)。
+                             無い・読めないときは None。既定値の None は、値を渡さない入力 (テストなど) のため
     """
 
     t: float
@@ -129,6 +132,7 @@ class MiddleInput:
     current_controls: str = ""
     place_names: tuple[str, ...] = ()
     map_document: MapDocument | None = None
+    progress: ProgressState | None = None
 
 
 @dataclass(frozen=True)

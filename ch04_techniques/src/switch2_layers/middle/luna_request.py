@@ -57,6 +57,7 @@ from switch2_layers.middle.record_summary import (
 )
 from switch2_layers.notes.map_document import MapDocument, map_document_to_json
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.progress.progress_state import ProgressState
 
 LUNA_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
@@ -131,6 +132,17 @@ def describe_map_document(document: MapDocument | None) -> str:
     if document is None:
         return NO_MAP_TEXT
     return json.dumps(map_document_to_json(document), ensure_ascii=False)
+
+
+def describe_progress(progress: ProgressState | None) -> str:
+    """画面の停滞 (コードの計測) の節の中身を返す。
+
+    progress が None (値が無い) なら progress.progress_text.NO_PROGRESS_TEXT。そうでなければ次の行の文:
+        計測した時刻: t=<progress.t>                     t は format_frame_label の形
+        画面が変わっていない: <static_s> 秒                     ここから 2 行は
+        直近 <window_s> 秒に見た画面だけが出ている: <no_novel_s> 秒     progress_text.describe_progress_values
+    """
+    raise NotImplementedError
 
 
 def describe_previous_state(state: MiddleState | None) -> str:

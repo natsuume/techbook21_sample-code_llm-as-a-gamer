@@ -20,6 +20,7 @@ from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
 from switch2_layers.frames.surface_frames import BoxDrawingPlan, build_surface_image
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
+from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
@@ -347,6 +348,28 @@ def test_scene_documents_timeline_and_wait_come_from_middle_state(tmp_path):
     assert result.row["uses_common"] == {"controls": False, "tips": True}
     assert result.row["middle_generated_t"] == 8.5
     assert result.row["wait_s"] == 1.5
+
+
+def test_progress_comes_from_progress_state_file(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    # まだ値が無い (progress/state.json が無い)
+    harness.loop.step()
+    assert decider.inputs[0].progress is None
+    (harness.root / "progress").mkdir()
+    (harness.root / "progress" / "state.json").write_text(
+        json.dumps({"t": 9.8, "static_s": 1.5, "no_novel_s": 70.25, "window_s": 300.0}),
+        encoding="utf-8",
+    )
+    harness.loop.step()
+    assert decider.inputs[1].progress == ProgressState(
+        t=9.8, static_s=1.5, no_novel_s=70.25, window_s=300.0
+    )
+    # 壊れていれば値が無いものとして扱う
+    (harness.root / "progress" / "state.json").write_text("{broken", encoding="utf-8")
+    harness.loop.step()
+    assert decider.inputs[2].progress is None
 
 
 def test_wait_out_of_range_is_clamped(tmp_path):

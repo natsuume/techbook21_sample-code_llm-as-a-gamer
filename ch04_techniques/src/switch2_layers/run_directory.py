@@ -15,6 +15,8 @@
     deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
                                             Claude Code で動かしたジョブには stream.jsonl・result.json も置く
                                             (deep.claude_stream_log)
+    progress/state.json                     画面の停滞の計測の最新の値 (progress.progress_state)。
+                                            まだフレームが無いときは無い
 """
 
 from collections.abc import Collection
@@ -54,6 +56,9 @@ MIDDLE_CALLS_FILE = "calls.jsonl"
 # middle のマップの記録 (middle.map_records)
 MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
 DEEP_DIR = "deep"
+# 画面の停滞の計測 (progress.progress_loop)
+PROGRESS_DIR = "progress"
+PROGRESS_STATE_FILE = "state.json"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
 
@@ -132,6 +137,16 @@ class RunPaths:
     def deep_dir(self) -> Path:
         """root / DEEP_DIR"""
         return self.root / DEEP_DIR
+
+    @property
+    def progress_dir(self) -> Path:
+        """root / PROGRESS_DIR"""
+        return self.root / PROGRESS_DIR
+
+    @property
+    def progress_state(self) -> Path:
+        """root / PROGRESS_DIR / PROGRESS_STATE_FILE"""
+        return self.root / PROGRESS_DIR / PROGRESS_STATE_FILE
 
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""

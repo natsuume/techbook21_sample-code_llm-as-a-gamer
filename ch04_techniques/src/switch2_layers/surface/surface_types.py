@@ -6,6 +6,7 @@ from typing import Protocol
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction
+from switch2_layers.progress.progress_state import ProgressState
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,8 @@ class SurfaceInput:
     timeline               系列情報 (middle/state.json の timeline)。ファイルが無ければ空文字列
     timeline_generated_t   系列情報を作った時刻 (middle/state.json の generated_t)。ファイルが無ければ None
     recent_actions         直近に送った操作 (古い順。最大 surface_loop.RECENT_ACTIONS_COUNT 件)
+    progress               画面の停滞の計測の最新の値 (progress/state.json)。ファイルが無いか読めなければ None。
+                           既定値の None は、値を渡さない入力 (フェイクやテストなど) のため
     """
 
     t: float
@@ -74,6 +77,7 @@ class SurfaceInput:
     timeline: str
     timeline_generated_t: float | None
     recent_actions: tuple[RecentAction, ...]
+    progress: ProgressState | None = None
 
 
 @dataclass(frozen=True)

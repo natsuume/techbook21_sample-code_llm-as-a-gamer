@@ -580,3 +580,63 @@ def test_strategy_and_advice_instructions_use_the_map():
     # 助言に場所の構造を使う (直接の指示ではなく、原因の説明にする)
     assert "場所の構造" in advice
     assert "直接指示する書き方をしない" in advice
+
+
+# --- 画面の停滞の計測 (progress/state.json) ---
+
+
+def test_prompt_values_have_the_progress_state_path(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(tips_job(run_dir))
+    values = prompt_values(context)
+    assert "progress_state" in PROMPT_VALUE_NAMES
+    assert (
+        values["progress_state"]
+        == (run_dir.resolve() / "progress" / "state.json").as_posix()
+    )
+
+
+def test_advice_prompt_reads_the_progress_state(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(
+        make_job(run_dir, "advice-001", "advice", None, ["advice.md"])
+    )
+    prompt = build_deep_prompt(context)
+    # 読んでよい記録に progress/state.json を足す
+    assert (context.run_dir / "progress" / "state.json").as_posix() in prompt
+    # 対象の文書は変わらない (計測の値は書かない)
+    assert context.notes == ("advice.md",)
+    advice = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind.ADVICE])
+    assert "${progress_state}" in advice
+    # 値の項目を説明する
+    for key in ["static_s", "no_novel_s", "window_s"]:
+        assert key in advice, key
+
+
+@pytest.mark.parametrize(
+    "name, kind, scene_id, documents",
+    [
+        ("controls-001", "controls", None, ["common/controls.md"]),
+        ("tips-001", "tips", "scene-001", TIPS_NOTES),
+        ("strategy-001", "strategy", None, ["strategy.md"]),
+        ("map-001", "map", None, ["map/map.json", "map/places.md"]),
+    ],
+)
+def test_other_prompts_do_not_read_the_progress_state(
+    tmp_path, name, kind, scene_id, documents
+):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(make_job(run_dir, name, kind, scene_id, documents))
+    prompt = build_deep_prompt(context)
+    assert (context.run_dir / "progress" / "state.json").as_posix() not in prompt
+
+
+def test_prompt_of_progress_trigger_job_has_the_trigger(tmp_path):
+    run_dir = make_run(tmp_path)
+    job_dir = make_job(run_dir, "advice-001", "advice", None, ["advice.md"])
+    value = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    value["trigger"] = "progress"
+    (job_dir / "job.json").write_text(json.dumps(value), encoding="utf-8")
+    context = read_prompt_context(job_dir)
+    assert context.trigger == "progress"
+    assert "きっかけ: progress" in build_deep_prompt(context)

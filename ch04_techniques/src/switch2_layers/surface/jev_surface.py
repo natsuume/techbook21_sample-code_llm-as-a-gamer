@@ -41,6 +41,7 @@ from typing import Protocol
 
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.pad_action import action_to_json
+from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
@@ -80,6 +81,8 @@ from switch2_layers.surface.surface_types import (
 )
 
 NO_TIMELINE_TEXT = "まだ作られていない"  # 系列情報がまだ無いときの timeline の created
+# 画面の停滞の計測の値がまだ無いときの progress の measured
+NOT_MEASURED_TEXT = "まだ測っていない"
 
 
 class JevAsker(Protocol):
@@ -157,6 +160,19 @@ def timeline_to_state(
         else relative_time_label(generated_t, request_t)
     )
     return {"created": created, "text": timeline}
+
+
+def progress_to_state(
+    progress: ProgressState | None, request_t: float
+) -> dict[str, str]:
+    """画面の停滞の計測の値を state の progress {"measured", "text"} にする。
+
+    measured は値の時刻のラベル relative_time_label(progress.t, request_t)、text は
+    progress.progress_text.describe_progress_values(progress) (例: 「画面が変わっていない: 12.4 秒」と
+    「直近 300 秒に見た画面だけが出ている: 85.0 秒」の 2 行)。
+    progress が None (値が無い) なら、measured は NOT_MEASURED_TEXT、text は progress.progress_text.NO_PROGRESS_TEXT。
+    """
+    raise NotImplementedError
 
 
 def recent_actions_to_state(

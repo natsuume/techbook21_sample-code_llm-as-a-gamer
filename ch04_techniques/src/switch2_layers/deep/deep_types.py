@@ -36,6 +36,8 @@ class DeepTrigger(StrEnum):
     NEW_SCENE = "new_scene"  # middle が初めての場面に名前を付けた
     AUTO = "auto"  # 同じ文書の前回のジョブの終了から決まった秒数がたった
     MANUAL = "manual"  # deep-once で手で起動した
+    # 画面の停滞の計測で、新しい画面が出ていない秒数がしきい値を超えた (advice だけ)
+    PROGRESS = "progress"
 
 
 @dataclass(frozen=True)

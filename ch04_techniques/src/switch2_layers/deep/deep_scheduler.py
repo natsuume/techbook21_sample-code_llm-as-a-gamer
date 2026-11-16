@@ -43,6 +43,8 @@ from switch2_layers.deep.deep_types import (
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_store import latest_frame_t
 from switch2_layers.notes.note_paths import document_key, is_scene_id
+from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.records.run_log import (
     EVENT_DEEP_END,
     EVENT_DEEP_REQUEST_ERROR,
@@ -122,6 +124,11 @@ def start_daemon_thread(body: Callable[[], None]) -> None:
     threading.Thread(target=body, name="deep-job", daemon=True).start()
 
 
+def no_progress_state() -> ProgressState | None:
+    """いつも None (画面の停滞の計測の値が無い) を返す (DeepSchedulerParts.progress_state の既定値)。"""
+    return None
+
+
 @dataclass(frozen=True)
 class DeepSchedulerSettings:
     """deep のスケジューラーの設定。
@@ -130,12 +137,15 @@ class DeepSchedulerSettings:
     auto_seconds           自動の呼び出しの秒数 (--deep-auto-seconds)
     timeout_s              ジョブの実行時間の上限 (--deep-timeout)。起動からこの秒数たったジョブを止める
     stop_grace_s           stop を呼んでから、run が戻らなければ kill を呼ぶまでの秒数 (既定 STOP_GRACE_S)
+    stuck_advice_seconds   新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で要求する
+                           (--stuck-advice-seconds。既定 progress.stuck_advice_trigger.DEFAULT_STUCK_ADVICE_SECONDS)
     """
 
     min_start_interval_s: float
     auto_seconds: float
     timeout_s: float
     stop_grace_s: float = STOP_GRACE_S
+    stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -155,6 +165,9 @@ class DeepSchedulerParts:
     prepare_job_directory
                        ジョブのディレクトリーを用意する関数 (既定 deep_job_directory.create_job_directory)。
                        テストでは、ある種類の用意に失敗する関数を渡す
+    progress_state     画面の停滞の計測の最新の値を返す関数 (run では progress/state.json を
+                       progress.progress_state.read_progress_state で読む)。値が無ければ None。
+                       既定は、いつも None を返す関数 (きっかけ progress で要求しない)
     """
 
     paths: RunPaths
@@ -166,6 +179,7 @@ class DeepSchedulerParts:
     start_job_thread: Callable[[Callable[[], None]], None] = start_daemon_thread
     sleep: Callable[[float], None] = time.sleep
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
+    progress_state: Callable[[], ProgressState | None] = no_progress_state
 
 
 @dataclass
@@ -350,6 +364,21 @@ class DeepScheduler:
                     error=describe_exception(error),
                 )
         return results
+
+    def check_progress(self) -> DeepRequestResult | None:
+        """画面の停滞の計測から、advice の deep をきっかけ progress で要求するかを 1 回判定する。
+
+        判定は progress.stuck_advice_trigger.StuckAdviceTrigger (しきい値は settings.stuck_advice_seconds) で行う:
+            1. state = parts.progress_state() (値が無ければ None)
+            2. advice の文書 (場面に依らない) のジョブが 1 つ以上実行中か (きっかけに依らない) を確かめる
+            3. StuckAdviceTrigger.check(clock.now(), state の no_novel_s (state が None なら None), 実行中か) が
+               True なら、request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None) を呼んで、その結果を返す。
+               最小の起動間隔などの規則は request がそのまま当てる (捨てたら DeepRequestResult(started=False, ...))
+            4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "progress",
+               "kind": "advice", "trigger": "progress", "scene_id": null, "error": 説明} を書き、None を返す
+        要求しなければ None を返す。close の後は何もせず None を返す。
+        """
+        raise NotImplementedError
 
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
