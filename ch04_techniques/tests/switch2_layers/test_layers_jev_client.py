@@ -247,6 +247,42 @@ def test_ask_reads_answers():
     }
 
 
+def test_ask_returns_usage_as_received():
+    usage = {
+        "input_tokens": 1200,
+        "output_tokens": 3,
+        "details": {"images": 2, "cost": [0.1, None]},
+    }
+    body = {"model": DEFAULT_JEV_MODEL, "answers": good_answers(), "usage": usage}
+    client, _ = client_returning(json_response(body))
+    answers = client.ask(STATE, QUESTIONS, IMAGES)
+    # 受け取った形のまま (中身を確かめず、変えない)
+    assert answers.usage == usage
+
+
+@pytest.mark.parametrize("usage", ["12 tokens", 42, []])
+def test_ask_keeps_usage_of_any_json_type(usage):
+    body = {"model": DEFAULT_JEV_MODEL, "answers": good_answers(), "usage": usage}
+    client, _ = client_returning(json_response(body))
+    assert client.ask(STATE, QUESTIONS, IMAGES).usage == usage
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model": DEFAULT_JEV_MODEL, "answers": good_answers()},
+        {"model": DEFAULT_JEV_MODEL, "answers": good_answers(), "usage": None},
+    ],
+    ids=["missing", "null"],
+)
+def test_ask_without_usage_returns_none(body):
+    client, _ = client_returning(json_response(body))
+    answers = client.ask(STATE, QUESTIONS, IMAGES)
+    assert answers.usage is None
+    # usage が無くても、答えは読める
+    assert answers.nouls == {"scene_changed": 0.25}
+
+
 def test_http_error_is_jev_error_without_retry():
     client, recorder = client_returning(
         lambda request: httpx.Response(500, text="boom")

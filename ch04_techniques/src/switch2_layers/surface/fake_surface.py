@@ -10,6 +10,7 @@ class FakeSurfaceDecider:
     def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
         """SurfaceOutput(action=pad_action.NEUTRAL_ACTION) を返す。
 
-        deep_kinds・info_labels・boxes は空、scene_changed は False。surface_input は使わない。
+        deep_kinds・info_labels・boxes は空、scene_changed は False、exchange は None。surface_input は使わない
+        (request_sink も呼ばない)。
         """
         return SurfaceOutput(action=NEUTRAL_ACTION)

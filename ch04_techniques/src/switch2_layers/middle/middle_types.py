@@ -5,10 +5,13 @@
 
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
-     "surface_rows_offset", "operations_rows_offset"}
+     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t"}
 surface_rows_offset と operations_rows_offset は、次の middle の入力で surface.jsonl と operations.jsonl を読み始める
 バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
 docstring)。
+first_task は出力の短期タスクリストの最初のタスクの文、first_task_since_t は最初のタスクが今の文になった時刻
+(最初のタスクが無いときと記録が無いときは null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを
+伝えるのに使う (middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
 """
 
 from collections.abc import Mapping
@@ -73,6 +76,12 @@ class MiddleState:
                              (MiddleInput.surface_rows_offset)。次の入力はこの位置から読む
     operations_rows_offset   この出力の入力までに読んだ operations.jsonl の完全な行の末尾のバイト位置
                              (MiddleInput.operations_rows_offset)。次の入力はこの位置から読む
+    first_task               この出力の短期タスクリストの最初のタスクの文 (middle.task_progress.first_task_of の値)。
+                             無ければ空文字列
+    first_task_since_t       最初のタスクが今の文になった時刻 (middle.task_progress.first_task_since の値)。
+                             最初のタスクが無いときと記録が無いときは None
+    first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
+    記録しない値 (テストなど) のため。
     """
 
     generated_t: float
@@ -85,6 +94,8 @@ class MiddleState:
     timeline: str
     surface_rows_offset: int
     operations_rows_offset: int
+    first_task: str = ""
+    first_task_since_t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +191,8 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
         "timeline": state.timeline,
         "surface_rows_offset": state.surface_rows_offset,
         "operations_rows_offset": state.operations_rows_offset,
+        "first_task": state.first_task,
+        "first_task_since_t": state.first_task_since_t,
     }
 
 
@@ -190,6 +203,8 @@ def middle_state_from_json(value: object) -> MiddleState:
     generated_t・based_on_t・surface_wait_s は数 (bool を除く)、surface_rows_offset と operations_rows_offset は
     0 以上の整数 (bool を除く)、scene_id と scene_name は文字列か null、is_stuck は真偽、stuck_description と timeline は
     文字列。scene_id が文字列なら場面 ID の形に限る。
+    first_task と first_task_since_t は省けるキーで、無ければ既定値 (空文字列と None) にする。あれば、first_task は
+    文字列、first_task_since_t は数 (bool を除く) か null でなければ ValueError にする。
     """
     if isinstance(value, dict):
         return _middle_state_from_object(value)
@@ -201,6 +216,13 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
     scene_id = _optional_string(value, "scene_id")
     if scene_id is not None and not is_scene_id(scene_id):
         raise ValueError(f"invalid scene id in middle state: {scene_id!r}")
+    # first_task と first_task_since_t は省けるキー: 無ければ既定値にする
+    first_task = _string(value, "first_task") if "first_task" in value else ""
+    first_task_since_t = (
+        _optional_number(value, "first_task_since_t")
+        if "first_task_since_t" in value
+        else None
+    )
     return MiddleState(
         generated_t=_number(value, "generated_t"),
         based_on_t=_number(value, "based_on_t"),
@@ -212,6 +234,8 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         timeline=_string(value, "timeline"),
         surface_rows_offset=_offset(value, "surface_rows_offset"),
         operations_rows_offset=_offset(value, "operations_rows_offset"),
+        first_task=first_task,
+        first_task_since_t=first_task_since_t,
     )
 
 
@@ -232,6 +256,16 @@ def _number(value: Mapping[str, object], key: str) -> float:
     if isinstance(item, int | float) and not isinstance(item, bool):
         return float(item)
     raise ValueError(f"{key!r} in middle state must be a number: {item!r}")
+
+
+def _optional_number(value: Mapping[str, object], key: str) -> float | None:
+    """value[key] が数 (bool を除く) か null ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if item is None:
+        return None
+    if isinstance(item, int | float) and not isinstance(item, bool):
+        return float(item)
+    raise ValueError(f"{key!r} in middle state must be a number or null: {item!r}")
 
 
 def _offset(value: Mapping[str, object], key: str) -> int:
