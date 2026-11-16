@@ -14,9 +14,12 @@
 返す秒数は run_clock.round_to_milliseconds で丸める。時刻 t は、どの操作も引数で受け取る。
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
+
+from switch2_layers.run_clock import round_to_milliseconds
 
 # 1 回の追加で足せるタスクの数
 MAX_ADDED_PER_CALL = 3
@@ -25,6 +28,8 @@ MAX_OPEN_TASKS_PER_SCENE = 5
 # タスクの ID は TASK_ID_PREFIX と TASK_ID_DIGITS 桁以上の連番 (例: task-001)
 TASK_ID_PREFIX = "task-"
 TASK_ID_DIGITS = 3
+# タスクの ID の形 (TASK_ID_PREFIX と TASK_ID_DIGITS 桁以上の数字)。グループ 1 が連番の数字
+_TASK_ID_PATTERN = re.compile(r"task-([0-9]{3,})")
 
 # 足せなかった理由: empty (空の文)、duplicate (その場面の未完了のタスクと同じ文)、limit (上限に達した後の文)
 DropReason = Literal["empty", "duplicate", "limit"]
@@ -89,7 +94,9 @@ def task_id(number: int) -> str:
     連番は TASK_ID_DIGITS 桁に満たなければ先頭を 0 で埋める。例: 1 → task-001、12 → task-012、1000 → task-1000。
     number が 1 未満なら ValueError。
     """
-    raise NotImplementedError
+    if number < 1:
+        raise ValueError(f"task number must be 1 or more: {number}")
+    return f"{TASK_ID_PREFIX}{number:0{TASK_ID_DIGITS}d}"
 
 
 def task_id_number(value: object) -> int | None:
@@ -97,7 +104,12 @@ def task_id_number(value: object) -> int | None:
 
     例: "task-001" → 1、"task-1000" → 1000。形が違う値と str でない値 (None を含む) は None。
     """
-    raise NotImplementedError
+    if not isinstance(value, str):
+        return None
+    match = _TASK_ID_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def normalize_task_text(text: str) -> str:
@@ -106,7 +118,8 @@ def normalize_task_text(text: str) -> str:
     前後の空白を除き (str.strip())、その後の改行 (`\\r\\n`・`\\r`・`\\n` のそれぞれ 1 つ) を空白 1 つに置き換える。
     例: " 宿屋に\\r\\n入る " → "宿屋に 入る"。
     """
-    raise NotImplementedError
+    # \r\n を先に置き換え、\r と \n の 2 つにしない
+    return text.strip().replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
 
 def is_same_task_text(a: str, b: str) -> bool:
@@ -115,7 +128,45 @@ def is_same_task_text(a: str, b: str) -> bool:
     空白文字 (半角・全角の空白、タブ、改行。str.split() が区切る文字) をすべて除いた文字列どうしを比べる
     (例: 「A で話しかける」と「Aで話しかける」は同じ)。
     """
-    raise NotImplementedError
+    return _without_whitespace(a) == _without_whitespace(b)
+
+
+def _without_whitespace(text: str) -> str:
+    """text から空白文字 (str.split() が区切る文字) をすべて除いた文字列を返す。"""
+    return "".join(text.split())
+
+
+@dataclass
+class _QueuedTask:
+    """キューの中の未完了のタスク (状態を書き換えるため frozen にしない)。
+
+    active_base   キューに入った時点の、そのタスクの場面の累計 (現在の場面だった秒数)。作り直したタスクは
+                  累計 − 保存されていた active_s。続いた秒数は「t での累計 − active_base」
+    ほかは TaskView の同じ名前の値
+    """
+
+    id: str
+    text: str
+    scene_id: str
+    added_t: float
+    active_base: float
+    cancel_requested_t: float | None
+
+
+def _drop_reason(
+    queue: Sequence[_QueuedTask], text: str, added_count: int
+) -> DropReason | None:
+    """整えた後の文 text を場面のキュー queue に足せない理由を返す。足せるなら None。
+
+    added_count は、同じ呼び出しで既に足した数。理由が重なるときは empty → duplicate → limit の順で最初のもの。
+    """
+    if not text:
+        return "empty"
+    if any(is_same_task_text(task.text, text) for task in queue):
+        return "duplicate"
+    if added_count >= MAX_ADDED_PER_CALL or len(queue) >= MAX_OPEN_TASKS_PER_SCENE:
+        return "limit"
+    return None
 
 
 class SceneTaskQueues:
@@ -133,12 +184,30 @@ class SceneTaskQueues:
         restored の active_s から始め、added_t と cancel_requested_t もそのまま持つ。
         現在の場面は場面なし (None)。次に振る ID の連番は next_number。
         """
-        raise NotImplementedError
+        # 場面 ID → 未完了のタスク (キューの順)
+        self._queues: dict[str, list[_QueuedTask]] = {}
+        # 場面 ID → 現在の場面だった秒数の累計 (今の現在の場面になってからの分は含まない)
+        self._scene_seconds: dict[str, float] = {}
+        self._current_scene_id: str | None = None
+        # 今の現在の場面になった時刻 (場面なしの間は使わない)
+        self._current_since_t = 0.0
+        self._next_number = next_number
+        for task in restored:
+            # 作り直した時点では、どの場面の累計も 0 のため、累計 − active_s は −active_s
+            queued = _QueuedTask(
+                id=task.id,
+                text=task.text,
+                scene_id=task.scene_id,
+                added_t=task.added_t,
+                active_base=-task.active_s,
+                cancel_requested_t=task.cancel_requested_t,
+            )
+            self._queues.setdefault(task.scene_id, []).append(queued)
 
     @property
     def current_scene_id(self) -> str | None:
         """現在の場面 ID。場面なしなら None。"""
-        raise NotImplementedError
+        return self._current_scene_id
 
     def add(self, scene_id: str, texts: Sequence[str], t: float) -> AddResult:
         """文の配列 texts を、場面 scene_id のキューの末尾に、配列の順に時刻 t で足す。
@@ -153,14 +222,39 @@ class SceneTaskQueues:
         (added_t = t、cancel_requested_t = None、続いた秒数は 0 から)。足せなかった文は ID を使わない。
         戻り値の outcomes は、入力の文ごとに、足したタスクの t での見え方か、足せなかった文と理由を、入力の順に並べたもの。
         """
-        raise NotImplementedError
+        queue = self._queues.setdefault(scene_id, [])
+        outcomes: list[TaskView | DroppedText] = []
+        added_count = 0
+        for raw_text in texts:
+            text = normalize_task_text(raw_text)
+            reason = _drop_reason(queue, text, added_count)
+            if reason is not None:
+                outcomes.append(DroppedText(text=text, reason=reason))
+                continue
+            queued = _QueuedTask(
+                id=task_id(self._next_number),
+                text=text,
+                scene_id=scene_id,
+                added_t=t,
+                active_base=self._scene_total(scene_id, t),
+                cancel_requested_t=None,
+            )
+            self._next_number += 1
+            queue.append(queued)
+            added_count += 1
+            outcomes.append(self._view(queued, t))
+        return AddResult(outcomes=tuple(outcomes))
 
     def complete(self, scene_id: str, task_id: str, t: float) -> TaskView | None:
         """task_id が場面 scene_id のキューの先頭なら、キューから外し (完了)、外したタスクの t での見え方を返す。
 
         先頭でない、その場面にキューが無い、未知の ID のときは何もせず None を返す。
         """
-        raise NotImplementedError
+        head = self._head(scene_id, task_id)
+        if head is None:
+            return None
+        self._queues[scene_id].pop(0)
+        return self._view(head, t)
 
     def request_cancel(self, scene_id: str, task_id: str, t: float) -> TaskView | None:
         """task_id が場面 scene_id のキューの先頭で、取り消しの要求がまだ無ければ、要求の時刻 t を付ける。
@@ -168,18 +262,34 @@ class SceneTaskQueues:
         付けたら、付けた後のタスクの t での見え方を返す。それ以外 (先頭でない、その場面にキューが無い、未知の ID、
         既に要求がある) は何もせず None を返す。要求は、タスクが完了するか取り消されるまで残る。
         """
-        raise NotImplementedError
+        head = self._head(scene_id, task_id)
+        if head is None or head.cancel_requested_t is not None:
+            return None
+        head.cancel_requested_t = t
+        return self._view(head, t)
 
     def cancel(self, task_ids: Sequence[str], t: float) -> tuple[TaskView, ...]:
         """task_ids の順に、未完了のタスクのうち ID が当たるものを、場面に依らずキューから外す (取り消し)。
 
         外したタスクの t での見え方を、外した順に返す。未完了のタスクに無い ID (同じ ID の 2 回目を含む) は無視する。
         """
-        raise NotImplementedError
+        canceled: list[TaskView] = []
+        for target in task_ids:
+            removed = self._remove(target)
+            if removed is not None:
+                canceled.append(self._view(removed, t))
+        return tuple(canceled)
 
     def set_current_scene(self, scene_id: str | None, t: float) -> None:
         """現在の場面を、時刻 t から scene_id (None は場面なし) にする。今と同じ場面なら何もしない。"""
-        raise NotImplementedError
+        if scene_id == self._current_scene_id:
+            return
+        previous = self._current_scene_id
+        if previous is not None:
+            # 今の現在の場面だった区間の秒数を、その場面の累計に入れる
+            self._scene_seconds[previous] = self._scene_total(previous, t)
+        self._current_scene_id = scene_id
+        self._current_since_t = t
 
     def oldest_active_s(self, scene_id: str, t: float) -> float | None:
         """場面 scene_id の最も古いタスクの、t での続いた秒数を返す。
@@ -187,8 +297,48 @@ class SceneTaskQueues:
         最も古いタスクは、未完了のタスクのうち added_t が最も小さいもの (同じ値ならキューの前のもの)。
         キューの先頭とは限らない。未完了のタスクが無ければ None。
         """
-        raise NotImplementedError
+        queue = self._queues.get(scene_id)
+        if not queue:
+            return None
+        # min は、最小の値が複数あれば最初のもの (キューの前のもの) を返す
+        oldest = min(queue, key=lambda queued: queued.added_t)
+        return self._view(oldest, t).active_s
 
     def tasks(self, scene_id: str, t: float) -> tuple[TaskView, ...]:
         """場面 scene_id の未完了のタスクの t での見え方を、キューの順に返す。無ければ空のタプル。"""
-        raise NotImplementedError
+        return tuple(self._view(queued, t) for queued in self._queues.get(scene_id, []))
+
+    def _scene_total(self, scene_id: str, t: float) -> float:
+        """場面 scene_id が時刻 t までに現在の場面だった秒数の累計 (丸めない)。"""
+        total = self._scene_seconds.get(scene_id, 0.0)
+        if scene_id == self._current_scene_id:
+            total += t - self._current_since_t
+        return total
+
+    def _view(self, queued: _QueuedTask, t: float) -> TaskView:
+        """キューの中のタスク queued の、時刻 t での見え方を返す。続いた秒数はミリ秒に丸める。"""
+        return TaskView(
+            id=queued.id,
+            text=queued.text,
+            scene_id=queued.scene_id,
+            added_t=queued.added_t,
+            active_s=round_to_milliseconds(
+                self._scene_total(queued.scene_id, t) - queued.active_base
+            ),
+            cancel_requested_t=queued.cancel_requested_t,
+        )
+
+    def _head(self, scene_id: str, target: str) -> _QueuedTask | None:
+        """場面 scene_id のキューの先頭の ID が target なら、先頭のタスクを返す。そうでなければ None。"""
+        queue = self._queues.get(scene_id)
+        if not queue or queue[0].id != target:
+            return None
+        return queue[0]
+
+    def _remove(self, target: str) -> _QueuedTask | None:
+        """ID が target の未完了のタスクを、どの場面のキューからでも外して返す。無ければ None。"""
+        for queue in self._queues.values():
+            for index, queued in enumerate(queue):
+                if queued.id == target:
+                    return queue.pop(index)
+        return None

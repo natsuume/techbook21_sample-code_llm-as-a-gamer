@@ -13,7 +13,8 @@
 from pathlib import Path
 from typing import Literal
 
-from switch2_layers.tasks.task_queue import DroppedText, TaskView
+from switch2_layers.file_io import read_json_lines
+from switch2_layers.tasks.task_queue import DroppedText, TaskView, task_id_number
 
 # tasks.jsonl の出来事の名前
 TaskEventName = Literal["added", "dropped", "done", "cancel_requested", "canceled"]
@@ -29,7 +30,15 @@ def task_event_row(
     {"t": t, "event": event, "scene_id": task.scene_id, "id": task.id, "text": task.text, "reason": None,
      "active_s": event が added なら None、ほかは task.active_s} (キーはこの順)。
     """
-    raise NotImplementedError
+    return {
+        "t": t,
+        "event": event,
+        "scene_id": task.scene_id,
+        "id": task.id,
+        "text": task.text,
+        "reason": None,
+        "active_s": None if event == "added" else task.active_s,
+    }
 
 
 def dropped_event_row(
@@ -40,7 +49,15 @@ def dropped_event_row(
     {"t": t, "event": "dropped", "scene_id": scene_id, "id": None, "text": dropped.text,
      "reason": dropped.reason, "active_s": None} (キーはこの順)。
     """
-    raise NotImplementedError
+    return {
+        "t": t,
+        "event": "dropped",
+        "scene_id": scene_id,
+        "id": None,
+        "text": dropped.text,
+        "reason": dropped.reason,
+        "active_s": None,
+    }
 
 
 def max_task_number_in_log(path: Path) -> int:
@@ -49,4 +66,5 @@ def max_task_number_in_log(path: Path) -> int:
     file_io.read_json_lines(path) の各行の id に task_queue.task_id_number を当てる。当たる行が無ければ
     (ファイルが無いときを含む) 0。id が null の行や形の違う行は無視する。
     """
-    raise NotImplementedError
+    numbers = (task_id_number(row.get("id")) for row in read_json_lines(path))
+    return max((number for number in numbers if number is not None), default=0)
