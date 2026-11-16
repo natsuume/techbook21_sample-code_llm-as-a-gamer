@@ -2,14 +2,15 @@
 
 手順の一覧 (PROCEDURE_NAMES):
     名前         引数                                                     展開
-    tap_repeat   button (ボタン名)、count (1 以上の整数)、                  button の短押しと interval_seconds 秒の待ちを
+    tap_repeat   button (ボタン名)、count (回数)、                         button の短押しと interval_seconds 秒の待ちを
                  interval_seconds (0 以上、60 以下)                         count 回
-    walk         direction (UP・RIGHT・DOWN・LEFT)、count (1 以上の整数)、  direction を seconds 秒押す操作と
+    walk         direction (UP・RIGHT・DOWN・LEFT)、count (回数)、         direction を seconds 秒押す操作と
                  seconds (0 より大きく 60 以下)、                           interval_seconds 秒の待ちを count 回
                  interval_seconds (0 以上、60 以下)
 引数の値の規則:
     ボタン名   switch2_remote.controller_state.BUTTON_ORDER の名前 (大文字小文字を区別する)。押せないボタン (HOME など) も
                ここでは誤りにしない (実行のときに PadOutput.apply が外す)
+    回数       1 以上 MAX_PROCEDURE_COUNT (100) 以下の整数。MAX_PROCEDURE_COUNT を超えたら誤り
     整数       JSON の整数 (int。bool と小数は誤り)
     秒数       JSON の数 (int か float。bool は誤り)。有限の値で、範囲は上の表のとおり
 展開は、どの手順も (押す操作, 待ち) の組を count 回並べた 2 * count 個の列にする。interval_seconds が 0 でも、0 秒の
@@ -34,6 +35,8 @@ PROCEDURE_ARGUMENTS: dict[str, tuple[str, ...]] = {
 WALK_DIRECTIONS: tuple[str, ...] = ("UP", "RIGHT", "DOWN", "LEFT")
 # interval_seconds と seconds の上限 (秒)。press の seconds と同じ hardware.pad_output.MAX_HOLD_SECONDS
 MAX_PROCEDURE_SECONDS = MAX_HOLD_SECONDS
+# count (手順を繰り返す回数) の上限
+MAX_PROCEDURE_COUNT = 100
 
 
 def procedure_argument_errors(name: str, args: Mapping[str, object]) -> list[str]:

@@ -7,13 +7,22 @@
     列の操作を前から順に 1 つずつ実行し、次の操作は前の操作を離し終えてから始める。待ちはしない (run のループが回りごとに
     advance を呼び、今の時刻までに来た期限の送信をする)。時刻は clock (実行の経過秒) で測る。
     press   ボタンを押してスティックを倒したレポートを送り、その送信が戻った時刻から押す秒数 (seconds。None なら
-            hardware.pad_output.TAP_PRESS_S) たったら、ボタンを離してスティックを中立にしたレポートを送る。
-            前の操作で押したボタンをもう一度押すときは、離したレポートの送信が戻った時刻から
-            hardware.pad_output.TAP_RELEASE_GAP_S 秒あけてから押す (間をあけずに押し直すと、ゲームから見て新しい押下に
-            ならないため)
+            hardware.pad_output.TAP_PRESS_S) たったら、ボタンを離してスティックを中立にしたレポートを送る
     wait    何も押さずに seconds 秒待つ (前の操作を離した時刻から数える。列の最初なら始めた時刻から)
     押す・離すの送信は PadOutput.apply で行う。押せないボタンは apply が外し、外したボタンを take_blocked_buttons で返す。
     列を途中で捨てる (cancel・start) ときだけ、PadOutput.neutral で押下状態を中立に戻す。
+押し直しの間:
+    ボタンごとに、最後に離した時刻 (そのボタンを離したレポートの送信が戻った clock.now()。押す操作を離す送信と、
+    cancel・start の PadOutput.neutral の両方で決める) を持つ。この時刻は、列・待ち・cancel・列の持ち主 (主ループと
+    監視) をまたいで持ち続ける。
+    press は、その操作のどのボタンも、最後に離した時刻から hardware.pad_output.TAP_RELEASE_GAP_S 秒たってから
+    始める (たっていなければ、たつ時刻まで操作を始めない。押す秒数は、実際に押したレポートの送信から数える)。
+    間をあけずに押し直すと、ゲームから見て新しい押下にならないため。0 秒か TAP_RELEASE_GAP_S より短い wait を挟んだ
+    ときも、cancel の直後に同じボタンで始まる列も、この規則で間をあける。最後に離してから TAP_RELEASE_GAP_S 秒以上
+    たっていれば (間に十分な wait があれば)、待たずに始める。
+最後に離した時刻 (last_release_t):
+    ボタンかスティックを離したレポート (押す操作を離す送信と、cancel・start の PadOutput.neutral) を最後に送った
+    clock.now()。OrchestratorController が、監視の要求に使うフレームがこれより後に撮ったものかを確かめるのに使う。
 操作の記録:
     PadOutput.apply を呼ぶたびに、source に列の持ち主 (orchestrator か monitor) を渡す
     (PadOutput.apply(操作, source=持ち主))。operations.jsonl の行は、PadOutput が on_operation でその source のまま
@@ -99,4 +108,9 @@ class ActionExecutor:
     @property
     def output_stopped(self) -> bool:
         """PadOutput.apply が OutputStoppedError を出した後なら True。"""
+        raise NotImplementedError
+
+    @property
+    def last_release_t(self) -> float | None:
+        """ボタンかスティックを離したレポートを最後に送った時刻 (モジュールの docstring)。まだ離していなければ None。"""
         raise NotImplementedError

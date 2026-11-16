@@ -67,14 +67,22 @@ WAIT_TIMEOUT_S = 5.0
 POLL_S = 0.002
 # 「起きない」ことを確かめるときに待つ run のループの回りの数
 QUIET_ROUNDS = 10
+# 既定のフレームの時刻。監視は、最後に操作を離した時刻より後のフレームでだけ問うため、どのテストの偽の時刻よりも
+# 後にしておく (フレームの新しさを確かめるテストは frame_at で時刻を決める)
+LATEST_FRAME_T = 100.0
 SMALL_FRAME = CapturedFrame(
-    t=1.5, nv12=np.full((360 * 3 // 2, 640), 128, dtype=np.uint8)
+    t=LATEST_FRAME_T, nv12=np.full((360 * 3 // 2, 640), 128, dtype=np.uint8)
 )
 WIDE_FRAME = CapturedFrame(
-    t=2.0, nv12=np.full((1080 * 3 // 2, 1920), 128, dtype=np.uint8)
+    t=LATEST_FRAME_T, nv12=np.full((1080 * 3 // 2, 1920), 128, dtype=np.uint8)
 )
 NEUTRAL_STICK = (128, 128)
 HAT_DIRECTIONS = {hat: directions for directions, hat in DPAD_HAT.items()}
+
+
+def frame_at(t: float) -> CapturedFrame:
+    """時刻 t に撮った小さいフレーム。"""
+    return CapturedFrame(t=t, nv12=SMALL_FRAME.nv12)
 
 
 # --- レポートの読み取り ---
@@ -596,6 +604,74 @@ def test_pressing_the_same_button_again_waits_the_release_gap(
     h.wait_until(lambda: len(h.sender.press_starts("A")) == 2, "A is pressed again")
 
 
+def assert_next_press_waits_the_release_gap(h: Harness, released_at: float) -> None:
+    """A を released_at に離した後、TAP_RELEASE_GAP_S 秒たつまで A を押し直さず、たったら押し直すことを確かめる。"""
+    h.set_time(released_at + TAP_RELEASE_GAP_S - 0.01)
+    h.wait_rounds()
+    assert len(h.sender.press_starts("A")) == 1
+    h.set_time(released_at + TAP_RELEASE_GAP_S + 0.001)
+    h.wait_until(lambda: len(h.sender.press_starts("A")) == 2, "A is pressed again")
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [
+        (tap_repeat("A", 2, 0.0),),
+        (tap("A"), WaitAction(seconds=0.0), tap("A")),
+        (tap("A"), WaitAction(seconds=0.05), tap("A")),
+    ],
+    ids=["tap_repeat_with_zero_interval", "zero_wait", "wait_shorter_than_the_gap"],
+)
+def test_short_or_zero_wait_between_presses_still_keeps_the_release_gap(
+    tmp_path, cleanups, actions
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(*actions))
+    h.wait_pressed({"A"})
+    h.set_time(TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: h.sender.release_times("A"), "A is released")
+    assert_next_press_waits_the_release_gap(h, h.sender.release_times("A")[0])
+
+
+def test_actions_starting_with_the_same_button_after_a_cancel_wait_the_release_gap(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(hold(1.0, "A")))
+    h.wait_pressed({"A"})
+    # 新しい actions で前の残りを捨てて中立に戻し、同じボタンから始める
+    h.controller.apply(act(tap("A")))
+    h.wait_until(lambda: h.sender.release_times("A"), "A is released by the cancel")
+    assert_next_press_waits_the_release_gap(h, h.sender.release_times("A")[0])
+
+
+def test_main_actions_after_monitor_actions_on_the_same_button_wait_the_release_gap(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(monitor(case("c0", hold(1.0, "A"))))
+    h.jev.respond(hit(h.wait_request(1), 0))
+    h.wait_pressed({"A"})
+    h.controller.apply(act(tap("A")))
+    h.wait_until(lambda: h.sender.release_times("A"), "A is released by the cancel")
+    assert_next_press_waits_the_release_gap(h, h.sender.release_times("A")[0])
+
+
+def test_no_extra_wait_when_the_wait_is_longer_than_the_release_gap(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(tap("A"), WaitAction(seconds=0.3), tap("A")))
+    h.wait_pressed({"A"})
+    h.set_time(TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: h.sender.release_times("A"), "A is released")
+    released_at = h.sender.release_times("A")[0]
+    h.set_time(released_at + 0.29)
+    h.wait_rounds()
+    assert len(h.sender.press_starts("A")) == 1
+    # 待ちが TAP_RELEASE_GAP_S より長ければ、待ちを終えたときにすぐ押す
+    h.set_time(released_at + 0.301)
+    h.wait_until(lambda: len(h.sender.press_starts("A")) == 2, "A is pressed again")
+
+
 def test_main_loop_operations_are_recorded_once_with_the_orchestrator_source(
     tmp_path, cleanups
 ):
@@ -966,6 +1042,75 @@ def test_no_request_while_monitor_actions_run(tmp_path, cleanups):
     h.wait_request(2)
 
 
+# --- 監視: 問いに使うフレームの新しさ ---
+
+
+def test_no_request_until_a_frame_newer_than_the_monitor_actions_arrives(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
+    h.set_time(10.0)
+    h.controller.apply(monitor(case("c0", tap("B"))))
+    # まだ何も離していないので、前に撮ったフレームでも問う
+    h.jev.respond(hit(h.wait_request(1), 0))
+    h.wait_pressed({"B"})
+    h.set_time(10.2)
+    h.wait_neutral()
+    assert h.sender.release_times("B") == [10.2]
+    h.wait_rounds()
+    assert h.jev.request_count() == 1
+    # 離した時刻より前と、ちょうど同じ時刻のフレームでは問わない
+    for frame_t in (10.1, 10.2):
+        h.frames.frame = frame_at(frame_t)
+        h.wait_rounds()
+        assert h.jev.request_count() == 1
+    h.frames.frame = frame_at(10.25)
+    request = h.wait_request(2)
+    assert len(request.images) == 1
+
+
+def test_no_request_until_a_frame_newer_than_the_main_actions_arrives(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
+    h.set_time(10.0)
+    h.controller.apply(
+        Decision(
+            actions=(tap("A"),),
+            monitor=MonitorCreate("dialog", (case("c0", tap("B")),)),
+        )
+    )
+    h.wait_pressed({"A"})
+    h.set_time(10.2)
+    h.wait_neutral()
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(10.3)
+    h.wait_request(1)
+
+
+def test_frame_must_be_newer_than_a_cancel_too(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups, frame=frame_at(9.0))
+    h.set_time(10.0)
+    h.controller.apply(
+        Decision(
+            actions=(hold(5.0, "A"),),
+            monitor=MonitorCreate("dialog", (case("c0", tap("B")),)),
+        )
+    )
+    h.wait_pressed({"A"})
+    h.set_time(10.5)
+    # 主ループの actions を空でない列で置き換えて中立に戻し、その列も終える
+    h.controller.apply(act(WaitAction(seconds=0.1)))
+    h.wait_neutral()
+    h.set_time(10.7)
+    h.wait_rounds()
+    assert h.controller.take_events().running is False
+    assert h.jev.request_count() == 0
+    h.frames.frame = frame_at(10.6)
+    h.wait_request(1)
+
+
 # --- 監視: 当たりの判定 ---
 
 
@@ -1212,6 +1357,47 @@ def test_create_replaces_the_monitor_after_the_old_request_returns(tmp_path, cle
     assert h.sender.reports() == []
     [row] = h.monitor_rows()
     assert (row["monitor"], row["hit"]) == ("a", None)
+
+
+def test_answer_for_an_identical_monitor_created_again_is_not_used(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    same = monitor(case("c0", tap("A")))
+    h.controller.apply(same)
+    old_request = h.wait_request(1)
+    # 同じ名前・同じ条件の監視を作り直す (世代が変わる)
+    h.controller.apply(same)
+    h.wait_rounds()
+    assert h.jev.request_count() == 1
+    h.jev.respond(hit(old_request, 0))
+    h.wait_request(2)
+    assert h.sender.press_starts("A") == []
+    assert h.controller.take_events().case_hits == ()
+    [row] = h.monitor_rows()
+    assert row["hit"] is None
+
+
+def test_failure_for_an_identical_monitor_created_again_is_not_counted(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups, max_errors=2)
+    same = monitor(case("c0", tap("A")))
+    h.controller.apply(same)
+    h.wait_request(1)
+    h.jev.respond(JevError("first"))
+    h.wait_request(2)
+    h.controller.apply(same)
+    # 作り直す前の世代の要求の失敗は、新しい世代の回数に数えない
+    h.jev.respond(JevError("old generation"))
+    h.wait_request(3)
+    h.jev.respond(JevError("new 1"))
+    h.wait_request(4)
+    assert h.controller.take_events().monitor_ends == ()
+    h.jev.respond(JevError("new 2"))
+    h.wait_until(lambda: len(h.monitor_rows()) == 4, "four requests are recorded")
+    h.wait_rounds()
+    [end] = h.controller.take_events().monitor_ends
+    assert (end.name, end.reason) == ("dialog", "failed")
+    assert "new 2" in end.detail
 
 
 def test_stop_ends_the_requests_and_ignores_the_answer(tmp_path, cleanups):

@@ -19,6 +19,7 @@ from switch2_layers.orchestrator.decision_types import (
     ProcedureAction,
     WaitAction,
 )
+from switch2_layers.orchestrator.procedures import MAX_PROCEDURE_COUNT
 
 # 主ループが書く JSON の例 (操作・マクロ・監視をすべて使う)
 CONTRACT_EXAMPLE = {
@@ -601,6 +602,22 @@ def test_procedure_boundaries_are_valid():
         walk(seconds=0.001),
     )
     assert_decision(result)
+
+
+def test_procedure_count_limit_is_100():
+    assert MAX_PROCEDURE_COUNT == 100
+
+
+@pytest.mark.parametrize("make_action", [tap_repeat, walk], ids=["tap_repeat", "walk"])
+def test_procedure_count_up_to_the_limit_is_valid(make_action):
+    result = assert_decision(parse_actions(make_action(count=MAX_PROCEDURE_COUNT)))
+    assert result.actions[0].args["count"] == 100
+
+
+@pytest.mark.parametrize("make_action", [tap_repeat, walk], ids=["tap_repeat", "walk"])
+@pytest.mark.parametrize("count", [MAX_PROCEDURE_COUNT + 1, 1000])
+def test_procedure_count_over_the_limit_is_an_error(make_action, count):
+    assert_error_at(parse_actions(make_action(count=count)), "actions[0].args.count")
 
 
 def test_procedure_seconds_nan_is_an_error():
