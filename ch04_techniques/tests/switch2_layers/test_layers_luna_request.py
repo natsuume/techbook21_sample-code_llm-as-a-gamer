@@ -787,11 +787,13 @@ def test_grid_map_and_route_sections():
     map_json = json.loads(section_body(sections, "マップ"))
     assert map_json == map_document_to_json(GRID_MAP_DOCUMENT)
     assert map_json["layout"] == "grid"
-    # 前回の出力の現在地 (家の 1 階の (7, 1)) から、出口までの経路をコードで計算して書く
+    # 前回の出力の現在地 (家の 1 階の (7, 1)) から、出口までの経路をコードで計算して書く。続けて場所をまたぐ経路
+    # (町はマップの場所に無いため、行ける場所は無い)
     assert section_body(sections, ROUTE_SECTION_TITLE) == lines_of(
         [
             "前回の middle の出力 (入力の時刻 t=10.000) の現在地: 家の 1 階 のマス (x=7, y=1)",
             "- 出口「左下の赤いマット」(x=1, y=2)。行き先: 町。手順: 下に 1 マス → 左に 6 マス (合計 7 マス)",
+            "場所をまたぐ経路: 行ける場所は無い",
         ]
     )
     # 経路の節はマップの節の直後
@@ -838,10 +840,23 @@ def test_instructions_describe_exits_avoided_by_the_route():
     ) in LUNA_DEVELOPER_INSTRUCTIONS
 
 
-def test_instructions_allow_checking_unknown_tiles_for_unreachable_targets():
-    # 「経路なし」の目標でも、まだ確かめていないマス (?) が残っていれば、? を確かめに行ってよい
-    assert (
-        "「経路なし」の目標でも、その場所のマスの図にまだ確かめていないマス (?) が残っているときは、"
-        "? のマスを確かめに行くタスクにしてよいです"
-    ) in LUNA_DEVELOPER_INSTRUCTIONS
+def test_instructions_allow_checking_unknown_tiles_on_the_route_through_them():
+    # 未確認のマス (?) を通る経路の文は、? のマスを確かめながら進むタスクにしてよい
+    tasks = instructions_section("短期タスクリスト (tasks)")
+    assert "未確認のマス (?) も通れるとすると" in tasks
+    assert "確かめながら進む" in tasks
     assert "「経路なし」の目標には向かいません" not in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def test_instructions_use_the_cross_place_routes_for_the_tasks():
+    # 場所をまたぐ経路の行を使って、大方針の行き先の場所までの手順を短期タスクリストに書かせる
+    tasks = instructions_section("短期タスクリスト (tasks)")
+    assert "場所をまたぐ経路" in tasks
+    assert "大方針の行き先" in tasks
+    # 入力の節の説明でも、経路の節に場所をまたぐ経路があることを書く
+    [route_input] = [
+        line
+        for line in instructions_section("入力").split("\n")
+        if line.startswith(f"- {ROUTE_SECTION_TITLE}: ")
+    ]
+    assert "場所をまたぐ経路" in route_input

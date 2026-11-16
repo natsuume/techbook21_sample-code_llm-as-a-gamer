@@ -423,6 +423,8 @@ def test_pending_job_takes_previous_latest_frame_time_when_it_starts(
     value = job_json(harness.root / "deep" / "tips-003")
     assert value["previous_latest_frame_t"] == previous
     assert value["latest_frame_t"] == 15.0
+    # map 以外の種類のジョブには、マップの型が無い
+    assert value["map_layout"] is None
 
 
 @pytest.mark.parametrize(
@@ -472,6 +474,104 @@ def test_previous_latest_frame_time_skips_killed_jobs(tmp_path):
     third = harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
     assert third.job_dir is not None
     assert job_json(third.job_dir)["previous_latest_frame_t"] == 3.0
+
+
+# --- map のジョブの型 (コードがジョブを作るときに決めて渡す) ---
+
+GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型\n- 2D で真上から見る\n"
+GUESSED_GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型 (推測)\n"
+GRID_MAP_JSON = {"layout": "grid", "places": [], "connections": []}
+FREE_MAP_JSON = {"layout": "free", "places": [], "connections": []}
+
+
+def write_game(root: Path, text: str) -> None:
+    (root / "notes" / "game.md").write_text(text, encoding="utf-8")
+
+
+def write_map_json(root: Path, value: object) -> None:
+    (root / "notes" / "map" / "map.json").write_text(
+        json.dumps(value), encoding="utf-8"
+    )
+
+
+def test_request_writes_the_map_layout_and_compares_it_with_map_json(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    write_game(harness.root, GRID_GAME)
+    harness.latest["t"] = 3.0
+    first = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert first.job_dir is not None
+    assert job_json(first.job_dir)["map_layout"] == "grid"
+    harness.threads.run_all()
+    # map.json の layout がジョブの型と同じなら、前回の正常に終わったジョブの時刻を渡す
+    write_map_json(harness.root, GRID_MAP_JSON)
+    harness.latest["t"] = 8.0
+    second = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert second.job_dir is not None
+    assert job_json(second.job_dir)["previous_latest_frame_t"] == 3.0
+    harness.threads.run_all()
+    # map.json の layout がジョブの型と違えば、前回の時刻を渡さない (deep に最初から読ませる)
+    write_map_json(harness.root, FREE_MAP_JSON)
+    harness.latest["t"] = 12.0
+    third = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert third.job_dir is not None
+    value = job_json(third.job_dir)
+    assert value["map_layout"] == "grid"
+    assert value["previous_latest_frame_t"] is None
+
+
+def test_request_of_an_undecided_line_keeps_the_layout_of_map_json(tmp_path):
+    # 「- 型: マス目型 (推測)」は型の行と一致しないため判定なし。今の map.json の型 (grid) を引き継ぐので、
+    # マスの図を free への書き直しで失わず、型を書き換えにならないため前回の時刻を渡す
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    write_game(harness.root, GUESSED_GRID_GAME)
+    write_map_json(harness.root, GRID_MAP_JSON)
+    harness.latest["t"] = 3.0
+    first = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert first.job_dir is not None
+    assert job_json(first.job_dir)["map_layout"] == "grid"
+    harness.threads.run_all()
+    harness.latest["t"] = 8.0
+    second = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert second.job_dir is not None
+    assert job_json(second.job_dir)["map_layout"] == "grid"
+    assert job_json(second.job_dir)["previous_latest_frame_t"] == 3.0
+
+
+@pytest.mark.parametrize(
+    "kind", [kind for kind in DOCUMENT_KINDS if kind is not DocumentKind.MAP]
+)
+def test_request_of_other_kinds_has_no_map_layout(tmp_path, kind):
+    harness = make_scheduler(tmp_path)
+    write_game(harness.root, GRID_GAME)
+    result = harness.scheduler.request(kind, DeepTrigger.SURFACE, None)
+    assert result.job_dir is not None
+    assert job_json(result.job_dir)["map_layout"] is None
+
+
+def test_pending_map_job_decides_the_layout_when_it_starts(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    # ゲームの性質の文書がまだ無いので判定なし。map.json も無い 1 つ目は free、map.json (free) を引き継ぐ 2 つ目も free
+    harness.latest["t"] = 3.0
+    harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    harness.threads.run_all()
+    write_map_json(harness.root, FREE_MAP_JSON)
+    harness.latest["t"] = 8.0
+    second = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
+    assert second.job_dir is not None
+    assert job_json(second.job_dir)["map_layout"] == "free"
+    assert job_json(second.job_dir)["previous_latest_frame_t"] == 3.0
+    harness.latest["t"] = 12.0
+    assert harness.scheduler.request(
+        DocumentKind.MAP, DeepTrigger.SURFACE, None
+    ) == DeepRequestResult(started=False, reason=REQUEST_PENDING)
+    # 2 つ目の実行中に、game のジョブがマップの形式をマス目型に書き換える
+    write_game(harness.root, GRID_GAME)
+    harness.latest["t"] = 15.0
+    harness.threads.run_all()
+    # 保留した要求は、起動するときの文書から型を決め、map.json (free) と違うので前回の時刻を渡さない
+    value = job_json(harness.root / "deep" / "map-003")
+    assert value["map_layout"] == "grid"
+    assert value["previous_latest_frame_t"] is None
 
 
 # --- 実行中のジョブがあるときの保留と最小間隔 ---
@@ -1933,6 +2033,38 @@ def test_run_deep_once_runs_a_game_job(tmp_path):
     # 現在の場面があっても、場面に依らない notes/game.md を対象にする
     assert value["scene_id"] is None
     assert value["documents"] == ["game.md"]
+    assert value["map_layout"] is None
+
+
+def write_success_result(job_dir: Path) -> None:
+    """job_dir/result.json に、正常に終わった Claude Code の結果を書く (deep-once は run.jsonl に書かないため)。"""
+    (job_dir / "result.json").write_text(
+        json.dumps({"returncode": 0, "is_error": False, "stopped": False}),
+        encoding="utf-8",
+    )
+
+
+def test_run_deep_once_writes_the_map_layout_and_compares_it_with_map_json(tmp_path):
+    root = make_run(tmp_path)
+    write_frames(root, [1.0, 6.5])
+    write_game(root, GRID_GAME)
+    first = run_deep_once(root, DocumentKind.MAP, None, FakeRunner())
+    assert job_json(first.job_dir)["map_layout"] == "grid"
+    write_success_result(first.job_dir)
+    # map.json の layout がジョブの型と同じなら、前回の正常に終わったジョブの時刻を渡す
+    write_map_json(root, GRID_MAP_JSON)
+    second = run_deep_once(root, DocumentKind.MAP, None, FakeRunner())
+    assert job_json(second.job_dir)["previous_latest_frame_t"] == 6.5
+    write_success_result(second.job_dir)
+    # 違えば渡さない
+    write_map_json(root, FREE_MAP_JSON)
+    third = run_deep_once(root, DocumentKind.MAP, None, FakeRunner())
+    value = job_json(third.job_dir)
+    assert value["map_layout"] == "grid"
+    assert value["previous_latest_frame_t"] is None
+    # map 以外の種類には、マップの型が無い
+    other = run_deep_once(root, DocumentKind.STRATEGY, None, FakeRunner())
+    assert job_json(other.job_dir)["map_layout"] is None
 
 
 # --- 画面の停滞の計測による advice の要求 (きっかけ progress) ---

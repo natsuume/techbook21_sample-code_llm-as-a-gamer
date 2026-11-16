@@ -8,14 +8,15 @@
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)
     strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
     advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json を使うことを含む)
-    map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く)
+    map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く。
+                   書くマップの型は、コードが決めて job.json の map_layout で渡す ${map_layout})
     game.md        ゲームの性質の指示 (6 つの節の見出しと順、マップの形式の型の行、確かめたことと推測の分け方、
                    ゲームの名前を書かないこと、全体の行数の上限)
 
 値の埋め方: string.Template の ${名前} の形の置き場所に、PROMPT_VALUE_NAMES の値を入れる
 (Template.substitute。足りない値があれば KeyError)。種類ごとの指示も同じ値で埋めてから ${kind_instructions} に入れる。
 Markdown の { } はそのまま残る。
-埋めるのは、コードが決めた値 (パス・時刻・場面 ID・きっかけ) だけにする。文書・記録・画面から読んだ文 (文書の中身、
+埋めるのは、コードが決めた値 (パス・時刻・場面 ID・きっかけ・マップの型) だけにする。文書・記録・画面から読んだ文 (文書の中身、
 場面名、middle の出力など) はプロンプトに入れず、deep にファイルとして読ませる (画面の文字や記録の文による指示の注入を、
 プロンプトの指示と混ぜないため)。
 
@@ -32,6 +33,7 @@ from pathlib import Path
 from switch2_layers.deep.claude_code_command import validate_document_note
 from switch2_layers.deep.deep_job_directory import read_job_file, run_directory_of_job
 from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
+from switch2_layers.notes.map_document import MapLayout
 from switch2_layers.notes.note_paths import (
     GAME_NOTE,
     MAP_DIR,
@@ -85,6 +87,7 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
     "map_dir",
     "game_note",
     "progress_state",
+    "map_layout",
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
@@ -113,6 +116,7 @@ class DeepPromptContext:
     documents                 対象の文書 (job.json の documents の順)
     previous_latest_frame_t   前回の、正常に終わった同じ文書のジョブに渡した最新のフレームの時刻 (job.json)。無ければ None
     latest_frame_t            今回の最新のフレームの時刻 (job.json)。無ければ None
+    map_layout                map のジョブで書くマップの型 (job.json の map_layout)。map 以外の種類では None
     """
 
     kind: DocumentKind
@@ -122,6 +126,7 @@ class DeepPromptContext:
     documents: tuple[PromptDocument, ...]
     previous_latest_frame_t: float | None
     latest_frame_t: float | None
+    map_layout: MapLayout | None = None
 
     @property
     def notes(self) -> tuple[str, ...]:
@@ -150,6 +155,7 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
     - documents は job.json の documents (notes/ からの相対パスの文字列のリスト) の順に、
       PromptDocument(note, 実行ディレクトリー / run_directory.NOTES_DIR / note) にする。
       note は claude_code_command.validate_document_note で確かめる
+    - map_layout は、kind が map なら job.json の map_layout ("grid" か "free") の MapLayout、map 以外なら None
     次のときは ValueError にする (claude_code_command.RulePathError も ValueError):
         - job.json が読めない (deep_job_directory.read_job_file の ValueError)
         - kind が DocumentKind の値でない。trigger が DeepTrigger の値でない
@@ -157,6 +163,8 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
         - previous_latest_frame_t・latest_frame_t が null でも数 (真偽値を除く) でもない
         - documents がリストでないか、要素が文字列でない
         - note が validate_document_note で RulePathError
+        - kind が map で、map_layout が "grid"・"free" (大文字と小文字を区別する) のどちらでもない (無い・null を含む)。
+          kind が map 以外で、map_layout が null でない (キーが無いのはよい)
         - job_dir がジョブのディレクトリーの形でない (run_directory_of_job の ValueError)
     """
     resolved_job_dir = job_dir.resolve()
@@ -180,6 +188,7 @@ def read_prompt_context(job_dir: Path) -> DeepPromptContext:
             "previous_latest_frame_t", value.get("previous_latest_frame_t")
         ),
         latest_frame_t=_frame_time_of("latest_frame_t", value.get("latest_frame_t")),
+        map_layout=_map_layout_of(kind, value.get("map_layout")),
     )
 
 
@@ -230,6 +239,25 @@ def _frame_time_of(name: str, value: object) -> float | None:
     raise ValueError(f"{name} in job.json must be null or a number: {value!r}")
 
 
+def _map_layout_of(kind: DocumentKind, value: object) -> MapLayout | None:
+    """job.json の map_layout を確かめて返す。
+
+    kind が map なら "grid" か "free" (MapLayout の値。大文字と小文字を区別する) の文字列で、MapLayout にして返す。
+    map 以外なら null (キーが無いときも null と同じ) で、None を返す。どちらでもなければ ValueError。
+    """
+    if kind is DocumentKind.MAP:
+        if isinstance(value, str) and value in {layout.value for layout in MapLayout}:
+            return MapLayout(value)
+        raise ValueError(
+            f"map_layout in job.json of a map job must be 'grid' or 'free': {value!r}"
+        )
+    if value is None:
+        return None
+    raise ValueError(
+        f"map_layout in job.json must be null for a {kind.value} job: {value!r}"
+    )
+
+
 def format_frame_time(t: float | None) -> str:
     """フレームの時刻をプロンプトに書く形にする。None なら NOT_AVAILABLE_TEXT、数なら `<小数第 3 位まで> 秒` (例: 12.345 秒)。"""
     if t is None:
@@ -273,6 +301,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         map_dir                   実行ディレクトリー/notes/map (マップの文書を置くディレクトリー)
         game_note                 実行ディレクトリー/notes/game.md (ゲームの性質の文書。まだ無いこともある)
         progress_state            実行ディレクトリー/progress/state.json (画面の停滞の計測の最新の値)
+        map_layout                context.map_layout の値 ("grid" か "free")。None (map 以外の種類) なら NOT_AVAILABLE_TEXT
     パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths と
     notes.note_paths に合わせる。
     """
@@ -297,6 +326,9 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "map_dir": (paths.notes_dir / MAP_DIR).as_posix(),
         "game_note": (paths.notes_dir / GAME_NOTE).as_posix(),
         "progress_state": paths.progress_state.as_posix(),
+        "map_layout": context.map_layout.value
+        if context.map_layout is not None
+        else NOT_AVAILABLE_TEXT,
     }
 
 

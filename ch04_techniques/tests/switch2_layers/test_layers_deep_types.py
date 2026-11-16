@@ -49,3 +49,5 @@ def test_job_key():
         latest_frame_t=0.9,
     )
     assert job.key == DocumentKey(DocumentKind.TIPS, "scene-001")
+    # マップの型は、map のジョブだけが持つ (既定は None)
+    assert job.map_layout is None

@@ -12,14 +12,23 @@
     - 場所の landmarks の座標は使わない
     - 最短の経路のうち、向きを変える回数の少ないものを選ぶ。それも同じなら、1 マスずつの移動の向きの列を
       MoveDirection の並び (上・下・左・右) の順で先頭から比べ、最も前のものを選ぶ (同じ入力なら同じ経路になる)
+未確認のマス (?) も通れるとみなした経路の決め方 (find_unknown_tile_route):
+    - 動き方は find_grid_route と同じ。ただし、文字が TILE_UNKNOWN (?) のマスも、途中で通れるマスに含める。
+      blocked の座標のマス、出口のマス、避けるマスは、文字が ? でも途中で通らない
+    - 通る ? のマスの数が少ない経路を選ぶ。? の数が同じなら短い経路、長さも同じなら向きを変える回数の少ない経路を
+      選ぶ。それも同じなら、find_grid_route と同じく、1 マスずつの移動の向きの列を MoveDirection の並びの順で先頭から
+      比べ、最も前のものを選ぶ
+    - 通る ? のマスは、経路で入るマス (途中のマスと目標のマス) のうち、文字が ? のもの。開始のマスは数えない
+    - 通れるマスだけで経路があれば、途中で ? を通らない経路になり、find_grid_route と同じ経路を返す
 経路を求める目標の並べ方 (list_route_targets):
     1. 場所の exits のうち、座標が tiles の範囲の中にあるもの (exits の順)
     2. from が場所の name か aliases (前後の空白を除いて比べる) で、from_tile が tiles の範囲の中にあるつながり
        (connections の順)。from_tile が 1 の出口のどれかと同じマスのつながりは目標にせず、その出口の行き先として添える
     合わせて最大 MAX_ROUTE_TARGETS 件 (先頭から)。
-場所をまたぐ経路 (つながりをたどる経路) は計算しない。
+場所をまたぐ経路 (つながりをたどる道筋) は notes.cross_place_route が求める。
 """
 
+import heapq
 from collections import deque
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
@@ -28,6 +37,7 @@ from enum import StrEnum
 from switch2_layers.notes.map_document import (
     TILE_EXIT,
     TILE_PASSABLE,
+    TILE_UNKNOWN,
     GridMapDocument,
     GridMapPlace,
     MapConnection,
@@ -75,6 +85,19 @@ class GridRoute:
     def total_tiles(self) -> int:
         """合計のマス数 (steps の tiles の和。steps が空なら 0)。"""
         return sum(step.tiles for step in self.steps)
+
+
+@dataclass(frozen=True)
+class UnknownTileRoute:
+    """未確認のマス (?) も通れるとみなした経路 (find_unknown_tile_route の結果)。
+
+    route           経路
+    unknown_tiles   経路で通る ? のマスの数 (0 以上)。経路で入るマス (途中のマスと目標のマス) のうち、文字が ? のものを
+                    数える。目標のマスが ? なら、そのマスも数える。開始のマスは数えない
+    """
+
+    route: GridRoute
+    unknown_tiles: int
 
 
 class RouteTargetKind(StrEnum):
@@ -174,6 +197,69 @@ def find_grid_route(
         _, last, cell = best
         moves.append(directions[last])
     return GridRoute(steps=_merge_moves(tuple(moves)))
+
+
+def find_unknown_tile_route(
+    place: GridMapPlace,
+    start: TilePosition,
+    goal: TilePosition,
+    avoided: Collection[TilePosition] = (),
+) -> UnknownTileRoute | None:
+    """場所 place の中で、未確認のマス (?) も途中で通れるとみなして、マス start からマス goal までの経路を返す
+    (経路の決め方はモジュールの docstring)。
+
+    avoided は find_grid_route と同じ (出口のマスのほかに、経路の途中で通らないマス)。既定は無し。
+    次のときは None (経路なし) を返す:
+        - start か goal が tiles の範囲の外 (tiles が空のときを含む)
+        - 途中で通れるマス (文字が PASSABLE_TILES か TILE_UNKNOWN で、blocked の座標に無く、出口のマスでも avoided の
+          マスでもないマス) だけを通っては goal にたどり着けない
+    start と goal が同じマスなら、手順が空 (0 マス) で unknown_tiles が 0 の経路を返す。
+    開始のマスの文字と blocked と avoided は問わず、目標のマスには文字と blocked と avoided によらず入る
+    (find_grid_route と同じ)。
+    経路は、(通る ? の数, 長さ, 向きを変えた回数, 移動の向きの番号の列) を小さい順に比べる、ダイクストラ法で求める
+    (どの値も、経路を 1 マス延ばすと減らないため、最初に goal に着いた経路が最も前のものになる)。
+    """
+    if tile_at(place, start) is None or tile_at(place, goal) is None:
+        return None
+    passable = _passable_cells(
+        place, avoided, passable_tiles=PASSABLE_TILES | {TILE_UNKNOWN}
+    )
+    unknown_cells = _unknown_cells(place)
+    start_cell = (start.x, start.y)
+    goal_cell = (goal.x, goal.y)
+    directions = list(MoveDirection)
+    # キューの要素: (通る ? の数, 長さ, 向きを変えた回数, 向きの番号の列, マス, 最後の向きの番号)
+    queue: list[_UnknownRouteState] = [(0, 0, 0, (), start_cell, None)]
+    # 調べ終えた (マス, そのマスに着いた向きの番号)。同じ組には、最初に取り出した経路が最も前のもの
+    finished: set[tuple[tuple[int, int], int | None]] = set()
+    while queue:
+        unknown, length, turns, moves, cell, last = heapq.heappop(queue)
+        if cell == goal_cell:
+            route = GridRoute(
+                steps=_merge_moves(tuple(directions[index] for index in moves))
+            )
+            return UnknownTileRoute(route=route, unknown_tiles=unknown)
+        if (cell, last) in finished:
+            continue
+        finished.add((cell, last))
+        for index, (dx, dy) in enumerate(_DIRECTION_DELTAS.values()):
+            neighbor = (cell[0] + dx, cell[1] + dy)
+            if neighbor != goal_cell and neighbor not in passable:
+                continue
+            if (neighbor, index) in finished:
+                continue
+            heapq.heappush(
+                queue,
+                (
+                    unknown + (1 if neighbor in unknown_cells else 0),
+                    length + 1,
+                    turns + (0 if last is None or last == index else 1),
+                    (*moves, index),
+                    neighbor,
+                    index,
+                ),
+            )
+    return None
 
 
 def list_route_targets(
@@ -282,11 +368,14 @@ class _RouteCells:
 
 
 def _passable_cells(
-    place: GridMapPlace, avoided_tiles: Collection[TilePosition]
+    place: GridMapPlace,
+    avoided_tiles: Collection[TilePosition],
+    passable_tiles: Collection[str] = PASSABLE_TILES,
 ) -> frozenset[tuple[int, int]]:
     """場所 place の tiles の範囲の中で、経路の途中で入れるマスの集合を返す。
 
-    入れるのは、文字が PASSABLE_TILES で、blocked の座標に無く、出口のマスでも avoided_tiles のマスでもないマス。
+    入れるのは、文字が passable_tiles (既定は PASSABLE_TILES。find_unknown_tile_route は ? も含める) で、blocked の
+    座標に無く、出口のマスでも avoided_tiles のマスでもないマス。
     出口のマスは、文字が TILE_EXIT のマスと、exits の座標のマス (目標のマスは、この集合によらず入れる)。
     """
     avoided = {
@@ -296,10 +385,25 @@ def _passable_cells(
         (place.origin.x + column, place.origin.y + row)
         for row, line in enumerate(place.tiles)
         for column, character in enumerate(line)
-        if character in PASSABLE_TILES
+        if character in passable_tiles
         and character != TILE_EXIT
         and (place.origin.x + column, place.origin.y + row) not in avoided
     )
+
+
+def _unknown_cells(place: GridMapPlace) -> frozenset[tuple[int, int]]:
+    """場所 place の tiles の範囲の中で、文字が TILE_UNKNOWN (?) のマスの集合を返す。"""
+    return frozenset(
+        (place.origin.x + column, place.origin.y + row)
+        for row, line in enumerate(place.tiles)
+        for column, character in enumerate(line)
+        if character == TILE_UNKNOWN
+    )
+
+
+# find_unknown_tile_route のキューの要素: (通る ? の数, 長さ, 向きを変えた回数, 移動の向きの番号の列, マス,
+# そのマスに着いた向きの番号 (開始のマスでは None))。タプルの比べ方 (先頭から順) が、経路の選び方の順になる
+_UnknownRouteState = tuple[int, int, int, tuple[int, ...], tuple[int, int], int | None]
 
 
 def _distances_to_goal(cells: _RouteCells) -> dict[tuple[int, int], int]:
