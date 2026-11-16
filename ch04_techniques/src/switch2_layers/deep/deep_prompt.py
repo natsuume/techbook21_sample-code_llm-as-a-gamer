@@ -8,6 +8,8 @@
     strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
     advice.md      詰まったときの助言の指示 (マップの場所の構造を使うことを含む)
     map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く)
+    game.md        ゲームの性質の指示 (6 つの節の見出しと順、マップの形式の型の行、確かめたことと推測の分け方、
+                   ゲームの名前を書かないこと、全体の行数の上限)
 
 値の埋め方: string.Template の ${名前} の形の置き場所に、PROMPT_VALUE_NAMES の値を入れる
 (Template.substitute。足りない値があれば KeyError)。種類ごとの指示も同じ値で埋めてから ${kind_instructions} に入れる。
@@ -28,7 +30,12 @@ from pathlib import Path
 from switch2_layers.deep.claude_code_command import validate_document_note
 from switch2_layers.deep.deep_job_directory import read_job_file, run_directory_of_job
 from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
-from switch2_layers.notes.note_paths import MAP_DIR, SCENE_LABELS_FILE, is_scene_id
+from switch2_layers.notes.note_paths import (
+    GAME_NOTE,
+    MAP_DIR,
+    SCENE_LABELS_FILE,
+    is_scene_id,
+)
 from switch2_layers.run_directory import FRAMES_DIR, RunPaths
 
 # プロンプトのファイルを置くパッケージの中のディレクトリー (importlib.resources.files("switch2_layers.deep") / PROMPTS_DIR)
@@ -42,6 +49,7 @@ KIND_PROMPT_FILES: dict[DocumentKind, str] = {
     DocumentKind.STRATEGY: "strategy.md",
     DocumentKind.ADVICE: "advice.md",
     DocumentKind.MAP: "map.md",
+    DocumentKind.GAME: "game.md",
 }
 # 種類の日本語の名前 (プロンプトの ${kind_title})
 KIND_TITLES: dict[DocumentKind, str] = {
@@ -50,6 +58,7 @@ KIND_TITLES: dict[DocumentKind, str] = {
     DocumentKind.STRATEGY: "大方針",
     DocumentKind.ADVICE: "詰まったときの助言",
     DocumentKind.MAP: "マップ",
+    DocumentKind.GAME: "ゲームの性質",
 }
 # 時刻や場面が無いときにプロンプトに書く文字列
 NOT_AVAILABLE_TEXT = "なし"
@@ -72,6 +81,7 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
     "notes_dir",
     "scene_labels",
     "map_dir",
+    "game_note",
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
@@ -258,6 +268,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         notes_dir                 実行ディレクトリー/notes
         scene_labels              実行ディレクトリー/notes/scene_labels.json
         map_dir                   実行ディレクトリー/notes/map (マップの文書を置くディレクトリー)
+        game_note                 実行ディレクトリー/notes/game.md (ゲームの性質の文書。まだ無いこともある)
     パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths と
     notes.note_paths に合わせる。
     """
@@ -280,6 +291,7 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "notes_dir": paths.notes_dir.as_posix(),
         "scene_labels": (paths.notes_dir / SCENE_LABELS_FILE).as_posix(),
         "map_dir": (paths.notes_dir / MAP_DIR).as_posix(),
+        "game_note": (paths.notes_dir / GAME_NOTE).as_posix(),
     }
 
 

@@ -284,6 +284,39 @@ def test_map_file_symlinked_to_outside_of_notes_is_not_a_document(tmp_path):
     assert job_directory_entries(job_dir) == ["job.json"]
 
 
+def test_game_job_targets_only_game_md(tmp_path):
+    root = make_run(tmp_path)
+    # 場面に依らない notes/game.md だけを対象にする (マップの文書は対象にしない)
+    job_dir = create_job_directory(
+        RunPaths(root), job(DocumentKind.GAME, trigger=DeepTrigger.NEW_SCENE)
+    )
+    assert job_dir == root / "deep" / "game-001"
+    assert read_json(job_dir / "job.json") == {
+        "kind": "game",
+        "scene_id": None,
+        "trigger": "new_scene",
+        "requested_t": 9.5,
+        "previous_latest_frame_t": None,
+        "latest_frame_t": 8.0,
+        "documents": ["game.md"],
+    }
+    assert job_directory_entries(job_dir) == ["job.json"]
+    # まだ無い文書は作らない (deep が Write で作る)
+    assert not (root / "notes" / "game.md").exists()
+
+
+def test_game_job_directory_names_follow_the_same_rule(tmp_path):
+    assert job_directory_name(DocumentKind.GAME, 1) == "game-001"
+    assert parse_job_directory_name("game-012") == (DocumentKind.GAME, 12)
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    names = [
+        create_job_directory(paths, job(kind)).name
+        for kind in [DocumentKind.GAME, DocumentKind.MAP, DocumentKind.GAME]
+    ]
+    assert names == ["game-001", "map-001", "game-002"]
+
+
 def test_numbers_are_per_kind(tmp_path):
     root = make_run(tmp_path)
     paths = RunPaths(root)

@@ -454,7 +454,8 @@ def test_missing_choice_of_choice_question_is_value_error():
 
 def advisor_nouls(**values: float) -> dict[str, float]:
     nouls = {
-        f"advisor_{kind}": 0.0 for kind in ["controls", "tips", "strategy", "advice"]
+        f"advisor_{kind}": 0.0
+        for kind in ["controls", "tips", "strategy", "advice", "game"]
     }
     nouls.update({f"advisor_{name}": value for name, value in values.items()})
     return nouls
@@ -478,6 +479,20 @@ def test_deep_kinds_use_given_threshold():
             DocumentKind.ADVICE,
         }
     )
+
+
+def test_deep_kinds_include_game_above_threshold():
+    nouls = advisor_nouls(game=0.51)
+    assert decide_deep_kinds(nouls, 0.5) == frozenset({DocumentKind.GAME})
+    # しきい値ちょうどは入れない
+    assert decide_deep_kinds(advisor_nouls(game=0.5), 0.5) == frozenset()
+
+
+def test_deep_kinds_missing_game_answer_is_value_error():
+    nouls = advisor_nouls()
+    del nouls["advisor_game"]
+    with pytest.raises(ValueError):
+        decide_deep_kinds(nouls, 0.5)
 
 
 def test_deep_kinds_missing_answer_is_value_error():

@@ -176,7 +176,7 @@ def test_step_writes_outputs_and_calls_row(tmp_path):
     assert rows[0]["error"] is None
 
 
-def test_new_scene_requests_controls_and_tips_deep(tmp_path):
+def test_new_scene_requests_controls_tips_and_game_deep(tmp_path):
     root = make_run(tmp_path)
     monotonic = FakeMonotonic(ORIGIN + 10.0)
     sink = FakeDeepSink()
@@ -188,14 +188,19 @@ def test_new_scene_requests_controls_and_tips_deep(tmp_path):
         sink,
     )
     assert result.new_scene is not None
-    assert result.deep_requests == (DocumentKind.CONTROLS, DocumentKind.TIPS)
+    assert result.deep_requests == (
+        DocumentKind.CONTROLS,
+        DocumentKind.TIPS,
+        DocumentKind.GAME,
+    )
     assert sink.requests == [
         (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001"),
         (DocumentKind.TIPS, DeepTrigger.NEW_SCENE, "scene-001"),
+        (DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"),
     ]
     row = read_rows(root / "middle" / "calls.jsonl")[0]
     assert row["new_scene"] is True
-    assert row["deep_requests"] == ["controls", "tips"]
+    assert row["deep_requests"] == ["controls", "tips", "game"]
     assert row["deep_requests_sent"] is True
 
 
@@ -224,6 +229,7 @@ def test_new_scene_is_requested_again_after_failed_write(tmp_path):
     assert sink.requests == [
         (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001"),
         (DocumentKind.TIPS, DeepTrigger.NEW_SCENE, "scene-001"),
+        (DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"),
     ]
 
 
@@ -255,9 +261,13 @@ def test_without_deep_sink_requests_are_only_recorded(tmp_path):
         10.0,
         None,
     )
-    assert result.deep_requests == (DocumentKind.CONTROLS, DocumentKind.TIPS)
+    assert result.deep_requests == (
+        DocumentKind.CONTROLS,
+        DocumentKind.TIPS,
+        DocumentKind.GAME,
+    )
     row = read_rows(root / "middle" / "calls.jsonl")[0]
-    assert row["deep_requests"] == ["controls", "tips"]
+    assert row["deep_requests"] == ["controls", "tips", "game"]
     assert row["deep_requests_sent"] is False
     assert list((root / "deep").iterdir()) == []
 
@@ -471,6 +481,7 @@ def test_deep_request_error_is_collected_and_other_requests_continue(tmp_path):
     assert sink.requests == [
         (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001"),
         (DocumentKind.TIPS, DeepTrigger.NEW_SCENE, "scene-001"),
+        (DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"),
     ]
     row = read_rows(root / "middle" / "calls.jsonl")[0]
     assert row["error"] is None
@@ -536,6 +547,7 @@ def test_loop_passes_new_scene_to_deep_scheduler(tmp_path):
     assert harness.deep_sink.requests == [
         (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001"),
         (DocumentKind.TIPS, DeepTrigger.NEW_SCENE, "scene-001"),
+        (DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"),
     ]
 
 
@@ -566,7 +578,7 @@ def test_middle_once_uses_latest_saved_time_and_does_not_start_deep(tmp_path):
     assert result.state.based_on_t == 12.5
     assert result.state.generated_t == 12.5
     row = read_rows(root / "middle" / "calls.jsonl")[0]
-    assert row["deep_requests"] == ["controls", "tips"]
+    assert row["deep_requests"] == ["controls", "tips", "game"]
     assert row["deep_requests_sent"] is False
     assert [frame["t"] for frame in row["frames"]] == [4.0, 8.0, 12.5]
     assert list((root / "deep").iterdir()) == []
@@ -741,7 +753,7 @@ def test_stop_during_new_scene_deep_request_skips_the_rest(tmp_path):
     harness.deep_sink.fail_for[DocumentKind.CONTROLS] = OSError("disk full")
     result = harness.loop.run_once(stop)
     assert result.stopped is True
-    # 残りの種類 (tips) は要求せず、calls.jsonl の行も run.jsonl の deep_request_error も書かない
+    # 残りの種類 (tips と game) は要求せず、calls.jsonl の行も run.jsonl の deep_request_error も書かない
     assert harness.deep_sink.requests == [
         (DocumentKind.CONTROLS, DeepTrigger.NEW_SCENE, "scene-001")
     ]

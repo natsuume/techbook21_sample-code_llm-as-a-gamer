@@ -55,6 +55,7 @@ def test_question_lists_follow_the_issue():
         DocumentKind.TIPS,
         DocumentKind.STRATEGY,
         DocumentKind.ADVICE,
+        DocumentKind.GAME,
     )
     assert DocumentKind.MAP not in ADVISOR_KINDS
     assert set(ADVISOR_QUESTION_TEXTS) == set(ADVISOR_KINDS)
@@ -123,6 +124,18 @@ def advisor_rule(kind_value: str) -> str:
 
 def test_advisor_status_rule_text():
     assert ADVISOR_STATUS_RULE_TEXT.format(kind="tips") == advisor_rule("tips")
+
+
+def test_instructions_describe_the_game_document():
+    # documents の説明に、ほかの文書と同じ「名前 (キー)」の形でゲームの性質を足す
+    for phrase in [
+        "短期タスクリスト (tasks)",
+        "攻略情報 (tips)",
+        "操作説明 (controls)",
+        "詰まったときの助言 (advice)",
+        "ゲームの性質 (game)",
+    ]:
+        assert phrase in SURFACE_INSTRUCTIONS, phrase
 
 
 def test_latest_frame_path():
@@ -215,19 +228,21 @@ def test_stick_strength_questions():
 # --- ほかの問い ---
 
 
-def test_advisor_questions_are_the_four_documents():
+def test_advisor_questions_are_the_five_documents():
     questions = build_advisor_questions()
     assert [question.name for question in questions] == [
         "advisor_controls",
         "advisor_tips",
         "advisor_strategy",
         "advisor_advice",
+        "advisor_game",
     ]
     assert [question.target for question in questions] == [
         "controls",
         "tips",
         "strategy",
         "advice",
+        "game",
     ]
     for question, kind in zip(questions, ADVISOR_KINDS, strict=True):
         # 種類ごとの文の末尾に、間を空けずに共通の文を足す
@@ -262,11 +277,32 @@ def test_advisor_rule_is_added_for_a_new_advisor_kind(monkeypatch):
         "tips",
         "strategy",
         "advice",
+        "game",
         "map",
     ]
     assert questions[-1].instructions == (
         "マップの更新を求めるべきか。" + advisor_rule("map")
     )
+
+
+def test_advisor_game_question_follows_the_issue():
+    assert ADVISOR_QUESTION_TEXTS[DocumentKind.GAME] == (
+        "今、deep (文書をまとめる上位のモデル) に、ゲームの性質 (`documents.game`) の更新を求めるべきか。"
+        "まだ書かれていないゲームの仕組み (入力を待たずに進む部分、入力を待って進む部分、マップの形、"
+        "ダメージやゲームオーバーの条件) が画面に出たとき、書かれている内容と画面の様子が合わないときに真にする。"
+    )
+    [question] = [q for q in build_advisor_questions() if q.target == "game"]
+    assert question.name == "advisor_game"
+    assert question.instructions == (
+        ADVISOR_QUESTION_TEXTS[DocumentKind.GAME] + advisor_rule("game")
+    )
+
+
+def test_info_labels_do_not_include_game():
+    # 情報ラベル (info_<名前>) にはゲームの性質を足さない
+    assert "game" not in INFO_LABEL_NAMES
+    names = [q.name for q in build_info_label_questions("frames[0].image")]
+    assert "info_game" not in names
 
 
 def test_info_label_questions_refer_to_latest_frame_by_path():
@@ -336,7 +372,7 @@ def test_surface_questions_are_in_the_order_of_the_table():
         [QuestionKind.BUTTON] * 16
         + [QuestionKind.STICK_DIRECTION] * 4
         + [QuestionKind.STICK_STRENGTH] * 12
-        + [QuestionKind.ADVISOR] * 4
+        + [QuestionKind.ADVISOR] * 5
         + [QuestionKind.INFO_LABEL] * 5
         + [QuestionKind.SCENE_CHANGE]
         + [QuestionKind.BOX_EXISTS] * 3

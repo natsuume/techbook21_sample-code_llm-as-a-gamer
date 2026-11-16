@@ -5,7 +5,8 @@
   "documents": [notes/ からの / 区切りの相対パス, ...]}
 - documents は、そのジョブの対象の文書 (deep が Edit・Write で直接編集してよい文書) の相対パスの文字列のリスト
   (note_paths.deep_document_notes の結果をそのまま並べる)。controls と tips で場面がある場合は、場面の文書と
-  共通の文書の両方 (tips の場面は box_targets.md も)。map は map/map.json と map/places.md。まだ無い文書のパスも含める
+  共通の文書の両方 (tips の場面は box_targets.md も)。map は map/map.json と map/places.md、game は game.md。
+  まだ無い文書のパスも含める
 - deep は notes/ の文書の本体を直接編集するため、ジョブのディレクトリーには job.json だけを置く (文書のコピーや
   作業用のディレクトリーを作らない。ジョブの実行で、DeepRunner が記録のファイルを足す)
 - ジョブの用意では文書の中身を読まない

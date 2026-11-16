@@ -427,6 +427,37 @@ def test_deep_requests_are_passed_to_scheduler_in_kind_order(tmp_path):
     assert result.row["scene_changed"] is True
 
 
+def test_game_deep_request_is_passed_last_with_current_scene(tmp_path):
+    output = SurfaceOutput(
+        action=NEUTRAL_ACTION,
+        deep_kinds=frozenset({DocumentKind.GAME, DocumentKind.ADVICE}),
+    )
+    decider = ScriptedDecider(output)
+    harness = make_harness(tmp_path, decider)
+    write_state(harness.root, scene_id="scene-002")
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    # DOCUMENT_KINDS の順 (game は最後)。場面は呼んだ側が知っている現在の場面を渡す
+    assert harness.deep_sink.requests == [
+        (DocumentKind.ADVICE, DeepTrigger.SURFACE, "scene-002"),
+        (DocumentKind.GAME, DeepTrigger.SURFACE, "scene-002"),
+    ]
+    assert result.row is not None
+    assert result.row["deep_requests"] == ["advice", "game"]
+
+
+def test_game_document_is_passed_to_the_decider(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    write_state(harness.root, scene_id="scene-001", scene_name="町")
+    (harness.root / "notes" / "game.md").write_text(
+        "## ジャンル\nRPG (推測)\n", encoding="utf-8"
+    )
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    assert decider.inputs[0].documents.game == "## ジャンル\nRPG (推測)\n"
+
+
 def test_deep_request_error_is_recorded_without_stopping(tmp_path):
     output = SurfaceOutput(
         action=NEUTRAL_ACTION,
@@ -515,6 +546,7 @@ def test_advisor_statuses_are_read_for_advisor_kinds_in_current_scene(tmp_path):
         DocumentKind.TIPS: RUNNING_STATUS,
         DocumentKind.STRATEGY: IDLE_STATUS,
         DocumentKind.ADVICE: ENDED_STATUS,
+        DocumentKind.GAME: IDLE_STATUS,
     }
     # 読み取りは deep の要求ではない
     assert harness.deep_sink.requests == []
@@ -562,6 +594,7 @@ def test_advisor_status_error_is_unreadable_without_counting_as_failure(
         DocumentKind.TIPS: None,
         DocumentKind.STRATEGY: IDLE_STATUS,
         DocumentKind.ADVICE: ENDED_STATUS,
+        DocumentKind.GAME: IDLE_STATUS,
     }
     # surface の失敗には数えず、全体も止めず、run.jsonl にも書かない。logging で警告を書く
     assert harness.loop.consecutive_errors == 0

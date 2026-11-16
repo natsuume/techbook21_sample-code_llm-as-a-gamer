@@ -124,6 +124,8 @@ class MiddleInput:
                              並べたもの。既定値の空のタプルは、マップを渡さない入力 (テストなど) のため
     map_document             notes/map/map.json の全体 (notes.map_document.read_map_document)。無い・読めない・形に
                              合わないときは None (マップなし)。既定値の None は、マップを渡さない入力 (テストなど) のため
+    game                     ゲームの性質 (notes/game.md。場面に依らない)。読んだまま (前後の空白も除かない) で、
+                             無い・読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
     """
 
     t: float
@@ -140,6 +142,7 @@ class MiddleInput:
     current_controls: str = ""
     place_names: tuple[str, ...] = ()
     map_document: MapDocument | None = None
+    game: str = ""
 
 
 @dataclass(frozen=True)

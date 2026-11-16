@@ -6,6 +6,7 @@ run の middle のループと middle-once は、同じ build_middle_input で�
     surface.jsonl・operations.jsonl      前回の middle の実行以降の行 (場面転換の印 scene_changed を含む)
     notes/scene_labels.json              場面ラベルの一覧
     middle/state.json                    前回の middle の出力
+    notes/game.md                        ゲームの性質
     notes/strategy.md                    大方針
     notes/scenes/<場面ID>/tasks.md        現在の場面の短期タスクリスト
     notes/scenes/<場面ID>/controls.md     現在の場面の操作説明 (無いか空なら notes/common/controls.md)
@@ -46,7 +47,12 @@ from switch2_layers.middle.middle_types import (
 )
 from switch2_layers.middle.place_names import collect_place_names
 from switch2_layers.notes.map_document import read_map_document
-from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, STRATEGY_NOTE, scene_note
+from switch2_layers.notes.note_paths import (
+    GAME_NOTE,
+    SCENE_LABELS_FILE,
+    STRATEGY_NOTE,
+    scene_note,
+)
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.notes.surface_documents import read_surface_documents
@@ -108,6 +114,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - operation_rows と operations_rows_offset: operations.jsonl について同じ (前回の位置は previous_state.operations_rows_offset)
     - scene_change_reported: surface_rows のどれかの scene_changed が True なら True
     - scene_labels: notes.scene_labels.read_scene_labels(notes/scene_labels.json)
+    - game: notes/game.md の本文 (無ければ空文字列。本文は読んだまま (前後の空白も除かない) にする)
     - strategy: notes/strategy.md (無ければ空文字列)
     - current_tasks: previous_state の scene_id の tasks.md (場面が無いか、文書が無ければ空文字列)
     - current_controls: previous_state の scene_id (previous_state が None なら None) の操作説明。
@@ -119,8 +126,9 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - place_names: middle.place_names.collect_place_names(map_document,
       middle.map_records.read_recorded_place_names(middle/map_records.jsonl))
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0・None) にする。
-    strategy・current_tasks・map.json の文書は notes.note_reader で読み、シンボリックリンクを解決した先が
-    notes/ の中の通常のファイルでなければ、無い文書 (空文字列。map.json は None) として扱う。
+    game・strategy・current_tasks・map.json の文書は notes.note_reader で読み、シンボリックリンクを解決した先が
+    notes/ の中の通常のファイルでなければ、無い文書 (空文字列。map.json は None) として扱う。UTF-8 として読めない
+    game・strategy・current_tasks も空文字列にする。
     """
     previous_state = read_middle_state(paths.middle_state)
     surface_chunk = read_json_lines_from(
@@ -161,6 +169,7 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         current_controls=current_controls,
         place_names=tuple(place_names),
         map_document=map_document,
+        game=read_note_text(paths.notes_dir, GAME_NOTE),
     )
 
 

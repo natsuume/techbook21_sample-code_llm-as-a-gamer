@@ -41,6 +41,8 @@ class SurfaceDocuments:
     scene_id               現在の場面 ID。場面が決まっていなければ None
     uses_common_controls   操作説明に共通の文書を使ったら True
     uses_common_tips       攻略情報に共通の文書を使ったら True
+    game                   ゲームの性質 (notes/game.md。場面に依らない)。読んだまま (前後の空白も除かない) で、
+                           無いか読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
     """
 
     tasks: str
@@ -50,6 +52,7 @@ class SurfaceDocuments:
     scene_id: str | None
     uses_common_controls: bool
     uses_common_tips: bool
+    game: str = ""
 
 
 @dataclass(frozen=True)

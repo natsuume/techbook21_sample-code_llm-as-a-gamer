@@ -398,17 +398,29 @@ def test_close_stops_running_deep_jobs(tmp_path):
     app = LayersApp(settings(tmp_path), parts(sender, deep=deep))
     reason, root = run_app(app, stop_after=RUN_SECONDS)
     assert reason == REASON_INTERRUPTED
-    # 初めての場面の操作説明と攻略情報のジョブは、終了時まで実行中だった
-    jobs = {root / "deep" / "controls-001", root / "deep" / "tips-001"}
+    # 初めての場面の操作説明・攻略情報・ゲームの性質のジョブは、終了時まで実行中だった
+    jobs = {
+        root / "deep" / "controls-001",
+        root / "deep" / "tips-001",
+        root / "deep" / "game-001",
+    }
     assert set(deep.stopped) == jobs
     # stop で run が戻ったので、kill は呼ばない
     assert deep.killed == []
     run_rows = read_rows(root / "run.jsonl")
     stops = [row for row in run_rows if row["event"] == "deep_stop"]
-    assert {row["job"] for row in stops} == {"deep/controls-001", "deep/tips-001"}
+    assert {row["job"] for row in stops} == {
+        "deep/controls-001",
+        "deep/tips-001",
+        "deep/game-001",
+    }
     assert all(row["reason"] == "close" for row in stops)
     ends = [row for row in run_rows if row["event"] == "deep_end"]
-    assert {row["job"] for row in ends} == {"deep/controls-001", "deep/tips-001"}
+    assert {row["job"] for row in ends} == {
+        "deep/controls-001",
+        "deep/tips-001",
+        "deep/game-001",
+    }
     assert all(row["status"] == "stopped" for row in ends)
     assert all(row["stop_reason"] == "close" for row in ends)
     # deep の終わりは、run.jsonl の stop より前に記録する

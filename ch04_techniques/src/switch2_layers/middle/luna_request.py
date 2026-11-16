@@ -11,7 +11,7 @@
           {"type": "input_text", "text": luna_instructions.LUNA_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 12>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 13>},
           {"type": "input_text", "text": frame_label(フレーム 1 の t)},
           {"type": "input_image", "image_url": jpeg_data_url(フレーム 1 の JPEG)},
           ...]}
@@ -29,15 +29,17 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     3. 場所の名前の一覧                 describe_place_names(middle_input.place_names)
     4. マップ                           describe_map_document(middle_input.map_document)
     5. 前回の middle の出力             describe_previous_state(middle_input.previous_state, middle_input.t)
-    6. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
-    7. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
-    8. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
+    6. ゲームの性質                     middle_input.game の前後の空白を除いたもの。空なら EMPTY_TEXT
+                                        (待ち時間と、タスクにしない行動を決めるために渡す)
+    7. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
+    8. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
+    9. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (unknown のボタンを確かめるタスクを作るために渡す)
-    9. 前回以降の surface の記録        record_summary.summarize_surface_rows(middle_input.surface_rows)
-    10. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
-    11. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
+    10. 前回以降の surface の記録       record_summary.summarize_surface_rows(middle_input.surface_rows)
+    11. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
+    12. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
                                         SCENE_CHANGE_NOT_REPORTED_TEXT
-    12. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
+    13. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
                                         0 枚なら NO_FRAMES_TEXT
 節の後ろに、middle_input.frames の順 (古い順) に、時刻のラベル (frame_label) と画像 (input_image) を 1 組ずつ置く。
 画像の detail は指定しない (既定の auto)。
@@ -67,6 +69,7 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "場所の名前の一覧",
     "マップ",
     "前回の middle の出力",
+    "ゲームの性質",
     "大方針",
     "現在の場面の短期タスクリスト",
     "現在の場面の操作説明",
@@ -185,7 +188,7 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
 
 
 def build_user_sections(middle_input: MiddleInput) -> list[str]:
-    """user メッセージの 12 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 13 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     frame_count = len(middle_input.frames)
     if frame_count:
         frames_text = (
@@ -200,6 +203,7 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
         describe_place_names(middle_input.place_names),
         describe_map_document(middle_input.map_document),
         describe_previous_state(middle_input.previous_state, middle_input.t),
+        _stripped_or_empty_text(middle_input.game),
         _stripped_or_empty_text(middle_input.strategy),
         _stripped_or_empty_text(middle_input.current_tasks),
         _stripped_or_empty_text(middle_input.current_controls),

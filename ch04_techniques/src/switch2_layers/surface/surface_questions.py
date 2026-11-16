@@ -5,7 +5,7 @@
     button            button_<ボタン>                         choice  押せるボタンごと (BUTTON_ORDER の順)
     stick_direction   stick_<LS|RS>_<x|y>                     choice  2 本 × 横・縦 = 4
     stick_strength    stick_<LS|RS>_<x|y>_at_least_<段階>      noul    4 軸 × 50・75・100 = 12
-    advisor           advisor_<種類>                           noul    ADVISOR_KINDS の 4 つ
+    advisor           advisor_<種類>                           noul    ADVISOR_KINDS の 5 つ
     info_label        info_<名前>                              noul    INFO_LABEL_NAMES の 5 つ
     scene_change      scene_changed                           noul    1
     box_exists        box_exists_<番号>                        noul    box の対象ごと
@@ -82,6 +82,7 @@ ADVISOR_KINDS: tuple[DocumentKind, ...] = (
     DocumentKind.TIPS,
     DocumentKind.STRATEGY,
     DocumentKind.ADVICE,
+    DocumentKind.GAME,
 )
 # 情報ラベルの名前 (操作説明・攻略情報・大方針・詰まり・マップ)。並びは問いの順と、SurfaceOutput.info_labels の順
 INFO_LABEL_NAMES = ("controls", "tips", "strategy", "stuck", "map")
@@ -182,7 +183,8 @@ SURFACE_INSTRUCTIONS = (
     "各画像の左上には時刻を、追えている対象には枠と名前を書き込んであります。"
     "書き込んだ時刻・枠・名前は、ゲームの画面の一部ではありません。\n"
     "`documents` は、今の場面の短期タスクリスト (tasks)・攻略情報 (tips)・操作説明 (controls)・"
-    "詰まったときの助言 (advice) です。`timeline` は上位の層がまとめた系列情報とその作成時刻、"
+    "詰まったときの助言 (advice) と、場面に依らないゲームの性質 (game) です。"
+    "`timeline` は上位の層がまとめた系列情報とその作成時刻、"
     "`recent_actions` は直近に送った操作 (古い順) です。\n"
     "`advisor` は、deep (文書をまとめる上位のモデル) の文書の種類ごとの呼び出しの状況 (実行中のジョブ、前回の終了、"
     "今求めると捨てられるか、surface が最後に求めた結果) です。\n"
@@ -212,6 +214,11 @@ ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
         "今、deep (文書をまとめる上位のモデル) に、詰まったときの助言 (`documents.advice`) を求めるべきか。"
         "系列情報 (`timeline`) に止まっていると書かれているとき、同じ操作や同じ失敗を繰り返して先に進めないとき、"
         "何をすればよいか分からないときに真にする。"
+    ),
+    DocumentKind.GAME: (
+        "今、deep (文書をまとめる上位のモデル) に、ゲームの性質 (`documents.game`) の更新を求めるべきか。"
+        "まだ書かれていないゲームの仕組み (入力を待たずに進む部分、入力を待って進む部分、マップの形、"
+        "ダメージやゲームオーバーの条件) が画面に出たとき、書かれている内容と画面の様子が合わないときに真にする。"
     ),
 }
 # advisor 判定のすべての問いの文の末尾に足す共通の文。{kind} は文書の種類の値 (DocumentKind.value) に置き換える

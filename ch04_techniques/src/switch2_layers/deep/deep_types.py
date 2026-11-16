@@ -2,7 +2,7 @@
 
 文書 (deep のジョブの単位) は、種類と場面の組 (DocumentKey) で区別する。
 操作説明 (controls) と攻略情報 (tips) は場面ごとの文書と共通の文書 (場面 None) があり、
-大方針 (strategy)・助言 (advice)・マップ (map) は場面に依らない (場面はいつも None)。
+大方針 (strategy)・助言 (advice)・マップ (map)・ゲームの性質 (game) は場面に依らない (場面はいつも None)。
 """
 
 from dataclasses import dataclass
@@ -19,6 +19,7 @@ class DocumentKind(StrEnum):
     STRATEGY = "strategy"  # 大方針
     ADVICE = "advice"  # 詰まったときの助言
     MAP = "map"  # マップ
+    GAME = "game"  # ゲームの性質 (ジャンル・進み方・マップの形式・ダメージとゲームオーバーの条件など)
 
 
 # 文書の種類の並び。自動の呼び出しの判定と、記録の並びはこの順にする
