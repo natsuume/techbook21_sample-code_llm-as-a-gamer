@@ -197,8 +197,8 @@ class PadOutput:
         """action をボタンの制限に通してから、押下状態を置き換えて送る。送った操作と、制限で外したボタンを返す。
 
         source は記録 (OperationEvent と operations.jsonl の行の source) に入れる、送った処理の名前。surface の操作は
-        "apply" (既定)、本体の画面の操作 (system_screen.system_operation_runner) は "system"。source は記録だけに使い、
-        送り方は変えない。
+        "apply" (既定)、本体の画面の操作 (system_screen.system_operation_runner) は "system"、Orchestrator 型の操作は
+        "orchestrator" (主ループの操作) か "monitor" (監視の操作)。source は記録だけに使い、送り方は変えない。
 
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す
@@ -479,6 +479,14 @@ class PadOutput:
     def allowed_buttons(self) -> frozenset[str]:
         """押せるボタンの集合 (作るときに受け取ったもの)。"""
         return self._allowed_buttons
+
+    @property
+    def output_stopped(self) -> bool:
+        """stop_output を呼んだ後なら True (以後の apply は OutputStoppedError を出す)。
+
+        ロックを取らずに読む (bool の読み取りなので、on_operation の中など、ロックを持つ間に呼んでも止まらない)。
+        """
+        return self._output_stopped
 
     @property
     def last_error(self) -> str | None:

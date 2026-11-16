@@ -1,10 +1,12 @@
 """コントローラーに送った操作の記録 operations.jsonl。
 
-1 件を {"t", "source": "apply" | "system" | "neutral" | "stop", "held", "hold_seconds", "taps", "sticks", "ok", "error"}
-の 1 行で追記する。
+1 件を {"t", "source": "apply" | "system" | "neutral" | "stop" | "orchestrator" | "monitor", "held", "hold_seconds",
+"taps", "sticks", "ok", "error"} の 1 行で追記する。
 hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent を on_operation に渡し、OperationLog.write が書く。
-surface のスレッド (apply)、本体の画面の操作のスレッド (system)、終了処理 (neutral・stop) から書くため、追記は 1 つの
-ロックの中で行う。
+apply で送った操作の source は PadOutput.apply の引数で決まる (既定 apply)。本体の画面の操作は system、Orchestrator
+型の操作 (orchestrator.orchestrator_controller) は orchestrator か monitor を渡す。
+surface のスレッド (apply)、本体の画面の操作のスレッド (system)、Orchestrator 型の操作のスレッド (orchestrator・
+monitor)、終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
 """
 
 import threading
@@ -17,10 +19,13 @@ from switch2_layers.pad_action import PadAction, action_to_json
 from switch2_layers.run_clock import RunClock
 
 # 操作を送った処理: apply (surface の操作)、system (本体の画面の操作。system_screen.system_operation_runner)、
-# neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)
-OperationSource = Literal["apply", "system", "neutral", "stop"]
-# hardware.pad_output.PadOutput.apply で送った操作の処理 (OperationSource のうち apply と system)
-ApplySource = Literal["apply", "system"]
+# neutral (中立に戻した)、stop (全体を止めるときに中立にして出力を止めた)、
+# orchestrator (Orchestrator 型の主ループの操作)、monitor (Orchestrator 型の監視の操作)
+OperationSource = Literal[
+    "apply", "system", "neutral", "stop", "orchestrator", "monitor"
+]
+# hardware.pad_output.PadOutput.apply で送った操作の処理 (OperationSource のうち neutral と stop 以外)
+ApplySource = Literal["apply", "system", "orchestrator", "monitor"]
 
 
 @dataclass(frozen=True)
@@ -28,7 +33,8 @@ class OperationEvent:
     """コントローラーに送ろうとした 1 回分の操作。
 
     source   送った処理
-    action   送ろうとした操作 (apply ではボタンの制限を通した後の操作。neutral と stop では pad_action.NEUTRAL_ACTION)
+    action   送ろうとした操作 (apply・orchestrator・monitor ではボタンの制限を通した後の操作。neutral と stop では
+             pad_action.NEUTRAL_ACTION)
     ok       送信に成功したら True
     error    送信の失敗の説明。成功なら None
     """

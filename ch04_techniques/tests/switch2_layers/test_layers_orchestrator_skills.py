@@ -13,6 +13,8 @@ from switch2_remote.controller_state import BUTTON_ORDER
 
 import switch2_layers
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
+from switch2_layers.orchestrator.decision_parser import parse_decision
+from switch2_layers.orchestrator.decision_types import DecisionError
 
 # スキルを置くディレクトリー (パッケージのディレクトリーからのパスで指す)
 SKILLS_DIR = Path(switch2_layers.__file__).parent / "orchestrator" / "skills"
@@ -212,3 +214,15 @@ def test_json_example_waits_have_seconds(name):
     for where, action in example_actions(name):
         if action.get("type") == "wait":
             assert_seconds(where, action)
+
+
+@pytest.mark.parametrize("name", SKILL_NAMES)
+def test_json_examples_are_read_by_parse_decision(name):
+    # 主ループの応答の本文に、例のブロックを 1 つだけ書いたものとして読む
+    _, body = split_frontmatter(read_skill(name))
+    for block_index, block in enumerate(json_blocks(body), start=1):
+        response = f"{CODE_FENCE}json\n{block}\n{CODE_FENCE}\n"
+        result = parse_decision(response)
+        assert not isinstance(result, DecisionError), (
+            f"{name} の {block_index} 番目の JSON の例が誤りになる: {result.messages}"
+        )

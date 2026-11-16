@@ -129,6 +129,13 @@ def test_safety_log_path():
     assert RunPaths(root).safety_log == root / "safety.jsonl"
 
 
+def test_orchestrator_paths():
+    root = Path("/runs/20261115-142233")
+    paths = RunPaths(root)
+    assert paths.orchestrator_dir == root / "orchestrator"
+    assert paths.orchestrator_monitor_log == root / "orchestrator" / "monitor.jsonl"
+
+
 def test_frame_file_name_uses_nine_digit_milliseconds():
     assert frame_file_name(12.345) == "000012345.jpg"
     assert frame_file_name(0.0) == "000000000.jpg"
