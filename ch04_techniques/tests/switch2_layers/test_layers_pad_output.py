@@ -431,6 +431,39 @@ def test_apply_send_failure_is_reported_and_raised():
     assert "reconnecting" in (events[-1].error or "")
 
 
+@pytest.mark.parametrize("source", ["orchestrator", "monitor"])
+def test_apply_reports_the_given_source(source):
+    output, sender, _, events = make_output()
+    action = PadAction(held=frozenset({"A", "HOME"}), left_stick=(0.5, 0.0))
+    result = output.apply(action, source=source)
+    # 送る操作とボタンの制限は、source に依らない
+    assert result.action == PadAction(held=frozenset({"A"}), left_stick=(0.5, 0.0))
+    assert result.blocked_buttons == ("HOME",)
+    assert len(sender.reports) == 1
+    assert events == [
+        OperationEvent(source=source, action=result.action, ok=True, error=None)
+    ]
+
+
+@pytest.mark.parametrize("source", ["orchestrator", "monitor"])
+def test_apply_send_failure_is_reported_with_the_given_source(source):
+    output, sender, _, events = make_output()
+    sender.fail_with = RuntimeError("bridge is reconnecting")
+    with pytest.raises(RuntimeError, match="reconnecting"):
+        output.apply(PadAction(taps=frozenset({"B"})), source=source)
+    assert len(events) == 1
+    assert events[0].source == source
+    assert events[0].ok is False
+
+
+def test_apply_without_source_reports_apply():
+    output, _, _, events = make_output()
+    output.apply(PadAction(taps=frozenset({"A"})))
+    output.apply(PadAction(), source="orchestrator")
+    output.apply(PadAction())
+    assert [event.source for event in events] == ["apply", "orchestrator", "apply"]
+
+
 def test_neutral_send_failure_is_not_raised():
     output, sender, _, events = make_output()
     sender.fail_with = RuntimeError("bridge failed")

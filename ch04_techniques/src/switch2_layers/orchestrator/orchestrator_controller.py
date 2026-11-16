@@ -49,8 +49,9 @@ take_events:
     外したボタン) を返して空にし、running・remaining_action_count・macros・monitor は呼んだ時点の値を返す
     (orchestrator_events.OrchestratorEvents の欄の説明)。
 操作の記録:
-    PadOutput.apply で送るたびに、parts.record_operation に、主ループの列なら source が orchestrator、監視の列なら
-    monitor の OperationEvent を渡す (action_executor の「操作の記録」)。
+    PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor を渡す (action_executor の
+    「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では OperationLog.write) が 1 回の送信に
+    つき 1 行書く。このクラスは記録の関数を受け取らず、operations.jsonl に行を書かない。
 """
 
 import threading
@@ -63,7 +64,6 @@ from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.decision_types import Decision
 from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_events import OrchestratorEvents
-from switch2_layers.records.operation_log import OperationEvent
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.safety.safety_monitor import SAFETY_IMAGE_WIDTH
@@ -86,16 +86,16 @@ def wait_for_wake(wake: threading.Event, timeout: float) -> None:
 class OrchestratorParts:
     """OrchestratorController が使う部品。
 
-    pad_output         操作の送信 (ボタンの制限を含む。押せるボタンの集合は作った側が決める)
-    jev                監視の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
-    latest_frame       キャプチャーの最新のフレームを返す関数 (run では FrameBuffer.latest)。まだ無ければ None
-    clock              実行の経過秒の時計。操作の秒数と monitor.jsonl の時刻に使う (PadOutput の clock と同じ monotonic
-                       から作る)
-    paths              実行ディレクトリー (orchestrator/monitor.jsonl に書く)
-    record_operation   PadOutput.apply で送るたびに OperationEvent を受け取る関数 (run では OperationLog.write)
-    wait               run のループが回りの最後に待つ関数 (wake, timeout を受け取る)。既定 wait_for_wake。
-                       テストでは、回りの数を数える関数を渡せる
-    make_reference     画像の参照文字列を作る関数 (既定 jev_client.new_asset_reference。呼ぶたびに異なる文字列を返す)
+    pad_output       操作の送信 (ボタンの制限を含む。押せるボタンの集合と、operations.jsonl に書く on_operation は
+                     作った側が決める)
+    jev              監視の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
+    latest_frame     キャプチャーの最新のフレームを返す関数 (run では FrameBuffer.latest)。まだ無ければ None
+    clock            実行の経過秒の時計。操作の秒数と monitor.jsonl の時刻に使う (PadOutput の clock と同じ monotonic
+                     から作る)
+    paths            実行ディレクトリー (orchestrator/monitor.jsonl に書く)
+    wait             run のループが回りの最後に待つ関数 (wake, timeout を受け取る)。既定 wait_for_wake。
+                     テストでは、回りの数を数える関数を渡せる
+    make_reference   画像の参照文字列を作る関数 (既定 jev_client.new_asset_reference。呼ぶたびに異なる文字列を返す)
     """
 
     pad_output: PadOutput
@@ -103,7 +103,6 @@ class OrchestratorParts:
     latest_frame: Callable[[], CapturedFrame | None]
     clock: RunClock
     paths: RunPaths
-    record_operation: Callable[[OperationEvent], None]
     wait: Callable[[threading.Event, float], None] = wait_for_wake
     make_reference: Callable[[], str] = new_asset_reference
 

@@ -3,8 +3,8 @@
 1 件を {"t", "source": "apply" | "neutral" | "stop" | "orchestrator" | "monitor", "held", "hold_seconds", "taps",
 "sticks", "ok", "error"} の 1 行で追記する。
 hardware.pad_output.PadOutput が、送ろうとするたびに OperationEvent を on_operation に渡し、OperationLog.write が書く。
-Orchestrator 型の操作 (orchestrator.orchestrator_controller) は、PadOutput.apply で送るたびに、source を
-orchestrator か monitor にした OperationEvent を OperationLog.write に渡す。
+source は PadOutput.apply の引数で決まり (既定 apply)、Orchestrator 型の操作 (orchestrator.orchestrator_controller) は
+orchestrator か monitor を渡す。
 surface のスレッド (apply) と終了処理 (neutral・stop) から書くため、追記は 1 つのロックの中で行う。
 """
 

@@ -15,26 +15,25 @@
     押す・離すの送信は PadOutput.apply で行う。押せないボタンは apply が外し、外したボタンを take_blocked_buttons で返す。
     列を途中で捨てる (cancel・start) ときだけ、PadOutput.neutral で押下状態を中立に戻す。
 操作の記録:
-    PadOutput.apply を呼ぶたびに、record_operation に OperationEvent(source=列の持ち主 (orchestrator か monitor),
-    action=apply が返した操作 (ボタンの制限を通した後), ok=True) を渡す。apply が例外を出したら、action を
-    buttons.filter_action(渡した操作, pad_output.allowed_buttons).action、ok=False、error=error_text.describe_exception(例外)
-    にして渡し、例外は外に出さない (その操作は時刻どおりに進める)。
-    apply が OutputStoppedError を出したら (全体を止める処理が出力を止めた)、記録せずに、今の列とこの後に始める列を
-    すべて捨てる (以後は何も送らない)。
+    PadOutput.apply を呼ぶたびに、source に列の持ち主 (orchestrator か monitor) を渡す
+    (PadOutput.apply(操作, source=持ち主))。operations.jsonl の行は、PadOutput が on_operation でその source のまま
+    書く (このモジュールは記録の関数を持たず、行を書かない)。
+    apply の送信の例外は外に出さない (PadOutput が ok=False の行を書く。その操作は時刻どおりに進める)。
+    apply が OutputStoppedError を出したら (全体を止める処理が出力を止めた)、今の列とこの後に始める列をすべて捨てる
+    (以後は何も送らない)。
 OrchestratorController の run のループのスレッドからだけ呼ぶ (ロックを持たない)。
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.decision_types import Action, PressAction, WaitAction
-from switch2_layers.records.operation_log import OperationEvent
 from switch2_layers.run_clock import RunClock
 
 # 展開した後の操作 (押す操作と待ち)
 PrimitiveAction = PressAction | WaitAction
-# 操作の列の持ち主。operations.jsonl の source に書く
+# 操作の列の持ち主。PadOutput.apply の source に渡し、operations.jsonl の source になる
 ActionOwner = Literal["orchestrator", "monitor"]
 
 
@@ -52,17 +51,11 @@ def expand_actions(
 class ActionExecutor:
     """操作の列を 1 つ持ち、advance のたびに、今の時刻までに来た押す・離すを送る。
 
-    pad_output         操作の送信 (ボタンの制限を含む)
-    clock              押す秒数と待ちの秒数を測る時計 (PadOutput の clock と同じ monotonic から作ったもの)
-    record_operation   PadOutput.apply を呼ぶたびに OperationEvent を受け取る関数 (run では OperationLog.write)
+    pad_output   操作の送信 (ボタンの制限と operations.jsonl への記録を含む)
+    clock        押す秒数と待ちの秒数を測る時計 (PadOutput の clock と同じ monotonic から作ったもの)
     """
 
-    def __init__(
-        self,
-        pad_output: PadOutput,
-        clock: RunClock,
-        record_operation: Callable[[OperationEvent], None],
-    ) -> None:
+    def __init__(self, pad_output: PadOutput, clock: RunClock) -> None:
         """列を持たない状態で作る。レポートは送らない。"""
         raise NotImplementedError
 

@@ -185,8 +185,13 @@ class PadOutput:
             )
             self._timer_thread.start()
 
-    def apply(self, action: PadAction) -> FilteredAction:
+    def apply(
+        self, action: PadAction, source: OperationSource = "apply"
+    ) -> FilteredAction:
         """action をボタンの制限に通してから、押下状態を置き換えて送る。送った操作と、制限で外したボタンを返す。
+
+        source は、on_operation に渡す OperationEvent の source (送った処理)。既定は "apply" (surface の操作)。
+        Orchestrator 型の操作は "orchestrator" (主ループの操作) か "monitor" (監視の操作) を渡す。
 
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す
@@ -224,7 +229,7 @@ class PadOutput:
                sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、7 で tapping から
                外したもの) の最後に離した時刻を sent_at にする。held の各ボタンの期限は、秒数があれば sent_at + 秒数に
                置き換え、無ければ外す (次の apply まで押し続ける)
-            10. on_operation に OperationEvent(source="apply", action=2〜5 の後の操作, ok, error) を渡す
+            10. on_operation に OperationEvent(source=source, action=2〜5 の後の操作, ok, error) を渡す
         戻り値は FilteredAction(action=2〜5 の後の操作, blocked_buttons=2 で外したボタン)。操作の hold_seconds は、
         3 と 4 で整えた後の秒数 (held のボタンのうち秒数のあるものだけ)。
         送信の例外は、on_operation に ok=False で渡してからそのまま出す。状態は 6・7 で変えたままにし、9 の時刻は
@@ -294,7 +299,7 @@ class PadOutput:
             self._set_hold_deadlines_locked(
                 pressed_held, sent_action.hold_seconds, sent_at
             )
-            self._report_operation_locked("apply", sent_action, error)
+            self._report_operation_locked(source, sent_action, error)
             if error is not None:
                 raise error
             return FilteredAction(

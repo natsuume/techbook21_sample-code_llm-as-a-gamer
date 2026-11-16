@@ -379,6 +379,11 @@ def read_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def rows_pressing(rows: list[dict], button: str) -> list[dict]:
+    """operations.jsonl の行のうち、button を押し続けるか短押しする行。"""
+    return [row for row in rows if button in row["held"] or button in row["taps"]]
+
+
 @pytest.fixture
 def cleanups():
     """テストの最後に逆順で呼ぶ後片付けの関数の並び (テストの本体で部品を作るため、fixture では作らない)。"""
@@ -398,15 +403,24 @@ def make_harness(
     frame: CapturedFrame | None = SMALL_FRAME,
     started: bool = True,
 ) -> Harness:
-    """OrchestratorController を作って run のスレッドを起動し、started なら set_started を呼ぶ。"""
+    """OrchestratorController を作って run のスレッドを起動し、started なら set_started を呼ぶ。
+
+    PadOutput の on_operation には、run と同じく operations.jsonl の OperationLog.write をつなぐ。
+    """
     monotonic = FakeMonotonic()
     sender = RecordingSender(monotonic)
-    pad_output = PadOutput(sender, allowed, clock=monotonic, start_timer=False)
+    clock = RunClock(monotonic, origin=0.0)
+    paths = RunPaths(tmp_path)
+    pad_output = PadOutput(
+        sender,
+        allowed,
+        clock=monotonic,
+        on_operation=OperationLog(paths.operations_log, clock).write,
+        start_timer=False,
+    )
     cleanups.append(pad_output.close)
     jev = ScriptedJev()
     cleanups.append(jev.close)
-    clock = RunClock(monotonic, origin=0.0)
-    paths = RunPaths(tmp_path)
     frames = FrameSource(frame)
     rounds = LoopRounds(pad_output)
     controller = OrchestratorController(
@@ -416,7 +430,6 @@ def make_harness(
             latest_frame=frames.latest,
             clock=clock,
             paths=paths,
-            record_operation=OperationLog(paths.operations_log, clock).write,
             wait=rounds.wait,
         ),
         OrchestratorSettings(
@@ -583,15 +596,17 @@ def test_pressing_the_same_button_again_waits_the_release_gap(
     h.wait_until(lambda: len(h.sender.press_starts("A")) == 2, "A is pressed again")
 
 
-def test_all_operations_are_recorded_with_the_orchestrator_source(tmp_path, cleanups):
+def test_main_loop_operations_are_recorded_once_with_the_orchestrator_source(
+    tmp_path, cleanups
+):
     h = make_harness(tmp_path, cleanups)
     h.controller.apply(act(tap("A"), hold(0.2, "B")))
     h.drive(1.0)
     rows = h.operation_rows()
-    assert rows
-    assert {row["source"] for row in rows} == {"orchestrator"}
-    assert any("A" in row["taps"] + row["held"] for row in rows)
-    assert any("B" in row["taps"] + row["held"] for row in rows)
+    # 押す操作 1 つにつき、orchestrator の行が 1 行だけある (apply の行として重ねて書かない)
+    assert [row["source"] for row in rows_pressing(rows, "A")] == ["orchestrator"]
+    assert [row["source"] for row in rows_pressing(rows, "B")] == ["orchestrator"]
+    assert "apply" not in {row["source"] for row in rows}
 
 
 # --- 操作の実行: procedure・macro ---
@@ -1354,7 +1369,9 @@ def test_failed_request_row(tmp_path, cleanups):
     assert "timeout" in row["error"]
 
 
-def test_monitor_operations_are_recorded_with_the_monitor_source(tmp_path, cleanups):
+def test_monitor_operations_are_recorded_once_with_the_monitor_source(
+    tmp_path, cleanups
+):
     h = make_harness(tmp_path, cleanups)
     h.controller.apply(monitor(case("c0", tap("B"))))
     h.jev.respond(hit(h.wait_request(1), 0))
@@ -1362,21 +1379,10 @@ def test_monitor_operations_are_recorded_with_the_monitor_source(tmp_path, clean
     h.controller.apply(act(tap("A")))
     h.wait_pressed({"A"})
     rows = h.operation_rows()
-
-    def pressed_in(row: dict) -> set[str]:
-        return set(row["taps"]) | set(row["held"])
-
-    assert {row["source"] for row in rows} <= {"orchestrator", "monitor"}
-    assert any(row["source"] == "monitor" and "B" in pressed_in(row) for row in rows)
-    assert any(
-        row["source"] == "orchestrator" and "A" in pressed_in(row) for row in rows
-    )
-    assert not any(
-        row["source"] == "monitor" and "A" in pressed_in(row) for row in rows
-    )
-    assert not any(
-        row["source"] == "orchestrator" and "B" in pressed_in(row) for row in rows
-    )
+    # 監視の操作は monitor、主ループの操作は orchestrator の行が、それぞれ 1 行だけある
+    assert [row["source"] for row in rows_pressing(rows, "B")] == ["monitor"]
+    assert [row["source"] for row in rows_pressing(rows, "A")] == ["orchestrator"]
+    assert "apply" not in {row["source"] for row in rows}
 
 
 # --- 主ループへの知らせ ---
