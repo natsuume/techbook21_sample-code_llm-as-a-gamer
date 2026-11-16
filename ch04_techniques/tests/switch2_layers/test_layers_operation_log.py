@@ -42,6 +42,13 @@ def test_operation_row():
     }
 
 
+def test_operation_row_of_system_screen_operation():
+    action = PadAction(taps=frozenset({"DOWN"}))
+    row = operation_row(3.0, OperationEvent(source="system", action=action, ok=True))
+    assert row["source"] == "system"
+    assert row["taps"] == ["DOWN"]
+
+
 def test_operation_log_appends_rows(tmp_path):
     monotonic = FakeMonotonic(10.0)
     path = tmp_path / "operations.jsonl"
