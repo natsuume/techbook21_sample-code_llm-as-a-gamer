@@ -208,6 +208,14 @@ class _TurnEnd(Enum):
     ENDED = "ended"  # 標準出力が終わった (子プロセスが終わった)
 
 
+class _SendFailure(Enum):
+    """入力を送れなかった理由 (_send_content の結果)。"""
+
+    # 書き込みに失敗したか、turn_timeout_s 秒のうちに書き終わらなかった
+    NOT_SENT = "not_sent"
+    STOPPED = "stopped"  # 書き終わる前に停止の合図が立った
+
+
 @dataclass
 class _SentTurn:
     """送った入力 1 つ (result を待っているターン)。
@@ -219,6 +227,7 @@ class _SentTurn:
     images        送った画像の実行ディレクトリーからの相対パス
     events        その入力に載せた出来事 (引き継ぎの依頼では None)。result を受け取れなければ繰り越す
     last_text     そのターンの最後の assistant の文 (まだ無ければ None)
+    result_is_error  届いた result の is_error が true なら True
     """
 
     number: int
@@ -228,6 +237,7 @@ class _SentTurn:
     images: tuple[str, ...]
     events: OrchestratorEvents | None
     last_text: str | None = None
+    result_is_error: bool = False
 
 
 @dataclass
@@ -238,7 +248,7 @@ class _OpenSession:
     stream            claude の子プロセス
     usage_tokens      最後に読んだ assistant の行の使用量
     turn_count        送った入力の数 (次の入力の番号は turn_count + 1)
-    completed_turns   result を受け取ったターンの数 (引き継ぎの依頼を含む)
+    completed_turns   result を受け取ったターンの数 (引き継ぎの依頼を含む。is_error が true の result は数えない)
     previous_sent_t   前の入力を送った時刻。まだ送っていなければ None
     """
 
@@ -275,10 +285,16 @@ class OrchestratorMainLoop:
            events, read_progress_state(paths.progress_state), 前の JSON の誤り, 写さなかったスキル)) を改行でつないだ
            テキストと、select_turn_frames(frames.jsonl の記録, None, now) (最新の 1 枚) の画像を、build_turn_content の
            内容にして送る。入力を作ったら、繰り越した出来事を None に戻す
+           入力の送り方: ClaudeStreamSession.send_in_background で書き込み用のスレッドに書かせ、書き終わるのを
+           READ_POLL_S 秒ごとに、停止の合図と turn_timeout_s を確かめながら待つ (子プロセスが標準入力を読まなくなっても、
+           主ループのスレッドを止めないため)。書き込みに失敗したとき、または入力を作った時刻から turn_timeout_s 秒の
+           うちに書き終わらなかったときは、送れなかったものとして扱う (5 の「入力を送れなかった」)。書き終わる前に
+           停止の合図が立ったら、書き込みを待たずにセッションを終えて (理由 close) 戻る (この入力の行は書かない)
            出来事の繰り越し: ふつうのターンの入力が result を受け取れなかったとき (送れなかった・ターンの途中で
-           子プロセスが終わった・turn_timeout_s で打ち切った)、その入力に載せた events (繰り越した分を含む) を
-           繰り越した出来事として覚え、次の入力 (次のセッションの最初の入力を含む) で carry_over_events に渡す
-           (一度だけの出来事を失わないため)。停止の合図で打ち切ったときは、主ループが戻るため繰り越さない
+           子プロセスが終わった・turn_timeout_s で打ち切った・is_error が true の result が届いた)、その入力に載せた
+           events (繰り越した分を含む) を繰り越した出来事として覚え、次の入力 (次のセッションの最初の入力を含む) で
+           carry_over_events に渡す (一度だけの出来事を失わないため)。停止の合図で打ち切ったときは、主ループが戻るため
+           繰り越さない
         3. ターンを待つ: READ_POLL_S 秒ごとに ClaudeStreamSession.read で行を受け取る。ターンの最後の文と使用量は、
            次のように読む (stream_messages):
              - assistant の行: deep.claude_stream_log.assistant_text が None でなければ、そのターンの最後の文にする
@@ -288,6 +304,11 @@ class OrchestratorMainLoop:
              - result の行: そのターンを終える (4)
              - ほかの行 (system/init・thinking_tokens・rate_limit_event など): 何もしない (stream.jsonl には書かれる)
         4. result を受け取ったら、copy_game_skills で写し (写さなかったスキルを覚え直す) てから:
+             is_error が true の result (API の誤りなど): JSON は読まず (parse_decision も apply も
+               呼ばず、JSON の誤りの回数も変えない)、そのターンを終えたものとも数えない。turns.jsonl に行
+               (outcome ERROR_RESULT、t_result は受け取った時刻) を書き、ふつうのターンなら出来事を繰り越して、
+               セッションを終える (理由 exit。引き継ぎの依頼のターンなら rotate)。最初のターンの result を受け取って
+               いないセッションなら、最初のターンを終えずに終わったセッションとして数える
              ふつうのターン: 最後の文 (None なら空文字列) を parse_decision に渡す。
                Decision なら controller.apply(decision) を呼び、JSON の誤りが続いた回数を 0 にし、前の JSON の誤りを
                None にする。DecisionError なら回数を 1 増やし、前の JSON の誤りをそれにし、run.jsonl に
@@ -308,15 +329,17 @@ class OrchestratorMainLoop:
              - 入力を送ってから turn_timeout_s 秒 (clock の差。ちょうどその秒数で超えたとする): 引き継ぎの依頼を送らずに
                終える (理由 timeout。引き継ぎの依頼のターンなら理由 rotate。outcome TIMEOUT)
              - 標準出力の終わり (StreamEnd): 理由 exit (引き継ぎの依頼のターンなら rotate)。outcome EXITED
-             - 入力を送れなかった (send が False): 子プロセスが終わったものとして、理由 exit で終える (この入力の行は
-               書かない)
+             - 入力を送れなかった (書き込みの失敗か、turn_timeout_s 秒のうちに書き終わらなかった): 子プロセスが
+               終わったものとして、理由 exit で終える (この入力の行は書かない)
         セッションを終える手順は、ClaudeStreamSession.close(settings.close_grace_s) (標準入力を閉じ、close_grace_s 秒で
-        終わらなければ SIGTERM、さらに close_grace_s 秒で SIGKILL)。終えたら、sessions.jsonl に終了の行、run.jsonl に
+        終わらなければ SIGTERM、さらに close_grace_s 秒で SIGKILL。書き込みが戻っていなければ、標準入力を閉じずに、
+        待たずに SIGTERM を送る)。終えたら、sessions.jsonl に終了の行、run.jsonl に
         orchestrator_session_end {"session", "reason", "returncode", "usage_tokens"} を書く。
     セッションの続け方:
         - 理由 rotate・timeout・exit で終えたら、すぐ次のセッションを始める (引き継ぎは notes/ にあるものだけ)
-        - 最初のターンの result を受け取る前に終わったセッション (起動できない・timeout・exit) が、続けて
-          MAX_SESSION_FAILURES 回になったら、on_stop(session_failure_reason(回数)) を呼んで戻る。最初のターンの result を
+        - 最初のターンの result を受け取る前に終わったセッション (起動できない・送れない・timeout・exit・最初の
+          ターンの result の is_error が true) が、続けて MAX_SESSION_FAILURES 回になったら、
+          on_stop(session_failure_reason(回数)) を呼んで戻る。最初のターンの result (is_error が true のものを除く) を
           受け取ったセッションで、回数を 0 に戻す。理由 close で終えたセッションは数えない
         - JSON の誤りの回数は、セッションを入れ替えても続けて数える
     run が想定外の例外 (Exception) で抜けるときは、外に出さずに、開いているセッションを終えて (理由 close)、
@@ -400,9 +423,13 @@ class OrchestratorMainLoop:
         session = self._start_session()
         if session is None:
             return self._count_session_failure()
-        turn = self._send_turn(session, first=True)
+        turn = self._send_turn(session, first=True, stop=stop)
         while True:
-            if turn is None:
+            if turn is _SendFailure.STOPPED:
+                # 書き終わる前に停止の合図が立った: 書き込みを待たずに終える
+                self._end_session(session, SessionEndReason.CLOSE)
+                return False
+            if turn is _SendFailure.NOT_SENT:
                 # 入力を送れなかった: 子プロセスが終わったものとして終える
                 return self._end_unfinished_session(session, SessionEndReason.EXIT)
             end = self._wait_for_result(session, turn, stop)
@@ -412,10 +439,12 @@ class OrchestratorMainLoop:
                 return False
             if end is not _TurnEnd.RESULT:
                 return self._finish_cut_turn(session, turn, end)
+            self._skipped_skills = copy_game_skills(self.parts.paths).skipped
+            if turn.result_is_error:
+                return self._finish_error_result(session, turn)
             session.completed_turns += 1
             if session.completed_turns == 1:
                 self._session_failures = 0
-            self._skipped_skills = copy_game_skills(self.parts.paths).skipped
             if turn.kind is TurnKind.HANDOFF:
                 self._write_turn(
                     session, turn, self.parts.clock.now(), None, TurnOutcome.HANDOFF
@@ -429,9 +458,9 @@ class OrchestratorMainLoop:
                 self._end_session(session, SessionEndReason.CLOSE)
                 return False
             if session.usage_tokens > self.settings.rotate_tokens:
-                turn = self._send_handoff_request(session)
+                turn = self._send_handoff_request(session, stop)
             else:
-                turn = self._send_turn(session, first=False)
+                turn = self._send_turn(session, first=False, stop=stop)
 
     def _start_session(self) -> _OpenSession | None:
         """セッションの流れの 1 (始める)。起動できなければ終了の行を書いて None を返す。"""
@@ -482,8 +511,10 @@ class OrchestratorMainLoop:
         parts.run_log.write(EVENT_ORCHESTRATOR_SESSION_START, session=number)
         return session
 
-    def _send_turn(self, session: _OpenSession, first: bool) -> _SentTurn | None:
-        """ふつうのターンの入力を作って送り、送ったターンを返す。送れなければ出来事を繰り越して None を返す。
+    def _send_turn(
+        self, session: _OpenSession, first: bool, stop: threading.Event
+    ) -> _SentTurn | _SendFailure:
+        """ふつうのターンの入力を作って送り、送ったターンを返す。送れなければ出来事を繰り越して _SendFailure を返す。
 
         first なら、セッションの開始の節を付け、画像を最新の 1 枚にする (セッションの流れの 2)。
         """
@@ -520,15 +551,18 @@ class OrchestratorMainLoop:
             images=tuple(image.file for image in images),
             events=events,
         )
-        if not session.stream.send(build_turn_content(text, images)):
+        failure = self._send_content(
+            session, turn, build_turn_content(text, images), stop
+        )
+        if failure is not None:
             self._carried_events = events
-            return None
-        session.turn_count = turn.number
-        session.previous_sent_t = now
+            return failure
         return turn
 
-    def _send_handoff_request(self, session: _OpenSession) -> _SentTurn | None:
-        """引き継ぎの依頼 (テキストだけ) を送り、送ったターンを返す。送れなければ None を返す。"""
+    def _send_handoff_request(
+        self, session: _OpenSession, stop: threading.Event
+    ) -> _SentTurn | _SendFailure:
+        """引き継ぎの依頼 (テキストだけ) を送り、送ったターンを返す。送れなければ _SendFailure を返す。"""
         now = self.parts.clock.now()
         text = handoff_request_text()
         turn = _SentTurn(
@@ -539,11 +573,40 @@ class OrchestratorMainLoop:
             images=(),
             events=None,
         )
-        if not session.stream.send(build_turn_content(text, [])):
-            return None
-        session.turn_count = turn.number
-        session.previous_sent_t = now
-        return turn
+        failure = self._send_content(session, turn, build_turn_content(text, []), stop)
+        return turn if failure is None else failure
+
+    def _send_content(
+        self,
+        session: _OpenSession,
+        turn: _SentTurn,
+        content: list[dict[str, object]],
+        stop: threading.Event,
+    ) -> _SendFailure | None:
+        """content を書き込み用のスレッドで送り、書き終わるのを停止の合図と turn_timeout_s を確かめながら待つ。
+
+        書けたら、セッションの送った入力の数と前の入力を送った時刻を進めて None を返す。停止の合図が立ったら
+        _SendFailure.STOPPED、書き込みに失敗したか、turn.t_sent から turn_timeout_s 秒のうちに書き終わらなかったら
+        _SendFailure.NOT_SENT を返す (クラスの docstring の「入力の送り方」)。
+        """
+        pending = session.stream.send_in_background(content)
+        clock = self.parts.clock
+        while True:
+            written = pending.wait(READ_POLL_S)
+            if written is True:
+                session.turn_count = turn.number
+                session.previous_sent_t = turn.t_sent
+                return None
+            if written is False:
+                return _SendFailure.NOT_SENT
+            if stop.is_set():
+                return _SendFailure.STOPPED
+            if clock.now() - turn.t_sent >= self.settings.turn_timeout_s:
+                logger.warning(
+                    "writing to the stdin of claude did not finish in %s seconds",
+                    self.settings.turn_timeout_s,
+                )
+                return _SendFailure.NOT_SENT
 
     def _wait_for_result(
         self, session: _OpenSession, turn: _SentTurn, stop: threading.Event
@@ -572,6 +635,9 @@ class OrchestratorMainLoop:
                     compact_row(clock.now(), session.number, compact_metadata(data))
                 )
             if is_result_message(data):
+                turn.result_is_error = (
+                    isinstance(data, dict) and data.get("is_error") is True
+                )
                 return _TurnEnd.RESULT
 
     def _apply_result(self, session: _OpenSession, turn: _SentTurn) -> bool:
@@ -626,10 +692,26 @@ class OrchestratorMainLoop:
             )
         return self._end_unfinished_session(session, reason)
 
+    def _finish_error_result(self, session: _OpenSession, turn: _SentTurn) -> bool:
+        """is_error が true の result を受け取ったターンを記録し、セッションを終える (セッションの流れの 4)。
+
+        JSON は読まず、ターンを終えたものとも数えない。ふつうのターンなら、その入力に載せた出来事を繰り越す。
+        理由は exit (引き継ぎの依頼のターンなら rotate)。主ループを続けるなら True を返す。
+        """
+        self._write_turn(
+            session, turn, self.parts.clock.now(), None, TurnOutcome.ERROR_RESULT
+        )
+        if turn.kind is TurnKind.HANDOFF:
+            reason = SessionEndReason.ROTATE
+        else:
+            self._carried_events = turn.events
+            reason = SessionEndReason.EXIT
+        return self._end_unfinished_session(session, reason)
+
     def _end_unfinished_session(
         self, session: _OpenSession, reason: SessionEndReason
     ) -> bool:
-        """result を待たずにセッションを終え、最初のターンを終えていなければ失敗に数える。続けるなら True を返す。"""
+        """ターンを終えずにセッションを終え、最初のターンを終えていなければ失敗に数える。続けるなら True を返す。"""
         self._end_session(session, reason)
         if session.completed_turns == 0:
             return self._count_session_failure()

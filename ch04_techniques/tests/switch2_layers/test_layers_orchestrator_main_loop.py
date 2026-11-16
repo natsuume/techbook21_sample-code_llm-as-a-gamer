@@ -1718,3 +1718,228 @@ def test_default_settings():
     assert settings.turn_timeout_s == 120.0
     assert settings.max_decision_errors == 3
     assert settings.close_grace_s == 5.0
+
+
+# --- 戻らない標準入力への書き込み ---
+
+
+class BlockingStdin(FakeStdin):
+    """書き込みが、子プロセスにシグナルが届くまで戻らない標準入力 (標準入力を読まなくなった子プロセスの代わり)。
+
+    entered は書き込みが止まったときに立つ。シグナルが届くと、書き込みは BrokenPipeError で終わる。止まる上限は
+    STDOUT_IDLE_LIMIT_S 秒 (Harness.join で待つ上限より長い。書き込みを待ち続ける主ループを見逃さないため)。
+    """
+
+    def __init__(self, process: FakeClaudeProcess):
+        super().__init__(process)
+        self.entered = threading.Event()
+        self.released = threading.Event()
+
+    def write(self, text: str) -> int:
+        self.entered.set()
+        self.released.wait(STDOUT_IDLE_LIMIT_S)
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class BlockingWriteClaude(FakeClaude):
+    """blocking に含まれる番号 (0 始まり) の子プロセスの標準入力を BlockingStdin にする FakeClaude。"""
+
+    def __init__(self, scripts: list[list[Step]], blocking: set[int]):
+        super().__init__(scripts)
+        self.blocking = blocking
+
+    def start(self, args, **kwargs) -> FakeClaudeProcess:
+        process = super().start(args, **kwargs)
+        if len(self.processes) - 1 in self.blocking:
+            process.stdin = BlockingStdin(process)
+        return process
+
+    def signal_group(self, pgid: int, sig: int) -> None:
+        for process in self.processes:
+            if process.pid == pgid and isinstance(process.stdin, BlockingStdin):
+                process.stdin.released.set()
+        super().signal_group(pgid, sig)
+
+
+def write_entered(fake: FakeClaude, number: int) -> bool:
+    """number 番目 (0 始まり) の子プロセスの BlockingStdin で、書き込みが止まっていれば True。"""
+    if len(fake.processes) <= number:
+        return False
+    stdin = fake.processes[number].stdin
+    return isinstance(stdin, BlockingStdin) and stdin.entered.is_set()
+
+
+def test_stop_while_the_write_to_stdin_does_not_return_ends_the_session(tmp_path):
+    fake = BlockingWriteClaude([[Hang()]], blocking={0})
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    assert wait_until(lambda: write_entered(fake, 0))
+    harness.finish()
+    [process] = fake.processes
+    assert process.inputs == []
+    # 書き込みの途中の標準入力は閉じずに、SIGTERM で終わらせる
+    assert process.stdin.closed is False
+    assert fake.signals == [(process.pid, signal.SIGTERM)]
+    assert [row["reason"] for row in end_rows(harness.root)] == ["close"]
+    # 送れなかった入力の行は書かない
+    assert turns_rows(harness.root) == []
+    assert harness.reasons == []
+
+
+def test_write_to_stdin_not_done_within_the_turn_timeout_is_not_sent(tmp_path):
+    controller = FakeController(
+        sequence=[events_with("書けなかった条件"), events_with("新しい条件")]
+    )
+    fake = BlockingWriteClaude([[Hang()], [Hang()]], blocking={0})
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: write_entered(fake, 0))
+    harness.clock.advance(119.9)
+    time.sleep(0.3)
+    assert len(fake.processes) == 1
+    harness.clock.advance(0.1)
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    first = fake.processes[0]
+    assert first.inputs == []
+    assert first.stdin.closed is False
+    assert fake.signals == [(first.pid, signal.SIGTERM)]
+    first_end = end_rows(harness.root)[0]
+    assert first_end["reason"] == "exit"
+    assert first_end["completed_turns"] == 0
+    assert [row for row in turns_rows(harness.root) if row["session"] == 1] == []
+    # 書けなかった入力の出来事は、次のセッションの最初の入力に繰り越す
+    text = text_of(inputs_of(fake, 1)[0])
+    assert text.index("書けなかった条件") < text.index("新しい条件")
+    assert harness.reasons == []
+
+
+# --- is_error が true の result ---
+
+
+@dataclass
+class ErrorReply(Reply):
+    """is_error が true の result で終わる応答 (API の誤りなど)。
+
+    主ループが読むのは is_error だけのため、subtype を変えられる。文は既定で誤りの無い JSON を含む (読まないことを
+    確かめるため)。
+    """
+
+    subtype: str = "success"
+
+    def rows(self) -> list[dict]:
+        rows = super().rows()
+        rows[-1] = {**rows[-1], "subtype": self.subtype, "is_error": True}
+        return rows
+
+
+@pytest.mark.parametrize("subtype", ["success", "error_during_execution"])
+def test_error_result_ends_the_session_as_exit_and_starts_a_new_session(
+    tmp_path, subtype
+):
+    fake = FakeClaude([[Reply(), ErrorReply(subtype=subtype)], [Hang()]])
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    # is_error が true の result の文の JSON は読まない
+    assert harness.parser.calls == [VALID_TEXT]
+    assert harness.controller.applied == [DECISION]
+    assert fake.processes[0].stdin.closed is True
+    first_end = end_rows(harness.root)[0]
+    assert first_end["reason"] == "exit"
+    assert first_end["completed_turns"] == 1
+    error_turn = turns_rows(harness.root)[1]
+    assert (error_turn["session"], error_turn["turn"]) == (1, 2)
+    assert error_turn["outcome"] == "error_result"
+    assert error_turn["t_result"] == START_T
+    assert error_turn["errors"] is None
+    assert harness.reasons == []
+
+
+def test_error_result_is_not_counted_as_invalid_json(tmp_path):
+    fake = FakeClaude(
+        [
+            [Reply(INVALID_TEXT), Reply(INVALID_TEXT), ErrorReply()],
+            [Reply(INVALID_TEXT), Hang()],
+        ]
+    )
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    harness.join()
+    # 誤りの result は、JSON の誤りの回数を増やさず、0 にも戻さない
+    assert harness.reasons == [decision_failure_reason(3)]
+    counts = [
+        row["count"]
+        for row in read_jsonl(harness.root / "run.jsonl")
+        if row["event"] == "orchestrator_decision_error"
+    ]
+    assert counts == [1, 2, 3]
+    assert harness.parser.calls == [INVALID_TEXT] * 3
+    assert len(fake.processes) == 2
+
+
+def test_error_results_on_the_first_turn_three_times_stop_the_run(tmp_path):
+    fake = FakeClaude([[ErrorReply()], [ErrorReply()], [ErrorReply()], [Hang()]])
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    harness.join()
+    assert harness.reasons == ["orchestrator session failed 3 times in a row"]
+    assert len(fake.processes) == 3
+    ends = end_rows(harness.root)
+    assert [row["reason"] for row in ends] == ["exit", "exit", "exit"]
+    assert [row["completed_turns"] for row in ends] == [0, 0, 0]
+    assert [row["outcome"] for row in turns_rows(harness.root)] == [
+        "error_result",
+        "error_result",
+        "error_result",
+    ]
+    assert harness.controller.applied == []
+
+
+def test_error_results_after_the_first_turn_do_not_count_as_failed_sessions(tmp_path):
+    fake = FakeClaude(
+        [
+            [Reply(), ErrorReply()],
+            [Reply(), ErrorReply()],
+            [Reply(), ErrorReply()],
+            [Hang()],
+        ]
+    )
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 3)) == 1)
+    harness.finish()
+    assert harness.reasons == []
+
+
+def test_events_of_an_input_answered_by_an_error_result_are_carried(tmp_path):
+    controller = FakeController(
+        sequence=[
+            events_with("届いた条件"),
+            events_with("誤りの result の条件"),
+            events_with("新しい条件"),
+        ]
+    )
+    fake = FakeClaude([[Reply(), ErrorReply()], [Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    text = text_of(inputs_of(fake, 1)[0])
+    assert text.index("誤りの result の条件") < text.index("新しい条件")
+    assert "届いた条件" not in text
+
+
+def test_error_result_of_the_handoff_request_still_rotates(tmp_path):
+    fake = FakeClaude([[Reply(calls=(130_000,)), ErrorReply()], [Hang()]])
+    harness = make_harness(tmp_path, fake)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    assert text_of(inputs_of(fake, 0)[1]) == handoff_request_text()
+    assert end_rows(harness.root)[0]["reason"] == "rotate"
+    handoff = turns_rows(harness.root)[1]
+    assert handoff["kind"] == "handoff"
+    assert handoff["outcome"] == "error_result"
+    assert harness.parser.calls == [VALID_TEXT]

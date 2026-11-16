@@ -447,3 +447,120 @@ def test_close_before_start_does_nothing(tmp_path):
     session = make_session(tmp_path, launcher)
     assert session.close(0.01) is None
     assert launcher.processes == []
+
+
+# --- 書き込み用のスレッドでの書き込み ---
+
+
+class BlockingStdin(FakeStdin):
+    """書き込みが、子プロセスにシグナルが届くまで戻らない標準入力 (標準入力を読まなくなった子プロセスの代わり)。
+
+    entered は書き込みが止まったときに立つ。シグナルが届くと、書き込みは BrokenPipeError で終わる。止まる上限は
+    WAIT_LIMIT_S 秒の 2 倍。
+    """
+
+    def __init__(self, process: FakeProcess):
+        super().__init__(process)
+        self.entered = threading.Event()
+        self.released = threading.Event()
+
+    def write(self, text: str) -> int:
+        self.entered.set()
+        self.released.wait(WAIT_LIMIT_S * 2)
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def start_blocking_session(
+    tmp_path: Path, launcher: FakeLauncher
+) -> tuple[ClaudeStreamSession, FakeProcess, BlockingStdin]:
+    """標準入力が BlockingStdin の子プロセスで始めたセッションを返す。シグナルを送ると書き込みが戻る。"""
+
+    def signal_and_release(pgid: int, sig: int) -> None:
+        stdin.released.set()
+        launcher.signal_group(pgid, sig)
+
+    session = ClaudeStreamSession(
+        LAUNCH,
+        tmp_path / "stream.jsonl",
+        launcher.clock,
+        start_process=launcher.start,
+        signal_process_group=signal_and_release,
+    )
+    session.start()
+    [process] = launcher.processes
+    stdin = BlockingStdin(process)
+    process.stdin = stdin
+    return session, process, stdin
+
+
+def test_send_in_background_writes_the_same_line_as_send(tmp_path):
+    launcher = FakeLauncher(FakeClock())
+    session = make_session(tmp_path, launcher)
+    session.start()
+    [process] = launcher.processes
+    pending = session.send_in_background(CONTENT)
+    assert pending.wait(WAIT_LIMIT_S) is True
+    assert pending.finished is True
+    assert process.stdin.written == [user_message_line(CONTENT)]
+    assert process.stdin.flushes >= 1
+    # 書き終わった後は、標準入力を閉じて終わらせる
+    assert session.close(0.01) == 0
+    assert process.stdin.closed is True
+    assert launcher.signals == []
+
+
+def test_send_in_background_to_an_ended_process_finishes_as_false(tmp_path):
+    launcher = FakeLauncher(FakeClock())
+    session = make_session(tmp_path, launcher)
+    session.start()
+    [process] = launcher.processes
+    process.stdin.broken = True
+    assert session.send_in_background(CONTENT).wait(WAIT_LIMIT_S) is False
+    session.close(0.01)
+
+
+def test_send_in_background_before_start_and_after_close_finishes_as_false(
+    tmp_path,
+):
+    launcher = FakeLauncher(FakeClock())
+    session = make_session(tmp_path, launcher)
+    before = session.send_in_background(CONTENT)
+    assert before.finished is True
+    assert before.wait(0) is False
+    session.start()
+    session.close(0.01)
+    after = session.send_in_background(CONTENT)
+    assert after.finished is True
+    assert after.wait(0) is False
+
+
+def test_send_in_background_returns_before_the_write_finishes(tmp_path):
+    launcher = FakeLauncher(FakeClock())
+    session, _, stdin = start_blocking_session(tmp_path, launcher)
+    pending = session.send_in_background(CONTENT)
+    assert stdin.entered.wait(WAIT_LIMIT_S)
+    assert pending.wait(0.05) is None
+    assert pending.finished is False
+    session.close(0.01)
+
+
+def test_second_send_in_background_while_writing_is_an_error(tmp_path):
+    launcher = FakeLauncher(FakeClock())
+    session, _, stdin = start_blocking_session(tmp_path, launcher)
+    session.send_in_background(CONTENT)
+    assert stdin.entered.wait(WAIT_LIMIT_S)
+    with pytest.raises(RuntimeError):
+        session.send_in_background(CONTENT)
+    session.close(0.01)
+
+
+def test_close_while_writing_sends_sigterm_without_closing_stdin(tmp_path):
+    launcher = FakeLauncher(FakeClock())
+    session, process, stdin = start_blocking_session(tmp_path, launcher)
+    pending = session.send_in_background(CONTENT)
+    assert stdin.entered.wait(WAIT_LIMIT_S)
+    assert session.close(0.01) == 143
+    assert stdin.closed is False
+    assert launcher.signals == [(process.pid, signal.SIGTERM)]
+    # 子プロセスが終わると、戻らなかった書き込みは失敗として終わる
+    assert pending.wait(WAIT_LIMIT_S) is False

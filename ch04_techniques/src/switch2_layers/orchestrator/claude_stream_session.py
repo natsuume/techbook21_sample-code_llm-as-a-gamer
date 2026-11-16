@@ -7,8 +7,13 @@ deep.claude_stream_log の関数で行い、このモジュールはプロセス
     - 標準出力: 別のスレッド (daemon) が 1 行ずつ読み、届くたびに stream.jsonl に書き (deep.claude_stream_log の
       ClaudeStreamLog。deep の stream.jsonl と同じ形)、読んだ行をキューに入れる。主ループは read で 1 つずつ受け取る
     - 標準エラー出力: 別のスレッド (daemon) が最後まで読む
+    - 標準入力: send は呼んだスレッドで書く。send_in_background は書き込み用のスレッド (daemon) で書き、すぐ戻る。
+      子プロセスが標準入力を読まなくなると、パイプのバッファーを超える行 (画像を含む入力など) の書き込みは戻らない。
+      主ループは send_in_background を使い、書き終わるのを、停止の合図と --turn-timeout を確かめながら待つ
     - 終了 (close): 標準入力を閉じ、grace_s 秒 (既定 5 秒) たっても終わらなければプロセスグループに SIGTERM を送り、
-      さらに grace_s 秒たっても終わらなければ SIGKILL を送る
+      さらに grace_s 秒たっても終わらなければ SIGKILL を送る。send_in_background の書き込みが終わっていなければ、
+      標準入力を閉じると書き込みの終わりを待ってしまうため、閉じずに (最初の grace_s 秒も待たずに) すぐ SIGTERM を
+      送る (子プロセスが終われば、戻らなかった書き込みは失敗として終わる)
 外部に触れないテストのため、子プロセスの起動・シグナルの送り先・時計を差し替えられる (deep の ClaudeCodeDeepRunner と
 同じ形)。
 """
@@ -35,6 +40,31 @@ logger = logging.getLogger(__name__)
 SESSION_CLOSE_GRACE_S = 5.0
 # close で、標準出力を読むスレッドの終わりを待つ上限 (秒)
 READER_JOIN_TIMEOUT_S = 5.0
+
+
+class PendingSend:
+    """send_in_background で書き始めた 1 行の書き込み。"""
+
+    def __init__(self) -> None:
+        """書き終えていない状態で作る。"""
+        self._finished = threading.Event()
+        self._written = False
+
+    def finish(self, written: bool) -> None:
+        """書き込みが終わったことを記録する (written は書けたら True)。書き込み用のスレッドが呼ぶ。"""
+        self._written = written
+        self._finished.set()
+
+    def wait(self, timeout_s: float) -> bool | None:
+        """書き込みの終わりを最大 timeout_s 秒待つ。書けたら True、書けなかったら False、まだ終わっていなければ None。"""
+        if not self._finished.wait(max(timeout_s, 0.0)):
+            return None
+        return self._written
+
+    @property
+    def finished(self) -> bool:
+        """書き込みが終わっていれば (書けたかに依らず) True。"""
+        return self._finished.is_set()
 
 
 class StreamProcess(Protocol):
@@ -140,6 +170,8 @@ class ClaudeStreamSession:
         self._stderr_text = ""
         self._closed = False
         self._close_code: int | None = None
+        # send_in_background の、最後に始めた書き込み
+        self._pending_send: PendingSend | None = None
 
     def start(self) -> None:
         """子プロセスを起動し、標準出力と標準エラー出力を読むスレッドを起動する。
@@ -197,13 +229,35 @@ class ClaudeStreamSession:
         process = self._process
         if process is None or self._closed or process.stdin is None:
             return False
-        try:
-            process.stdin.write(user_message_line(content))
-            process.stdin.flush()
-        except (OSError, ValueError):
-            logger.info("failed to write to the stdin of claude", exc_info=True)
-            return False
-        return True
+        return _write_line(process.stdin, user_message_line(content))
+
+    def send_in_background(
+        self, content: Sequence[Mapping[str, object]]
+    ) -> PendingSend:
+        """send と同じ 1 行の書き込みを、書き込み用のスレッド (daemon) で始め、書き終わるのを待たずに戻る。
+
+        戻り値の PendingSend.wait で、書き終わったか (書けたら True、書けなかったら False) を待つ。行は呼んだスレッドで
+        作る (content が空なら ValueError)。start の前と close の後は、書けなかった (False) として終わった PendingSend を
+        返す。前の send_in_background の書き込みが終わっていなければ、RuntimeError にする (書き込みは 1 つずつ)。
+        """
+        line = user_message_line(content)
+        pending = PendingSend()
+        process = self._process
+        if process is None or self._closed or process.stdin is None:
+            pending.finish(False)
+            return pending
+        if self._pending_send is not None and not self._pending_send.finished:
+            raise RuntimeError(
+                "the previous write to the stdin of claude has not finished"
+            )
+        self._pending_send = pending
+        stdin = process.stdin
+        threading.Thread(
+            target=lambda: pending.finish(_write_line(stdin, line)),
+            name="claude-session-stdin",
+            daemon=True,
+        ).start()
+        return pending
 
     def read(self, timeout_s: float) -> StreamLine | StreamEnd | None:
         """標準出力の次の行を、最大 timeout_s 秒待って返す。
@@ -226,6 +280,8 @@ class ClaudeStreamSession:
 
         1. 標準入力を閉じる (閉じる失敗の OSError は無視する)
         2. wait(timeout=grace_s) で待つ。終わればその終了コード
+           send_in_background の書き込みが終わっていなければ、閉じると書き込みの終わりを待ってしまうため、1 と 2 の
+           代わりに poll で終わったかだけを確かめ、終わっていなければすぐ 3 へ進む
         3. 終わらなければ (subprocess.TimeoutExpired)、signal_process_group(pid, signal.SIGTERM) を呼び、
            wait(timeout=grace_s) で待つ
         4. まだ終わらなければ signal_process_group(pid, signal.SIGKILL) を呼び、wait(timeout=grace_s) で待つ。
@@ -241,12 +297,15 @@ class ClaudeStreamSession:
         if self._closed:
             return self._close_code
         self._closed = True
-        if process.stdin is not None:
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
-        code = _wait_for(process, grace_s)
+        if self._pending_send is not None and not self._pending_send.finished:
+            code = process.poll()
+        else:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            code = _wait_for(process, grace_s)
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if code is not None:
                 break
@@ -321,6 +380,20 @@ class ClaudeStreamSession:
                 process.pid,
                 exc_info=True,
             )
+
+
+def _write_line(stdin: IO[str], line: str) -> bool:
+    """stdin に line を書いて flush し、書けたら True を返す。
+
+    子プロセスが終わっていて書けないとき (BrokenPipeError を含む OSError、閉じた標準入力の ValueError) は False。
+    """
+    try:
+        stdin.write(line)
+        stdin.flush()
+    except (OSError, ValueError):
+        logger.info("failed to write to the stdin of claude", exc_info=True)
+        return False
+    return True
 
 
 def _wait_for(process: StreamProcess, timeout_s: float) -> int | None:

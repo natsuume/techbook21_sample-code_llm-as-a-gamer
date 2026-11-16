@@ -7,7 +7,8 @@ orchestrator/sessions.jsonl の行 (キーはこの順):
     開始       {"t", "event": "start", "session": 番号, "stream": stream.jsonl の実行ディレクトリーからの相対パス}
     終了       {"t", "event": "end", "session", "reason": SessionEndReason の値, "usage_tokens": 最後の使用量,
                 "returncode": 終了コード (起動できなかった・終わらなかったときは null), "completed_turns": result を
-                受け取ったターンの数 (引き継ぎの依頼を含む), "error": 起動できなかったときの説明 (無ければ null)}
+                受け取ったターンの数 (引き継ぎの依頼を含む。is_error が true の result は数えない), "error": 起動
+                できなかったときの説明 (無ければ null)}
     要約       {"t", "event": "compact", "session", "metadata": compact_boundary の行の compact_metadata (無ければ null)}
 orchestrator/turns.jsonl の行 (1 ターンに 1 行。result を受け取ったとき、またはターンを終えずにセッションを終えたときに
 書く。キーはこの順):
@@ -46,7 +47,9 @@ class SessionEndReason(StrEnum):
 
     ROTATE = "rotate"  # 使用量がしきい値を超え、引き継ぎの依頼の後に終えた
     TIMEOUT = "timeout"  # 1 ターンが --turn-timeout 秒を超えた
-    EXIT = "exit"  # 入れ替えの途中ではないのに、子プロセスが終わった (起動できなかったときを含む)
+    # 入れ替えの途中ではないのに、子プロセスが終わった・入力を送れなかった・is_error が true の result が届いた
+    # (起動できなかったときを含む)
+    EXIT = "exit"
     CLOSE = "close"  # 停止の合図、または主ループが実行全体を止めた
 
 
@@ -63,6 +66,8 @@ class TurnOutcome(StrEnum):
     APPLIED = "applied"  # 誤りの無い JSON を読み、apply した
     INVALID = "invalid"  # JSON が誤っていた (errors に説明)
     HANDOFF = "handoff"  # 引き継ぎの依頼の result を受け取った (JSON は読まない)
+    # is_error が true の result を受け取った (API の誤りなど。JSON は読まない)
+    ERROR_RESULT = "error_result"
     TIMEOUT = "timeout"  # --turn-timeout 秒たっても result が届かなかった
     EXITED = "exited"  # result が届く前に子プロセスが終わった
     STOPPED = "stopped"  # result が届く前に停止の合図が立った
