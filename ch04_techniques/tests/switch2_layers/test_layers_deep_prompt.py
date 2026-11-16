@@ -26,6 +26,7 @@ from switch2_layers.deep.deep_prompt import (
     read_prompt_context,
 )
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 TIPS_NOTES = [
     "scenes/scene-001/tips.md",
@@ -126,9 +127,10 @@ def test_prompt_files_are_in_the_package_directory():
         "strategy.md",
         "advice.md",
         "map.md",
+        "game.md",
     ]:
         assert (prompts_dir / name).is_file(), name
-    # どの種類 (map を含む) にも指示のファイルがある
+    # どの種類 (map と game を含む) にも指示のファイルがある
     assert set(KIND_PROMPT_FILES) == set(DocumentKind)
     assert set(KIND_PROMPT_FILES) == set(KIND_TITLES)
 
@@ -339,6 +341,8 @@ def test_prompt_values_have_exactly_the_names(tmp_path):
     assert (
         values["scene_labels"] == (run_abs / "notes" / "scene_labels.json").as_posix()
     )
+    # ゲームの性質の文書 (まだ無くてもパスを渡す)
+    assert values["game_note"] == (run_abs / "notes" / "game.md").as_posix()
     assert values["previous_latest_frame_t"] == "12.500 秒"
     assert values["latest_frame_t"] == "30.250 秒"
     # ジョブのディレクトリーや作業用のディレクトリーは渡さない
@@ -430,6 +434,24 @@ def test_prompt_of_each_kind_embeds_values(tmp_path, name, kind, scene_id, docum
     # 種類ごとの指示は、その種類のファイルのもの
     kind_text = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind(kind)])
     assert kind_text.splitlines()[0] in prompt
+
+
+def test_common_prompt_includes_every_safety_rule_line():
+    # Markdown のファイルなので、安全のための規則の文を 1 行ずつ書き写してある
+    lines = raw_prompt_file(COMMON_PROMPT_FILE).splitlines()
+    for line in SAFETY_RULES.splitlines():
+        assert line in lines, line
+
+
+def test_prompt_of_every_kind_includes_the_safety_rules(tmp_path):
+    run_dir = make_run(tmp_path)
+    for job_dir in [
+        tips_job(run_dir),
+        make_job(run_dir, "strategy-001", "strategy", None, ["strategy.md"]),
+        make_job(run_dir, "map-001", "map", None, ["map/map.json", "map/places.md"]),
+    ]:
+        prompt = build_deep_prompt(read_prompt_context(job_dir))
+        assert SAFETY_RULES in prompt
 
 
 def test_prompt_does_not_embed_text_read_from_files(tmp_path):
@@ -582,6 +604,160 @@ def test_strategy_and_advice_instructions_use_the_map():
     assert "直接指示する書き方をしない" in advice
 
 
+# --- ゲームの性質 ---
+
+GAME_NOTES = ["game.md"]
+# ゲームの性質の文書の節の見出し (この順に「## 」で書かせる)
+GAME_SECTION_TITLES = (
+    "ジャンル",
+    "リアルタイムに進む部分",
+    "ターン制の部分",
+    "マップの形式",
+    "ダメージとゲームオーバーの条件",
+    "進めるのに要るそのほかの根本の情報",
+)
+# 種類ごとのジョブ (名前, 種類, 場面 ID, 対象の文書)
+JOBS_OF_EACH_KIND = [
+    (
+        "controls-001",
+        "controls",
+        "scene-001",
+        ["scenes/scene-001/controls.md", "common/controls.md"],
+    ),
+    ("tips-001", "tips", "scene-001", TIPS_NOTES),
+    ("strategy-001", "strategy", None, ["strategy.md"]),
+    ("advice-001", "advice", None, ["advice.md"]),
+    ("map-001", "map", None, MAP_NOTES),
+    ("game-001", "game", None, GAME_NOTES),
+]
+
+
+def game_job(run_dir: Path, previous: float | None = 12.5) -> Path:
+    return make_job(run_dir, "game-001", "game", None, GAME_NOTES, previous=previous)
+
+
+def common_prompt_section(title: str) -> str:
+    """common.md の「## <title>」の見出しの次の行から、次の「## 」の見出しの前までを返す。"""
+    text = raw_prompt_file(COMMON_PROMPT_FILE)
+    return text.split(f"\n## {title}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_game_kind_has_a_title_and_prompt_file():
+    assert KIND_TITLES[DocumentKind.GAME] == "ゲームの性質"
+    assert KIND_PROMPT_FILES[DocumentKind.GAME] == "game.md"
+    assert "game_note" in PROMPT_VALUE_NAMES
+
+
+def test_game_prompt_asks_for_the_six_sections_in_order():
+    text = raw_prompt_file("game.md")
+    positions = [text.find(f"## {title}") for title in GAME_SECTION_TITLES]
+    assert all(position >= 0 for position in positions), positions
+    assert positions == sorted(positions)
+    # まだ分からない節も、見出しを消さずに「未確認」と書かせる
+    for phrase in ["見出しを消さず", "未確認"]:
+        assert phrase in text, phrase
+
+
+def test_game_prompt_follows_the_issue():
+    text = raw_prompt_file("game.md")
+    for phrase in [
+        # リアルタイムに進む部分とターン制の部分 (と、その例)
+        "入力を待たずに進む",
+        "敵の移動",
+        "制限時間",
+        "会話の自動送り",
+        "入力を待って進む",
+        "コマンドを選ぶ戦闘",
+        "会話の文字送り",
+        # マップの形式の最初の行は、3 つの型のどれか
+        "- 型: マス目型",
+        "- 型: 自由型",
+        "- 型: 未確認",
+        # マス目型なら、1 マスの大きさと主人公の表示位置
+        "1 マス",
+        "中央",
+        # 2D か 3D か、視点と画面のスクロールのしかた
+        "2D",
+        "3D",
+        "視点",
+        "スクロール",
+        # 進めるのに要るそのほかの根本の情報の例
+        "時間制限",
+        "セーブ",
+        "成長",
+        "持てる数の上限",
+        # 確かめたことと、ジャンルの知識からの推測を分け、推測に印を付けさせる
+        "フレームと記録",
+        "ジャンルの知識",
+        "(推測)",
+        # surface が要求のたびに読むため、全体の行数を抑える
+        "40 行以内",
+    ]:
+        assert phrase in text, phrase
+
+
+def test_game_prompt_forbids_writing_the_game_title():
+    text = raw_prompt_file("game.md")
+    assert "ゲームの名前" in text
+    assert "書かない" in text
+
+
+def test_common_prompt_lets_every_job_read_the_game_note():
+    section = common_prompt_section("読んでよいもの")
+    assert "${game_note}" in section
+    assert "ゲームの性質" in section
+
+
+def test_read_prompt_context_of_game_job(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(game_job(run_dir))
+    run_abs = run_dir.resolve()
+    assert context.kind is DocumentKind.GAME
+    assert context.scene_id is None
+    assert context.documents == (
+        PromptDocument(note="game.md", path=run_abs / "notes" / "game.md"),
+    )
+
+
+def test_game_prompt_embeds_values(tmp_path):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(game_job(run_dir))
+    prompt = build_deep_prompt(context)
+    assert_values_are_embedded(prompt, context)
+    assert "ゲームの性質" in prompt
+    assert (context.run_dir / "notes" / "game.md").as_posix() in prompt
+    assert "12.500 秒" in prompt
+    # 種類ごとの指示は game.md のもの
+    assert raw_prompt_file("game.md").splitlines()[0] in prompt
+
+
+@pytest.mark.parametrize("name, kind, scene_id, documents", JOBS_OF_EACH_KIND)
+def test_prompt_of_every_kind_shows_the_game_note(
+    tmp_path, name, kind, scene_id, documents
+):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(make_job(run_dir, name, kind, scene_id, documents))
+    prompt = build_deep_prompt(context)
+    # まだ無い文書でも、読んでよいものとしてパスを渡す
+    assert not (run_dir / "notes" / "game.md").exists()
+    assert (context.run_dir / "notes" / "game.md").as_posix() in prompt
+    # 対象の文書は種類ごとのまま (game のジョブのほかは、ゲームの性質の文書を書かない)
+    assert context.notes == tuple(documents)
+
+
+def test_prompt_does_not_embed_text_read_from_the_game_note(tmp_path):
+    run_dir = make_run(tmp_path)
+    (run_dir / "notes" / "game.md").write_text(
+        f"## ジャンル\n{MARKER}\n", encoding="utf-8"
+    )
+    for job_dir in [
+        game_job(run_dir),
+        make_job(run_dir, "strategy-001", "strategy", None, ["strategy.md"]),
+    ]:
+        prompt = build_deep_prompt(read_prompt_context(job_dir))
+        assert MARKER not in prompt
+
+
 # --- 画面の停滞の計測 (progress/state.json) ---
 
 
@@ -620,6 +796,7 @@ def test_advice_prompt_reads_the_progress_state(tmp_path):
         ("tips-001", "tips", "scene-001", TIPS_NOTES),
         ("strategy-001", "strategy", None, ["strategy.md"]),
         ("map-001", "map", None, ["map/map.json", "map/places.md"]),
+        ("game-001", "game", None, ["game.md"]),
     ],
 )
 def test_other_prompts_do_not_read_the_progress_state(

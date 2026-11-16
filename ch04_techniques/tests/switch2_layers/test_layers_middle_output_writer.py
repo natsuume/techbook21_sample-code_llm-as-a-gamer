@@ -96,8 +96,13 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_new_scene_deep_kinds_are_controls_and_tips():
-    assert NEW_SCENE_DEEP_KINDS == (DocumentKind.CONTROLS, DocumentKind.TIPS)
+def test_new_scene_deep_kinds_are_controls_tips_and_game():
+    # ゲームの性質は最後。場面に依らないため、どの場面の new_scene でも同じ文書を求める
+    assert NEW_SCENE_DEEP_KINDS == (
+        DocumentKind.CONTROLS,
+        DocumentKind.TIPS,
+        DocumentKind.GAME,
+    )
 
 
 def test_first_scene_name_adds_label_tasks_and_state(tmp_path):

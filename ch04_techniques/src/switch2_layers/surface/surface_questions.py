@@ -5,7 +5,7 @@
     button            button_<ボタン>                         choice  押せるボタンごと (BUTTON_ORDER の順)
     stick_direction   stick_<LS|RS>_<x|y>                     choice  2 本 × 横・縦 = 4
     stick_strength    stick_<LS|RS>_<x|y>_at_least_<段階>      noul    4 軸 × 50・75・100 = 12
-    advisor           advisor_<種類>                           noul    ADVISOR_KINDS の 4 つ
+    advisor           advisor_<種類>                           noul    ADVISOR_KINDS の 5 つ
     info_label        info_<名前>                              noul    INFO_LABEL_NAMES の 5 つ
     scene_change      scene_changed                           noul    1
     box_exists        box_exists_<番号>                        noul    box の対象ごと
@@ -26,6 +26,7 @@ from enum import StrEnum
 from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 from switch2_layers.surface.box_targets import BoxTarget
 
 # state の中でフレームの一覧を置くキー (問いの文がパスで参照する)
@@ -82,6 +83,7 @@ ADVISOR_KINDS: tuple[DocumentKind, ...] = (
     DocumentKind.TIPS,
     DocumentKind.STRATEGY,
     DocumentKind.ADVICE,
+    DocumentKind.GAME,
 )
 # 情報ラベルの名前 (操作説明・攻略情報・大方針・詰まり・マップ)。並びは問いの順と、SurfaceOutput.info_labels の順
 INFO_LABEL_NAMES = ("controls", "tips", "strategy", "stuck", "map")
@@ -97,7 +99,10 @@ class QuestionType(StrEnum):
 
 
 class QuestionKind(StrEnum):
-    """surface の問いの種類 (モジュールの docstring の表)。"""
+    """Jev に送る問いの種類。SAFETY のほかは surface の問い (モジュールの docstring の表)。
+
+    SAFETY は安全の監視の問い (safety.safety_questions) で、surface の要求には入れない。
+    """
 
     BUTTON = "button"
     STICK_DIRECTION = "stick_direction"
@@ -107,6 +112,7 @@ class QuestionKind(StrEnum):
     SCENE_CHANGE = "scene_change"
     BOX_EXISTS = "box_exists"
     BOX = "box"
+    SAFETY = "safety"
 
 
 @dataclass(frozen=True)
@@ -130,7 +136,8 @@ class SurfaceQuestion:
     kind            問いの種類
     target          button はボタン名、stick_direction は `LS_x` の形、stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
-                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)
+                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
+                    safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素)
     question_type   Jev の問いの型。button と stick_direction は choice、box は box、ほかは noul
     choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE)。ほかの型では空のタプル
     """
@@ -175,22 +182,25 @@ STICK_DIRECTION_CHOICES = {
     ),
 }
 
-# 要求の state の instructions に入れる、役割と規則の説明
+# 要求の state の instructions に入れる、役割と規則の説明。最後に安全のための規則 (safety.safety_rules) を置く
 SURFACE_INSTRUCTIONS = (
     "あなたは、Nintendo Switch 2 のゲームを遊ぶエージェントの surface (コントローラーを操作する層) です。\n"
     "`frames` は直近 2 秒以内のゲームの画面で、古い順に並び、最後が最新です。"
     "各画像の左上には時刻を、追えている対象には枠と名前を書き込んであります。"
     "書き込んだ時刻・枠・名前は、ゲームの画面の一部ではありません。\n"
     "`documents` は、今の場面の短期タスクリスト (tasks)・攻略情報 (tips)・操作説明 (controls)・"
-    "詰まったときの助言 (advice) です。`timeline` は上位の層がまとめた系列情報とその作成時刻、"
+    "詰まったときの助言 (advice) と、場面に依らないゲームの性質 (game) です。"
+    "`timeline` は上位の層がまとめた系列情報とその作成時刻、"
     "`recent_actions` は直近に送った操作 (古い順) です。\n"
+    "`advisor` は、deep (文書をまとめる上位のモデル) の文書の種類ごとの呼び出しの状況 (実行中のジョブ、前回の終了、"
+    "今求めると捨てられるか、surface が最後に求めた結果) です。\n"
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
     "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
-    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。"
+    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
 
-# advisor 判定の問いの文 (文書の種類 → 文)
+# advisor 判定の問いの文 (文書の種類 → 文)。build_advisor_questions が、末尾に ADVISOR_STATUS_RULE_TEXT の文を足す
 ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
     DocumentKind.CONTROLS: (
         "今、deep (文書をまとめる上位のモデル) に、操作説明 (`documents.controls`) の更新を求めるべきか。"
@@ -211,7 +221,17 @@ ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
         "系列情報 (`timeline`) に止まっていると書かれているとき、同じ操作や同じ失敗を繰り返して先に進めないとき、"
         "何をすればよいか分からないときに真にする。"
     ),
+    DocumentKind.GAME: (
+        "今、deep (文書をまとめる上位のモデル) に、ゲームの性質 (`documents.game`) の更新を求めるべきか。"
+        "まだ書かれていないゲームの仕組み (入力を待たずに進む部分、入力を待って進む部分、マップの形、"
+        "ダメージやゲームオーバーの条件) が画面に出たとき、書かれている内容と画面の様子が合わないときに真にする。"
+    ),
 }
+# advisor 判定のすべての問いの文の末尾に足す共通の文。{kind} は文書の種類の値 (DocumentKind.value) に置き換える
+ADVISOR_STATUS_RULE_TEXT = (
+    "ただし、`advisor.{kind}` に実行中のジョブがあるとき、"
+    "または今求めると捨てられると書かれているときは偽にする。"
+)
 
 # 情報ラベルの問いの文 (名前 → 文)。{frame} は latest_frame_path の値に置き換える
 INFO_LABEL_QUESTION_TEXTS: dict[str, str] = {
@@ -329,14 +349,19 @@ def build_stick_strength_questions() -> list[SurfaceQuestion]:
 
 
 def build_advisor_questions() -> list[SurfaceQuestion]:
-    """advisor 判定の問い 4 問を ADVISOR_KINDS の順で返す。
+    """advisor 判定の問いを ADVISOR_KINDS の種類ごとに (ADVISOR_KINDS の順で) 返す。
 
-    name は advisor_<種類の値>、target は種類の値、型は noul、文は ADVISOR_QUESTION_TEXTS[種類]。
+    name は advisor_<種類の値>、target は種類の値、型は noul。文は ADVISOR_QUESTION_TEXTS[種類] の末尾に、
+    ADVISOR_STATUS_RULE_TEXT の {kind} を種類の値に置き換えた共通の文を、間を空けずに足したもの
+    (ADVISOR_KINDS に種類が増えても、同じ共通の文が付く)。
     """
     return [
         SurfaceQuestion(
             name=f"advisor_{kind.value}",
-            instructions=ADVISOR_QUESTION_TEXTS[kind],
+            instructions=(
+                ADVISOR_QUESTION_TEXTS[kind]
+                + ADVISOR_STATUS_RULE_TEXT.format(kind=kind.value)
+            ),
             kind=QuestionKind.ADVISOR,
             target=kind.value,
             question_type=QuestionType.NOUL,

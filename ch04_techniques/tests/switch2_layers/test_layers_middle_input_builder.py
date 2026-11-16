@@ -373,6 +373,57 @@ def test_documents_symlinked_to_outside_of_notes_are_empty(tmp_path):
     assert middle_input.current_tasks == ""
 
 
+# --- ゲームの性質 (notes/game.md。場面に依らない) ---
+
+GAME = "\n# ゲームの性質\n\n## ジャンル\nRPG (推測)\n\n"
+
+
+def test_game_document_is_read_as_it_is(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    (root / "notes" / "game.md").write_text(GAME, encoding="utf-8")
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    # 前後の空白も除かずに渡す (除くのは要求の節を作るとき)
+    assert middle_input.game == GAME
+
+
+@pytest.mark.parametrize(
+    "state_changes", [None, {"scene_id": None, "scene_name": None}]
+)
+def test_game_document_does_not_depend_on_the_scene(tmp_path, state_changes):
+    root = make_run(tmp_path)
+    if state_changes is not None:
+        write_state(root, **state_changes)
+    (root / "notes" / "game.md").write_text(GAME, encoding="utf-8")
+    scene_dir = root / "notes" / "scenes" / "scene-001"
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "game.md").write_text("# 場面の文書ではない\n", encoding="utf-8")
+    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    assert middle_input.game == GAME
+
+
+def test_missing_game_document_is_empty(tmp_path):
+    root = make_run(tmp_path)
+    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    assert middle_input.game == ""
+
+
+def test_unreadable_game_document_is_empty(tmp_path):
+    root = make_run(tmp_path)
+    (root / "notes" / "game.md").write_bytes(b"\xff\xfe not utf-8")
+    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    assert middle_input.game == ""
+
+
+def test_game_document_symlinked_to_outside_of_notes_is_empty(tmp_path):
+    root = make_run(tmp_path)
+    secret = tmp_path / "secret.env"
+    secret.write_text("text outside of notes\n", encoding="utf-8")
+    (root / "notes" / "game.md").symlink_to(secret)
+    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    assert middle_input.game == ""
+
+
 # --- 現在の場面の操作説明 (surface の文書と同じ選び方) ---
 
 COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n- B: unknown\n"

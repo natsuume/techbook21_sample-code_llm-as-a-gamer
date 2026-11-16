@@ -9,7 +9,8 @@
        書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
        Box を問い直す対象は、最新のフレームの画像に書き込まない)。
        送る画像は frames/surface/ に保存する (t と、書き込んだ box の内容の組ごとに 1 回だけ)
-    4. SurfaceDecider.decide を呼ぶ。Jev を呼ぶ実装は、Jev に送る直前に、送る要求を surface_requests.jsonl に
+    4. advisor 判定で問う文書の種類ごとに、現在の場面の文書の deep の呼び出しの状況を deep のスケジューラーから読んで
+       入力に入れ、SurfaceDecider.decide を呼ぶ。Jev を呼ぶ実装は、Jev に送る直前に、送る要求を surface_requests.jsonl に
        1 行書く (書き込み先 SurfaceRequestWriter をこのループが渡す)
     5. 出力の操作をボタンの制限に通してから送る (PadOutput.apply)
     6. 1 行を surface.jsonl に書く
@@ -33,6 +34,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from switch2_layers.buttons import filter_action
+from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import (
     DOCUMENT_KINDS,
     DeepRequestSink,
@@ -67,6 +69,7 @@ from switch2_layers.surface.middle_state_reader import (
     SurfaceContext,
     read_surface_context,
 )
+from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_record import (
     SentFrame,
     SurfaceRecord,
@@ -75,6 +78,7 @@ from switch2_layers.surface.surface_record import (
 )
 from switch2_layers.surface.surface_types import (
     Box,
+    DeepStatusReader,
     RecentAction,
     SurfaceDecider,
     SurfaceDocuments,
@@ -151,6 +155,8 @@ class SurfaceLoopParts:
     frame_store     送った画像の保存
     pad_output      操作の送信 (ボタンの制限を含む)
     deep_requests   deep を呼ぶ要求の受け口 (run では DeepScheduler)
+    deep_status     deep の文書ごとの呼び出しの状況の読み取り (run では deep_requests と同じ DeepScheduler)。step が要求ごとに、
+                    advisor 判定で問う種類の状況を読む
     run_log         run.jsonl (surface_error を書く)
     clock           実行の経過秒の時計
     bridge_state    ブリッジの状態 ("ok" / "recovering" / "failed") を返す関数
@@ -168,6 +174,7 @@ class SurfaceLoopParts:
     frame_store: FrameStore
     pad_output: PadOutput
     deep_requests: DeepRequestSink
+    deep_status: DeepStatusReader
     run_log: RunLog
     clock: RunClock
     bridge_state: Callable[[], str]
@@ -251,10 +258,14 @@ class SurfaceLoop:
            SurfaceFrame(t, jpeg, format_frame_label(t), save_surface の戻り値) にする。boxes_at が例外 (Exception) を
            出したら、logging で警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。
            保存する画像と送る画像は同じもの
-        5. writer = SurfaceRequestWriter(paths.surface_requests_log, clock) を作る。t_sent = clock.now() で
-           SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t, 直近の操作, request_sink=writer,
-           progress=3 で読んだ値) を
-           decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる。
+        5. advisor の状況 statuses を読む: surface_questions.ADVISOR_KINDS の種類ごとに (この順で)
+           deep_status.document_status(種類, 現在の場面 ID (SurfaceContext.scene_id)) を呼び、{種類: 状況} にする。
+           document_status が例外 (Exception) を出した種類は None にし (state の文は「状況を取得できない」)、logging で
+           警告を書いて残りの種類を続ける (decide の失敗には数えず、run.jsonl にも書かない)。
+           writer = SurfaceRequestWriter(paths.surface_requests_log, clock) を作る。t_sent = clock.now() で
+           SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t, 直近の操作, advisor_statuses=statuses,
+           request_sink=writer, progress=3 で読んだ値) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。
+           ここで stop を確かめる。
            続けて、writer.write_error があれば (surface_requests.jsonl の追記の失敗)、decide の成否に依らず、その例外を
            step の外にそのまま出す (surface.jsonl の追記の失敗と同じ扱い。操作の送信・失敗の回数の変更・
            run.jsonl と surface.jsonl への書き込み・deep の要求をしない)
@@ -311,6 +322,7 @@ class SurfaceLoop:
         frames, sent_frames = self._prepare_frames(
             selected, self._box_plan(documents.scene_id)
         )
+        advisor_statuses = self._read_advisor_statuses(context.scene_id)
         writer = SurfaceRequestWriter(parts.paths.surface_requests_log, parts.clock)
         surface_input = SurfaceInput(
             t=now_t,
@@ -319,6 +331,7 @@ class SurfaceLoop:
             timeline=context.timeline,
             timeline_generated_t=context.generated_t,
             recent_actions=tuple(self._recent_actions),
+            advisor_statuses=advisor_statuses,
             request_sink=writer,
             progress=read_progress_state(parts.paths.progress_state),
         )
@@ -379,6 +392,24 @@ class SurfaceLoop:
         except Exception:
             logger.warning("planning the surface boxes failed", exc_info=True)
             return BoxDrawingPlan(target_numbers={})
+
+    def _read_advisor_statuses(
+        self, scene_id: str | None
+    ) -> dict[DocumentKind, DeepDocumentStatus | None]:
+        """advisor 判定で問う種類ごとの deep の呼び出しの状況を、ADVISOR_KINDS の順に読む (step の 5)。
+
+        document_status が例外を出した種類は None にし、警告を書いて残りの種類を続ける。
+        """
+        statuses: dict[DocumentKind, DeepDocumentStatus | None] = {}
+        for kind in ADVISOR_KINDS:
+            try:
+                statuses[kind] = self.parts.deep_status.document_status(kind, scene_id)
+            except Exception:
+                logger.warning(
+                    "reading the deep status of %s failed", kind.value, exc_info=True
+                )
+                statuses[kind] = None
+        return statuses
 
     def _boxes_at(self, t: float) -> Sequence[Box]:
         """時刻 t のフレームの box を boxes_at で求める (step の 4)。

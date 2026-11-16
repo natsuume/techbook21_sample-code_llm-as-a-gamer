@@ -11,22 +11,30 @@ from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SE
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_RUNNER,
+    DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MIDDLE_KIND,
+    DEFAULT_SAFETY,
+    DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_SURFACE,
     DEFAULT_THRESHOLD_ADVISOR,
+    DEFAULT_THRESHOLD_SAFETY,
     OPENAI_API_KEY_ENV,
+    SAFETY_INTERVAL_MAX_S,
+    SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
     RunSettings,
+    SafetyKind,
     SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
     run_settings_errors,
     run_settings_to_json,
+    safety_api_key_errors,
     typesafe_api_key_errors,
 )
 
@@ -306,6 +314,103 @@ def test_jev_surface_with_api_key_has_no_error():
 @pytest.mark.parametrize("environ", [{}, {"TYPESAFE_API_KEY": "ts-x"}])
 def test_fake_surface_never_needs_api_key(environ):
     assert typesafe_api_key_errors(SurfaceKind.FAKE, environ) == []
+
+
+# --- 安全の監視 (--safety・--safety-interval・--threshold-safety・--max-safety-errors) ---
+
+
+def test_safety_settings_defaults_follow_the_issue():
+    settings = RunSettings()
+    assert [kind.value for kind in SafetyKind] == ["jev", "fake"]
+    assert settings.safety is SafetyKind.JEV
+    assert DEFAULT_SAFETY is SafetyKind.JEV
+    assert settings.safety_interval_s == DEFAULT_SAFETY_INTERVAL_S == 1.0
+    assert settings.threshold_safety == DEFAULT_THRESHOLD_SAFETY == 0.7
+    assert settings.max_safety_errors == DEFAULT_MAX_SAFETY_ERRORS == 3
+    assert (SAFETY_INTERVAL_MIN_S, SAFETY_INTERVAL_MAX_S) == (0.2, 10.0)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"safety_interval_s": 0.2},
+        {"safety_interval_s": 10.0},
+        {"threshold_safety": 0.001},
+        {"threshold_safety": 0.999},
+        {"max_safety_errors": 1},
+        {"safety": SafetyKind.FAKE},
+    ],
+)
+def test_safety_boundary_values_are_valid(changes):
+    assert run_settings_errors(dataclasses.replace(RunSettings(), **changes)) == []
+
+
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"safety_interval_s": 0.19}, "--safety-interval"),
+        ({"safety_interval_s": 10.01}, "--safety-interval"),
+        ({"safety_interval_s": math.nan}, "--safety-interval"),
+        ({"safety_interval_s": math.inf}, "--safety-interval"),
+        ({"threshold_safety": 0.0}, "--threshold-safety"),
+        ({"threshold_safety": 1.0}, "--threshold-safety"),
+        ({"threshold_safety": -0.5}, "--threshold-safety"),
+        ({"threshold_safety": math.nan}, "--threshold-safety"),
+        ({"max_safety_errors": 0}, "--max-safety-errors"),
+        ({"max_safety_errors": -1}, "--max-safety-errors"),
+    ],
+)
+def test_safety_out_of_range_values_are_reported_with_option_name(changes, option):
+    errors = run_settings_errors(dataclasses.replace(RunSettings(), **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_safety_errors_follow_the_order_of_the_arguments():
+    errors = run_settings_errors(
+        RunSettings(
+            box_requery_every=0,
+            safety_interval_s=0.0,
+            threshold_safety=1.0,
+            max_safety_errors=0,
+        )
+    )
+    assert len(errors) == 4
+    assert "--box-requery-every" in errors[0]
+    assert "--safety-interval" in errors[1]
+    assert "--threshold-safety" in errors[2]
+    assert "--max-safety-errors" in errors[3]
+
+
+def test_run_settings_to_json_writes_safety_as_string():
+    value = run_settings_to_json(RunSettings(safety=SafetyKind.FAKE))
+    assert value["safety"] == "fake"
+    assert type(value["safety"]) is str
+    assert value["safety_interval_s"] == 1.0
+    assert value["threshold_safety"] == 0.7
+    assert value["max_safety_errors"] == 3
+    assert json.loads(json.dumps(value)) == value
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [{}, {"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": " \n"}, {"OTHER": "x"}],
+)
+def test_jev_safety_without_api_key_is_an_error(environ):
+    errors = safety_api_key_errors(SafetyKind.JEV, environ)
+    assert len(errors) == 1
+    assert "TYPESAFE_API_KEY" in errors[0]
+    # キーなしで動かす方法を示す
+    assert "--safety fake" in errors[0]
+
+
+def test_jev_safety_with_api_key_has_no_error():
+    assert safety_api_key_errors(SafetyKind.JEV, {"TYPESAFE_API_KEY": "ts-x"}) == []
+
+
+@pytest.mark.parametrize("environ", [{}, {"TYPESAFE_API_KEY": "ts-x"}])
+def test_fake_safety_never_needs_api_key(environ):
+    assert safety_api_key_errors(SafetyKind.FAKE, environ) == []
 
 
 # --- 画面の停滞の計測 (--progress-window・--stuck-advice-seconds) ---

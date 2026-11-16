@@ -1,6 +1,7 @@
 """LayersApp をフェイクの層とフェイクのキャプチャー・ブリッジで数秒動かす統合テスト (実時間で待つ)。"""
 
 import dataclasses
+import itertools
 import json
 import threading
 import time
@@ -33,12 +34,17 @@ from switch2_layers.middle.middle_loop import middle_failure_reason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
 from switch2_layers.pad_action import PadAction
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.safety.fake_safety import FakeSafetyChecker
+from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
+from switch2_layers.safety.safety_types import SafetyAnswer
 from switch2_layers.settings import DeepRunnerChoice, RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_client import DEFAULT_JEV_MODEL, IMAGES_HEADER
+from switch2_layers.surface.jev_surface import ADVISOR_STATUS_UNAVAILABLE_TEXT
 from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
+from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
@@ -150,6 +156,7 @@ def parts(
     surface=None,
     middle=None,
     deep=None,
+    safety=None,
 ) -> LayersParts:
     return LayersParts(
         frame_reader=reader or FakeFrameReader(),
@@ -158,6 +165,7 @@ def parts(
         surface=surface or FakeSurfaceDecider(),
         middle=middle or FakeMiddleAnalyzer(),
         deep=deep or FakeDeepRunner(),
+        safety=safety or FakeSafetyChecker(),
     )
 
 
@@ -398,17 +406,29 @@ def test_close_stops_running_deep_jobs(tmp_path):
     app = LayersApp(settings(tmp_path), parts(sender, deep=deep))
     reason, root = run_app(app, stop_after=RUN_SECONDS)
     assert reason == REASON_INTERRUPTED
-    # 初めての場面の操作説明と攻略情報のジョブは、終了時まで実行中だった
-    jobs = {root / "deep" / "controls-001", root / "deep" / "tips-001"}
+    # 初めての場面の操作説明・攻略情報・ゲームの性質のジョブは、終了時まで実行中だった
+    jobs = {
+        root / "deep" / "controls-001",
+        root / "deep" / "tips-001",
+        root / "deep" / "game-001",
+    }
     assert set(deep.stopped) == jobs
     # stop で run が戻ったので、kill は呼ばない
     assert deep.killed == []
     run_rows = read_rows(root / "run.jsonl")
     stops = [row for row in run_rows if row["event"] == "deep_stop"]
-    assert {row["job"] for row in stops} == {"deep/controls-001", "deep/tips-001"}
+    assert {row["job"] for row in stops} == {
+        "deep/controls-001",
+        "deep/tips-001",
+        "deep/game-001",
+    }
     assert all(row["reason"] == "close" for row in stops)
     ends = [row for row in run_rows if row["event"] == "deep_end"]
-    assert {row["job"] for row in ends} == {"deep/controls-001", "deep/tips-001"}
+    assert {row["job"] for row in ends} == {
+        "deep/controls-001",
+        "deep/tips-001",
+        "deep/game-001",
+    }
     assert all(row["status"] == "stopped" for row in ends)
     assert all(row["stop_reason"] == "close" for row in ends)
     # deep の終わりは、run.jsonl の stop より前に記録する
@@ -468,9 +488,10 @@ class StartPartsRecorder:
         monkeypatch: pytest.MonkeyPatch,
         fail_at: str | None,
         error: BaseException,
+        names: tuple[str, ...] = START_PART_NAMES,
     ):
         self.made: list[object] = []
-        for name in START_PART_NAMES:
+        for name in names:
             original = getattr(app_module, name)
             monkeypatch.setattr(
                 app_module, name, self._wrap(name, original, fail_at, error)
@@ -627,6 +648,34 @@ def test_failure_while_starting_deep_scheduler_thread_cleans_up_and_writes_stop(
     recorder = StartPartsRecorder(monkeypatch, None, error)
     app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
     check_failed_start(tmp_path, app, error, recorder, [])
+
+
+@pytest.mark.parametrize("error_type", [InjectedStartError, KeyboardInterrupt])
+def test_failure_while_building_safety_monitor_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch, error_type
+):
+    error = error_type("injected")
+    recorder = StartPartsRecorder(
+        monkeypatch, "SafetyMonitor", error, (*START_PART_NAMES, "SafetyMonitor")
+    )
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), reader=NoFrameReader()))
+    check_failed_start(tmp_path, app, error, recorder, [])
+
+
+@pytest.mark.parametrize("error_type", [InjectedStartError, KeyboardInterrupt])
+def test_failure_while_starting_safety_thread_cleans_up_and_writes_stop(
+    tmp_path, monkeypatch, error_type
+):
+    # 安全の監視のスレッドは、surface と middle のループのスレッドの後に起動する
+    error = error_type("injected")
+    recorder = StartPartsRecorder(monkeypatch, None, error)
+    starter = FailingThreadStarter(2, error)
+    app = LayersApp(
+        settings(tmp_path),
+        parts(FakeSender(), reader=NoFrameReader()),
+        start_thread=starter,
+    )
+    check_failed_start(tmp_path, app, error, recorder, starter.started)
 
 
 class SurfaceHooks:
@@ -841,6 +890,232 @@ def test_jev_surface_records_requests_and_answers_with_mock_jev(tmp_path):
         }
         # usage は受け取った形のまま (偽の Jev は空の object を返す)
         assert row["usage"] == {}
+
+
+def test_jev_surface_sends_and_records_deep_status_with_mock_jev(tmp_path):
+    sent_states: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent_states.append(json.loads(request.content)["state"])
+        return mock_jev_answers(request)
+
+    sender = FakeSender()
+    http = httpx.Client(transport=httpx.MockTransport(respond))
+    run_settings = settings(tmp_path)
+    surface = build_surface_assembly(run_settings, "test-key", http_client=http)
+    app = LayersApp(
+        run_settings,
+        dataclasses.replace(
+            parts(sender, surface=surface.decider),
+            on_frame=surface.on_frame,
+            surface_boxes_at=surface.boxes_at,
+            surface_plan_boxes=surface.plan_boxes,
+            on_run_directory=surface.on_run_directory,
+        ),
+    )
+    try:
+        reason, root = run_app(app, stop_after=1.5)
+    finally:
+        surface.close()
+    assert reason == REASON_INTERRUPTED
+    request_rows = read_rows(root / "surface_requests.jsonl")
+    assert sent_states
+    # 要求の行は送る直前に書くので、送った要求より 1 行多いことがある
+    assert len(sent_states) <= len(request_rows) <= len(sent_states) + 1
+    for row, sent_state in zip(
+        request_rows[: len(sent_states)], sent_states, strict=True
+    ):
+        recorded = row["state"]
+        assert list(recorded) == [
+            "instructions",
+            "documents",
+            "timeline",
+            "progress",
+            "recent_actions",
+            "advisor",
+            "frames",
+        ]
+        # 記録の state には、送った state と同じ advisor が入る
+        assert recorded["advisor"] == sent_state["advisor"]
+        assert list(recorded["advisor"]) == [kind.value for kind in ADVISOR_KINDS]
+        for text in recorded["advisor"].values():
+            # フェイクの deep でも、deep のスケジューラーから状況を読める
+            assert text != ADVISOR_STATUS_UNAVAILABLE_TEXT
+            assert text.startswith("実行中のジョブ: ")
+            # 偽の Jev は advisor 判定の確率を 0.0 にするので、surface は deep を求めない
+            assert text.endswith("surface はまだ求めていない")
+
+
+# --- 安全の監視 ---
+# 止める条件の境界 (しきい値ちょうど・続けて 2 回・失敗の回数・--allow-home) は、test_layers_safety_judge と
+# test_layers_safety_monitor で 1 回ずつ確かめる。ここでは、3 層と組み合わせたときの止まり方を確かめる
+
+SAFETY_INTERVAL_S = 0.2  # 監視の間隔 (テストを短くするため、範囲の下限にする)
+ALL_SAFE = {name: 0.0 for name in SAFETY_QUESTION_NAMES}
+
+
+def safety_answer(**values: float) -> SafetyAnswer:
+    """すべての問いを 0 にし、values の問いだけをその確率にした答え。"""
+    return SafetyAnswer(probabilities={**ALL_SAFE, **values})
+
+
+class ScriptedSafety:
+    """SafetyChecker の偽物。results を順に返す (例外なら出す。最後の結果は繰り返す)。
+
+    first_check_gate があれば、1 回目の check はその合図が立つまで (最大 SAFETY_TIMEOUT_S 秒) 戻らない。
+    """
+
+    def __init__(
+        self,
+        results: list[SafetyAnswer | Exception],
+        first_check_gate: threading.Event | None = None,
+    ):
+        self.lock = threading.Lock()
+        self.results = list(results)
+        self.first_check_gate = first_check_gate
+        self.count = 0
+
+    def check(self, jpeg: bytes) -> SafetyAnswer:
+        with self.lock:
+            self.count += 1
+            first = self.count == 1
+            result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if first and self.first_check_gate is not None:
+            self.first_check_gate.wait(SAFETY_TIMEOUT_S)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def safety_settings(tmp_path: Path, **changes: object) -> RunSettings:
+    return dataclasses.replace(
+        settings(tmp_path), safety_interval_s=SAFETY_INTERVAL_S, **changes
+    )
+
+
+def assert_no_operation_was_sent(root: Path, sender: FakeSender) -> None:
+    """surface が操作を 1 つも送っていない (送ったのは、止めるときの中立のレポートだけ) ことを確かめる。"""
+    assert read_rows(root / "surface.jsonl") == []
+    sources = [row["source"] for row in read_rows(root / "operations.jsonl")]
+    assert "apply" not in sources
+    assert all(report == NEUTRAL_REPORT for report in sender.reports)
+
+
+def test_unsafe_screen_at_start_stops_without_sending_operations(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(home_menu=0.9)])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    reason, root = run_app(app, stop_after=3.0)
+    assert reason == "unsafe screen at start: home_menu"
+    assert read_rows(root / "run.jsonl")[-1]["reason"] == reason
+    assert_no_operation_was_sent(root, sender)
+    # middle のループも始めない
+    assert read_rows(root / "middle" / "calls.jsonl") == []
+    # 確かめは 1 回だけで、safety.jsonl に記録した
+    assert safety.count == 1
+    [row] = read_rows(root / "safety.jsonl")
+    assert row["phase"] == "start"
+    assert row["probabilities"]["home_menu"] == 0.9
+    assert row["frame_t"] >= 0
+
+
+def test_safety_check_failure_at_start_stops_without_sending_operations(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([RuntimeError("jev is down")])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    reason, root = run_app(app, stop_after=3.0)
+    assert reason == "safety check failed at start"
+    assert read_rows(root / "run.jsonl")[-1]["reason"] == reason
+    assert_no_operation_was_sent(root, sender)
+    [row] = read_rows(root / "safety.jsonl")
+    assert row["phase"] == "start"
+    assert row["probabilities"] is None
+    assert "jev is down" in row["error"]
+
+
+def test_surface_and_middle_wait_for_the_start_check(tmp_path):
+    sender = FakeSender()
+    gate = threading.Event()
+    safety = ScriptedSafety([safety_answer()], first_check_gate=gate)
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    paths = app.start()
+    try:
+        time.sleep(1.0)
+        # 実行を始めるときの確かめの応答を待つ間は、surface も middle も始めない
+        assert safety.count == 1
+        assert read_rows(paths.surface_log) == []
+        assert read_rows(paths.middle_calls) == []
+        assert "apply" not in [row["source"] for row in read_rows(paths.operations_log)]
+        gate.set()
+        time.sleep(1.5)
+        assert read_rows(paths.surface_log)
+        app.request_stop(REASON_INTERRUPTED)
+        assert app.wait() == REASON_INTERRUPTED
+    finally:
+        gate.set()
+        app.request_stop("test cleanup")
+        app.close()
+
+
+def test_unsafe_screen_twice_while_running_stops_everything(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(), safety_answer(online=0.9)])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    reason, root = run_app(app, stop_after=5.0)
+    assert reason == "unsafe screen: online"
+    assert read_rows(root / "run.jsonl")[-1]["reason"] == reason
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    rows = read_rows(root / "safety.jsonl")
+    assert [row["phase"] for row in rows] == ["start", "monitor", "monitor"]
+    # 監視の確かめは、前の確かめを送ってから --safety-interval 秒ごと
+    sent = [row["t_sent"] for row in rows]
+    assert all(b - a >= SAFETY_INTERVAL_S - 0.01 for a, b in itertools.pairwise(sent))
+
+
+def test_consecutive_safety_failures_stop_everything(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(), RuntimeError("timeout")])
+    app = LayersApp(
+        safety_settings(tmp_path, max_safety_errors=2), parts(sender, safety=safety)
+    )
+    reason, root = run_app(app, stop_after=5.0)
+    assert reason == "safety check failed 2 times in a row"
+    assert read_rows(root / "run.jsonl")[-1]["reason"] == reason
+    assert sender.reports[-1] == NEUTRAL_REPORT
+    rows = read_rows(root / "safety.jsonl")
+    assert [row["phase"] for row in rows] == ["start", "monitor", "monitor"]
+    assert [row["probabilities"] is None for row in rows] == [False, True, True]
+
+
+def test_allow_home_keeps_running_on_the_home_menu(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(home_menu=0.99, user_select=0.99)])
+    app = LayersApp(
+        safety_settings(tmp_path, allow_home=True), parts(sender, safety=safety)
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    assert read_rows(root / "surface.jsonl")
+    rows = read_rows(root / "safety.jsonl")
+    assert rows[0]["phase"] == "start"
+    assert len(rows) >= 3
+    assert all(row["phase"] == "monitor" for row in rows[1:])
+
+
+def test_safety_monitor_keeps_checking_while_the_bridge_is_recovering(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer()])
+    app = LayersApp(
+        safety_settings(tmp_path),
+        parts(sender, bridge_state=lambda: "recovering", safety=safety),
+    )
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    # surface は要求を送らないが、安全の監視は続ける
+    assert read_rows(root / "surface.jsonl") == []
+    rows = read_rows(root / "safety.jsonl")
+    assert len(rows) >= 3
+    assert all(row["error"] is None for row in rows)
 
 
 # --- 画面の停滞の計測 ---

@@ -1,7 +1,9 @@
 """Jev を呼ぶ SurfaceDecider。Jev は偽物 (FakeAsker) か、httpx の MockTransport で受け、外部には送らない。"""
 
+import dataclasses
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -9,6 +11,14 @@ import numpy as np
 import pytest
 
 from switch2_layers.buttons import allowed_buttons
+from switch2_layers.deep.deep_scheduler import (
+    SKIP_CLOSED,
+    SKIP_MIN_START_INTERVAL,
+    DeepDocumentStatus,
+    DeepJobEnd,
+    DeepJobStatus,
+    DeepRequestOutcome,
+)
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.pad_action import PadAction
@@ -28,12 +38,16 @@ from switch2_layers.surface.jev_client import (
     JevImage,
 )
 from switch2_layers.surface.jev_surface import (
+    ADVISOR_STATUS_UNAVAILABLE_TEXT,
+    DEEP_JOB_STATUS_TEXTS,
     NO_TIMELINE_TEXT,
     NOT_MEASURED_TEXT,
     JevSurfaceDecider,
     JevSurfaceSettings,
+    advisor_to_state,
     build_recorded_state,
     build_surface_state,
+    deep_status_text,
     documents_to_state,
     progress_to_state,
     recent_actions_to_state,
@@ -165,15 +179,19 @@ def surface_input(
     recent_actions: tuple[RecentAction, ...] = (),
     files: Sequence[str | None] | None = None,
     request_sink: Callable[[SurfaceRequest], None] | None = None,
+    advisor_statuses: Mapping[DocumentKind, DeepDocumentStatus | None] | None = None,
     progress: ProgressState | None = None,
 ) -> SurfaceInput:
-    """files は times と同じ順の、画像の保存を予約したファイル (None なら、どの画像も file を持たない)。"""
+    """files は times と同じ順の、画像の保存を予約したファイル (None なら、どの画像も file を持たない)。
+
+    advisor_statuses が None なら、SurfaceInput の既定 (空) のままにする。
+    """
     frame_files = files if files is not None else [None] * len(times)
     frames = tuple(
         SurfaceFrame(t=t, jpeg=f"jpeg-{t}".encode(), label=f"t={t:.3f}", file=file)
         for t, file in zip(times, frame_files, strict=True)
     )
-    return SurfaceInput(
+    value = SurfaceInput(
         t=request_t,
         frames=frames,
         documents=documents,
@@ -183,6 +201,9 @@ def surface_input(
         request_sink=request_sink,
         progress=progress,
     )
+    if advisor_statuses is None:
+        return value
+    return dataclasses.replace(value, advisor_statuses=advisor_statuses)
 
 
 def make_decider(
@@ -234,13 +255,33 @@ def test_relative_time_label():
 
 def test_documents_to_state():
     value = documents_to_state(DOCUMENTS)
-    assert list(value) == ["tasks", "tips", "controls", "advice"]
+    assert list(value) == ["tasks", "tips", "controls", "advice", "game"]
+    # ゲームの性質が無い (読めない) 文書は、ほかの文書と同じく空文字列
     assert value == {
         "tasks": "- 扉を開ける",
         "tips": "# 攻略情報",
         "controls": "- A: 決定",
         "advice": "# 助言",
+        "game": "",
     }
+
+
+def test_documents_to_state_puts_the_game_document_last():
+    documents = replace(DOCUMENTS, game="## ジャンル\nRPG\n")
+    value = documents_to_state(documents)
+    assert list(value) == ["tasks", "tips", "controls", "advice", "game"]
+    assert value["game"] == "## ジャンル\nRPG\n"
+
+
+def test_sent_and_recorded_states_include_the_game_document():
+    surface = surface_input(documents=replace(DOCUMENTS, game="## ジャンル\nRPG\n"))
+    sent = build_surface_state(surface, ["a", "b", "c"])
+    recorded = build_recorded_state(surface)
+    for state in [sent, recorded]:
+        documents = state["documents"]
+        assert isinstance(documents, dict)
+        assert list(documents) == ["tasks", "tips", "controls", "advice", "game"]
+        assert documents["game"] == "## ジャンル\nRPG\n"
 
 
 def test_timeline_to_state():
@@ -279,6 +320,213 @@ def test_recent_actions_to_state():
     ]
 
 
+# --- state の advisor (deep の呼び出しの状況の文) ---
+
+# 何も起きていない文書の状況と、その文
+IDLE_STATUS = DeepDocumentStatus(
+    running_count=0,
+    latest_running_start_t=None,
+    last_end=None,
+    min_interval_remaining_s=0.0,
+    last_surface_request=None,
+)
+IDLE_TEXT = (
+    "実行中のジョブ: なし。前回の終了: まだ無い。今求めれば起動する。"
+    "surface はまだ求めていない"
+)
+
+
+def sentences(*parts: str) -> str:
+    """4 つの文を「。」でつないだ文 (最後に「。」を付けない)。"""
+    return "。".join(parts)
+
+
+def test_deep_status_text_without_any_job():
+    assert deep_status_text(IDLE_STATUS, 120.0) == IDLE_TEXT
+
+
+def test_deep_status_text_of_unreadable_status():
+    assert deep_status_text(None, 10.0) == "状況を取得できない"
+    assert ADVISOR_STATUS_UNAVAILABLE_TEXT == "状況を取得できない"
+
+
+def test_deep_status_text_with_every_part():
+    status = DeepDocumentStatus(
+        running_count=2,
+        latest_running_start_t=120.3,
+        last_end=DeepJobEnd(100.0, DeepJobStatus.OK),
+        min_interval_remaining_s=4.27,
+        last_surface_request=DeepRequestOutcome(120.3, started=True),
+    )
+    assert deep_status_text(status, 135.5) == sentences(
+        "実行中のジョブ: 2 件 (最も新しい起動 t=120.300 秒 (15.2 秒前))",
+        "前回の終了: t=100.000 秒 (35.5 秒前)、正常に終了",
+        "今求めると捨てられる (あと 4.3 秒)",
+        "surface が最後に求めた: t=120.300 秒 (15.2 秒前)、起動した",
+    )
+
+
+def test_deep_status_text_with_one_running_job():
+    status = dataclasses.replace(
+        IDLE_STATUS, running_count=1, latest_running_start_t=9.0
+    )
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: 1 件 (最も新しい起動 t=9.000 秒 (1.0 秒前))",
+        "前回の終了: まだ無い",
+        "今求めれば起動する",
+        "surface はまだ求めていない",
+    )
+
+
+def test_deep_job_status_texts_cover_every_status():
+    assert set(DEEP_JOB_STATUS_TEXTS) == set(DeepJobStatus)
+
+
+@pytest.mark.parametrize(
+    "job_status, text",
+    [
+        (DeepJobStatus.OK, "正常に終了"),
+        (DeepJobStatus.FAILED, "文書を更新できずに終了"),
+        (DeepJobStatus.ERROR, "エラーで終了"),
+        (DeepJobStatus.STOPPED, "止めた"),
+        (DeepJobStatus.KILLED, "強制終了した"),
+    ],
+    ids=["ok", "failed", "error", "stopped", "killed"],
+)
+def test_deep_status_text_says_how_the_last_job_ended(job_status, text):
+    status = dataclasses.replace(IDLE_STATUS, last_end=DeepJobEnd(8.0, job_status))
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: なし",
+        f"前回の終了: t=8.000 秒 (2.0 秒前)、{text}",
+        "今求めれば起動する",
+        "surface はまだ求めていない",
+    )
+
+
+@pytest.mark.parametrize(
+    "remaining, text",
+    [
+        (0.0, "今求めれば起動する"),
+        (0.04, "今求めると捨てられる (あと 0.0 秒)"),
+        (0.5, "今求めると捨てられる (あと 0.5 秒)"),
+        (11.5, "今求めると捨てられる (あと 11.5 秒)"),
+    ],
+    ids=["zero", "tiny", "half", "remaining"],
+)
+def test_deep_status_text_says_whether_a_request_now_is_discarded(remaining, text):
+    status = dataclasses.replace(IDLE_STATUS, min_interval_remaining_s=remaining)
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: なし",
+        "前回の終了: まだ無い",
+        text,
+        "surface はまだ求めていない",
+    )
+
+
+@pytest.mark.parametrize(
+    "outcome, text",
+    [
+        (DeepRequestOutcome(7.5, started=True), "、起動した"),
+        (
+            DeepRequestOutcome(7.5, started=False, reason=SKIP_MIN_START_INTERVAL),
+            "、前回の起動から間もないため捨てられた",
+        ),
+        (
+            DeepRequestOutcome(7.5, started=False, reason=SKIP_CLOSED),
+            "、捨てられた (closed)",
+        ),
+    ],
+    ids=["started", "min_interval", "other_reason"],
+)
+def test_deep_status_text_says_the_result_of_last_surface_request(outcome, text):
+    status = dataclasses.replace(IDLE_STATUS, last_surface_request=outcome)
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: なし",
+        "前回の終了: まだ無い",
+        "今求めれば起動する",
+        f"surface が最後に求めた: t=7.500 秒 (2.5 秒前){text}",
+    )
+
+
+def test_deep_status_text_times_after_the_request_are_zero_seconds_ago():
+    status = dataclasses.replace(
+        IDLE_STATUS,
+        running_count=1,
+        latest_running_start_t=10.2,
+        last_surface_request=DeepRequestOutcome(10.2, started=True),
+    )
+    assert deep_status_text(status, 10.0) == sentences(
+        "実行中のジョブ: 1 件 (最も新しい起動 t=10.200 秒 (0.0 秒前))",
+        "前回の終了: まだ無い",
+        "今求めれば起動する",
+        "surface が最後に求めた: t=10.200 秒 (0.0 秒前)、起動した",
+    )
+
+
+# 種類ごとに違う状況 (advisor の文が種類ごとに入ることを確かめる)
+CONTROLS_STATUS = dataclasses.replace(
+    IDLE_STATUS, running_count=1, latest_running_start_t=6.0
+)
+CONTROLS_TEXT = sentences(
+    "実行中のジョブ: 1 件 (最も新しい起動 t=6.000 秒 (4.0 秒前))",
+    "前回の終了: まだ無い",
+    "今求めれば起動する",
+    "surface はまだ求めていない",
+)
+STRATEGY_STATUS = dataclasses.replace(
+    IDLE_STATUS,
+    last_end=DeepJobEnd(9.5, DeepJobStatus.KILLED),
+    min_interval_remaining_s=3.0,
+)
+STRATEGY_TEXT = sentences(
+    "実行中のジョブ: なし",
+    "前回の終了: t=9.500 秒 (0.5 秒前)、強制終了した",
+    "今求めると捨てられる (あと 3.0 秒)",
+    "surface はまだ求めていない",
+)
+ADVISOR_STATUSES: dict[DocumentKind, DeepDocumentStatus | None] = {
+    DocumentKind.ADVICE: IDLE_STATUS,
+    DocumentKind.STRATEGY: STRATEGY_STATUS,
+    DocumentKind.TIPS: None,
+    DocumentKind.CONTROLS: CONTROLS_STATUS,
+}
+# REQUEST_T (10.0) の要求での、ADVISOR_STATUSES の advisor (渡していない game は状況を取得できない)
+ADVISOR_STATE = {
+    "controls": CONTROLS_TEXT,
+    "tips": "状況を取得できない",
+    "strategy": STRATEGY_TEXT,
+    "advice": IDLE_TEXT,
+    "game": "状況を取得できない",
+}
+
+
+def test_advisor_to_state_lists_advisor_kinds_in_order():
+    value = advisor_to_state(ADVISOR_STATUSES, REQUEST_T)
+    # 渡した順ではなく ADVISOR_KINDS の順
+    assert list(value) == ["controls", "tips", "strategy", "advice", "game"]
+    assert value == ADVISOR_STATE
+
+
+def test_advisor_to_state_treats_missing_kinds_as_unreadable_and_ignores_others():
+    value = advisor_to_state(
+        {DocumentKind.ADVICE: IDLE_STATUS, DocumentKind.MAP: IDLE_STATUS}, 10.0
+    )
+    assert value == {
+        "controls": "状況を取得できない",
+        "tips": "状況を取得できない",
+        "strategy": "状況を取得できない",
+        "advice": IDLE_TEXT,
+        "game": "状況を取得できない",
+    }
+    assert advisor_to_state({}, 10.0) == {
+        "controls": "状況を取得できない",
+        "tips": "状況を取得できない",
+        "strategy": "状況を取得できない",
+        "advice": "状況を取得できない",
+        "game": "状況を取得できない",
+    }
+
+
 def test_progress_to_state():
     progress = ProgressState(t=9.8, static_s=12.4, no_novel_s=85.0, window_s=300.0)
     assert progress_to_state(progress, 10.0) == {
@@ -300,12 +548,14 @@ def test_build_surface_state_has_keys_in_order():
         surface_input(timeline="系列", timeline_generated_t=8.5, progress=progress),
         ["a", "b", "c"],
     )
+    # advisor は recent_actions の直後、frames の前
     assert list(state) == [
         "instructions",
         "documents",
         "timeline",
         "progress",
         "recent_actions",
+        "advisor",
         "frames",
     ]
     assert state["instructions"] == SURFACE_INSTRUCTIONS
@@ -313,6 +563,14 @@ def test_build_surface_state_has_keys_in_order():
     assert state["timeline"] == {"created": "t=8.500 秒 (1.5 秒前)", "text": "系列"}
     assert state["progress"] == progress_to_state(progress, REQUEST_T)
     assert state["recent_actions"] == []
+    # 状況を渡していない (既定の空) ので、どの種類も状況を取得できない
+    assert state["advisor"] == {
+        "controls": "状況を取得できない",
+        "tips": "状況を取得できない",
+        "strategy": "状況を取得できない",
+        "advice": "状況を取得できない",
+        "game": "状況を取得できない",
+    }
     assert state["frames"] == [
         {"label": "t=9.000 秒 (1.0 秒前)", "image": "a"},
         {"label": "t=9.500 秒 (0.5 秒前)", "image": "b"},
@@ -331,6 +589,30 @@ def test_build_surface_state_says_when_there_is_no_progress():
 def test_build_surface_state_needs_one_reference_per_frame():
     with pytest.raises(ValueError):
         build_surface_state(surface_input(), ["a", "b"])
+
+
+def test_build_surface_state_puts_advisor_statuses_counted_from_request_time():
+    state = build_surface_state(
+        surface_input(advisor_statuses=ADVISOR_STATUSES), ["a", "b", "c"]
+    )
+    assert state["advisor"] == ADVISOR_STATE
+    # 「何秒前」は要求の時刻から数える
+    later = build_surface_state(
+        surface_input(request_t=12.0, advisor_statuses=ADVISOR_STATUSES),
+        ["a", "b", "c"],
+    )
+    assert later["advisor"]["controls"].startswith(
+        "実行中のジョブ: 1 件 (最も新しい起動 t=6.000 秒 (6.0 秒前))"
+    )
+
+
+def test_recorded_state_has_the_same_advisor_as_sent_state():
+    surface = surface_input(advisor_statuses=ADVISOR_STATUSES, files=FILES)
+    sent = build_surface_state(surface, ["a", "b", "c"])
+    recorded = build_recorded_state(surface)
+    assert "advisor" in recorded
+    assert recorded["advisor"] == sent["advisor"] == ADVISOR_STATE
+    assert list(recorded) == list(sent)
 
 
 # --- 要求 ---
@@ -372,7 +654,13 @@ def test_request_sends_state_images_and_all_question_kinds(tmp_path):
     assert "button_HOME" not in names_of(questions, QuestionKind.BUTTON)
     assert len(names_of(questions, QuestionKind.STICK_DIRECTION)) == 4
     assert len(names_of(questions, QuestionKind.STICK_STRENGTH)) == 12
-    assert len(names_of(questions, QuestionKind.ADVISOR)) == 4
+    assert names_of(questions, QuestionKind.ADVISOR) == [
+        "advisor_controls",
+        "advisor_tips",
+        "advisor_strategy",
+        "advisor_advice",
+        "advisor_game",
+    ]
     assert len(names_of(questions, QuestionKind.INFO_LABEL)) == 5
     assert names_of(questions, QuestionKind.SCENE_CHANGE) == ["scene_changed"]
     # 対象の一覧のファイルが無いので固定の 4 つ。最初の要求では、どれもまだ box が無いので問い直す
@@ -501,6 +789,12 @@ def test_output_follows_answers(tmp_path):
         InfoLabel("map", 0.0),
     )
     assert output.scene_changed is True
+
+
+def test_advisor_game_above_threshold_asks_for_the_game_document(tmp_path):
+    asker = FakeAsker({"advisor_game": 0.7, "advisor_tips": 0.5})
+    decider, _ = make_decider(tmp_path, asker)
+    assert decider.decide(surface_input()).deep_kinds == frozenset({DocumentKind.GAME})
 
 
 def test_threshold_advisor_is_used(tmp_path):
@@ -777,6 +1071,19 @@ def test_request_is_passed_to_sink_once_just_before_sending(tmp_path):
     assert without_frames(request.state) == without_frames(state)
     assert [frame["image"] for frame in request.state["frames"]] == list(FILES)
     assert "ref-" not in json.dumps(request.state, ensure_ascii=False)
+
+
+def test_sent_and_recorded_requests_carry_the_advisor_of_the_input(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    sink = RequestSink(asker)
+    decider.decide(
+        surface_input(advisor_statuses=ADVISOR_STATUSES, files=FILES, request_sink=sink)
+    )
+    state, _, _ = asker.calls[0]
+    assert state["advisor"] == ADVISOR_STATE
+    # surface_requests.jsonl に書く state にも、送った state と同じ advisor が入る
+    assert sink.requests[0].state["advisor"] == ADVISOR_STATE
 
 
 def test_output_exchange_has_the_sent_request_and_the_answers(tmp_path):

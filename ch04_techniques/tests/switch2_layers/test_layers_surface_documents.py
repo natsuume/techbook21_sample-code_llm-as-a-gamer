@@ -187,3 +187,64 @@ def test_scene_directory_symlinked_to_outside_is_not_read(tmp_path):
     (notes / "scenes" / "scene-001").symlink_to(outside)
     documents = read_surface_documents(notes, "scene-001")
     assert documents.controls == COMMON_CONTROLS
+
+
+# --- ゲームの性質 (notes/game.md。場面に依らない) ---
+
+GAME = "# ゲームの性質\n\n## ジャンル\nRPG (推測)\n"
+
+
+@pytest.mark.parametrize("scene_id", [None, "scene-001", "../common"])
+def test_game_document_is_read_for_any_scene(tmp_path, scene_id):
+    notes = make_notes(tmp_path)
+    (notes / "game.md").write_text(GAME, encoding="utf-8")
+    write_scene(notes, "scene-001", {"controls.md": SCENE_CONTROLS})
+    documents = read_surface_documents(notes, scene_id)
+    assert documents.game == GAME
+
+
+def test_game_document_in_scene_directory_is_not_used(tmp_path):
+    # 場面ごとの文書は無い。scenes/<場面ID>/game.md や common/game.md があっても読まない
+    notes = make_notes(tmp_path)
+    write_scene(notes, "scene-001", {"game.md": GAME})
+    (notes / "common" / "game.md").write_text(GAME, encoding="utf-8")
+    assert read_surface_documents(notes, "scene-001").game == ""
+
+
+def test_missing_game_document_is_empty(tmp_path):
+    notes = make_notes(tmp_path)
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.game == ""
+    # ほかの文書は変わらない
+    assert documents.advice == ADVICE
+    assert documents.controls == COMMON_CONTROLS
+
+
+def test_blank_game_document_is_passed_as_it_is(tmp_path):
+    # surface にはほかの文書と同じく読んだままを渡す (空白だけの文書を「(無い)」にするのは middle)
+    notes = make_notes(tmp_path)
+    (notes / "game.md").write_text("  \n\n", encoding="utf-8")
+    assert read_surface_documents(notes, None).game == "  \n\n"
+
+
+def test_unreadable_game_document_is_empty(tmp_path):
+    notes = make_notes(tmp_path)
+    (notes / "game.md").write_bytes(b"\xff\xfe not utf-8")
+    assert read_surface_documents(notes, None).game == ""
+    (notes / "game.md").unlink()
+    (notes / "game.md").mkdir()
+    assert read_surface_documents(notes, None).game == ""
+
+
+def test_game_document_symlinked_to_outside_is_empty(tmp_path):
+    notes = make_notes(tmp_path)
+    secret = write_secret(tmp_path)
+    (notes / "game.md").symlink_to(secret)
+    assert read_surface_documents(notes, None).game == ""
+
+
+def test_game_document_symlinked_inside_notes_is_read(tmp_path):
+    notes = make_notes(tmp_path)
+    (notes / "game-real.md").write_text(GAME, encoding="utf-8")
+    (notes / "game.md").symlink_to(notes / "game-real.md")
+    assert read_surface_documents(notes, None).game == GAME

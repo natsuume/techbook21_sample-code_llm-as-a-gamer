@@ -3,17 +3,20 @@
 要求の state (キーはこの順):
     {
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
-      "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言},
+      "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言,
+                    "game": ゲームの性質},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
       "progress": {"measured": 画面の停滞の計測の値の時刻のラベル (無ければ NOT_MEASURED_TEXT),
                    "text": 2 つの値の文 (progress.progress_text。無ければ NO_PROGRESS_TEXT)},
       "recent_actions": [{"time": 時刻のラベル, "held": [...], "hold_seconds": {ボタン名: 秒}, "taps": [...],
                           "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
+      "advisor": {文書の種類の値: deep の呼び出しの状況の文, ...},
       "frames": [{"label": 時刻のラベル, "image": <画像の参照文字列>}, ...]
     }
 時刻のラベルは relative_time_label (例: "t=12.345 秒 (0.4 秒前)")。「何秒前」は要求の時刻 (SurfaceInput.t) から数える。
-recent_actions と frames は古い順。画像 (SurfaceInput.frames の JPEG) は assets に入れ、state の frames の image に
-参照文字列を 1 回だけ置く。
+recent_actions と frames は古い順。advisor は surface_questions.ADVISOR_KINDS の順 (advisor_to_state。文は
+deep_status_text)。画像 (SurfaceInput.frames の JPEG) は assets に入れ、state の frames の image に参照文字列を
+1 回だけ置く。
 
 1 回の decide の流れ:
     1. 要求の番号を 1 増やす (最初の decide が 1)
@@ -44,6 +47,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from switch2_layers.deep.deep_scheduler import (
+    SKIP_MIN_START_INTERVAL,
+    DeepDocumentStatus,
+    DeepJobEnd,
+    DeepJobStatus,
+    DeepRequestOutcome,
+)
+from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.pad_action import action_to_json
 from switch2_layers.progress.progress_state import ProgressState
@@ -75,6 +86,7 @@ from switch2_layers.surface.jev_client import (
     new_asset_reference,
 )
 from switch2_layers.surface.surface_questions import (
+    ADVISOR_KINDS,
     SURFACE_INSTRUCTIONS,
     SurfaceQuestion,
     box_question_name,
@@ -94,6 +106,16 @@ from switch2_layers.surface.surface_types import (
 NO_TIMELINE_TEXT = "まだ作られていない"  # 系列情報がまだ無いときの timeline の created
 # 画面の停滞の計測の値がまだ無いときの progress の measured
 NOT_MEASURED_TEXT = "まだ測っていない"
+# deep の呼び出しの状況を読めなかった種類の、state の advisor の文
+ADVISOR_STATUS_UNAVAILABLE_TEXT = "状況を取得できない"
+# deep のジョブの終わり方 → state の advisor の「前回の終了」の文に書く言い方
+DEEP_JOB_STATUS_TEXTS: dict[DeepJobStatus, str] = {
+    DeepJobStatus.OK: "正常に終了",
+    DeepJobStatus.FAILED: "文書を更新できずに終了",
+    DeepJobStatus.ERROR: "エラーで終了",
+    DeepJobStatus.STOPPED: "止めた",
+    DeepJobStatus.KILLED: "強制終了した",
+}
 
 
 class JevAsker(Protocol):
@@ -154,12 +176,16 @@ def relative_time_label(t: float, request_t: float) -> str:
 
 
 def documents_to_state(documents: SurfaceDocuments) -> dict[str, str]:
-    """文書を state の documents {"tasks", "tips", "controls", "advice"} (この順) にする。"""
+    """文書を state の documents {"tasks", "tips", "controls", "advice", "game"} (この順) にする。
+
+    値は SurfaceDocuments の同じ名前の属性 (無い・読めない文書は read_surface_documents が空文字列にしたもの)。
+    """
     return {
         "tasks": documents.tasks,
         "tips": documents.tips,
         "controls": documents.controls,
         "advice": documents.advice,
+        "game": documents.game,
     }
 
 
@@ -213,6 +239,91 @@ def recent_actions_to_state(
     ]
 
 
+def deep_status_text(status: DeepDocumentStatus | None, request_t: float) -> str:
+    """文書 1 つの deep の呼び出しの状況を、state の advisor の文にする。
+
+    status が None (状況を読めなかった) なら ADVISOR_STATUS_UNAVAILABLE_TEXT。そうでなければ次の 4 つの文を
+    この順に「。」でつないだもの (最後には「。」を付けない)。<時刻> は relative_time_label(その t, request_t):
+        1. 実行中: running_count が 1 以上なら「実行中のジョブ: <running_count> 件 (最も新しい起動 <latest_running_start_t の時刻>)」、
+           0 なら「実行中のジョブ: なし」
+        2. 前回の終了: last_end があれば「前回の終了: <last_end.t の時刻>、<DEEP_JOB_STATUS_TEXTS[last_end.status]>」、
+           None なら「前回の終了: まだ無い」
+        3. 最小間隔: min_interval_remaining_s が 0 より大きければ「今求めると捨てられる (あと <残りを小数第 1 位まで> 秒)」、
+           そうでなければ「今求めれば起動する」
+        4. surface の最後の要求: last_surface_request が None なら「surface はまだ求めていない」。そうでなければ
+           「surface が最後に求めた: <t の時刻>、<結果>」で、結果は、起動したら「起動した」、捨てた理由が
+           deep_scheduler.SKIP_MIN_START_INTERVAL なら「前回の起動から間もないため捨てられた」、ほかの理由なら
+           「捨てられた (<理由>)」
+    例: 「実行中のジョブ: なし。前回の終了: t=120.300 秒 (15.2 秒前)、正常に終了。今求めれば起動する。
+    surface が最後に求めた: t=100.000 秒 (35.5 秒前)、起動した」
+    """
+    if status is None:
+        return ADVISOR_STATUS_UNAVAILABLE_TEXT
+    return "。".join(
+        (
+            _running_jobs_text(status, request_t),
+            _last_end_text(status.last_end, request_t),
+            _min_interval_text(status.min_interval_remaining_s),
+            _last_surface_request_text(status.last_surface_request, request_t),
+        )
+    )
+
+
+def _running_jobs_text(status: DeepDocumentStatus, request_t: float) -> str:
+    """deep_status_text の 1 の文 (実行中のジョブ) を返す。"""
+    latest = status.latest_running_start_t
+    if status.running_count <= 0 or latest is None:
+        return "実行中のジョブ: なし"
+    label = relative_time_label(latest, request_t)
+    return f"実行中のジョブ: {status.running_count} 件 (最も新しい起動 {label})"
+
+
+def _last_end_text(last_end: DeepJobEnd | None, request_t: float) -> str:
+    """deep_status_text の 2 の文 (前回の終了) を返す。"""
+    if last_end is None:
+        return "前回の終了: まだ無い"
+    label = relative_time_label(last_end.t, request_t)
+    return f"前回の終了: {label}、{DEEP_JOB_STATUS_TEXTS[last_end.status]}"
+
+
+def _min_interval_text(remaining_s: float) -> str:
+    """deep_status_text の 3 の文 (最小間隔) を返す。"""
+    if remaining_s > 0:
+        return f"今求めると捨てられる (あと {remaining_s:.1f} 秒)"
+    return "今求めれば起動する"
+
+
+def _last_surface_request_text(
+    outcome: DeepRequestOutcome | None, request_t: float
+) -> str:
+    """deep_status_text の 4 の文 (surface の最後の要求) を返す。"""
+    if outcome is None:
+        return "surface はまだ求めていない"
+    if outcome.started:
+        result = "起動した"
+    elif outcome.reason == SKIP_MIN_START_INTERVAL:
+        result = "前回の起動から間もないため捨てられた"
+    else:
+        result = f"捨てられた ({outcome.reason})"
+    label = relative_time_label(outcome.t, request_t)
+    return f"surface が最後に求めた: {label}、{result}"
+
+
+def advisor_to_state(
+    statuses: Mapping[DocumentKind, DeepDocumentStatus | None], request_t: float
+) -> dict[str, str]:
+    """advisor 判定で問う種類ごとの状況を、state の advisor {種類の値: 文} にする。
+
+    キーは surface_questions.ADVISOR_KINDS のすべての種類の値で、ADVISOR_KINDS の順。文は
+    deep_status_text(statuses の値, request_t)。statuses に無い種類は None (状況を読めなかった) と同じに扱い、
+    ADVISOR_KINDS に無い種類は無視する。
+    """
+    return {
+        kind.value: deep_status_text(statuses.get(kind), request_t)
+        for kind in ADVISOR_KINDS
+    }
+
+
 def build_surface_state(
     surface_input: SurfaceInput, references: Sequence[str]
 ) -> dict[str, object]:
@@ -255,6 +366,7 @@ def _state_with_images(
         "recent_actions": recent_actions_to_state(
             surface_input.recent_actions, request_t
         ),
+        "advisor": advisor_to_state(surface_input.advisor_statuses, request_t),
         "frames": [
             {"label": relative_time_label(frame.t, request_t), "image": image}
             for frame, image in zip(surface_input.frames, images, strict=True)

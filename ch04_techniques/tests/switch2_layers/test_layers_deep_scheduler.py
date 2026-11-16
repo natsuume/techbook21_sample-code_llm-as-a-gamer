@@ -10,8 +10,11 @@ from switch2_layers.deep.deep_scheduler import (
     SKIP_CLOSED,
     SKIP_MIN_START_INTERVAL,
     STOP_GRACE_S,
+    DeepDocumentStatus,
+    DeepJobEnd,
     DeepJobOutcome,
     DeepJobStatus,
+    DeepRequestOutcome,
     DeepScheduler,
     DeepSchedulerParts,
     DeepSchedulerSettings,
@@ -469,6 +472,49 @@ def test_request_within_min_interval_is_skipped_and_recorded(tmp_path):
     ]
 
 
+def test_new_scene_game_requests_of_any_scene_share_the_game_note(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(1.0)
+    first = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"
+    )
+    assert first.started is True
+    assert first.job_dir == harness.root / "deep" / "game-001"
+    value = job_json(first.job_dir)
+    assert value["kind"] == "game"
+    assert value["trigger"] == "new_scene"
+    # 場面に依らない: どの場面の new_scene でも、同じ notes/game.md の文書のジョブになる
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]
+    assert harness.scheduler.is_running(DocumentKey(DocumentKind.GAME, None))
+    # 別の場面の new_scene でも同じ文書なので、最小間隔の内なら捨てる
+    harness.at(5.0)
+    second = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-002"
+    )
+    assert second.started is False
+    assert second.reason == SKIP_MIN_START_INTERVAL
+    assert not (harness.root / "deep" / "game-002").exists()
+    assert run_rows(harness.root, "deep_skipped") == [
+        {
+            "t": 5.0,
+            "event": "deep_skipped",
+            "kind": "game",
+            "scene_id": None,
+            "trigger": "new_scene",
+            "reason": "min_start_interval",
+            "since_last_start_s": 4.0,
+        }
+    ]
+    # 最小間隔の後なら、別の場面の new_scene でも起動する
+    harness.at(16.0)
+    third = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-002"
+    )
+    assert third.started is True
+    assert third.job_dir == harness.root / "deep" / "game-002"
+
+
 def test_min_interval_counts_from_start_not_end(tmp_path):
     harness = make_scheduler(tmp_path)
     harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
@@ -522,6 +568,22 @@ def test_auto_starts_all_documents_after_auto_seconds_from_start(tmp_path):
         value = job_json(result.job_dir)
         assert value["trigger"] == "auto"
         assert value["scene_id"] is None
+
+
+def test_auto_starts_a_game_job_for_the_game_note(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.scene["id"] = "scene-001"
+    harness.at(60.0)
+    results = harness.scheduler.check_auto()
+    # ゲームの性質は DOCUMENT_KINDS の最後で、場面に依らない notes/game.md だけを対象にする
+    assert started_kinds(results)[-1] == "game"
+    game = [r for r in results if job_json(r.job_dir)["kind"] == "game"]
+    assert len(game) == 1
+    assert game[0].job_dir == harness.root / "deep" / "game-001"
+    value = job_json(game[0].job_dir)
+    assert value["trigger"] == "auto"
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]
 
 
 def test_auto_does_not_start_while_job_is_running(tmp_path):
@@ -617,8 +679,8 @@ def test_auto_continues_with_later_kinds_after_a_kind_fails(tmp_path):
     )
     harness.at(60.0)
     results = harness.scheduler.check_auto()
-    # tips の後ろの種類 (strategy・advice・map) も判定して起動する
-    assert started_kinds(results) == ["controls", "strategy", "advice", "map"]
+    # tips の後ろの種類 (strategy・advice・map・game) も判定して起動する
+    assert started_kinds(results) == ["controls", "strategy", "advice", "map", "game"]
     errors = run_rows(harness.root, "deep_request_error")
     assert len(errors) == 1
     assert errors[0]["t"] == 60.0
@@ -846,6 +908,331 @@ def test_job_that_reports_stopped_by_itself_is_recorded_as_stopped(tmp_path):
     assert end[0]["stop_reason"] is None
 
 
+# --- 文書の呼び出しの状況 (document_status) ---
+
+# 何も要求していない文書の状況
+EMPTY_STATUS = DeepDocumentStatus(
+    running_count=0,
+    latest_running_start_t=None,
+    last_end=None,
+    min_interval_remaining_s=0.0,
+    last_surface_request=None,
+)
+
+
+def status_of(
+    harness: Harness, kind: DocumentKind, scene_id: str | None = None
+) -> DeepDocumentStatus:
+    return harness.scheduler.document_status(kind, scene_id)
+
+
+def test_document_status_without_any_request(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(30.0)
+    for kind in DOCUMENT_KINDS:
+        assert status_of(harness, kind) == EMPTY_STATUS
+        assert status_of(harness, kind, "scene-001") == EMPTY_STATUS
+
+
+def test_document_status_counts_running_jobs_and_latest_start(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=10.0)
+    harness.at(2.0)
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.AUTO, None)
+    harness.at(12.5)
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.AUTO, None)
+    harness.at(14.0)
+    # 同じ文書のジョブが 2 つ並行して動いている
+    assert status_of(harness, DocumentKind.STRATEGY) == DeepDocumentStatus(
+        running_count=2,
+        latest_running_start_t=12.5,
+        last_end=None,
+        min_interval_remaining_s=8.5,
+        last_surface_request=None,
+    )
+    # 終わったジョブは実行中に数えない
+    harness.at(20.0)
+    harness.threads.run_all()
+    after = status_of(harness, DocumentKind.STRATEGY)
+    assert after.running_count == 0
+    assert after.latest_running_start_t is None
+    assert after.last_end == DeepJobEnd(20.0, DeepJobStatus.OK)
+
+
+def test_document_status_latest_start_is_among_running_jobs_only(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    harness.at(1.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(2.0)
+    harness.threads.run_all()
+    harness.at(3.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(4.0)
+    status = status_of(harness, DocumentKind.ADVICE)
+    assert status.running_count == 1
+    assert status.latest_running_start_t == 3.0
+    # 前回の終了は、実行中のジョブとは別に、終わった 1 つ目のもの
+    assert status.last_end == DeepJobEnd(2.0, DeepJobStatus.OK)
+
+
+@pytest.mark.parametrize(
+    "result, status",
+    [
+        (DeepResult(ok=True, message="done"), DeepJobStatus.OK),
+        (DeepResult(ok=False, message="could not update"), DeepJobStatus.FAILED),
+        (RuntimeError("claude crashed"), DeepJobStatus.ERROR),
+        (STOPPED, DeepJobStatus.STOPPED),
+    ],
+    ids=["ok", "failed", "error", "stopped"],
+)
+def test_document_status_has_end_time_and_status_of_returned_job(
+    tmp_path, result, status
+):
+    harness = make_scheduler(tmp_path, FakeRunner(result))
+    harness.at(1.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(4.5)
+    harness.threads.run_all()
+    harness.at(6.0)
+    value = status_of(harness, DocumentKind.ADVICE)
+    assert value.running_count == 0
+    assert value.latest_running_start_t is None
+    assert value.last_end == DeepJobEnd(4.5, status)
+
+
+def test_document_status_last_end_is_the_most_recent_end(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.at(2.0)
+    harness.threads.run_all()
+    harness.runner.result = DeepResult(ok=False, message="could not update")
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.at(7.0)
+    harness.threads.run_all()
+    assert status_of(harness, DocumentKind.TIPS).last_end == DeepJobEnd(
+        7.0, DeepJobStatus.FAILED
+    )
+
+
+def test_document_status_counts_stopping_job_as_running_until_killed(tmp_path):
+    harness = make_scheduler(tmp_path, timeout_s=10.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.at(10.0)
+    harness.scheduler.check_timeouts()
+    # stop を呼んで戻るのを待っている間も、実行中に数える
+    stopping = status_of(harness, DocumentKind.TIPS)
+    assert stopping.running_count == 1
+    assert stopping.latest_running_start_t == 0.0
+    assert stopping.last_end is None
+    harness.at(15.0)
+    harness.scheduler.check_timeouts()
+    killed = status_of(harness, DocumentKind.TIPS)
+    assert killed.running_count == 0
+    assert killed.latest_running_start_t is None
+    assert killed.last_end == DeepJobEnd(15.0, DeepJobStatus.KILLED)
+    # kill の後に run が戻っても、前回の終了は変えない
+    harness.at(16.0)
+    harness.threads.run_all()
+    assert status_of(harness, DocumentKind.TIPS).last_end == DeepJobEnd(
+        15.0, DeepJobStatus.KILLED
+    )
+
+
+def test_document_status_counts_failed_preparation_as_error_end(tmp_path):
+    harness = make_scheduler(
+        tmp_path, prepare_job_directory=FailingPreparation(DocumentKind.TIPS)
+    )
+    harness.at(3.0)
+    with pytest.raises(OSError):
+        harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, "scene-001")
+    harness.at(4.0)
+    assert status_of(harness, DocumentKind.TIPS, "scene-001") == DeepDocumentStatus(
+        running_count=0,
+        latest_running_start_t=None,
+        last_end=DeepJobEnd(3.0, DeepJobStatus.ERROR),
+        # 起動できなかった要求は、最小間隔の起点にしない
+        min_interval_remaining_s=0.0,
+        # 起動も捨てもしていないので、surface の最後の要求に数えない
+        last_surface_request=None,
+    )
+
+
+def test_document_status_counts_thread_start_failure_as_start_and_error_end(
+    tmp_path,
+):
+    def failing_start(body: Callable[[], None]) -> None:
+        raise RuntimeError("cannot start thread")
+
+    harness = make_scheduler(tmp_path, start_job_thread=failing_start)
+    harness.at(2.0)
+    with pytest.raises(RuntimeError):
+        harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(5.0)
+    assert status_of(harness, DocumentKind.ADVICE) == DeepDocumentStatus(
+        running_count=0,
+        latest_running_start_t=None,
+        last_end=DeepJobEnd(2.0, DeepJobStatus.ERROR),
+        # deep_start を書いた起動なので、最小間隔の起点にする
+        min_interval_remaining_s=12.0,
+        last_surface_request=DeepRequestOutcome(2.0, started=True),
+    )
+
+
+@pytest.mark.parametrize(
+    "elapsed, remaining",
+    [(0.0, 15.0), (3.5, 11.5), (14.5, 0.5), (15.0, 0.0), (40.0, 0.0)],
+    ids=["just_started", "remaining", "almost", "exactly_zero", "long_after"],
+)
+def test_document_status_min_interval_remaining(tmp_path, elapsed, remaining):
+    harness = make_scheduler(tmp_path, min_start_interval_s=15.0)
+    harness.at(10.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(10.0 + elapsed)
+    value = status_of(harness, DocumentKind.ADVICE).min_interval_remaining_s
+    assert value == pytest.approx(remaining)
+    # 残りが 0 より大きいのは、今求めると最小間隔で捨てられるとき
+    result = harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.AUTO, None)
+    assert (result.reason == SKIP_MIN_START_INTERVAL) is (remaining > 0)
+
+
+def test_document_status_min_interval_counts_from_start_not_end(tmp_path):
+    harness = make_scheduler(tmp_path, min_start_interval_s=15.0)
+    harness.scheduler.request(DocumentKind.MAP, DeepTrigger.AUTO, None)
+    harness.at(1.0)
+    harness.threads.run_all()
+    harness.at(5.0)
+    assert status_of(harness, DocumentKind.MAP).min_interval_remaining_s == 10.0
+
+
+def test_document_status_records_last_surface_request_started(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(4.0)
+    harness.scheduler.request(DocumentKind.CONTROLS, DeepTrigger.SURFACE, "scene-001")
+    harness.at(6.0)
+    status = status_of(harness, DocumentKind.CONTROLS, "scene-001")
+    assert status.last_surface_request == DeepRequestOutcome(4.0, started=True)
+    assert status.last_surface_request.reason is None
+
+
+def test_document_status_records_surface_request_skipped_by_min_interval(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(4.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.at(9.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.at(9.5)
+    assert status_of(harness, DocumentKind.TIPS).last_surface_request == (
+        DeepRequestOutcome(9.0, started=False, reason=SKIP_MIN_START_INTERVAL)
+    )
+
+
+def test_document_status_records_surface_request_skipped_after_close(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(4.0)
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, None)
+    harness.on_sleep.append(harness.threads.run_all)
+    harness.at(20.0)
+    harness.scheduler.close()
+    harness.at(30.0)
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, None)
+    harness.at(31.0)
+    # close の後も読める
+    status = status_of(harness, DocumentKind.STRATEGY)
+    assert status.last_surface_request == DeepRequestOutcome(
+        30.0, started=False, reason=SKIP_CLOSED
+    )
+    # close で止めたジョブの終わりも読める
+    assert status.running_count == 0
+    assert status.last_end is not None
+    assert status.last_end.status is DeepJobStatus.STOPPED
+
+
+@pytest.mark.parametrize("trigger", [DeepTrigger.AUTO, DeepTrigger.NEW_SCENE])
+def test_document_status_ignores_requests_of_other_triggers(tmp_path, trigger):
+    harness = make_scheduler(tmp_path)
+    harness.at(1.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, "scene-002")
+    harness.at(20.0)
+    # 起動した要求も、最小間隔で捨てた要求も、surface の最後の要求に数えない
+    started = harness.scheduler.request(DocumentKind.TIPS, trigger, "scene-002")
+    harness.at(25.0)
+    skipped = harness.scheduler.request(DocumentKind.TIPS, trigger, "scene-002")
+    assert started.started and not skipped.started
+    status = status_of(harness, DocumentKind.TIPS, "scene-002")
+    assert status.last_surface_request == DeepRequestOutcome(1.0, started=True)
+    # 実行中のジョブには、きっかけに依らず数える
+    assert status.running_count == 2
+    assert status.latest_running_start_t == 20.0
+
+
+def test_document_status_without_surface_request_after_other_triggers(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(60.0)
+    harness.scheduler.check_auto()
+    harness.at(61.0)
+    for kind in DOCUMENT_KINDS:
+        status = status_of(harness, kind)
+        assert status.running_count == 1
+        assert status.last_surface_request is None
+
+
+def test_document_status_uses_scene_document_for_controls_and_tips(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(1.0)
+    harness.scheduler.request(DocumentKind.CONTROLS, DeepTrigger.SURFACE, "scene-001")
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.scheduler.request(DocumentKind.STRATEGY, DeepTrigger.SURFACE, "scene-001")
+    harness.at(2.0)
+    # controls: 場面の文書と、共通の文書は別
+    assert status_of(harness, DocumentKind.CONTROLS, "scene-001").running_count == 1
+    assert status_of(harness, DocumentKind.CONTROLS, None) == EMPTY_STATUS
+    assert status_of(harness, DocumentKind.CONTROLS, "scene-002") == EMPTY_STATUS
+    # tips: 場面が無ければ共通の文書
+    assert status_of(harness, DocumentKind.TIPS, None).running_count == 1
+    assert status_of(harness, DocumentKind.TIPS, "scene-001") == EMPTY_STATUS
+    # strategy・advice・map は場面を無視する
+    for scene_id in [None, "scene-001", "scene-009"]:
+        assert status_of(harness, DocumentKind.STRATEGY, scene_id).running_count == 1
+        assert status_of(harness, DocumentKind.ADVICE, scene_id) == EMPTY_STATUS
+
+
+def test_document_status_rejects_invalid_scene_for_scene_documents(tmp_path):
+    harness = make_scheduler(tmp_path)
+    with pytest.raises(ValueError):
+        harness.scheduler.document_status(DocumentKind.CONTROLS, "../x")
+
+
+def test_document_status_reads_without_starting_jobs_or_writing_records(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(1.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(5.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    rows_before = run_rows(harness.root)
+    jobs_before = sorted(path.name for path in (harness.root / "deep").iterdir())
+    bodies_before = len(harness.threads.bodies)
+    # 自動の呼び出しの時刻を過ぎていても、読み取りでは起動しない
+    harness.at(200.0)
+    for kind in DOCUMENT_KINDS:
+        for scene_id in [None, "scene-001"]:
+            harness.scheduler.document_status(kind, scene_id)
+    assert run_rows(harness.root) == rows_before
+    assert sorted(path.name for path in (harness.root / "deep").iterdir()) == (
+        jobs_before
+    )
+    assert len(harness.threads.bodies) == bodies_before
+    assert harness.runner.calls == []
+    assert harness.runner.stopped == []
+    assert harness.runner.killed == []
+
+
+def test_document_status_before_any_record_does_not_create_run_log(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(100.0)
+    harness.scheduler.document_status(DocumentKind.STRATEGY, None)
+    assert not (harness.root / "run.jsonl").exists()
+    assert list((harness.root / "deep").iterdir()) == []
+
+
 # --- deep-once ---
 
 
@@ -910,6 +1297,22 @@ def test_run_deep_once_errors(tmp_path):
         run_deep_once(tmp_path / "missing", DocumentKind.ADVICE, None, FakeRunner())
     with pytest.raises(ValueError):
         run_deep_once(root, DocumentKind.CONTROLS, "../x", FakeRunner())
+
+
+def test_run_deep_once_runs_a_game_job(tmp_path):
+    root = make_run(tmp_path)
+    (root / "middle" / "state.json").write_text(
+        json.dumps({"scene_id": "scene-003", "surface_wait_s": 0.2}), encoding="utf-8"
+    )
+    result = run_deep_once(root, DocumentKind.GAME, None, FakeRunner())
+    assert result.job == "deep/game-001"
+    assert result.outcome.status is DeepJobStatus.OK
+    value = job_json(result.job_dir)
+    assert value["kind"] == "game"
+    assert value["trigger"] == "manual"
+    # 現在の場面があっても、場面に依らない notes/game.md を対象にする
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]
 
 
 # --- 画面の停滞の計測による advice の要求 (きっかけ progress) ---

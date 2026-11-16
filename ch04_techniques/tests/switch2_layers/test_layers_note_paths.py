@@ -5,6 +5,7 @@ import pytest
 from switch2_layers.deep.deep_types import DocumentKey, DocumentKind
 from switch2_layers.notes.note_paths import (
     BOX_TARGETS_FILE,
+    GAME_NOTE,
     MAP_JSON_NOTE,
     MAP_PLACES_NOTE,
     box_targets_note,
@@ -155,3 +156,38 @@ def test_map_documents_do_not_list_symlinks_in_map_directory(tmp_path):
     os.symlink(outside, map_dir / "linked-dir")
     key = DocumentKey(DocumentKind.MAP, None)
     assert deep_document_notes(notes, key) == ["map/map.json", "map/places.md"]
+
+
+# --- ゲームの性質 ---
+
+
+def test_game_note_is_game_md():
+    assert GAME_NOTE == "game.md"
+
+
+def test_game_document_does_not_depend_on_the_scene():
+    for scene_id in [None, "scene-001"]:
+        assert document_key(DocumentKind.GAME, scene_id) == DocumentKey(
+            DocumentKind.GAME, None
+        )
+    # 場面ごとの文書も共通の文書も無い
+    with pytest.raises(ValueError):
+        common_note(DocumentKind.GAME)
+
+
+def test_deep_document_notes_for_game_is_only_game_md(tmp_path):
+    key = DocumentKey(DocumentKind.GAME, None)
+    # まだ無くてもパスを返す (deep が Write で作る)
+    assert deep_document_notes(tmp_path, key) == ["game.md"]
+    # マップの文書があっても、マップの 2 文書は対象にしない
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    (map_dir / "map.json").write_text(
+        '{"places": [], "connections": []}', encoding="utf-8"
+    )
+    (map_dir / "places.md").write_text("# 場所\n", encoding="utf-8")
+    (tmp_path / "game.md").write_text("## ジャンル\nRPG\n", encoding="utf-8")
+    notes = deep_document_notes(tmp_path, key)
+    assert notes == [GAME_NOTE]
+    assert MAP_JSON_NOTE not in notes
+    assert MAP_PLACES_NOTE not in notes

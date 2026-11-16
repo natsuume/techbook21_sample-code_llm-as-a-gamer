@@ -3,7 +3,7 @@
 層ごとの担当:
     surface   Decision Model で 0.2〜2 秒ごとにコントローラーを操作する (surface/)
     middle    数秒ごとに場面を特定し、短期タスクリストと surface の待ち時間を決める (middle/)
-    deep      文書 (操作説明・攻略情報・大方針・助言・マップ) を作る (deep/)
+    deep      文書 (操作説明・攻略情報・大方針・助言・マップ・ゲームの性質) を作る (deep/)
 
 層の間の受け渡しは、実行ごとのディレクトリー runs/<YYYYmmdd-HHMMSS>/ のファイルで行う (run_directory)。
 置き換えて書くファイル (JSON・Markdown・画像) は一時ファイルに書いてから os.replace で置き換え、
