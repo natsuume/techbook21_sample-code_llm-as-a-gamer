@@ -15,8 +15,10 @@ from switch2_layers.orchestrator.claude_session_command import (
     AUTO_COMPACT_START_TOKENS,
     AUTOCOMPACT_MAX_TOKENS,
     BUNDLED_SKILLS_TO_HIDE,
+    CROSS_SESSION_INBOUND,
     ROOT_ENTRY_ACCESS,
     SESSION_SETTINGS_BASE,
+    SKILL_OFF,
     ClaudeSessionOptions,
     RootEntryAccess,
     autocompact_arguments,
@@ -275,10 +277,29 @@ def test_settings_keep_the_base_keys_in_order_and_add_overrides_and_inbound():
     assert settings["crossSessionInbound"] == "refuse"
 
 
-def test_settings_stop_skills_from_running_shell_commands():
+def test_settings_base_stops_skills_from_running_shell_commands():
     # スキルの本文の !`...` と ```! のブロックを実行させない
     # (https://code.claude.com/docs/en/settings-reference の disableSkillShellExecution)
     assert SESSION_SETTINGS_BASE["disableSkillShellExecution"] is True
+
+
+def test_settings_constants_are_the_verified_values():
+    # 定数だけを確かめる (骨格の関数は呼ばない)
+    verified = json.loads(VERIFIED_SETTINGS_JSON)
+    base = {
+        key: value
+        for key, value in verified.items()
+        if key not in ("skillOverrides", "crossSessionInbound")
+    }
+    assert SESSION_SETTINGS_BASE == base
+    assert list(SESSION_SETTINGS_BASE) == list(base)
+    assert verified["crossSessionInbound"] == CROSS_SESSION_INBOUND == "refuse"
+    assert SKILL_OFF == "off"
+    assert set(BUNDLED_SKILLS_TO_HIDE) == {"design", "doctor"}
+    assert set(BUNDLED_SKILLS_TO_HIDE) <= set(verified["skillOverrides"])
+
+
+def test_session_settings_stop_skills_from_running_shell_commands():
     assert build_session_settings([])["disableSkillShellExecution"] is True
 
 

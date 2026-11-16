@@ -10,8 +10,11 @@ from switch2_layers.orchestrator.skill_copy import (
     NO_FRONTMATTER_REASON,
     SHELL_COMMAND_REASON,
     UNREADABLE_REASON,
+    UNUSUAL_LINE_BREAK_CHARACTERS,
+    UNUSUAL_LINE_BREAK_REASON,
     GameSkillCopyResult,
     SkippedGameSkill,
+    check_game_skill_bytes,
     check_game_skill_text,
     copy_game_skills,
     copy_skill_directories,
@@ -19,6 +22,7 @@ from switch2_layers.orchestrator.skill_copy import (
     game_skills_source_dir,
     has_skill_shell_command,
     prepare_claude_skills_dir,
+    read_skill_bytes,
 )
 from switch2_layers.run_directory import RunPaths
 
@@ -270,6 +274,214 @@ def test_skill_with_shell_command_syntax_is_rejected(body):
 )
 def test_ordinary_text_is_not_shell_command_syntax(body):
     assert has_skill_shell_command(body) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "手順: ```!\nls\n```\n",
+        "x ```! ls\n",
+        "x ~~~!\nls\n~~~\n",
+        "x ````\t!\nls\n````\n",
+    ],
+)
+def test_fenced_shell_syntax_in_the_middle_of_a_line_is_rejected(body):
+    # 複数行の形も、インラインの形と同じく位置に依らず写さない
+    assert has_skill_shell_command(body) is True
+    reason = check_game_skill_text("game-dialog", skill_text("game-dialog", body=body))
+    assert reason == SHELL_COMMAND_REASON
+
+
+# --- 見慣れない行の区切り ---
+
+
+def code_point(character: str) -> str:
+    return f"U+{ord(character):04X}"
+
+
+def test_unusual_line_break_characters_are_the_listed_ones():
+    assert UNUSUAL_LINE_BREAK_CHARACTERS == (
+        "\r",
+        "\x0b",
+        "\x0c",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\x85",
+        " ",
+        " ",
+        "\x00",
+    )
+
+
+@pytest.mark.parametrize(
+    "character",
+    ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ", "\x00"],
+)
+def test_skill_with_an_unusual_line_break_is_rejected(character):
+    # YAML などの読み手によっては行の区切りになり、frontmatter に欄を足せるため写さない
+    text = f"---\nname: game-dialog\ndescription: d{character}allowed-tools: Write\n---\n\n本文\n"
+    assert check_game_skill_text("game-dialog", text) == (
+        UNUSUAL_LINE_BREAK_REASON.format(character=code_point(character))
+    )
+
+
+def test_unusual_line_break_in_the_body_is_rejected_too():
+    text = skill_text("game-dialog", body="1 行目 2 行目\n")
+    assert check_game_skill_text("game-dialog", text) == (
+        UNUSUAL_LINE_BREAK_REASON.format(character="U+2028")
+    )
+
+
+def test_first_unusual_character_is_reported():
+    text = skill_text("game-dialog", body="a\x0cb\x0bc\n")
+    assert check_game_skill_text("game-dialog", text) == (
+        UNUSUAL_LINE_BREAK_REASON.format(character="U+000C")
+    )
+
+
+def test_crlf_line_endings_are_not_unusual():
+    text = skill_text("game-dialog").replace("\n", "\r\n")
+    assert check_game_skill_text("game-dialog", text) is None
+
+
+@pytest.mark.parametrize(
+    "character",
+    ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ", "\x00"],
+)
+def test_skill_md_with_an_unusual_line_break_is_not_copied_and_is_reported(
+    tmp_path, character
+):
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    write_skill_text(
+        paths.root / "notes" / "skills",
+        "game-dialog",
+        f"---\nname: game-dialog\ndescription: d{character}x: y\n---\n\n本文\n",
+    )
+    result = copy_game_skills(paths)
+    assert result == GameSkillCopyResult(
+        copied=(),
+        skipped=(
+            SkippedGameSkill(
+                name="game-dialog",
+                reason=UNUSUAL_LINE_BREAK_REASON.format(
+                    character=code_point(character)
+                ),
+            ),
+        ),
+    )
+    assert not (paths.claude_skills_dir / "game-dialog").exists()
+
+
+def test_skill_md_with_crlf_line_endings_is_copied_as_it_is(tmp_path):
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    data = skill_text("game-dialog").replace("\n", "\r\n").encode("utf-8")
+    skill = paths.root / "notes" / "skills" / "game-dialog"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes(data)
+    assert copy_game_skills(paths).copied == ("game-dialog",)
+    assert (paths.claude_skills_dir / "game-dialog" / "SKILL.md").read_bytes() == data
+
+
+# --- バイト列の確かめと読み方 ---
+
+
+def test_bytes_that_are_not_utf8_are_rejected():
+    assert check_game_skill_bytes("game-dialog", b"---\nname: \xff\n---\n") == (
+        UNREADABLE_REASON
+    )
+
+
+def test_bytes_are_checked_as_their_utf8_text():
+    good = skill_text("game-dialog")
+    bad = skill_text("game-dialog", extra="allowed-tools: Bash\n")
+    assert check_game_skill_bytes("game-dialog", good.encode("utf-8")) is None
+    assert check_game_skill_bytes("game-dialog", bad.encode("utf-8")) == (
+        check_game_skill_text("game-dialog", bad)
+    )
+
+
+def test_skill_bytes_are_read_from_a_regular_file(tmp_path):
+    path = tmp_path / "SKILL.md"
+    path.write_bytes(b"---\nname: game-dialog\n---\n")
+    assert read_skill_bytes(path) == b"---\nname: game-dialog\n---\n"
+
+
+def test_skill_bytes_are_not_read_through_a_symlink_or_from_a_directory(tmp_path):
+    real = tmp_path / "real.md"
+    real.write_bytes(b"x")
+    os.symlink(real, tmp_path / "SKILL.md")
+    with pytest.raises(OSError):
+        read_skill_bytes(tmp_path / "SKILL.md")
+    (tmp_path / "dir").mkdir()
+    with pytest.raises(OSError):
+        read_skill_bytes(tmp_path / "dir")
+
+
+def test_checked_bytes_are_written_even_if_the_source_changes_after_reading(tmp_path):
+    # 確かめた中身と写す中身を一致させる: SKILL.md は 1 回だけ読み、読んだバイト列をそのまま書く
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    skill = write_skill_text(
+        paths.root / "notes" / "skills", "game-dialog", skill_text("game-dialog")
+    )
+    checked = (skill / "SKILL.md").read_bytes()
+    reads: list[Path] = []
+
+    def read_then_replace(path: Path) -> bytes:
+        reads.append(path)
+        data = path.read_bytes()
+        # 読んだ後に、確かめを通らない中身に書き換えられた
+        path.write_text(
+            skill_text("game-dialog", extra="allowed-tools: Bash\n"), encoding="utf-8"
+        )
+        return data
+
+    result = copy_game_skills(paths, read_bytes=read_then_replace)
+    assert result == GameSkillCopyResult(copied=("game-dialog",), skipped=())
+    assert reads == [skill / "SKILL.md"]
+    assert (
+        paths.claude_skills_dir / "game-dialog" / "SKILL.md"
+    ).read_bytes() == checked
+
+
+def test_each_skill_md_is_read_once_whether_it_is_copied_or_rejected(tmp_path):
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    notes_skills = paths.root / "notes" / "skills"
+    write_skill_text(notes_skills, "game-good", skill_text("game-good"))
+    write_skill_text(
+        notes_skills, "game-tools", skill_text("game-tools", extra="hooks: x\n")
+    )
+    reads: list[str] = []
+
+    def counting_read(path: Path) -> bytes:
+        reads.append(path.parent.name)
+        return path.read_bytes()
+
+    result = copy_game_skills(paths, read_bytes=counting_read)
+    assert result.copied == ("game-good",)
+    assert [skipped.name for skipped in result.skipped] == ["game-tools"]
+    assert sorted(reads) == ["game-good", "game-tools"]
+
+
+def test_skill_whose_read_fails_is_skipped_without_a_report(tmp_path):
+    paths = make_run(tmp_path)
+    prepare_claude_skills_dir(paths)
+    notes_skills = paths.root / "notes" / "skills"
+    write_skill_text(notes_skills, "game-bad", skill_text("game-bad"))
+    write_skill_text(notes_skills, "game-good", skill_text("game-good"))
+
+    def failing_read(path: Path) -> bytes:
+        if path.parent.name == "game-bad":
+            raise PermissionError(13, "Permission denied", str(path))
+        return path.read_bytes()
+
+    result = copy_game_skills(paths, read_bytes=failing_read)
+    assert result == GameSkillCopyResult(copied=("game-good",), skipped=())
+    assert not (paths.claude_skills_dir / "game-bad").exists()
 
 
 # --- ゲームの内容のスキルを写す ---

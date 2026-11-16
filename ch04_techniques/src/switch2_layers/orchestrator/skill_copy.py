@@ -29,16 +29,19 @@ Claude Code は、セッションを始めたときに無かった .claude/skill
       写さない (notes/ は Claude が読めるため、参考のファイルは notes/ から読める)
     - ディレクトリーがシンボリックリンク、SKILL_FILE が無い、SKILL_FILE が通常のファイルでない (リンクを含む) ものは、
       写さず、写さなかったスキル (skipped) にも入れない
-    - SKILL_FILE の中身を check_game_skill_text で確かめ、理由が返ったものは写さずに skipped に入れる
-      (UTF-8 として読めないものも skipped に入れる)
+    - SKILL_FILE は 1 回だけバイト列で読み (read_skill_bytes)、そのバイト列を check_game_skill_bytes で確かめる。
+      理由が返ったものは写さずに skipped に入れる
+    - 確かめて通ったら、読んだバイト列をそのまま写し先の SKILL_FILE に書く。元のファイルを読み直したり、ファイルと
+      して写し直したりしない (確かめた中身と写す中身を一致させるため)
     - 写さなかったスキルの写し先は変えない (前に写した版が .claude/skills/ にあれば残す)
     - 写すときは、.claude/skills/<名前>/ の中を SKILL_FILE だけにする (前の版のほかのファイルがあれば消す)。
-      SKILL_FILE の中身が写し先と同じで、ほかのファイルも無ければ写さない
+      読んだバイト列が写し先の SKILL_FILE と同じで、ほかのファイルも無ければ写さない
     - 写す元から消えたスキルは、写し先から消さない
 """
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,9 +68,25 @@ FRONTMATTER_FENCE = "---"
 FRONTMATTER_LINE_PATTERN = re.compile(r"([A-Za-z0-9_-]+):(.*)")
 # スキルからシェルのコマンドを実行する書き方 (https://code.claude.com/docs/en/skills の dynamic context injection)。
 # インラインの形 !`<コマンド>` は、行の先頭か空白の直後の ! だけが実行されるが、ここでは位置に依らず !` を含めば
-# 写さない。複数行の形は、```! で始まるコードブロック (行の先頭の字下げを許す。~~~! も同じに扱う)
+# 写さない。複数行の形は ```! で始まるコードブロックで、これも位置に依らず、3 つ以上の ` か ~ の後に (空白と
+# タブを挟んで) ! が続けば写さない (~~~! も ```! と同じに扱う)
 INLINE_SHELL_PATTERN = re.compile(r"!`")
-FENCED_SHELL_PATTERN = re.compile(r"^[ \t]*(?:`{3,}|~{3,})[ \t]*!", re.MULTILINE)
+FENCED_SHELL_PATTERN = re.compile(r"(?:`{3,}|~{3,})[ \t]*!")
+# SKILL.md に含めてはいけない文字。\n のほかの行の区切りになりうる文字と NUL。YAML などの読み手によっては行の区切りに
+# なり、frontmatter の確かめをすり抜けて欄を足せるため、含む SKILL.md は写さない。\r は \r\n の一部でないものだけ
+# (\r\n は \n にそろえてから確かめる)
+UNUSUAL_LINE_BREAK_CHARACTERS: tuple[str, ...] = (
+    "\r",
+    "\x0b",
+    "\x0c",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    " ",
+    " ",
+    "\x00",
+)
 
 # 写さなかった理由 (Claude が直せるよう、次のターンの入力に載せる)
 NO_FRONTMATTER_REASON = "SKILL.md の先頭に --- の行で囲んだ frontmatter が無い (1 行目を --- にし、name と description を書く)"
@@ -82,6 +101,7 @@ SHELL_COMMAND_REASON = (
     "スキルからシェルのコマンドを実行する書き方 (!` か ```! のブロック) がある"
 )
 UNREADABLE_REASON = "SKILL.md を UTF-8 の文として読めない"
+UNUSUAL_LINE_BREAK_REASON = "SKILL.md に、\\n のほかの行の区切りか NUL の文字 ({character}) がある (行の区切りは \\n か \\r\\n にする)"
 
 
 @dataclass(frozen=True)
@@ -150,7 +170,10 @@ def has_skill_shell_command(text: str) -> bool:
 def check_game_skill_text(directory_name: str, text: str) -> str | None:
     """ゲームの内容のスキルの SKILL.md の中身 text を確かめ、写してよければ None、だめなら理由の文を返す (I/O なし)。
 
-    次の順に確かめ、最初に当たった理由を返す:
+    はじめに text の \\r\\n を \\n にそろえ、以後は \\n だけで行に分ける。次の順に確かめ、最初に当たった理由を返す:
+        0. そろえた text に UNUSUAL_LINE_BREAK_CHARACTERS のどれかがある (\\r は \\r\\n の一部でないものだけが残る)
+           UNUSUAL_LINE_BREAK_REASON (character は、そろえた text の中で最初に現れたその文字を `U+<16 進 4 桁>`
+           (大文字) にしたもの。例: \\x0b → U+000B)
         1. 1 行目が FRONTMATTER_FENCE でない、または閉じの FRONTMATTER_FENCE の行が無い   NO_FRONTMATTER_REASON
         2. frontmatter の空でない行が FRONTMATTER_LINE_PATTERN に fullmatch しない (字下げした行・`- ` で始まる行・
            コメントの行を含む)                                                       MALFORMED_FRONTMATTER_REASON
@@ -161,19 +184,43 @@ def check_game_skill_text(directory_name: str, text: str) -> str | None:
            GAME_SKILL_FRONTMATTER_KEYS の順に ", " でつなぐ)                           MISSING_KEYS_REASON
         6. name の値 (前後の空白を除き、両端の同じ引用符 ' か " を 1 組除く) が directory_name と違う
                                                                                     NAME_MISMATCH_REASON
-        7. text のどこか (frontmatter を含む) に has_skill_shell_command が当たる      SHELL_COMMAND_REASON
+        7. そろえた text のどこか (frontmatter を含む) に has_skill_shell_command が当たる   SHELL_COMMAND_REASON
     directory_name は notes/skills/ の下のディレクトリーの名前 (GAME_SKILL_PREFIX で始まるもの)。行の終わりは \\n と
     \\r\\n のどちらも受け付ける。
     """
     raise NotImplementedError
 
 
-def copy_game_skills(paths: RunPaths) -> GameSkillCopyResult:
+def check_game_skill_bytes(directory_name: str, data: bytes) -> str | None:
+    """SKILL.md のバイト列 data を確かめ、写してよければ None、だめなら理由の文を返す (I/O なし)。
+
+    data を UTF-8 (strict) で文にできなければ UNREADABLE_REASON。できれば、その文を check_game_skill_text で確かめた
+    結果を返す。copy_game_skills は、この関数で確かめた data をそのまま写し先に書く。
+    """
+    raise NotImplementedError
+
+
+def read_skill_bytes(path: Path) -> bytes:
+    """path を、シンボリックリンクをたどらずに開いて (os.O_NOFOLLOW)、通常のファイルなら中身のバイト列を返す。
+
+    開いたファイルを os.fstat で調べ、通常のファイルでなければ OSError を出す。path がシンボリックリンクのとき
+    (開けずに OSError) と、読めないときも OSError をそのまま出す。copy_game_skills の read_bytes の既定値。
+    """
+    raise NotImplementedError
+
+
+def copy_game_skills(
+    paths: RunPaths, read_bytes: Callable[[Path], bytes] = read_skill_bytes
+) -> GameSkillCopyResult:
     """ゲームの内容のスキルを、モジュールの docstring の「ゲームの内容のスキルを写す規則」で、
     game_skills_source_dir(paths) から paths.claude_skills_dir に写す。
 
+    read_bytes は SKILL_FILE を読む関数 (既定 read_skill_bytes)。写す候補の SKILL_FILE ごとに 1 回だけ呼び、返った
+    バイト列を check_game_skill_bytes で確かめ、通ったらそのバイト列を写し先の SKILL_FILE に置き換えの書き込み
+    (file_io.write_bytes_atomic) で書く (元のファイルを読み直さない)。テストでは、読んだ後に元のファイルを変える関数を
+    渡す。
     notes/skills/ が無ければ、何も写さずに GameSkillCopyResult((), ()) を返す。paths.claude_skills_dir は作ってある
-    ものとする。1 つのスキルを読むか写すのに失敗したら (OSError)、logging で警告を書き、そのスキルを飛ばして残りを
-    写す (例外は出さず、skipped にも入れない。写しかけのファイルは残さない)。
+    ものとする。1 つのスキルを読むか写すのに失敗したら (read_bytes の OSError を含む)、logging で警告を書き、そのスキルを
+    飛ばして残りを写す (例外は出さず、skipped にも入れない。写しかけのファイルは残さない)。
     """
     raise NotImplementedError
