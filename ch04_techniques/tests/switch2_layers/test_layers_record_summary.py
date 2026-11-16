@@ -78,6 +78,56 @@ def test_describe_operation_lists_all_parts():
     )
 
 
+def test_describe_operation_writes_hold_seconds_of_held_buttons():
+    row = {
+        "held": ["A", "LEFT", "B"],
+        "hold_seconds": {"LEFT": 0.3, "B": 1.0, "X": 0.3},
+    }
+    # 秒数のあるボタンだけ秒数を添える。held に無いボタンの秒数は書かない
+    assert describe_operation(row) == "押し続け: A, LEFT (0.3 秒), B (1.0 秒)"
+
+
+def test_timed_and_untimed_holds_are_not_grouped_together():
+    rows = [
+        {"t": 1.0, "source": "apply", "held": ["LEFT"], "ok": True},
+        {
+            "t": 2.1,
+            "source": "apply",
+            "held": ["LEFT"],
+            "hold_seconds": {"LEFT": 0.3},
+            "ok": True,
+        },
+        {
+            "t": 3.2,
+            "source": "apply",
+            "held": ["LEFT"],
+            "hold_seconds": {"LEFT": 0.3},
+            "ok": True,
+        },
+    ]
+    assert summarize_operation_rows(rows) == lines_of(
+        [
+            "- t=1.000: 押し続け: LEFT",
+            "- t=2.100〜t=3.200 (2 回): 押し続け: LEFT (0.3 秒)",
+        ]
+    )
+
+
+def test_describe_operation_skips_malformed_hold_seconds():
+    for hold_seconds in (
+        "LEFT",
+        None,
+        {"LEFT": "0.3"},
+        {"LEFT": True},
+        {"LEFT": math.nan},
+        {"LEFT": math.inf},
+        {"LEFT": 0.0},
+        {"LEFT": -1.0},
+    ):
+        row = {"held": ["LEFT"], "hold_seconds": hold_seconds}
+        assert describe_operation(row) == "押し続け: LEFT"
+
+
 def test_describe_neutral_operation():
     assert describe_operation(operation(1.0)) == "何も押さない"
     assert describe_operation({}) == "何も押さない"
