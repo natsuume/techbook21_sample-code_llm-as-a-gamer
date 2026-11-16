@@ -38,3 +38,18 @@ def test_fake_deep_stop_and_kill_do_nothing(tmp_path):
     runner.stop(tmp_path / "deep" / "missing-001")
     runner.kill(tmp_path / "deep" / "missing-001")
     assert sorted(p.name for p in job_dir.iterdir()) == ["job.json"]
+
+
+def test_fake_deep_succeeds_for_a_game_job(tmp_path):
+    # --deep fake でも、ゲームの性質のジョブは同じ規則で起動し、成功を返す
+    job_dir = tmp_path / "deep" / "game-001"
+    job_dir.mkdir(parents=True)
+    job = DeepJob(
+        kind=DocumentKind.GAME,
+        scene_id=None,
+        trigger=DeepTrigger.NEW_SCENE,
+        requested_t=1.0,
+        previous_latest_frame_t=None,
+        latest_frame_t=0.8,
+    )
+    assert FakeDeepRunner().run(job, job_dir) == DeepResult(ok=True)

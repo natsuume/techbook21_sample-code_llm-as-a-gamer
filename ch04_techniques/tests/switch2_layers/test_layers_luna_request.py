@@ -218,9 +218,9 @@ def test_user_content_is_sections_then_labeled_images():
     assert user == build_luna_payload(FULL_INPUT)["input"][1]
     content = user["content"]
     sections = build_user_sections(FULL_INPUT)
-    assert len(sections) == 12
-    assert content[:12] == [{"type": "input_text", "text": text} for text in sections]
-    assert content[12:] == [
+    assert len(sections) == 13
+    assert content[:13] == [{"type": "input_text", "text": text} for text in sections]
+    assert content[13:] == [
         {"type": "input_text", "text": "フレーム t=6.000"},
         {
             "type": "input_image",
@@ -262,6 +262,7 @@ def test_section_titles_and_order():
         "場所の名前の一覧",
         "マップ",
         "前回の middle の出力",
+        "ゲームの性質",
         "大方針",
         "現在の場面の短期タスクリスト",
         "現在の場面の操作説明",
@@ -337,6 +338,7 @@ def test_section_contents_of_empty_input():
     assert section_body(sections, "場所の名前の一覧") == "(無い)"
     assert section_body(sections, "マップ") == "マップなし"
     assert section_body(sections, "前回の middle の出力") == "(無い)"
+    assert section_body(sections, "ゲームの性質") == "(無い)"
     assert section_body(sections, "大方針") == "(無い)"
     assert section_body(sections, "現在の場面の短期タスクリスト") == "(無い)"
     assert section_body(sections, "現在の場面の操作説明") == "(無い)"
@@ -347,7 +349,7 @@ def test_section_contents_of_empty_input():
     )
     assert section_body(sections, "フレーム") == "フレームは無い"
     content = build_user_message(EMPTY_INPUT)["content"]
-    assert len(content) == 12
+    assert len(content) == 13
     assert all(part["type"] == "input_text" for part in content)
 
 
@@ -604,6 +606,78 @@ def test_instructions_decide_surface_wait_by_reaction_holding_and_progress():
     section = LUNA_DEVELOPER_INSTRUCTIONS.split("\n# 待ち時間 (surface_wait_s)\n", 1)[
         1
     ].split("\n# 出力\n", 1)[0]
-    assert section == "\n" + SURFACE_WAIT_SECTION_BODY + "\n"
+    # 既にある文は、この順にそのまま残す (ゲームの性質を見る文は、これらの文を変えずに足す)
+    position = 0
+    for text in SURFACE_WAIT_SECTION_BODY.split("\n"):
+        if not text:
+            continue
+        found = section.find(text, position)
+        assert found >= 0, text
+        position = found + len(text)
     # 場面の種類ごとの固定の表は使わない
     assert "0.5〜1.0: フィールドの移動、パズルなど" not in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+# --- ゲームの性質 ---
+
+GAME_TEXT = "\n# ゲームの性質\n\n## ジャンル\nRPG (推測)\n\n"
+
+
+def test_game_section_is_right_before_strategy():
+    index = USER_SECTION_TITLES.index("ゲームの性質")
+    assert USER_SECTION_TITLES[index - 1] == "前回の middle の出力"
+    assert USER_SECTION_TITLES[index + 1] == "大方針"
+    sections = build_user_sections(dataclasses.replace(FULL_INPUT, game=GAME_TEXT))
+    assert sections[index].startswith("## ゲームの性質\n")
+    assert sections[index + 1].startswith("## 大方針\n")
+
+
+def test_game_section_has_the_stripped_game_document():
+    sections = build_user_sections(dataclasses.replace(FULL_INPUT, game=GAME_TEXT))
+    # 前後の空白を除く (大方針と同じ)
+    assert (
+        section_body(sections, "ゲームの性質")
+        == "# ゲームの性質\n\n## ジャンル\nRPG (推測)"
+    )
+
+
+def test_game_section_of_missing_or_blank_document_is_empty_text():
+    # 無い・読めない文書は入力で空文字列になる。空白だけの文書も、ほかの節と同じく「(無い)」
+    for text in ["", "  \n\t\n"]:
+        sections = build_user_sections(dataclasses.replace(FULL_INPUT, game=text))
+        assert section_body(sections, "ゲームの性質") == "(無い)"
+
+
+def test_developer_message_does_not_depend_on_the_game_document():
+    with_game = build_luna_payload(dataclasses.replace(FULL_INPUT, game=GAME_TEXT))
+    without_game = build_luna_payload(FULL_INPUT)
+    assert with_game["input"][0] == without_game["input"][0]
+    assert with_game["input"][0] == build_developer_message()
+    assert "RPG (推測)" not in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def instructions_section(title: str) -> str:
+    """変わらない指示の「# <title>」の見出しの次の行から、次の「# 」の見出しの前までを返す。"""
+    return LUNA_DEVELOPER_INSTRUCTIONS.split(f"\n# {title}\n", 1)[1].split("\n# ", 1)[0]
+
+
+def test_instructions_list_the_game_section_in_the_input():
+    lines = instructions_section("入力").split("\n")
+    starts: list[int] = []
+    for prefix in ["- 前回の middle の出力: ", "- ゲームの性質: ", "- 大方針: "]:
+        found = [i for i, text in enumerate(lines) if text.startswith(prefix)]
+        assert len(found) == 1, prefix
+        starts.append(found[0])
+    # user メッセージの節の順どおり、前回の middle の出力の後、大方針の前に並べる
+    assert starts == sorted(starts)
+
+
+def test_instructions_decide_surface_wait_with_the_game_document():
+    section = instructions_section("待ち時間 (surface_wait_s)")
+    for phrase in ["ゲームの性質", "リアルタイムに進む部分", "ターン制の部分"]:
+        assert phrase in section, phrase
+
+
+def test_instructions_keep_damage_and_game_over_out_of_tasks():
+    section = instructions_section("短期タスクリスト (tasks)")
+    assert "ダメージとゲームオーバーの条件" in section

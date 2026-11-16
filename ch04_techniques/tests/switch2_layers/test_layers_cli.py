@@ -292,6 +292,13 @@ def test_deep_once_rejects_unknown_document_kind():
     assert exit_info.value.code == 2
 
 
+def test_deep_once_accepts_the_game_document_kind():
+    args = build_parser().parse_args(
+        ["deep-once", "--run-dir", "runs/x", "--doc", "game"]
+    )
+    assert args.doc == "game"
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -375,6 +382,7 @@ def test_deep_once_command_creates_job_directory(tmp_path, capsys):
         ["--doc", "controls", "--scene", "../x"],
         # controls・tips 以外には場面を付けられない
         ["--doc", "strategy", "--scene", "scene-001"],
+        ["--doc", "game", "--scene", "scene-001"],
     ],
 )
 def test_deep_once_command_rejects_invalid_scene(tmp_path, capsys, extra):
@@ -383,6 +391,28 @@ def test_deep_once_command_rejects_invalid_scene(tmp_path, capsys, extra):
     assert code == 2
     assert capsys.readouterr().out == ""
     assert list((run_dir / "deep").iterdir()) == []
+
+
+def test_deep_once_command_creates_game_job_directory(tmp_path, capsys):
+    run_dir = make_saved_run(tmp_path)
+    (run_dir / "middle" / "state.json").write_text(
+        json.dumps({"scene_id": "scene-001", "surface_wait_s": 0.2}), encoding="utf-8"
+    )
+    code = main(
+        ["deep-once", "--run-dir", str(run_dir), "--doc", "game", "--deep", "fake"]
+    )
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["job"] == "deep/game-001"
+    assert out["status"] == "ok"
+    job = json.loads(
+        (run_dir / "deep" / "game-001" / "job.json").read_text(encoding="utf-8")
+    )
+    assert job["kind"] == "game"
+    assert job["trigger"] == "manual"
+    # 現在の場面があっても、場面に依らない notes/game.md だけを対象にする
+    assert job["scene_id"] is None
+    assert job["documents"] == ["game.md"]
 
 
 # --- --middle (middle の実装の選択) ---

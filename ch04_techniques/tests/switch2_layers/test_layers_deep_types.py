@@ -21,8 +21,12 @@ def test_document_kinds_follow_the_issue():
         "strategy",
         "advice",
         "map",
+        "game",
     ]
+    # ゲームの性質は場面に依らない種類
     assert SCENE_DOCUMENT_KINDS == {DocumentKind.CONTROLS, DocumentKind.TIPS}
+    assert DocumentKind.GAME not in SCENE_DOCUMENT_KINDS
+    assert DocumentKind("game") is DocumentKind.GAME
 
 
 def test_triggers_follow_the_issue():

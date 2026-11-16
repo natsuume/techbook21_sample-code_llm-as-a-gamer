@@ -39,10 +39,12 @@ from switch2_layers.notes.scene_labels import (
 )
 from switch2_layers.run_directory import RunPaths
 
-# 初めての場面に名前が付いたときに deep を呼ぶ文書の種類 (その場面の操作説明と攻略情報)
+# 初めての場面に名前が付いたときに deep を呼ぶ文書の種類 (その場面の操作説明と攻略情報と、ゲームの性質)。
+# ゲームの性質は場面に依らないため、どの場面でも同じ notes/game.md の文書のジョブになる
 NEW_SCENE_DEEP_KINDS: tuple[DocumentKind, ...] = (
     DocumentKind.CONTROLS,
     DocumentKind.TIPS,
+    DocumentKind.GAME,
 )
 
 

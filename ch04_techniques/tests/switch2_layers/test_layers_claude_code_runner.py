@@ -349,6 +349,29 @@ def test_map_job_starts_claude_for_map_json_and_places_md(tmp_path):
     assert read_json(job_dir / "result.json")["returncode"] == 0
 
 
+def test_game_job_starts_claude_for_game_md_only(tmp_path):
+    root = make_run(tmp_path)
+    job, job_dir = prepare(root, DocumentKind.GAME)
+    fake = FakeClaude(lines=[line(INIT), line(RESULT)])
+    result = fake.runner().run(job, job_dir)
+    assert result.ok is True
+    assert len(fake.processes) == 1
+    process = fake.processes[0]
+    run_abs = root.resolve()
+    context = read_prompt_context(job_dir)
+    assert context.notes == ("game.md",)
+    assert process.args == build_claude_command(
+        build_deep_prompt(context), run_abs, context.notes, ClaudeCodeOptions()
+    )
+    # 書いてよいのは notes/game.md だけ (マップの文書は書けない)
+    allowed = process.args[process.args.index("--allowedTools") + 1].split(",")
+    notes = (run_abs / "notes").as_posix()
+    assert allowed == [
+        f"Read(/{run_abs.as_posix()}/**)",
+        f"Edit(/{notes}/game.md)",
+    ]
+
+
 def test_map_job_end_is_recorded_from_the_claude_result(tmp_path):
     root = make_run(tmp_path)
     fake = FakeClaude(lines=[line(RESULT)])

@@ -6,7 +6,8 @@
     3. 出力を書く (middle_output_writer.write_middle_output)
     4. マップの記録の行 (middle.map_records.build_map_record) があれば、middle/map_records.jsonl に追記する。
        追記の失敗は middle の失敗として数えず、logging で警告を書いて続ける (run.jsonl には書かない)
-    5. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報の deep を、きっかけ new_scene でスケジューラーに渡す
+    5. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報と、ゲームの性質 (場面に依らない) の deep を、
+       きっかけ new_scene でスケジューラーに渡す
        (middle-once では渡さず、記録だけする)
     6. 1 行を middle/calls.jsonl に書く。MiddleAnalyzer が middle_call_record.MiddleCallDetailsSource でもあれば
        (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を行に足す (失敗した回も同じ)

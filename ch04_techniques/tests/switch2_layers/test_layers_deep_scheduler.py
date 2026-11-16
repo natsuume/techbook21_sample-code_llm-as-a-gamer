@@ -449,6 +449,49 @@ def test_request_within_min_interval_is_skipped_and_recorded(tmp_path):
     ]
 
 
+def test_new_scene_game_requests_of_any_scene_share_the_game_note(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(1.0)
+    first = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-001"
+    )
+    assert first.started is True
+    assert first.job_dir == harness.root / "deep" / "game-001"
+    value = job_json(first.job_dir)
+    assert value["kind"] == "game"
+    assert value["trigger"] == "new_scene"
+    # 場面に依らない: どの場面の new_scene でも、同じ notes/game.md の文書のジョブになる
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]
+    assert harness.scheduler.is_running(DocumentKey(DocumentKind.GAME, None))
+    # 別の場面の new_scene でも同じ文書なので、最小間隔の内なら捨てる
+    harness.at(5.0)
+    second = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-002"
+    )
+    assert second.started is False
+    assert second.reason == SKIP_MIN_START_INTERVAL
+    assert not (harness.root / "deep" / "game-002").exists()
+    assert run_rows(harness.root, "deep_skipped") == [
+        {
+            "t": 5.0,
+            "event": "deep_skipped",
+            "kind": "game",
+            "scene_id": None,
+            "trigger": "new_scene",
+            "reason": "min_start_interval",
+            "since_last_start_s": 4.0,
+        }
+    ]
+    # 最小間隔の後なら、別の場面の new_scene でも起動する
+    harness.at(16.0)
+    third = harness.scheduler.request(
+        DocumentKind.GAME, DeepTrigger.NEW_SCENE, "scene-002"
+    )
+    assert third.started is True
+    assert third.job_dir == harness.root / "deep" / "game-002"
+
+
 def test_min_interval_counts_from_start_not_end(tmp_path):
     harness = make_scheduler(tmp_path)
     harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
@@ -502,6 +545,22 @@ def test_auto_starts_all_documents_after_auto_seconds_from_start(tmp_path):
         value = job_json(result.job_dir)
         assert value["trigger"] == "auto"
         assert value["scene_id"] is None
+
+
+def test_auto_starts_a_game_job_for_the_game_note(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.scene["id"] = "scene-001"
+    harness.at(60.0)
+    results = harness.scheduler.check_auto()
+    # ゲームの性質は DOCUMENT_KINDS の最後で、場面に依らない notes/game.md だけを対象にする
+    assert started_kinds(results)[-1] == "game"
+    game = [r for r in results if job_json(r.job_dir)["kind"] == "game"]
+    assert len(game) == 1
+    assert game[0].job_dir == harness.root / "deep" / "game-001"
+    value = job_json(game[0].job_dir)
+    assert value["trigger"] == "auto"
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]
 
 
 def test_auto_does_not_start_while_job_is_running(tmp_path):
@@ -597,8 +656,8 @@ def test_auto_continues_with_later_kinds_after_a_kind_fails(tmp_path):
     )
     harness.at(60.0)
     results = harness.scheduler.check_auto()
-    # tips の後ろの種類 (strategy・advice・map) も判定して起動する
-    assert started_kinds(results) == ["controls", "strategy", "advice", "map"]
+    # tips の後ろの種類 (strategy・advice・map・game) も判定して起動する
+    assert started_kinds(results) == ["controls", "strategy", "advice", "map", "game"]
     errors = run_rows(harness.root, "deep_request_error")
     assert len(errors) == 1
     assert errors[0]["t"] == 60.0
@@ -1215,3 +1274,19 @@ def test_run_deep_once_errors(tmp_path):
         run_deep_once(tmp_path / "missing", DocumentKind.ADVICE, None, FakeRunner())
     with pytest.raises(ValueError):
         run_deep_once(root, DocumentKind.CONTROLS, "../x", FakeRunner())
+
+
+def test_run_deep_once_runs_a_game_job(tmp_path):
+    root = make_run(tmp_path)
+    (root / "middle" / "state.json").write_text(
+        json.dumps({"scene_id": "scene-003", "surface_wait_s": 0.2}), encoding="utf-8"
+    )
+    result = run_deep_once(root, DocumentKind.GAME, None, FakeRunner())
+    assert result.job == "deep/game-001"
+    assert result.outcome.status is DeepJobStatus.OK
+    value = job_json(result.job_dir)
+    assert value["kind"] == "game"
+    assert value["trigger"] == "manual"
+    # 現在の場面があっても、場面に依らない notes/game.md を対象にする
+    assert value["scene_id"] is None
+    assert value["documents"] == ["game.md"]

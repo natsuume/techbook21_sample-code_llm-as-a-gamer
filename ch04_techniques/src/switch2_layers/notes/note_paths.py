@@ -2,6 +2,7 @@
 
     strategy.md                    大方針
     advice.md                      詰まったときの助言
+    game.md                        ゲームの性質 (場面に依らない。game の deep のジョブが書く)
     common/controls.md             共通の操作説明
     common/tips.md                 共通の攻略情報
     scenes/<場面ID>/controls.md     場面の操作説明
@@ -29,6 +30,7 @@ from switch2_layers.deep.deep_types import (
 SCENE_ID_PATTERN = re.compile(r"scene-[0-9]{3,}")
 STRATEGY_NOTE = "strategy.md"
 ADVICE_NOTE = "advice.md"
+GAME_NOTE = "game.md"
 COMMON_DIR = "common"
 SCENES_DIR = "scenes"
 MAP_DIR = "map"
@@ -75,7 +77,7 @@ def document_key(kind: DocumentKind, scene_id: str | None) -> DocumentKey:
     """種類 kind で場面 scene_id のときに対象になる文書のキーを返す。
 
     - controls・tips: DocumentKey(kind, scene_id) (scene_id が None なら共通の文書)
-    - strategy・advice・map: DocumentKey(kind, None) (scene_id は無視する)
+    - strategy・advice・map・game: DocumentKey(kind, None) (scene_id は無視する)
     controls・tips で scene_id が場面 ID の形でなければ ValueError。
     """
     if kind not in SCENE_DOCUMENT_KINDS:
@@ -94,7 +96,7 @@ def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
     - tips で場面あり: [scenes/<場面ID>/tips.md, scenes/<場面ID>/box_targets.md, common/tips.md]
       (場面の攻略情報のジョブは、場面の「box で取るもの」も書く)
     - controls・tips で場面なし: [common/<種類>.md]
-    - strategy: [strategy.md]、advice: [advice.md]
+    - strategy: [strategy.md]、advice: [advice.md]、game: [GAME_NOTE] (game.md だけ。マップの文書は対象にしない)
     - map: [MAP_JSON_NOTE, MAP_PLACES_NOTE] (map/map.json と map/places.md。notes_dir/map/ の下のほかのファイルは
       対象にしない)
     ファイルがまだ無くてもパスを返す (deep が Write で作る)。notes_dir の中は調べない。
@@ -113,4 +115,6 @@ def deep_document_notes(notes_dir: Path, key: DocumentKey) -> list[str]:
         return [STRATEGY_NOTE]
     if key.kind is DocumentKind.ADVICE:
         return [ADVICE_NOTE]
+    if key.kind is DocumentKind.GAME:
+        return [GAME_NOTE]
     return [MAP_JSON_NOTE, MAP_PLACES_NOTE]

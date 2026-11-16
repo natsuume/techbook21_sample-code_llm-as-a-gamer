@@ -3,6 +3,7 @@
 import dataclasses
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -248,13 +249,33 @@ def test_relative_time_label():
 
 def test_documents_to_state():
     value = documents_to_state(DOCUMENTS)
-    assert list(value) == ["tasks", "tips", "controls", "advice"]
+    assert list(value) == ["tasks", "tips", "controls", "advice", "game"]
+    # ゲームの性質が無い (読めない) 文書は、ほかの文書と同じく空文字列
     assert value == {
         "tasks": "- 扉を開ける",
         "tips": "# 攻略情報",
         "controls": "- A: 決定",
         "advice": "# 助言",
+        "game": "",
     }
+
+
+def test_documents_to_state_puts_the_game_document_last():
+    documents = replace(DOCUMENTS, game="## ジャンル\nRPG\n")
+    value = documents_to_state(documents)
+    assert list(value) == ["tasks", "tips", "controls", "advice", "game"]
+    assert value["game"] == "## ジャンル\nRPG\n"
+
+
+def test_sent_and_recorded_states_include_the_game_document():
+    surface = surface_input(documents=replace(DOCUMENTS, game="## ジャンル\nRPG\n"))
+    sent = build_surface_state(surface, ["a", "b", "c"])
+    recorded = build_recorded_state(surface)
+    for state in [sent, recorded]:
+        documents = state["documents"]
+        assert isinstance(documents, dict)
+        assert list(documents) == ["tasks", "tips", "controls", "advice", "game"]
+        assert documents["game"] == "## ジャンル\nRPG\n"
 
 
 def test_timeline_to_state():
@@ -596,7 +617,13 @@ def test_request_sends_state_images_and_all_question_kinds(tmp_path):
     assert "button_HOME" not in names_of(questions, QuestionKind.BUTTON)
     assert len(names_of(questions, QuestionKind.STICK_DIRECTION)) == 4
     assert len(names_of(questions, QuestionKind.STICK_STRENGTH)) == 12
-    assert len(names_of(questions, QuestionKind.ADVISOR)) == 4
+    assert names_of(questions, QuestionKind.ADVISOR) == [
+        "advisor_controls",
+        "advisor_tips",
+        "advisor_strategy",
+        "advisor_advice",
+        "advisor_game",
+    ]
     assert len(names_of(questions, QuestionKind.INFO_LABEL)) == 5
     assert names_of(questions, QuestionKind.SCENE_CHANGE) == ["scene_changed"]
     # 対象の一覧のファイルが無いので固定の 4 つ。最初の要求では、どれもまだ box が無いので問い直す
@@ -725,6 +752,12 @@ def test_output_follows_answers(tmp_path):
         InfoLabel("map", 0.0),
     )
     assert output.scene_changed is True
+
+
+def test_advisor_game_above_threshold_asks_for_the_game_document(tmp_path):
+    asker = FakeAsker({"advisor_game": 0.7, "advisor_tips": 0.5})
+    decider, _ = make_decider(tmp_path, asker)
+    assert decider.decide(surface_input()).deep_kinds == frozenset({DocumentKind.GAME})
 
 
 def test_threshold_advisor_is_used(tmp_path):

@@ -3,7 +3,8 @@
 要求の state (キーはこの順):
     {
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
-      "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言},
+      "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言,
+                    "game": ゲームの性質},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
       "recent_actions": [{"time": 時刻のラベル, "held": [...], "hold_seconds": {ボタン名: 秒}, "taps": [...],
                           "sticks": {"LS": [x, y], "RS": [x, y]}}, ...],
@@ -166,7 +167,10 @@ def relative_time_label(t: float, request_t: float) -> str:
 
 
 def documents_to_state(documents: SurfaceDocuments) -> dict[str, str]:
-    """文書を state の documents {"tasks", "tips", "controls", "advice"} (この順) にする。"""
+    """文書を state の documents {"tasks", "tips", "controls", "advice", "game"} (この順) にする。
+
+    値は SurfaceDocuments の同じ名前の属性 (無い・読めない文書は read_surface_documents が空文字列にしたもの)。
+    """
     return {
         "tasks": documents.tasks,
         "tips": documents.tips,
