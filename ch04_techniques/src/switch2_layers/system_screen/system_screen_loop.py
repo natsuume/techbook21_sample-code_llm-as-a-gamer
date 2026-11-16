@@ -4,9 +4,9 @@
 1 回分の流れ (step):
     1. 段階 (SystemScreenPhases) が wants_system_middle でなければ、何もしない
     2. 操作の送信の失敗の後なら、ブリッジの状態が ok に戻るまで (または段階が変わるまで) middle を呼ばない
-    3. 照合の結果を待つ。段階に入った後の最初の呼び出しは、段階に入った時刻より後のフレームの結果、2 回目以降は、
-       前の列を送り終えた時刻 + system_operation_runner.SETTLE_S より後のフレームの結果 (反映前の画面でカーソルの位置を
-       読ませないため)。届くまで middle を呼ばない
+    3. 照合の結果を待つ。段階に入った時刻より後で、かつ前の列を送り終えた時刻 + system_operation_runner.SETTLE_S より
+       後のフレームの結果 (反映前の画面でカーソルの位置を読ませないため。前の段階の列を送っている間に段階が変わった
+       場合も、その列の後の画面を待つ)。届くまで middle を呼ばない
     4. 入力の画像は、その照合のフレーム以降の最新のフレーム
     5. SystemScreenInput (目的は段階から PHASE_GOALS で決める。履歴はこの段階のもの) を作り、middle の decide を呼ぶ
     6. 失敗 (SystemScreenMiddleError) なら、middle/system_calls.jsonl に呼び出しの行を書き、続けた失敗を数える。
@@ -253,10 +253,11 @@ class SystemScreenLoop:
            この段階の履歴を空にし、送信の失敗の後の待ちをやめる
         3. 送信の失敗の後の待ちの間で、bridge_state() が BRIDGE_OK でなければ BRIDGE_NOT_READY を返す。
            BRIDGE_OK なら待ちをやめて続ける
-        4. after_t を決める: この段階で最初の呼び出しなら phase_started_t、前の回で列を送った (SENT・SEND_FAILED)
-           なら前の列を送り終えた時刻 + SETTLE_S、前の回が middle の失敗 (MIDDLE_ERROR) なら、その回に渡した照合の
-           結果の frame_t (同じ照合の結果で続けて呼ばない)。judgments.wait_newer(after_t, JUDGMENT_POLL_S) が None なら
-           NO_JUDGMENT を返す
+        4. after_t を決める: 前の回の下限と phase_started_t の遅い方 (前の回が無ければ phase_started_t)。前の回の下限は、
+           列を送った (SENT・SEND_FAILED) なら前の列を送り終えた時刻 + SETTLE_S、middle の失敗 (MIDDLE_ERROR) なら、
+           その回に渡した照合の結果の frame_t (同じ照合の結果で続けて呼ばない)。段階が変わっても前の回の下限は捨てない
+           (前の段階の列を送っている間に段階が変わったとき、その列の後の画面で次の列を決めるため)。
+           judgments.wait_newer(after_t, JUDGMENT_POLL_S) が None なら NO_JUDGMENT を返す
         5. frame = latest_frame()。None か、frame.t が照合の結果の frame_t より小さければ NO_JUDGMENT を返す
         6. screen_input = SystemScreenInput(t=clock.now(), goal=PHASE_GOALS[phase], software_name, user_name,
            frame_jpeg=frame を image_width 以下に縮小した JPEG, frame_t=frame.t, judged_screen=照合の結果の screen,
@@ -295,7 +296,6 @@ class SystemScreenLoop:
         if phase_started_t != self._phase_started_t:
             self._phase_started_t = phase_started_t
             self._history = []
-            self._next_after_t = None
             self._waiting_for_bridge = False
         if self._waiting_for_bridge:
             if parts.bridge_state() != BRIDGE_OK:
@@ -303,7 +303,11 @@ class SystemScreenLoop:
                     SystemScreenStepOutcome.BRIDGE_NOT_READY, SYSTEM_LOOP_POLL_S
                 )
             self._waiting_for_bridge = False
-        after_t = phase_started_t if self._next_after_t is None else self._next_after_t
+        after_t = (
+            phase_started_t
+            if self._next_after_t is None
+            else max(phase_started_t, self._next_after_t)
+        )
         judgment = parts.judgments.wait_newer(after_t, JUDGMENT_POLL_S)
         if judgment is None:
             return _result(SystemScreenStepOutcome.NO_JUDGMENT)

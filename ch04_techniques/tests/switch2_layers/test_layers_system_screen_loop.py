@@ -420,15 +420,34 @@ def test_goal_and_history_follow_the_phase(tmp_path):
     show(harness)
     step(harness)
     assert harness.middle.inputs[0].goal is SystemGoal.RECOVER
-    # 段階が変わったら、履歴を空にし、新しい段階に入った時刻より後のフレームの結果を待つ
+    finished_t = read_rows(harness.paths.system_calls)[-1]["t"]
+    # 前の列を送り終えてから SETTLE_S たつ前に段階が変わったら、履歴を空にし、前の列を送り終えた時刻 + SETTLE_S
+    # より後のフレームの結果を待つ (前の段階の列の後の画面で、次の列を決める)
     harness.phases.phase = RunPhase.CLEAN_UP
     harness.phases.phase_started_t = harness.clock.now()
+    assert harness.phases.phase_started_t < finished_t + SETTLE_S
     show(harness)
     step(harness)
     second = harness.middle.inputs[1]
     assert second.goal is SystemGoal.CLEAN_UP
     assert second.history == ()
-    assert harness.phases.phase_started_t in harness.judgments.after_values
+    assert harness.judgments.after_values[-1] == pytest.approx(finished_t + SETTLE_S)
+
+
+def test_phase_started_after_the_settle_waits_for_a_frame_of_the_new_phase(tmp_path):
+    harness = make_harness(
+        tmp_path, [output_of(press("home_menu", "A"))], phase=RunPhase.RECOVER
+    )
+    show(harness)
+    step(harness)
+    finished_t = read_rows(harness.paths.system_calls)[-1]["t"]
+    # 前の列を送り終えた時刻 + SETTLE_S より後に段階が変わったら、新しい段階に入った時刻より後のフレームの結果を待つ
+    harness.phases.phase = RunPhase.CLEAN_UP
+    harness.phases.phase_started_t = finished_t + SETTLE_S + 1.0
+    step(harness)
+    assert harness.judgments.after_values[-1] == pytest.approx(
+        harness.phases.phase_started_t
+    )
 
 
 def test_output_is_discarded_when_the_phase_changed_during_the_call(tmp_path):
