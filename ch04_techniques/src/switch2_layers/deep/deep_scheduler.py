@@ -77,6 +77,9 @@ CLOSE_POLL_INTERVAL_S = 0.05
 SKIP_MIN_START_INTERVAL = "min_start_interval"
 # deep_skipped の reason: close の後に来た要求
 SKIP_CLOSED = "closed"
+# check_progress は、progress/state.json の t がこの秒数より前の値を、値が無いものとして扱う。
+# フレームの保存か値の書き込みが止まったときに、しきい値を超えた古い値で advice を求め続けないため
+PROGRESS_STATE_MAX_AGE_S = 10.0
 
 
 class DeepStopReason(StrEnum):
@@ -443,9 +446,10 @@ class DeepScheduler:
         """画面の停滞の計測から、advice の deep をきっかけ progress で要求するかを 1 回判定する。
 
         判定は progress.stuck_advice_trigger.StuckAdviceTrigger (しきい値は settings.stuck_advice_seconds) で行う:
-            1. state = parts.progress_state() (値が無ければ None)
+            1. state = parts.progress_state() (値が無ければ None)。now = clock.now() とし、now - state.t が
+               PROGRESS_STATE_MAX_AGE_S を超える state は None として扱う (ちょうどその秒数なら使う)
             2. advice の文書 (場面に依らない) のジョブが 1 つ以上実行中か (きっかけに依らない) を確かめる
-            3. StuckAdviceTrigger.check(clock.now(), state の no_novel_s (state が None なら None), 実行中か) が
+            3. StuckAdviceTrigger.check(now, state の no_novel_s (state が None なら None), 実行中か) が
                True なら、request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None) を呼んで、その結果を返す。
                最小の起動間隔などの規則は request がそのまま当てる (捨てたら DeepRequestResult(started=False, ...))
             4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "progress",
@@ -457,12 +461,13 @@ class DeepScheduler:
             if self._closed:
                 return None
         state = self.parts.progress_state()
+        now = self.parts.clock.now()
+        if state is not None and now - state.t > PROGRESS_STATE_MAX_AGE_S:
+            state = None
         advice_key = document_key(DocumentKind.ADVICE, None)
         advice_running = self.is_running(advice_key)
         no_novel_s = None if state is None else state.no_novel_s
-        if not self._stuck_advice.check(
-            self.parts.clock.now(), no_novel_s, advice_running
-        ):
+        if not self._stuck_advice.check(now, no_novel_s, advice_running):
             return None
         try:
             return self.request(DocumentKind.ADVICE, DeepTrigger.PROGRESS, None)

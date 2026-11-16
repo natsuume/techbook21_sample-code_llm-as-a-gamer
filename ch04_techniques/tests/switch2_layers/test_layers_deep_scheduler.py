@@ -7,6 +7,7 @@ import pytest
 
 from switch2_layers.deep.deep_job_directory import create_job_directory
 from switch2_layers.deep.deep_scheduler import (
+    PROGRESS_STATE_MAX_AGE_S,
     SKIP_CLOSED,
     SKIP_MIN_START_INTERVAL,
     STOP_GRACE_S,
@@ -1387,13 +1388,14 @@ def test_check_progress_waits_for_running_advice_job_of_any_trigger(tmp_path):
     harness = make_scheduler(tmp_path)
     harness.at(90.0)
     harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
-    harness.stuck_for(61.0)
     for t in [100.0, 130.0]:
         harness.at(t)
+        harness.stuck_for(t - 39.0)
         assert harness.scheduler.check_progress() is None
     # 実行中のジョブが終わった後の判定で要求する
     harness.threads.run_all()
     harness.at(130.5)
+    harness.stuck_for(91.5)
     result = harness.scheduler.check_progress()
     assert result is not None and result.started is True
     assert job_json(result.job_dir)["trigger"] == "progress"
@@ -1429,9 +1431,11 @@ def test_check_progress_keeps_the_min_start_interval(tmp_path):
     ]
     # 捨てた要求も「要求した」に数え、判定のたびには出し直さない
     harness.at(110.0)
+    harness.stuck_for(71.0)
     assert harness.scheduler.check_progress() is None
     assert len(run_rows(harness.root, "deep_skipped")) == 1
     harness.at(160.0)
+    harness.stuck_for(121.0)
     assert harness.scheduler.check_progress().started is True
 
 
@@ -1481,6 +1485,31 @@ def test_check_progress_does_nothing_after_close(tmp_path):
     assert harness.scheduler.check_progress() is None
     assert run_rows(harness.root, "deep_skipped") == []
     assert list((harness.root / "deep").iterdir()) == []
+
+
+def test_check_progress_uses_a_value_up_to_the_max_age(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(100.0)
+    harness.stuck_for(61.0)
+    # 値の時刻からちょうど PROGRESS_STATE_MAX_AGE_S 秒後までは、その値を使う
+    harness.at(100.0 + PROGRESS_STATE_MAX_AGE_S)
+    result = harness.scheduler.check_progress()
+    assert result is not None and result.started is True
+
+
+def test_check_progress_ignores_a_value_older_than_the_max_age(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(100.0)
+    harness.stuck_for(61.0)
+    # フレームの保存か書き込みが止まり、値が更新されないまま時間がたった
+    harness.at(100.0 + PROGRESS_STATE_MAX_AGE_S + 0.001)
+    assert harness.scheduler.check_progress() is None
+    assert run_rows(harness.root, "deep_start") == []
+    assert list((harness.root / "deep").iterdir()) == []
+    # 値が更新されれば、また要求する
+    harness.stuck_for(71.0)
+    result = harness.scheduler.check_progress()
+    assert result is not None and result.started is True
 
 
 def test_check_progress_uses_the_configured_threshold(tmp_path):
