@@ -128,14 +128,26 @@ def read_job_file(job_dir: Path) -> dict[str, object]:
 def read_job_map_layout(notes_dir: Path, kind: DocumentKind) -> MapLayout | None:
     """種類 kind のジョブで書くマップの型 (DeepJob.map_layout) を返す。
 
-    kind が map なら、notes.game_map_layout.read_game_map_layout(notes_dir) (ゲームの性質の文書の「マップの形式」の
-    節の最初の空でない行が `- 型: マス目型` なら grid、それ以外は free)。map 以外の種類では、文書を読まずに None。
+    kind が map なら、次の順に決める:
+        1. notes.game_map_layout.read_game_map_layout(notes_dir) が型を返せば、その型 (ゲームの性質の文書の
+           「マップの形式」の節の最初の空でない行が `- 型: マス目型` なら grid、`- 型: 自由型` なら free)
+        2. 判定なし (None) なら、今の map.json を notes.map_document.read_map_document(notes_dir) で読めれば、その
+           layout を引き継ぐ (layout の無い map.json は free として読まれる)
+        3. map.json も無い・読めない・形に合わないときは free
+    map 以外の種類では、文書を読まずに None。
     ジョブを作る側 (deep.deep_scheduler の request・保留した要求の起動・deep-once) が、ジョブごとに 1 回だけ呼び、
     同じ結果を DeepJob.map_layout と find_previous_latest_frame_t の map_layout に渡す。
     """
-    if kind is DocumentKind.MAP:
-        return read_game_map_layout(notes_dir)
-    return None
+    if kind is not DocumentKind.MAP:
+        return None
+    decided = read_game_map_layout(notes_dir)
+    if decided is not None:
+        return decided
+    # 判定が付かないときは、今のマップの型を引き継ぐ (grid のマスの図を、判定が付かないだけで失わないため)
+    document = read_map_document(notes_dir)
+    if document is not None:
+        return document.layout
+    return MapLayout.FREE
 
 
 def find_previous_latest_frame_t(
@@ -213,9 +225,12 @@ def _previous_map_layout_differs(
 ) -> bool:
     """前回のジョブの job.json の値 job_value の map_layout が "grid" か "free" で、map_layout の値と違えば True。
 
-    map_layout が無い・null・ほかの値なら False (前回のジョブの型が分からないため、比べない)。
+    map_layout が無い・null・文字列でない (数・配列・object など)・ほかの文字列なら False (前回のジョブの型が
+    分からないため、比べない)。
     """
     previous = job_value.get("map_layout")
+    if not isinstance(previous, str):
+        return False
     valid_values = {layout.value for layout in MapLayout}
     return previous in valid_values and previous != map_layout.value
 

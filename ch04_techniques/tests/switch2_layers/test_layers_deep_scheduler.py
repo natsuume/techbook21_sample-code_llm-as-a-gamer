@@ -519,23 +519,21 @@ def test_request_writes_the_map_layout_and_compares_it_with_map_json(tmp_path):
     assert value["previous_latest_frame_t"] is None
 
 
-def test_request_of_a_guessed_grid_line_writes_free_and_settles(tmp_path):
-    # 「- 型: マス目型 (推測)」は、コードの規則では free。ジョブの型も free にして渡すので、deep が map.json を
-    # free で書けば、次のジョブからは型が同じになり、前回の時刻を渡す
+def test_request_of_an_undecided_line_keeps_the_layout_of_map_json(tmp_path):
+    # 「- 型: マス目型 (推測)」は型の行と一致しないため判定なし。今の map.json の型 (grid) を引き継ぐので、
+    # マスの図を free への書き直しで失わず、型を書き換えにならないため前回の時刻を渡す
     harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
     write_game(harness.root, GUESSED_GRID_GAME)
     write_map_json(harness.root, GRID_MAP_JSON)
     harness.latest["t"] = 3.0
     first = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
     assert first.job_dir is not None
-    assert job_json(first.job_dir)["map_layout"] == "free"
-    assert job_json(first.job_dir)["previous_latest_frame_t"] is None
+    assert job_json(first.job_dir)["map_layout"] == "grid"
     harness.threads.run_all()
-    write_map_json(harness.root, FREE_MAP_JSON)
     harness.latest["t"] = 8.0
     second = harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
     assert second.job_dir is not None
-    assert job_json(second.job_dir)["map_layout"] == "free"
+    assert job_json(second.job_dir)["map_layout"] == "grid"
     assert job_json(second.job_dir)["previous_latest_frame_t"] == 3.0
 
 
@@ -552,7 +550,7 @@ def test_request_of_other_kinds_has_no_map_layout(tmp_path, kind):
 
 def test_pending_map_job_decides_the_layout_when_it_starts(tmp_path):
     harness = make_scheduler(tmp_path, min_start_interval_s=0.0)
-    # ゲームの性質の文書がまだ無いので、最初の 2 つは free
+    # ゲームの性質の文書がまだ無いので判定なし。map.json も無い 1 つ目は free、map.json (free) を引き継ぐ 2 つ目も free
     harness.latest["t"] = 3.0
     harness.scheduler.request(DocumentKind.MAP, DeepTrigger.SURFACE, None)
     harness.threads.run_all()

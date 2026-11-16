@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from switch2_layers.notes.game_map_layout import (
+    GAME_FREE_LAYOUT_LINE,
     GAME_GRID_LAYOUT_LINE,
     GAME_MAP_FORMAT_HEADING,
     parse_game_map_layout,
@@ -47,6 +48,7 @@ def game_document(map_format_lines: list[str]) -> str:
 GRID_GAME = game_document(
     ["- 型: マス目型", "- 2D で真上から見る", "- 1 マスは画面の幅の約 1/15"]
 )
+FREE_GAME = game_document(["- 型: 自由型", "- 3D で後ろから見る"])
 
 
 def make_notes(tmp_path: Path) -> Path:
@@ -55,25 +57,37 @@ def make_notes(tmp_path: Path) -> Path:
     return notes
 
 
-def test_heading_and_grid_line():
+def test_heading_and_layout_lines():
     assert GAME_MAP_FORMAT_HEADING == "## マップの形式"
     assert GAME_GRID_LAYOUT_LINE == "- 型: マス目型"
+    assert GAME_FREE_LAYOUT_LINE == "- 型: 自由型"
 
 
-# --- 本文の読み方 ---
+# --- 本文の読み方 (grid・free・判定なしの 3 通り) ---
 
 
 def test_grid_line_after_the_heading_is_grid():
     assert parse_game_map_layout(GRID_GAME) is MapLayout.GRID
 
 
+def test_free_line_after_the_heading_is_free():
+    assert parse_game_map_layout(FREE_GAME) is MapLayout.FREE
+
+
 @pytest.mark.parametrize(
     "first_line",
-    ["- 型: 自由型", "- 型: 未確認", "- 2D で真上から見る", "型: マス目型"],
+    [
+        "- 型: 未確認",
+        # 注記の付いた行は、型の行と一致しない
+        "- 型: マス目型 (推測)",
+        "- 型: 自由型 (推測)",
+        "- 2D で真上から見る",
+        "型: マス目型",
+    ],
 )
-def test_other_first_lines_are_free(first_line):
+def test_other_first_lines_have_no_layout(first_line):
     text = game_document([first_line, "- 型: マス目型"])
-    assert parse_game_map_layout(text) is MapLayout.FREE
+    assert parse_game_map_layout(text) is None
 
 
 def test_first_non_blank_line_is_used():
@@ -82,15 +96,17 @@ def test_first_non_blank_line_is_used():
         parse_game_map_layout(game_document(["", "   ", "- 型: マス目型"]))
         is MapLayout.GRID
     )
+    assert parse_game_map_layout(game_document(["", "- 型: 自由型"])) is MapLayout.FREE
 
 
-def test_grid_line_is_compared_without_surrounding_spaces():
+def test_layout_lines_are_compared_without_surrounding_spaces():
     assert (
         parse_game_map_layout(game_document(["  - 型: マス目型  "])) is MapLayout.GRID
     )
+    assert parse_game_map_layout(game_document(["\t- 型: 自由型 "])) is MapLayout.FREE
 
 
-def test_grid_line_after_the_next_heading_is_not_read():
+def test_layout_line_after_the_next_heading_is_not_read():
     # 節の本文が空なら、次の ## の見出しより後の行は見ない
     text = lines_of(
         [
@@ -101,11 +117,11 @@ def test_grid_line_after_the_next_heading_is_not_read():
             "- 型: マス目型",
         ]
     )
-    assert parse_game_map_layout(text) is MapLayout.FREE
+    assert parse_game_map_layout(text) is None
 
 
-def test_grid_line_outside_the_section_is_not_read():
-    # 「マップの形式」の節より前に同じ行があっても、節の最初の行でなければ grid にしない
+def test_layout_line_outside_the_section_is_not_read():
+    # 「マップの形式」の節より前に型の行があっても、節の最初の行でなければ使わない
     text = lines_of(
         [
             "# ゲームの性質",
@@ -128,8 +144,8 @@ def test_grid_line_outside_the_section_is_not_read():
     ],
     ids=["empty", "no-section", "empty-section-at-the-end", "heading-only"],
 )
-def test_missing_section_or_line_is_free(text):
-    assert parse_game_map_layout(text) is MapLayout.FREE
+def test_missing_section_or_line_has_no_layout(text):
+    assert parse_game_map_layout(text) is None
 
 
 def test_first_heading_is_used():
@@ -155,33 +171,39 @@ def test_read_grid_layout_from_game_md(tmp_path):
 
 def test_read_free_layout_from_game_md(tmp_path):
     notes = make_notes(tmp_path)
-    (notes / "game.md").write_text(game_document(["- 型: 自由型"]), encoding="utf-8")
+    (notes / "game.md").write_text(FREE_GAME, encoding="utf-8")
     assert read_game_map_layout(notes) is MapLayout.FREE
 
 
-def test_missing_game_md_is_free(tmp_path):
-    assert read_game_map_layout(make_notes(tmp_path)) is MapLayout.FREE
+def test_read_unconfirmed_layout_from_game_md_has_no_layout(tmp_path):
+    notes = make_notes(tmp_path)
+    (notes / "game.md").write_text(game_document(["- 型: 未確認"]), encoding="utf-8")
+    assert read_game_map_layout(notes) is None
 
 
-def test_game_md_that_is_not_utf8_is_free(tmp_path):
+def test_missing_game_md_has_no_layout(tmp_path):
+    assert read_game_map_layout(make_notes(tmp_path)) is None
+
+
+def test_game_md_that_is_not_utf8_has_no_layout(tmp_path):
     notes = make_notes(tmp_path)
     (notes / "game.md").write_bytes(GRID_GAME.encode("utf-8") + b"\xff\xfe")
-    assert read_game_map_layout(notes) is MapLayout.FREE
+    assert read_game_map_layout(notes) is None
 
 
-def test_game_md_that_is_a_directory_is_free(tmp_path):
+def test_game_md_that_is_a_directory_has_no_layout(tmp_path):
     notes = make_notes(tmp_path)
     (notes / "game.md").mkdir()
-    assert read_game_map_layout(notes) is MapLayout.FREE
+    assert read_game_map_layout(notes) is None
 
 
-def test_game_md_symlinked_to_outside_of_notes_is_free(tmp_path):
+def test_game_md_symlinked_to_outside_of_notes_has_no_layout(tmp_path):
     # notes/ の外のファイルは、マス目型と書いてあっても読まない
     notes = make_notes(tmp_path)
     outside = tmp_path / "outside.md"
     outside.write_text(GRID_GAME, encoding="utf-8")
     (notes / "game.md").symlink_to(outside)
-    assert read_game_map_layout(notes) is MapLayout.FREE
+    assert read_game_map_layout(notes) is None
 
 
 def test_game_md_symlinked_inside_notes_is_read(tmp_path):

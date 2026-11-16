@@ -361,7 +361,7 @@ class DeepScheduler:
            "scene_id", "trigger", "since_last_start_s": 前回の起動からの秒数 (ミリ秒に丸める)} を書き、
            DeepRequestResult(started=False, reason=REQUEST_PENDING) を返す。ジョブのディレクトリーはまだ作らない
         4. 起動する: map_layout = deep_job_directory.read_job_map_layout(notes/, kind) (map ならゲームの性質の文書から
-           決めた型、map 以外は None) を 1 回だけ求め、DeepJob(kind, key.scene_id, trigger, requested_t=now,
+           決めた型。判定が付かなければ map.json の型、それも無ければ free。map 以外は None) を 1 回だけ求め、DeepJob(kind, key.scene_id, trigger, requested_t=now,
            previous_latest_frame_t=deep_job_directory.find_previous_latest_frame_t(paths, key, map_layout) (同じ文書の、
            前回の正常に終わったジョブの latest_frame_t。失敗・stop・kill のジョブは飛ばす。map の文書で、map.json の
            layout が map_layout と違えば None), latest_frame_t=latest_frame_t(), map_layout=map_layout) を作り、
@@ -844,7 +844,7 @@ class DeepScheduler:
         close の後、key のジョブが実行中、または key に保留中の要求が無ければ、何もせずに None を返す。
         そうでなければ、保留中の要求 (trigger, requested_t) を取り出し (key の保留中の要求は無くなる)、次を行う:
         1. map_layout = deep_job_directory.read_job_map_layout(notes/, key.kind) を 1 回だけ求め (このときの
-           ゲームの性質の文書から決める。map 以外は None)、DeepJob(key.kind, key.scene_id, trigger,
+           ゲームの性質の文書から決める。判定が付かなければ map.json の型、それも無ければ free。map 以外は None)、DeepJob(key.kind, key.scene_id, trigger,
            requested_t=保留した要求の t, previous_latest_frame_t=deep_job_directory.find_previous_latest_frame_t(
            paths, key, map_layout) (終わったばかりのジョブが正常に終わっていれば、その latest_frame_t。map の文書で、
            map.json の layout が map_layout と違えば None), latest_frame_t=latest_frame_t(), map_layout=map_layout) を
@@ -1001,8 +1001,8 @@ def run_deep_once(
     1. scene_id が None で kind が controls・tips なら、middle/state.json の現在の場面
        (surface.middle_state_reader.read_surface_context の scene_id。無ければ None = 共通の文書) を使う
     2. 時刻 now は frames.jsonl の最新の t (frame_store.latest_frame_t。無ければ 0.0)
-    3. map_layout = deep_job_directory.read_job_map_layout(notes/, kind) (map ならゲームの性質の文書から決めた型、
-       map 以外は None) を 1 回だけ求め、DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL,
+    3. map_layout = deep_job_directory.read_job_map_layout(notes/, kind) (map ならゲームの性質の文書から決めた型。
+       判定が付かなければ map.json の型、それも無ければ free。map 以外は None) を 1 回だけ求め、DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL,
        requested_t=now, previous_latest_frame_t=find_previous_latest_frame_t(paths, key, map_layout) (同じ文書の、
        前回の正常に終わったジョブの latest_frame_t。map の文書で、map.json の layout が map_layout と違えば None),
        latest_frame_t=frames.jsonl の最新の t (無ければ None), map_layout=map_layout) で create_job_directory →

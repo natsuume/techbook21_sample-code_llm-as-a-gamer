@@ -520,6 +520,7 @@ GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型\
 FREE_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: 自由型\n"
 UNCONFIRMED_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: 未確認\n"
 GUESSED_GRID_GAME = "# ゲームの性質\n\n## マップの形式\n- 型: マス目型 (推測)\n"
+NO_SECTION_GAME = "# ゲームの性質\n\n## ジャンル\n- RPG\n"
 GRID_MAP_JSON = {"layout": "grid", "places": [], "connections": []}
 FREE_MAP_JSON = {"layout": "free", "places": [], "connections": []}
 # layout の無い map.json は free として読む
@@ -544,34 +545,109 @@ def make_run_with_previous_map_job(tmp_path: Path) -> tuple[Path, RunPaths]:
 
 
 @pytest.mark.parametrize(
-    "game, layout",
+    "game, map_json, layout",
     [
-        (GRID_GAME, MapLayout.GRID),
-        (FREE_GAME, MapLayout.FREE),
-        (UNCONFIRMED_GAME, MapLayout.FREE),
-        # 最初の行が `- 型: マス目型` と一致しなければ free (推測の印が付いた行も)
-        (GUESSED_GRID_GAME, MapLayout.FREE),
-        (None, MapLayout.FREE),
+        # ゲームの性質の文書で判定が付けば、map.json の型によらずその型
+        (GRID_GAME, None, MapLayout.GRID),
+        (GRID_GAME, FREE_MAP_JSON, MapLayout.GRID),
+        (FREE_GAME, None, MapLayout.FREE),
+        (FREE_GAME, GRID_MAP_JSON, MapLayout.FREE),
     ],
-    ids=["grid", "free", "unconfirmed", "guessed-grid", "no-game-md"],
+    ids=["grid", "grid-over-free-map", "free", "free-over-grid-map"],
 )
-def test_map_job_layout_is_read_from_the_game_document(tmp_path, game, layout):
+def test_map_job_layout_is_read_from_the_game_document(
+    tmp_path, game, map_json, layout
+):
     root = make_run(tmp_path)
-    if game is not None:
-        write_game(root, game)
+    write_game(root, game)
+    if map_json is not None:
+        write_map_json(root, map_json)
     assert read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP) is layout
 
 
-def test_map_job_layout_of_game_md_symlinked_outside_of_notes_is_free(tmp_path):
-    # notes/ の外を指すゲームの性質の文書は無い文書として扱う
+# 判定が付かないゲームの性質の文書 (None は文書が無い)
+UNDECIDED_GAMES = [UNCONFIRMED_GAME, GUESSED_GRID_GAME, NO_SECTION_GAME, None]
+UNDECIDED_IDS = ["unconfirmed", "guessed-grid", "no-section", "no-game-md"]
+
+
+@pytest.mark.parametrize("game", UNDECIDED_GAMES, ids=UNDECIDED_IDS)
+@pytest.mark.parametrize(
+    "map_json, layout",
+    [
+        (GRID_MAP_JSON, MapLayout.GRID),
+        (FREE_MAP_JSON, MapLayout.FREE),
+        # layout の無い map.json は free として読まれる
+        (NO_LAYOUT_MAP_JSON, MapLayout.FREE),
+    ],
+    ids=["grid-map", "free-map", "no-layout-map"],
+)
+def test_undecided_map_job_layout_keeps_the_layout_of_map_json(
+    tmp_path, game, map_json, layout
+):
     root = make_run(tmp_path)
-    outside = tmp_path / "outside-game.md"
-    outside.write_text(GRID_GAME, encoding="utf-8")
-    (root / "notes" / "game.md").symlink_to(outside)
+    if game is not None:
+        write_game(root, game)
+    write_map_json(root, map_json)
+    assert read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP) is layout
+
+
+@pytest.mark.parametrize("game", UNDECIDED_GAMES, ids=UNDECIDED_IDS)
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        b"{not json",
+        b"\xff\xfe",
+        json.dumps(
+            {"layout": "grid", "places": [{"name": "町"}], "connections": []}
+        ).encode("utf-8"),
+    ],
+    ids=["missing-map", "not-json-map", "not-utf8-map", "wrong-shape-map"],
+)
+def test_undecided_map_job_layout_without_readable_map_json_is_free(
+    tmp_path, game, content
+):
+    # map.json も無い・読めない・形に合わないときは free (形に合わない map.json の layout は使わない)
+    root = make_run(tmp_path)
+    if game is not None:
+        write_game(root, game)
+    if content is not None:
+        (root / "notes" / "map" / "map.json").write_bytes(content)
     assert (
         read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP)
         is MapLayout.FREE
     )
+
+
+def test_map_job_layout_of_game_md_symlinked_outside_of_notes_keeps_map_json(
+    tmp_path,
+):
+    # notes/ の外を指すゲームの性質の文書は無い文書として扱い (判定なし)、map.json の型を引き継ぐ
+    root = make_run(tmp_path)
+    outside = tmp_path / "outside-game.md"
+    outside.write_text(FREE_GAME, encoding="utf-8")
+    (root / "notes" / "game.md").symlink_to(outside)
+    write_map_json(root, GRID_MAP_JSON)
+    assert (
+        read_job_map_layout(RunPaths(root).notes_dir, DocumentKind.MAP)
+        is MapLayout.GRID
+    )
+
+
+@pytest.mark.parametrize("game", UNDECIDED_GAMES, ids=UNDECIDED_IDS)
+@pytest.mark.parametrize("map_json", [GRID_MAP_JSON, FREE_MAP_JSON])
+def test_undecided_map_job_does_not_rewrite_the_layout(tmp_path, game, map_json):
+    # 判定が付かないときは map.json の型を引き継ぐので、型を書き換えにならず、前回の時刻を渡す
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    if game is not None:
+        write_game(root, game)
+    write_map_json(root, map_json)
+    inherited = MapLayout(map_json["layout"])
+    create_ended_job(root, job(DocumentKind.MAP, latest=5.0, map_layout=inherited))
+    map_layout = read_job_map_layout(paths.notes_dir, DocumentKind.MAP)
+    assert map_layout is inherited
+    assert find_previous_latest_frame_t(paths, MAP_KEY, map_layout) == 5.0
 
 
 @pytest.mark.parametrize(
@@ -668,9 +744,12 @@ def test_map_job_keeps_previous_time_when_the_previous_job_had_the_same_layout(
     assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) == 5.0
 
 
-@pytest.mark.parametrize("previous_layout", [None, "unknown"])
+@pytest.mark.parametrize(
+    "previous_layout", [None, "unknown", 1, ["free"], {"layout": "free"}]
+)
 def test_map_job_does_not_compare_an_unknown_previous_layout(tmp_path, previous_layout):
-    # 前回のジョブの job.json の map_layout が null・ほかの値なら、前回のジョブの型では比べない
+    # 前回のジョブの job.json の map_layout が null・ほかの文字列・文字列でない値 (数・配列・object) なら、
+    # 前回のジョブの型では比べない
     root = make_run(tmp_path)
     paths = RunPaths(root)
     job_dir = create_ended_job(root, job(DocumentKind.MAP, latest=5.0))

@@ -71,7 +71,8 @@ class DeepJob:
                               無い、または前回にフレームが無ければ None
     latest_frame_t            今回の最新のフレームの時刻 (frames.jsonl の最後の t)。まだフレームが無ければ None
     map_layout                map のジョブで書くマップの型。ジョブを作るときにコードがゲームの性質の文書から 1 回だけ
-                              決める (deep_job_directory.read_job_map_layout)。map 以外の種類では None
+                              決める (判定が付かなければ map.json の型を引き継ぐ。deep_job_directory.read_job_map_layout)。
+                              map 以外の種類では None
     """
 
     kind: DocumentKind
