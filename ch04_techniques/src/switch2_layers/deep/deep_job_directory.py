@@ -14,8 +14,8 @@
 - ジョブのディレクトリーの用意 (create_job_directory) では文書の中身を読まない
 - 次のジョブの previous_latest_frame_t は、同じ文書の前回の正常に終わったジョブ (deep_job_success) の
   job.json の latest_frame_t から取る (find_previous_latest_frame_t)。ただし map の文書で、notes/map/map.json の
-  layout がそのジョブの map_layout と違う (deep がマップの型を書き換える) ときは None にし、deep に記録とフレームを
-  最初から読ませる
+  layout がそのジョブの map_layout と違う (deep がマップの型を書き換える) ときと、前回の正常に終わったジョブの
+  map_layout がそのジョブの map_layout と違うときは None にし、deep に記録とフレームを最初から読ませる
 """
 
 import json
@@ -153,6 +153,9 @@ def find_previous_latest_frame_t(
     notes.map_document.read_map_document(paths.notes_dir) で読めて、その layout が map_layout と違えば、前回の
     ジョブを見ずに None を返す (deep がマップの型を書き換えるときに、記録とフレームを最初から読ませるため)。
     map.json が無い・読めない・形に合わない (read_map_document が None) ときと、型が同じときは、上の規則で決める。
+    ただし、見つかった前回のジョブの job.json の map_layout が "grid" か "free" で、map_layout の値と違えば None を
+    返す (型を書き換えるジョブが map.json を新しい型で書いた後に正常に終わらなかったときも、次のジョブに最初から
+    読ませるため)。job.json に map_layout が無い・null・ほかの値のときは、この比べ方をしない。
     この関数はゲームの性質の文書を読まない。map 以外の種類では map.json も読まない。
     request・保留した要求の起動・deep-once (deep.deep_scheduler) が、この関数で previous_latest_frame_t を決める。
     """
@@ -180,6 +183,12 @@ def find_previous_latest_frame_t(
             continue
         if not is_succeeded_job(paths.relative(job_dir), job_dir, succeeded_in_run_log):
             continue
+        if (
+            key.kind is DocumentKind.MAP
+            and map_layout is not None
+            and _previous_map_layout_differs(value, map_layout)
+        ):
+            return None
         latest = value.get("latest_frame_t")
         if isinstance(latest, int | float) and not isinstance(latest, bool):
             return float(latest)
@@ -197,6 +206,18 @@ def map_layout_will_change(notes_dir: Path, map_layout: MapLayout) -> bool:
     if document is None:
         return False
     return document.layout is not map_layout
+
+
+def _previous_map_layout_differs(
+    job_value: dict[str, object], map_layout: MapLayout
+) -> bool:
+    """前回のジョブの job.json の値 job_value の map_layout が "grid" か "free" で、map_layout の値と違えば True。
+
+    map_layout が無い・null・ほかの値なら False (前回のジョブの型が分からないため、比べない)。
+    """
+    previous = job_value.get("map_layout")
+    valid_values = {layout.value for layout in MapLayout}
+    return previous in valid_values and previous != map_layout.value
 
 
 def _job_directories(deep_dir: Path) -> list[tuple[DocumentKind, int, Path]]:

@@ -642,6 +642,45 @@ def test_map_job_keeps_previous_time_when_the_layout_is_the_same(
     assert find_previous_latest_frame_t(paths, MAP_KEY, map_layout) == 5.0
 
 
+@pytest.mark.parametrize("status", ["failed", "error", "stopped", "killed"])
+def test_map_job_reads_from_the_start_after_a_layout_rewrite_did_not_end_normally(
+    tmp_path, status
+):
+    # free で正常に終わったジョブの後、grid に書き換えるジョブが map.json を grid で書いてから正常に終わらなかった。
+    # map.json の layout は次のジョブの型と同じだが、前回の正常に終わったジョブの型が違うため、最初から読ませる
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    create_ended_job(root, job(DocumentKind.MAP, latest=5.0, map_layout=MapLayout.FREE))
+    create_ended_job(
+        root, job(DocumentKind.MAP, latest=9.0, map_layout=MapLayout.GRID), status
+    )
+    write_map_json(root, GRID_MAP_JSON)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) is None
+
+
+def test_map_job_keeps_previous_time_when_the_previous_job_had_the_same_layout(
+    tmp_path,
+):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    create_ended_job(root, job(DocumentKind.MAP, latest=5.0, map_layout=MapLayout.GRID))
+    write_map_json(root, GRID_MAP_JSON)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) == 5.0
+
+
+@pytest.mark.parametrize("previous_layout", [None, "unknown"])
+def test_map_job_does_not_compare_an_unknown_previous_layout(tmp_path, previous_layout):
+    # 前回のジョブの job.json の map_layout が null・ほかの値なら、前回のジョブの型では比べない
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    job_dir = create_ended_job(root, job(DocumentKind.MAP, latest=5.0))
+    value = read_json(job_dir / "job.json")
+    value["map_layout"] = previous_layout
+    (job_dir / "job.json").write_text(json.dumps(value), encoding="utf-8")
+    write_map_json(root, GRID_MAP_JSON)
+    assert find_previous_latest_frame_t(paths, MAP_KEY, MapLayout.GRID) == 5.0
+
+
 @pytest.mark.parametrize(
     "content",
     [
