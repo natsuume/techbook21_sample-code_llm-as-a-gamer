@@ -29,6 +29,7 @@ from switch2_harness.agent_launcher import (
     KEPT_API_KEY_ENV_PREFIX,
     KEPT_CLAUDE_ENV_NAMES,
     KEPT_CLAUDE_ENV_PREFIX,
+    MAX_CLEANUP_ATTEMPTS,
     MAX_RESUMES,
     MIN_REMAINING_S,
     POLL_INTERVAL_S,
@@ -66,10 +67,14 @@ from switch2_harness.event_log import CommandEvent
 from switch2_harness.features import BASE_AGENT_COMMANDS
 from switch2_harness.process_tree import (
     ProcessEntry,
-    kill_if_unchanged,
+    kill_sessions,
     read_descendants,
 )
-from switch2_harness.signal_guard import defer_interrupts, ignore_interrupts
+from switch2_harness.signal_guard import (
+    RunTerminated,
+    defer_interrupts,
+    ignore_interrupts,
+)
 from switch2_harness.workspace import WorkspacePaths
 from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
@@ -734,7 +739,7 @@ def test_start_claude_process_starts_a_new_process_group(tmp_path):
 
 
 class DescendantRecorder:
-    """stop_process の snapshot_descendants と kill_descendant の fake。
+    """stop_process の snapshot_descendants と stop_sessions の fake。
 
     呼ばれたことを process.calls に足し、プロセスへの操作との順序を確かめられるようにする。
     """
@@ -749,9 +754,8 @@ class DescendantRecorder:
         self.process.calls.append(("snapshot", root_pid))
         return list(self.descendants)
 
-    def kill(self, entry: ProcessEntry, sig: int) -> bool:
-        self.process.calls.append(("kill_descendant", entry.pid, sig))
-        return True
+    def stop_sessions(self, sessions: set[int], sig: int) -> None:
+        self.process.calls.append(("stop_sessions", frozenset(sessions), sig))
 
 
 def stop_with_recorder(
@@ -761,13 +765,17 @@ def stop_with_recorder(
     stop_process(
         process,
         snapshot_descendants=recorder.snapshot,
-        kill_descendant=recorder.kill,
+        stop_sessions=recorder.stop_sessions,
     )
+
+
+def descendant(pid: int, ppid: int, sid: int) -> ProcessEntry:
+    return ProcessEntry(pid=pid, state="S", ppid=ppid, pgid=pid, sid=sid, start_time=9)
 
 
 def test_stop_process_ends_with_sigint_without_snapshotting_descendants():
     process = FakeAgentProcess(FakeClock(), ProcessPlan(runs_for_s=None))
-    stop_with_recorder(process, [ProcessEntry(pid=501, ppid=process.pid, start_time=9)])
+    stop_with_recorder(process, [descendant(501, process.pid, 501)])
     assert process.calls == [("signal", signal.SIGINT), ("wait", 20.0)]
 
 
@@ -781,7 +789,7 @@ def test_stop_process_does_not_fail_when_the_group_is_gone():
 def test_stop_process_sends_sigterm_when_sigint_is_ignored():
     plan = ProcessPlan(runs_for_s=None, stops_on=frozenset({signal.SIGTERM}))
     process = FakeAgentProcess(FakeClock(), plan)
-    stop_with_recorder(process, [ProcessEntry(pid=501, ppid=process.pid, start_time=9)])
+    stop_with_recorder(process, [descendant(501, process.pid, 501)])
     assert process.calls == [
         ("signal", signal.SIGINT),
         ("wait", 20.0),
@@ -790,12 +798,14 @@ def test_stop_process_sends_sigterm_when_sigint_is_ignored():
     ]
 
 
-def test_stop_process_kills_descendants_after_sigkill():
+def test_stop_process_stops_descendant_sessions_after_sigkill():
     plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
     process = FakeAgentProcess(FakeClock(), plan)
+    # Bash ツールのコマンド (別のセッション) 2 つと、その子 (同じセッション)
     descendants = [
-        ProcessEntry(pid=501, ppid=process.pid, start_time=9),
-        ProcessEntry(pid=502, ppid=501, start_time=10),
+        descendant(501, process.pid, 501),
+        descendant(502, 501, 501),
+        descendant(601, process.pid, 601),
     ]
     stop_with_recorder(process, descendants)
     assert process.calls == [
@@ -806,15 +816,25 @@ def test_stop_process_kills_descendants_after_sigkill():
         ("snapshot", process.pid),
         ("signal", signal.SIGKILL),
         ("wait", None),
-        ("kill_descendant", 501, signal.SIGKILL),
-        ("kill_descendant", 502, signal.SIGKILL),
+        ("stop_sessions", frozenset({process.pid, 501, 601}), signal.SIGKILL),
     ]
+
+
+def test_stop_process_stops_claude_session_without_descendants():
+    plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
+    process = FakeAgentProcess(FakeClock(), plan)
+    stop_with_recorder(process, [])
+    assert process.calls[-1] == (
+        "stop_sessions",
+        frozenset({process.pid}),
+        signal.SIGKILL,
+    )
 
 
 def test_stop_process_defaults_to_process_tree_functions():
     defaults = inspect.signature(stop_process).parameters
     assert defaults["snapshot_descendants"].default is read_descendants
-    assert defaults["kill_descendant"].default is kill_if_unchanged
+    assert defaults["stop_sessions"].default is kill_sessions
 
 
 # --- run_agent_until の流れ ---
@@ -1499,34 +1519,27 @@ def test_run_stops_a_claude_interrupted_right_after_resuming(tmp_path):
 # --- 子孫を控えるときの失敗 ---
 
 
-def test_stop_process_sends_sigkill_even_if_snapshotting_fails():
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError("cannot read /proc"), ValueError("unexpected /proc stat line")],
+)
+def test_stop_process_sends_sigkill_even_if_snapshotting_fails(error):
     plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
     process = FakeAgentProcess(FakeClock(), plan)
-    killed: list[ProcessEntry] = []
+    stopped_sessions: list[set[int]] = []
 
     def failing_snapshot(root_pid: int) -> list[ProcessEntry]:
-        raise PermissionError("cannot read /proc")
+        raise error
 
-    def kill_descendant(entry: ProcessEntry, sig: int) -> bool:
-        killed.append(entry)
-        return True
+    def stop_sessions(sessions: set[int], sig: int) -> None:
+        stopped_sessions.append(set(sessions))
 
     stop_process(
-        process, snapshot_descendants=failing_snapshot, kill_descendant=kill_descendant
+        process, snapshot_descendants=failing_snapshot, stop_sessions=stop_sessions
     )
     assert process.calls[-2:] == [("signal", signal.SIGKILL), ("wait", None)]
-    assert killed == []
-
-
-def test_stop_process_sends_sigkill_even_if_parsing_fails():
-    plan = ProcessPlan(runs_for_s=None, stops_on=frozenset())
-    process = FakeAgentProcess(FakeClock(), plan)
-
-    def failing_snapshot(root_pid: int) -> list[ProcessEntry]:
-        raise ValueError("unexpected /proc stat line")
-
-    stop_process(process, snapshot_descendants=failing_snapshot)
-    assert process.calls[-2:] == [("signal", signal.SIGKILL), ("wait", None)]
+    # 子孫を控えられなくても、claude 自身のセッションは止める
+    assert stopped_sessions == [{process.pid}]
 
 
 # --- 期限は単調時計で計る ---
@@ -1599,3 +1612,103 @@ def test_run_stops_at_the_monotonic_deadline_without_the_wall_clock(tmp_path):
     assert run.wall.now == START_TIME
     assert {event.time for event in run.events} == {START_TIME}
     assert run.starter.processes[0].calls[0] == ("signal", signal.SIGINT)
+
+
+# --- 後片付けの shield に入る前に届いた割り込み ---
+
+
+def shield_failing_on_entry(
+    error: BaseException, failures: int = 1
+) -> tuple[Callable[[], AbstractContextManager[None]], list[int]]:
+    """入るときに、最初の failures 回だけ error を送出する fake の shield と、入った回数の記録を返す。
+
+    shield が割り込みを無視に切り替える前に Ctrl-C・SIGTERM が届いた状況の代わり。
+    """
+    entries: list[int] = []
+
+    @contextmanager
+    def shield() -> Iterator[None]:
+        entries.append(1)
+        if len(entries) <= failures:
+            raise error
+        yield
+
+    return shield, entries
+
+
+@pytest.mark.parametrize(
+    "error",
+    [KeyboardInterrupt(), RunTerminated(signal.SIGTERM)],
+    ids=["sigint", "sigterm"],
+)
+def test_run_cleans_up_after_an_interrupt_before_the_shield(tmp_path, error):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    shield, entries = shield_failing_on_entry(error)
+    with pytest.raises(type(error)) as raised:
+        run_scenario(scenario, minutes=1.0, shield=shield)
+    assert raised.value is error
+    assert len(entries) == 2
+    assert scenario.starter.processes[0].calls == [
+        ("signal", signal.SIGINT),
+        ("wait", 20.0),
+    ]
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["start", "stop", "release"]
+
+
+def test_run_without_interrupts_enters_the_shield_once_and_returns(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    shield, entries = shield_failing_on_entry(KeyboardInterrupt(), failures=0)
+    outcome = run_scenario(scenario, minutes=1.0, shield=shield)
+    assert outcome == RunOutcome(reason="deadline", launches=1)
+    assert len(entries) == 1
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_does_not_clean_up_twice_after_an_interrupt_on_leaving_the_shield(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    exits: list[int] = []
+
+    @contextmanager
+    def shield() -> Iterator[None]:
+        yield
+        exits.append(1)
+        if len(exits) == 1:
+            # 後片付けが済み、shield が元のハンドラーに戻した直後に Ctrl-C が届いた
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_scenario(scenario, minutes=1.0, shield=shield)
+    assert exits == [1]
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["start", "stop", "release"]
+
+
+def test_run_gives_up_cleaning_up_after_max_attempts(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    error = KeyboardInterrupt()
+    shield, entries = shield_failing_on_entry(error, failures=MAX_CLEANUP_ATTEMPTS)
+    with pytest.raises(KeyboardInterrupt) as raised:
+        run_scenario(scenario, minutes=1.0, shield=shield)
+    assert raised.value is error
+    assert len(entries) == MAX_CLEANUP_ATTEMPTS
+    assert scenario.daemon.sent == []
+
+
+def test_run_reraises_the_first_interrupt(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    errors = [RunTerminated(signal.SIGHUP), KeyboardInterrupt()]
+    entries: list[int] = []
+
+    @contextmanager
+    def shield() -> Iterator[None]:
+        entries.append(1)
+        if len(entries) <= len(errors):
+            raise errors[len(entries) - 1]
+        yield
+
+    with pytest.raises(RunTerminated) as raised:
+        run_scenario(scenario, minutes=1.0, shield=shield)
+    assert raised.value is errors[0]
+    assert len(entries) == 3
+    assert scenario.daemon.sent == [["up", "ALL"]]

@@ -744,13 +744,13 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - `uv run switch2-harness status` は許可されて実行され、許可したサブコマンドの後ろに付けた出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・変数の展開 (`$HOME`・`"$PATH"`・`${USER}`)・`~` と、`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
 - 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
 - `uv run switch2-harness status --workspace ..` と、環境変数を書き換えて起動する形 (`SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`・`env SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`) は拒否される
-- `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる
+- `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる。`--resume` で起動したプロセスの `--max-budget-usd` は、累計ではなくそのプロセスが使った分と比べられる (累計 0.00015 USD・そのプロセスの分 0.00008 USD で、予算 0.0001 USD の起動が `success` で終わった)
 
 エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
 
 期限になったら Claude Code に SIGINT を送り、20 秒たっても終わらなければ SIGTERM、さらに 10 秒たっても終わらなければ強制終了 (SIGKILL) します。止めた後は、デーモンに `up ALL` を送って押したままの入力を離します (応答を待つのは 10 秒まで)。
 
-Claude Code の Bash ツールは、コマンドを別のセッションで起動します。2026-11-17 に Claude Code 2.1.325 で確かめたところ、SIGINT と SIGTERM では Claude Code が終わるときに Bash ツールのコマンドも止めました。強制終了する場合は Claude Code がコマンドを止められないため、強制終了の直前に Claude Code の子孫のプロセスを控えておき、強制終了の後に残っていればそれも止めます。
+Claude Code の Bash ツールは、コマンドを別のセッションで起動します。2026-11-17 に Claude Code 2.1.325 で確かめたところ、SIGINT と SIGTERM では Claude Code が終わるときに Bash ツールのコマンドも止めました。強制終了する場合は Claude Code がコマンドを止められないため、強制終了の直前に Claude Code の子孫のプロセスとそのセッションを控えておき、強制終了の後に、控えたセッションに残っているプロセスを止めます。
 
 `run` を Ctrl+C・SIGTERM・SIGHUP で止めた場合も、同じ順序で Claude Code を止めてから `up ALL` を送ります。Claude Code は新しいセッションで起動するため、端末の Ctrl+C は Claude Code に直接は届かず、`run` が受け取って止めます。`nohup` で起動したときのように、起動した時点で無視しているシグナルは無視したままにします。
 
@@ -797,3 +797,10 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 画面の変化は、2 枚をグレースケールにして 160x90 に縮小し、明るさの差が 24 を超える画素の割合で測ります。割合が 1% 未満の組を「変化なし」とします。期限で止めた起動は result を出さないことがあり (Claude Code のドキュメントには、SIGTERM で止めると result を記録しないとある)、その起動の分は費用・ターン数・時間に含まれません。起動の回数と応答の数は、result の有無によらず数えます。
 
 `--json` を付けると、同じ集計を JSON の 1 行で表示します。
+
+### 既知の制限
+
+- Claude Code を強制終了 (SIGKILL) する場合、子孫のセッションを控えた後に、Bash ツールが新しいセッションで起動したコマンドは止められず、`up ALL` の後に入力を送る可能性があります。強制終了まで進むのは、Claude Code が SIGINT と SIGTERM の両方に 30 秒応じない場合だけです。2026-11-17 に確かめた範囲では、Claude Code は SIGINT 1 回で終わりました
+- シグナルを受けてから後片付けに入るまでのごく短い間に、2 回目のシグナルが届いた場合の動作は確かめていません
+- `run` を SIGKILL で止めると、後片付けは行われません。別のセッションで動く Claude Code は残るため、人が止めてから、`ch02_setup` ディレクトリーで `uv run switch2-remote up ALL` を送ってください
+- 費用の集計と予算の残りは、Claude Code が result に書く `total_cost_usd` (Claude Code が計算した推定値) にもとづきます。Claude Code が result を書かずに異常終了してから起動し直した場合は、その起動の費用が次の起動に渡す残りの予算の計算に入らないため、`--max-budget-usd` をその分超えることがあります

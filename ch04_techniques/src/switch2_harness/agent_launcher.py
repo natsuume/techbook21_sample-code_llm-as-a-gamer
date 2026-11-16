@@ -15,8 +15,11 @@ claude のプロセスとの関係は次のとおり (Claude Code 2.1.325 で 20
       claude のプロセスグループに送ったシグナルは Bash ツールのコマンドには届かない
     - claude のプロセスグループに SIGINT か SIGTERM を送ると、claude は終わり、Bash ツールのコマンドも claude 自身が止める
     - SIGINT と SIGTERM で claude が終わらず SIGKILL で止めるときは、claude は後始末できず、別のセッションの子が残りうる
-そのため stop_process は、SIGKILL を送るときだけ、その前に claude の子孫を /proc から控え (process_tree)、
-claude が終わった後に、控えた子孫を pid の再利用を見分けながら SIGKILL で止める。
+そのため stop_process は、SIGKILL を送るときだけ、その前に claude の子孫を /proc から控えて、子孫のセッションの集合
+(claude 自身のセッションを含む) を作り、claude が終わった後に、そのセッションのプロセスを残りがなくなるまで
+SIGKILL で止める (process_tree.kill_sessions)。親が SIGKILL された子孫は init などに付け替わり、claude の pid からの
+親子関係ではたどれなくなるため、セッションで探す。Bash ツールのコマンドはそれぞれ別のセッションで起動されるため、
+控えた後に作られた子 (同じセッションに入る) も止められる。
 
 プレイ中のエージェントには、ユーザー・プロジェクト・ローカルの設定 (plugin・hook・許可の設定など)、MCP、
 CLAUDE.md (~/.claude/CLAUDE.md を含む)、自動メモリー、親ディレクトリーの .claude/skills (既存の第4章の Skill)、
@@ -57,10 +60,14 @@ from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.process_tree import (
     ProcessEntry,
-    kill_if_unchanged,
+    kill_sessions,
     read_descendants,
 )
-from switch2_harness.signal_guard import defer_interrupts, ignore_interrupts
+from switch2_harness.signal_guard import (
+    RunTerminated,
+    defer_interrupts,
+    ignore_interrupts,
+)
 from switch2_harness.workspace import WorkspacePaths
 from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
@@ -82,6 +89,8 @@ MIN_REMAINING_S = 30.0  # 期限までの残りがこれ未満なら、終わっ
 MAX_RESUMES = 20  # 起動し直す回数の上限 (最初の起動は数えない)
 # 後片付けの up ALL の待ち時間の上限 (秒)。後片付けの間はシグナルを無視するため、デーモンが応答しなくても止まれるようにする
 RELEASE_TIMEOUT_S = 10.0
+# shield に入る前・入る途中で届いた割り込みで、後片付けをやり直す回数の上限 (最初の 1 回を含む)
+MAX_CLEANUP_ATTEMPTS = 5
 
 # --settings に渡す設定。作業ディレクトリーの外の読み取りを、Read と読み取り専用の Bash (cat など) の両方で止めるため
 CLAUDE_SETTINGS_JSON = json.dumps(
@@ -514,23 +523,25 @@ def stop_process(
     process: AgentProcess,
     *,
     snapshot_descendants: Callable[[int], list[ProcessEntry]] = read_descendants,
-    kill_descendant: Callable[[ProcessEntry, int], bool] = kill_if_unchanged,
+    stop_sessions: Callable[[set[int], int], None] = kill_sessions,
 ) -> None:
     """動いている claude を、claude のプロセスグループへのシグナルで段階的に止める。
 
     1. グループに signal.SIGINT を送り、process.wait(timeout=STOP_GRACE_S) で待つ
     2. まだ終わっていなければ (subprocess.TimeoutExpired) グループに signal.SIGTERM を送り、
        process.wait(timeout=TERMINATE_GRACE_S) で待つ
-    3. まだ終わっていなければ、snapshot_descendants(process.pid) で claude の子孫を控えてから、グループに
-       signal.SIGKILL を送り、process.wait() で終わるのを待つ。その後、控えた子孫それぞれに
-       kill_descendant(<子孫>, signal.SIGKILL) を送る。snapshot_descendants が OSError か ValueError を
-       送出したときは、控えた子孫を空として扱い、必ずグループへの SIGKILL を送る
+    3. まだ終わっていなければ、snapshot_descendants(process.pid) で claude の子孫を控え、子孫のセッション (sid) と
+       claude 自身のセッション (claude の pid) の集合を作る。グループに signal.SIGKILL を送り、process.wait() で
+       終わるのを待ってから、stop_sessions(<セッションの集合>, signal.SIGKILL) を送る。
+       snapshot_descendants が OSError か ValueError を送出したときは、控えた子孫を空として扱い
+       (セッションの集合は claude 自身のセッションだけ)、必ずグループへの SIGKILL を送る
     SIGINT か SIGTERM で claude が終わったときは、Bash ツールのコマンドは claude 自身が止めるため、子孫を控えない。
     SIGKILL で止めた claude は後始末できず、別のセッションにいる Bash ツールのコマンドが残りうるため、控えて止める
-    (Claude Code 2.1.325 で 2026-11-17 に確かめた)。
+    (Claude Code 2.1.325 で 2026-11-17 に確かめた)。親が SIGKILL された子孫は init などに付け替わり、親子関係からは
+    たどれなくなるため、控えるのは SIGKILL の前で、止めるのはセッションで探して行う。Bash ツールのコマンドは
+    それぞれ別のセッションで起動されるため、控えた後に作られた子 (同じセッションに入る) も止められる。
     グループが無い (ProcessLookupError) ときは、送らずに待つ (例外にしない)。
-    snapshot_descendants の既定は process_tree.read_descendants、kill_descendant の既定は
-    process_tree.kill_if_unchanged (控えたときと同じプロセスのときだけ送る)。
+    snapshot_descendants の既定は process_tree.read_descendants、stop_sessions の既定は process_tree.kill_sessions。
     """
     for sig, grace_s in (
         (signal.SIGINT, STOP_GRACE_S),
@@ -547,10 +558,10 @@ def stop_process(
     except (OSError, ValueError):
         # 子孫を控えられなくても、claude を止める SIGKILL は送り損ねない
         descendants = []
+    sessions = {process.pid} | {descendant.sid for descendant in descendants}
     _signal_group_if_present(process, signal.SIGKILL)
     process.wait()
-    for descendant in descendants:
-        kill_descendant(descendant, signal.SIGKILL)
+    stop_sessions(sessions, signal.SIGKILL)
 
 
 def stop_reason_after_exit(
@@ -585,6 +596,39 @@ def stop_reason_after_exit(
     if session_id is None:
         return "no_session"
     return None
+
+
+def _clean_up_shielded(
+    clean_up: Callable[[], None],
+    shield: Shield,
+    max_attempts: int = MAX_CLEANUP_ATTEMPTS,
+) -> None:
+    """clean_up を with shield(): の中で 1 回だけ行う。
+
+    shield に入る前・入る途中 (割り込みがまだ無視になっていない間) に KeyboardInterrupt か RunTerminated を受けたら、
+    最初に受けた例外を覚えて、shield に入り直して行う (入るのは合わせて max_attempts 回まで)。
+    shield の中では割り込みは無視されているため、clean_up の途中でやり直しにはならない。clean_up が済んだ後
+    (shield を抜ける途中) に受けた場合も、やり直さない。
+    clean_up が済んだら、覚えた例外があれば送出し直す (handle_run が Ctrl-C やシグナルとして報告できるように)。
+    max_attempts 回入り直しても行えなければ、覚えた例外を送出する。
+    clean_up がそれ以外の例外を送出したら、そのまま外に出す。
+    """
+    interrupted: KeyboardInterrupt | RunTerminated | None = None
+    done = False
+    for _ in range(max_attempts):
+        try:
+            with shield():
+                if not done:
+                    clean_up()
+                    done = True
+        except (KeyboardInterrupt, RunTerminated) as e:
+            if interrupted is None:
+                interrupted = e
+            if not done:
+                continue
+        break
+    if interrupted is not None:
+        raise interrupted
 
 
 def _run_event(
@@ -640,7 +684,9 @@ def run_agent_until(
           理由が返ればその理由で終える。None なら RESUME_PROMPT と --resume <session_id> で起動し直す。
           options.max_budget_usd が None でなければ、dataclasses.replace(options, max_budget_usd=<残りの予算>) を
           build_claude_args に渡す (CLI は --max-budget-usd を 1 つのプロセスが使った分だけで判定するため、
-          run 全体の上限にするには残りを渡す)
+          run 全体の上限にするには残りを渡す。--resume で起動したプロセスの --max-budget-usd が、累計ではなく
+          そのプロセスが使った分と比べられること (累計 0.00015 USD、そのプロセスの分 0.00008 USD で、予算 0.0001 USD の
+          起動が success で終わった) を、Claude Code 2.1.325 で 2026-11-17 に確かめた)
 
     後片付けは、終えるとき (例外・KeyboardInterrupt で抜けるときも finally で) に with shield(): の中で行う
     (本番の shield は signal_guard.ignore_interrupts で、後片付けの途中の Ctrl-C などで up ALL の前に抜けないようにする)。
@@ -649,10 +695,14 @@ def run_agent_until(
         1. 最後に起動したプロセスがまだ動いていれば、stop_process で止める
            (止めないと、up ALL の後もエージェントが入力を送り続けるため)。SIGINT か SIGTERM で止まれば、
            claude の Bash ツールのコマンドは claude 自身が止める。SIGKILL まで進んだときは、stop_process が
-           控えた claude の子孫も止める (Claude Code 2.1.325 で 2026-11-17 に確かめたふるまい。モジュールの説明を参照)
+           控えた claude の子孫のセッションも止める (Claude Code 2.1.325 で 2026-11-17 に確かめたふるまい。モジュールの説明を参照)
         2. 理由が決まって終えるときは、停止のイベントを記録する
         3. 1・2 が例外になっても、send(["up", "ALL"], timeout_s=RELEASE_TIMEOUT_S) を送り、そのイベントを記録する
            (後片付けの間はシグナルを無視するため、デーモンが応答しなくても止まれるように待ち時間に上限を付ける)
+    ループを抜けてから shield が割り込みを無視に切り替えるまでの間に Ctrl-C・SIGTERM・SIGHUP が届くと、
+    KeyboardInterrupt か RunTerminated になり、後片付けの本体が飛ばされうる。そのため、shield に入って後片付けを
+    行うことを、これらの例外を受けたら入り直すループで包む (最初に受けた例外を覚えておき、後片付けが済んだら
+    送出し直す。入るのは合わせて MAX_CLEANUP_ATTEMPTS 回まで。_clean_up_shielded)。
     後片付けの中では claude を起動しない (無視の設定を子が受け継ぐため)。
 
     record で次のイベントを記録する (command は "run"、frame は None):
@@ -680,6 +730,33 @@ def run_agent_until(
             prompt, agent_commands, paths.instructions_file, launch_options, session_id
         )
         return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
+
+    def clean_up() -> None:
+        """後片付けの本体。claude を止め、停止を記録し、(途中で例外になっても) up ALL を送って記録する。"""
+        try:
+            if process is not None and process.poll() is None:
+                stop_process(process)
+            if reason is not None:
+                record(
+                    _run_event(
+                        clock(),
+                        ("stop", reason),
+                        f"stopped reason={reason} launches={launches}",
+                    )
+                )
+        finally:
+            sent_at = clock()
+            started = monotonic()
+            reply = send(["up", "ALL"], timeout_s=RELEASE_TIMEOUT_S)
+            record(
+                _run_event(
+                    sent_at,
+                    ("release",),
+                    reply,
+                    ok=not reply.startswith("error"),
+                    elapsed_s=monotonic() - started,
+                )
+            )
 
     try:
         with defer():
@@ -728,31 +805,7 @@ def run_agent_until(
                 )
             )
     finally:
-        with shield():
-            try:
-                if process is not None and process.poll() is None:
-                    stop_process(process)
-                if reason is not None:
-                    record(
-                        _run_event(
-                            clock(),
-                            ("stop", reason),
-                            f"stopped reason={reason} launches={launches}",
-                        )
-                    )
-            finally:
-                sent_at = clock()
-                started = monotonic()
-                reply = send(["up", "ALL"], timeout_s=RELEASE_TIMEOUT_S)
-                record(
-                    _run_event(
-                        sent_at,
-                        ("release",),
-                        reply,
-                        ok=not reply.startswith("error"),
-                        elapsed_s=monotonic() - started,
-                    )
-                )
+        _clean_up_shielded(clean_up, shield)
     # reason が None のまま finally を抜けるのは例外のときだけで、そのときはここに来ない
     assert reason is not None
     return RunOutcome(reason=reason, launches=launches)
