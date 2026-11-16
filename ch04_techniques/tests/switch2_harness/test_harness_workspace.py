@@ -88,6 +88,19 @@ def test_create_workspace_creates_files_and_directories(tmp_path):
     ]
 
 
+def test_create_workspace_writes_initial_files(tmp_path):
+    paths = workspace_paths(tmp_path / "play")
+    create_workspace(paths, CONFIG, "# 指示\n", {"notes.md": "# メモ\n"})
+    assert sorted(os.listdir(paths.root)) == [
+        "CLAUDE.md",
+        "frames",
+        "harness.json",
+        "notes.md",
+        "records",
+    ]
+    assert (paths.root / "notes.md").read_text(encoding="utf-8") == "# メモ\n"
+
+
 def test_create_workspace_accepts_existing_empty_directory(tmp_path):
     root = tmp_path / "play"
     root.mkdir()

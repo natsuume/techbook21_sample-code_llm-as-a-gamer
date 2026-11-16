@@ -70,7 +70,7 @@ class CliDependencies:
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
     environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
-    read_template: CLAUDE.md のテンプレートの読み込み (本番は instructions.read_package_template)
+    read_template: CLAUDE.md と、要素が置くファイルの最初の内容のテンプレートの読み込み (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     """
 

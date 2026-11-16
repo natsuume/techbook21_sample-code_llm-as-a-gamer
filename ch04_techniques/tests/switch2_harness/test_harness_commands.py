@@ -146,6 +146,42 @@ def test_init_enables_features_in_available_order(tmp_path):
     )
 
 
+def test_init_writes_initial_files_of_enabled_features_unsubstituted(tmp_path):
+    directory = tmp_path / "play"
+    result = handle_init(
+        directory,
+        "G",
+        "X",
+        ["memo-files"],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert result.exit_code == 0
+    memo = directory / "memo.md"
+    assert memo.is_file()
+    assert memo.read_text(encoding="utf-8") == "# メモ $goal\n"
+
+
+def test_init_without_features_creates_only_the_base_files(tmp_path):
+    directory = tmp_path / "play"
+    handle_init(
+        directory,
+        "G",
+        "X",
+        [],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert sorted(os.listdir(directory)) == [
+        "CLAUDE.md",
+        "frames",
+        "harness.json",
+        "records",
+    ]
+
+
 def test_init_prints_absolute_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = handle_init(
@@ -788,6 +824,26 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
     assert "Bash(uv run switch2-harness note *)" in args
     assert "Bash(uv run switch2-harness notes *)" in args
     assert "Bash(uv run switch2-harness history *)" not in args
+
+
+def test_run_allows_writing_files_of_enabled_features(paths, clock):
+    write_harness_json(paths, ["memo-files"])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        monotonic=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    args = starter.launches[0].args
+    assert args[args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+    assert "Edit(./memo.md)" in args
 
 
 def test_run_reports_budget_exhausted(paths, clock):

@@ -787,6 +787,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 |---|---|
 | `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
 | `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
+| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ |
 | `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
@@ -833,6 +834,7 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - 子のプロセスには、起動した人の環境変数から、`CLAUDE` で始まる変数 (Claude Code の認証・設定の場所・プロバイダーの選択に使うものを除く) と、`ANTHROPIC_` で始まらない `*_API_KEY` を除いて渡します。Claude Code のセッションの中から `run` を起動しても、そのセッションの変数は子に渡りません
 - 子のプロセスの環境変数 `SWITCH2_HARNESS_WORKSPACE` に作業ディレクトリーのパスを入れます。この変数があるとき、`look`・`press`・`status`・`finish` はその作業ディレクトリーだけを使い、別の `--workspace` を指定するとエラーにします。エージェントが別の実験の作業ディレクトリーに画像や記録を書かないようにするためです
 - 使える組み込みのツールを Bash と Read に限り (`--tools Bash,Read`)、Bash は `uv run switch2-harness <サブコマンド>` だけを許可します。`--permission-mode dontAsk` で、許可していない呼び出しは確認なしで拒否します。Web 検索はできません
+- メモファイル (`notes`) を有効にしたときは、`--tools` に Write と Edit を足し、`--allowedTools "Edit(./notes.md)"` で `notes.md` だけに書き込めるようにします
 
 2026-11-16〜17 に Claude Code 2.1.325 で起動し、次のことを確かめました。
 
@@ -840,6 +842,7 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - `uv run switch2-harness status` は許可されて実行され、許可したサブコマンドの後ろに付けた出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・変数の展開 (`$HOME`・`"$PATH"`・`${USER}`)・`~` と、`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
 - 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
 - `uv run switch2-harness status --workspace ..` と、環境変数を書き換えて起動する形 (`SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`・`env SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`) は拒否される
+- `--tools` に Write と Edit を足して `--allowedTools "Edit(./<ファイル名>)"` を渡すと、そのファイルへの Write と Edit は通り、作業ディレクトリーのほかのファイル (`CLAUDE.md`・`records/` の中など) と作業ディレクトリーの外への書き込みは拒否される
 - `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる。`--resume` で起動したプロセスの `--max-budget-usd` は、累計ではなくそのプロセスが使った分と比べられる (累計 0.00015 USD・そのプロセスの分 0.00008 USD で、予算 0.0001 USD の起動が `success` で終わった)
 
 エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
@@ -901,6 +904,7 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 | 名前 | 内容 |
 |---|---|
 | `action-history` | 行動履歴。`look` の出力に、直近の行動と、`press` の前後の画面の変化を付けます |
+| `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
 
 #### 行動履歴 (`action-history`)
 
@@ -921,6 +925,23 @@ ok /home/user/ch04_techniques/plays/honogurashi/frames/000044.png
 - 同じ 2 枚の撮影の間に複数の `press` があれば、どれも同じ結果になります
 - 直前の撮影が無い `press` (作業ディレクトリーで最初の `look` より前の `press`) は「不明」です
 - 失敗した `press` と `look` は、画面の変化の代わりにエラーの応答を表示します
+
+#### メモファイル (`notes`)
+
+`init` で作業ディレクトリーの直下に `notes.md` を置き、エージェントが Write・Edit ツールで `notes.md` だけに書き込めるようにします。`CLAUDE.md` の節では、セッションを始めたら操作の前に `notes.md` を Read で読むことと、分かったことをその場で書くことを指示します。セッションは予告なしに終わるため、後でまとめて書く時間はありません。
+
+同じ作業ディレクトリーで `run` を繰り返すと、`run` ごとに、前の会話を持たない新しいセッションが始まります。前のセッションで分かったことは、`notes.md` を通して次のセッションに渡ります。`run` の中で Claude Code が期限より前に終わり、`--resume` で続けた場合は、同じセッションの続きです。
+
+`notes.md` の最初の内容は、次の 4 つの節の見出しだけです (`src/switch2_harness/instructions/notes-initial.md`)。
+
+| 節 | 書くこと (`CLAUDE.md` の指示) |
+|---|---|
+| 操作方法 | ボタンの割り当て、会話の送り方、メニューの開き方など |
+| ゲームの仕組み | 進め方、場所、物、人物など |
+| 試して効かなかったこと | 試した入力と、そのときの場面 |
+| 今の状況と次にやること | 今の場面と、次に試すこと。状況が変わったら書き直す |
+
+`notes.md` への書き込みは `records/events.jsonl` には記録されません。Write・Edit の呼び出しは `records/agent.jsonl` (stream-json) に残ります。
 
 ### 既知の制限
 
