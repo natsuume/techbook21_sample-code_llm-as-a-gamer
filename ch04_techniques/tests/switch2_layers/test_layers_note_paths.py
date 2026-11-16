@@ -8,12 +8,14 @@ from switch2_layers.notes.note_paths import (
     GAME_NOTE,
     MAP_JSON_NOTE,
     MAP_PLACES_NOTE,
+    TASKS_JSON_FILE,
     box_targets_note,
     common_note,
     deep_document_notes,
     document_key,
     is_scene_id,
     scene_note,
+    tasks_json_note,
 )
 
 
@@ -137,6 +139,21 @@ def test_common_tips_and_scene_controls_jobs_do_not_target_box_targets(tmp_path)
     assert deep_document_notes(
         tmp_path, DocumentKey(DocumentKind.CONTROLS, "scene-002")
     ) == ["scenes/scene-002/controls.md", "common/controls.md"]
+
+
+# --- 短期タスクのキューの状態 ---
+
+
+def test_tasks_json_note():
+    assert TASKS_JSON_FILE == "tasks.json"
+    assert tasks_json_note("scene-001") == "scenes/scene-001/tasks.json"
+    assert tasks_json_note("scene-1000") == "scenes/scene-1000/tasks.json"
+
+
+@pytest.mark.parametrize("scene_id", ["../x", "scene-01", "scene-001/..", ""])
+def test_tasks_json_note_rejects_invalid_scene_id(scene_id):
+    with pytest.raises(ValueError):
+        tasks_json_note(scene_id)
 
 
 # --- map の文書とリンク ---
