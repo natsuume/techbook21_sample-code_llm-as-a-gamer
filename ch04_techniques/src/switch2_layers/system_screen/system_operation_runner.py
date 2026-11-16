@@ -28,6 +28,8 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
+from switch2_layers.buttons import filter_action
+from switch2_layers.error_text import describe_exception
 from switch2_layers.hardware.pad_output import (
     TAP_PRESS_S,
     OutputStoppedError,
@@ -60,15 +62,20 @@ WaitOrStop = Callable[[threading.Event, float], bool]
 
 
 class SystemOutputError(RuntimeError):
-    """press を送ってから終えるまでの間に、PadOutput のタイマーが送るレポート (離すレポートなど) の送信が失敗した。
+    """press の送信が失敗した。次の 2 つの失敗を表す:
+        apply の失敗     PadOutput.apply の送信が失敗した (OutputStoppedError 以外の例外)。元の例外は __cause__ に
+                         入れ、説明にも入れる
+        タイマーの失敗   press を送ってから終えるまでの間に、PadOutput のタイマーが送るレポート (離すレポートなど) の
+                         送信が失敗した。説明には PadOutput.last_error を入れる
 
-    PadOutput は押下の記録からボタンを外しても、ブリッジ側ではボタンが押されたままのことがある。説明には
-    PadOutput.last_error を入れる。
+    どちらの失敗でも、そのレポートは本体に届いたかもしれない (ブリッジは書き込んだ後に ack を確かめられないときも失敗に
+    する)。また、ブリッジ側ではボタンが押されたままのことがある (タイマーの失敗では、PadOutput が押下の記録からボタンを
+    外していても)。
 
     result   そこまでの実行の結果 (SystemRunResult)。呼び出し側は、これで履歴 (送った操作の数と、この段階で送った
-             決定) を作る。sent_count には、送信が失敗した press を含める (押すレポートは送ったため)。cut_index は
-             その press の次の位置 (列の最後の操作なら None)、cut_reason は None、blocked_buttons はその press までに
-             外したボタン
+             決定) を作る。sent_count は送信が失敗した press の位置 + 1 (その press は届いたかもしれないため含める)、
+             cut_index はその press の位置 (列の最後の操作でも None にしない)、cut_reason は SystemCutReason.SEND_FAILED、
+             blocked_buttons はその press までに外したボタン (その press の分を含む)
     """
 
     def __init__(self, message: str, result: SystemRunResult) -> None:
@@ -190,21 +197,25 @@ class SystemOperationRunner:
         最後の操作まで送って終えたら、SystemRunResult(sent_count=操作の数, cut_index=None, cut_reason=None,
         blocked_buttons) を返す。操作が 0 個なら、何も送らず待たずに SystemRunResult(0, None, None, frozenset()) を返す。
 
-        位置 i で打ち切ったら、SystemRunResult(sent_count=i, cut_index=i, cut_reason=理由, blocked_buttons) を返す (その
-        操作から後は送らない)。各操作は 5 で終えているので、どの理由でも、送った操作を終えた後に返す (stop が立って
-        待つのをやめた場合を除く)。
+        位置 i の操作を送らずに打ち切ったら、SystemRunResult(sent_count=i, cut_index=i, cut_reason=理由,
+        blocked_buttons) を返す (その操作から後は送らない)。各操作は 5 で終えているので、どの理由でも、送った操作を
+        終えた後に返す (stop が立って待つのをやめた場合を除く)。
         apply が hardware.pad_output.OutputStoppedError を出したら (全体を止めるときに出力が止められた)、その操作は
-        送らなかったものとして STOPPED で打ち切る。apply のほかの例外 (送信の失敗) は、型を変えずにそのまま外に出す
-        (その操作は送っていない。結果は返さない)。
-        press では、apply の直前と、その操作を終えた (離したことを確かめた、または上限に達した) 後に
-        pad_output.timer_send_failures を読み、増えていれば (タイマーが送る離すレポートなどの送信が失敗した)
-        SystemOutputError を出し、その後の操作は送らない。終えた後なら、stop が立っていても確かめる。確かめないのは、
-        5 の待ちの間に stop が立って待つのをやめたときと、wait の操作だけ。SystemOutputError の説明には
-        pad_output.last_error を入れ、属性 result にそこまでの結果を持たせる: sent_count はその press を含めた数
-        (押すレポートは送ったため)、cut_index はその press の次の位置 (列の最後の操作なら None)、cut_reason は None、
-        blocked_buttons はその press までに外したボタン。呼び出し側は、この result で履歴 (送った操作の数と、この段階で
-        送った決定) を作る前提とする。また、ブリッジ側でボタンが押されたまま残っているおそれがあるため、呼び出し側は
-        PadOutput.neutral() で押下の状態をそろえてから次の入力を作る前提とする。
+        送らなかったものとして STOPPED で打ち切る。
+        press の送信が失敗したら、結果を返さずに SystemOutputError を出し、その後の操作は送らない。送信の失敗は次の 2 つ:
+            apply の失敗     apply が OutputStoppedError 以外の例外を出した。その press を終えるのを待たずにすぐ出し、
+                             元の例外を __cause__ に入れる (説明には error_text.describe_exception(元の例外) を入れる)。
+                             その press の押せないボタン (buttons.filter_action で求める) も blocked_buttons に足す
+            タイマーの失敗   apply の直前と、その操作を終えた (離したことを確かめた、または上限に達した) 後に
+                             pad_output.timer_send_failures を読み、増えていた (タイマーが送る離すレポートなどの送信が
+                             失敗した)。終えた後なら、stop が立っていても確かめる。確かめないのは、5 の待ちの間に stop が
+                             立って待つのをやめたときと、wait の操作だけ。説明には pad_output.last_error を入れる
+        どちらの失敗でも、失敗した press は届いたかもしれないものとして送った数に入れ、SystemOutputError の属性 result に
+        SystemRunResult(sent_count=その press の位置 + 1, cut_index=その press の位置, cut_reason=SEND_FAILED,
+        blocked_buttons=その press までに外したボタン) を持たせる (その press が列の最後の操作でも、cut_index を None に
+        しない)。呼び出し側は、この result で履歴 (送った操作の数と、この段階で送った決定) を作る前提とする。また、
+        ブリッジ側でボタンが押されたまま残っているおそれがあるため、呼び出し側は PadOutput.neutral() で押下の状態を
+        そろえてから次の入力を作る前提とする。
 
         先頭の操作は、渡された judged_screen とだけ比べて送り、新しいフレームの照合の結果を待たない。そのため呼び出し側は、
         次の列を決める入力の照合の結果を、前の列の最後の操作を終えた時刻 + SETTLE_S より後に撮ったフレームのものにする
@@ -219,31 +230,34 @@ class SystemOperationRunner:
             if reason is not None:
                 return _cut(index, reason, blocked)
             if operation.kind == "press":
+                action = operation_pad_action(operation)
                 failures_before = self.pad_output.timer_send_failures
                 try:
-                    filtered = self.pad_output.apply(
-                        operation_pad_action(operation), source="system"
-                    )
+                    filtered = self.pad_output.apply(action, source="system")
                 except OutputStoppedError:
                     return _cut(index, SystemCutReason.STOPPED, blocked)
+                except Exception as error:
+                    # 送信の失敗。この press は届いたかもしれないので、終えるのを待たずに結果を持たせて出す
+                    blocked.update(
+                        filter_action(
+                            action, self.pad_output.allowed_buttons
+                        ).blocked_buttons
+                    )
+                    raise SystemOutputError(
+                        f"sending operation {index} failed: "
+                        f"{describe_exception(error)}",
+                        _send_failed(index, blocked),
+                    ) from error
                 blocked.update(filtered.blocked_buttons)
                 end_t, interrupted = self._finish_press(operation, stop)
                 if (
                     not interrupted
                     and self.pad_output.timer_send_failures > failures_before
                 ):
-                    sent_count = index + 1
                     raise SystemOutputError(
                         f"a timer report failed while finishing operation {index}: "
                         f"{self.pad_output.last_error}",
-                        SystemRunResult(
-                            sent_count=sent_count,
-                            cut_index=sent_count
-                            if sent_count < len(operations)
-                            else None,
-                            cut_reason=None,
-                            blocked_buttons=frozenset(blocked),
-                        ),
+                        _send_failed(index, blocked),
                     )
             else:
                 # wait は何も送らず、待ち始めた時刻 + 秒数まで待つ
@@ -341,5 +355,18 @@ def _cut(index: int, reason: SystemCutReason, blocked: set[str]) -> SystemRunRes
         sent_count=index,
         cut_index=index,
         cut_reason=reason,
+        blocked_buttons=frozenset(blocked),
+    )
+
+
+def _send_failed(index: int, blocked: set[str]) -> SystemRunResult:
+    """位置 index の press の送信が失敗したときの結果を返す (blocked は、その press までに外したボタン)。
+
+    失敗した press は届いたかもしれないので、送った数に入れる (sent_count は index + 1)。
+    """
+    return SystemRunResult(
+        sent_count=index + 1,
+        cut_index=index,
+        cut_reason=SystemCutReason.SEND_FAILED,
         blocked_buttons=frozenset(blocked),
     )

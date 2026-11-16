@@ -22,6 +22,7 @@ def test_cut_reason_values():
         "no_judgment",
         "decision_not_first",
         "stopped",
+        "send_failed",
     ]
 
 

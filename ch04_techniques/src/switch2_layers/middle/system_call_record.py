@@ -11,7 +11,9 @@
 
 実行の結果の行 (system_run_row。操作の列を送り終えたら (打ち切りを含む) 1 行):
     {"kind": "run", "t", "sent_count", "cut_index", "cut_reason", "blocked_buttons": [ボタン名...]}
-    cut_index と cut_reason は、最後まで送ったら null。blocked_buttons は pad_action.sort_buttons の順。
+    cut_index と cut_reason は、最後まで送ったら null。cut_reason が send_failed のときは、cut_index は送信に失敗した
+    press の位置で、sent_count はその次の数 (cut_index + 1。失敗した press を含む)。その press が列の最後の操作でも、
+    cut_index と cut_reason は null にしない。blocked_buttons は pad_action.sort_buttons の順。
 
 ファイルに書く処理 (いつ書くか) は、行を作るこのモジュールの外で行う。
 """

@@ -138,7 +138,8 @@ def describe_sent_decisions(history: Sequence[SystemStepRecord]) -> str:
     history のすべて (MAX_HISTORY_ENTRIES 件に削る前のもの) を古い順に見て、各履歴の操作の列の先頭から sent_count 個
     (実際に送った操作) のうち、buttons に DECISION_BUTTON を含む press を、1 件 1 行「t=<その呼び出しの時刻> <その操作の
     screen> で A」で並べる (行は改行 1 つでつなぎ、末尾に改行を付けない。t は format_frame_label の形)。
-    打ち切りで送らなかった操作は入れない。1 件も無ければ NO_SENT_DECISIONS_TEXT を返す。
+    打ち切りで送らなかった操作は入れない。cut_reason が send_failed のとき、送信に失敗した press は sent_count に
+    含まれるため、届いたかもしれないものとして入る。1 件も無ければ NO_SENT_DECISIONS_TEXT を返す。
     """
     lines = [
         f"{format_frame_label(record.t)} {operation.screen} で {DECISION_BUTTON}"

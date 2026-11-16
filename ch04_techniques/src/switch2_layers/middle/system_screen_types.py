@@ -34,7 +34,11 @@ class SystemGoal(StrEnum):
 
 
 class SystemCutReason(StrEnum):
-    """操作の列の実行を、最後の操作より前で打ち切った理由 (SystemRunResult.cut_reason の値)。"""
+    """操作の列の実行を打ち切った理由 (SystemRunResult.cut_reason の値)。
+
+    SEND_FAILED 以外は、ある操作を送る前に打ち切った理由 (その操作から後は送らない)。SEND_FAILED は、送った press の
+    送信が失敗して打ち切った理由で、失敗した press が列の最後の操作でも入る。
+    """
 
     # 操作の screen が、送る前の照合の結果の画面と違った
     SCREEN_MISMATCH = "screen_mismatch"
@@ -44,6 +48,9 @@ class SystemCutReason(StrEnum):
     DECISION_NOT_FIRST = "decision_not_first"
     # 止める合図が立った (全体を止めるときに出力が止められた場合を含む)
     STOPPED = "stopped"
+    # press の送信 (PadOutput.apply の送信か、PadOutput のタイマーが送る離すレポートなど) が失敗した。失敗した press は
+    # 届いたかもしれないものとして数える
+    SEND_FAILED = "send_failed"
 
 
 @dataclass(frozen=True)
@@ -74,7 +81,8 @@ class SystemStepRecord:
     judged_screen   その回に渡した照合の結果の画面の名前。見本のどの画面でもなければ None
     operations      その回に middle が返した操作の列
     sent_count      そのうち送った操作の数 (SystemRunResult.sent_count)
-    cut_reason      打ち切ったときはその理由。最後まで送ったら None
+    cut_reason      打ち切ったときはその理由 (SystemRunResult.cut_reason)。最後まで送ったら None (SEND_FAILED は、列の
+                    最後の操作の送信が失敗したときにも入る)
     """
 
     t: float
@@ -130,9 +138,12 @@ class SystemRunResult:
     """操作の列の実行 (SystemOperationRunner.run) の結果。
 
     sent_count        送った操作の数 (wait は待ち始めたもの、押せないボタンを外して何も押さなかった press も数える)。
-                      打ち切ったときは cut_index と同じ値
-    cut_index         打ち切った操作の位置 (0 から数える。その操作から後は送っていない)。最後まで送ったら None
-    cut_reason        打ち切った理由。最後まで送ったら None
+                      打ち切ったときは cut_index と同じ値。ただし cut_reason が SEND_FAILED のときは cut_index + 1
+                      (送信に失敗した press を含む)
+    cut_index         打ち切った操作の位置 (0 から数える。その操作から後は送っていない)。最後まで送ったら None。
+                      cut_reason が SEND_FAILED のときは送信に失敗した press の位置 (その press は届いたかもしれず、
+                      その後の操作は送っていない)。その press が列の最後の操作でも None にしない
+    cut_reason        打ち切った理由。最後まで送ったら None (SEND_FAILED は、列の最後の操作の送信が失敗したときにも入る)
     blocked_buttons   押せないボタンとして hardware.pad_output.PadOutput.apply が外したボタン名 (送った操作のすべての分)
     """
 

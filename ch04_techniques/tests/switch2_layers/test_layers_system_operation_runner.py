@@ -309,6 +309,16 @@ def sent_all(count: int, blocked=frozenset()) -> SystemRunResult:
     )
 
 
+def send_failed(index: int, blocked=frozenset()) -> SystemRunResult:
+    """位置 index の press の送信が失敗したときの結果 (失敗した press は送った数に入れる)。"""
+    return SystemRunResult(
+        sent_count=index + 1,
+        cut_index=index,
+        cut_reason=SystemCutReason.SEND_FAILED,
+        blocked_buttons=blocked,
+    )
+
+
 def system_actions(harness: Harness) -> list[PadAction]:
     return [event.action for event in harness.events if event.source == "system"]
 
@@ -741,8 +751,18 @@ class BridgeDown(Exception):
 def test_send_failure_is_raised():
     harness = make_harness(steady("home_menu"))
     harness.sender.fail_with = BridgeDown("bridge is down")
-    with pytest.raises(BridgeDown):
+    with pytest.raises(SystemOutputError, match="bridge is down") as raised:
         run(harness, press("home_menu", "DOWN"))
+    assert isinstance(raised.value.__cause__, BridgeDown)
+    # 失敗した press は届いたかもしれないので、送った操作の数に入れる
+    assert raised.value.result == SystemRunResult(
+        sent_count=1,
+        cut_index=0,
+        cut_reason=SystemCutReason.SEND_FAILED,
+        blocked_buttons=frozenset(),
+    )
+    # その press を終えるのを待たずに出す (失敗した送信では偽の時計は進まない)
+    assert harness.now() == pytest.approx(START_T)
 
 
 def fail_after_sends(harness: Harness, count: int) -> None:
@@ -758,6 +778,36 @@ def fail_after_sends(harness: Harness, count: int) -> None:
 def fail_after_the_first_send(harness: Harness) -> None:
     """最初のレポート (押すレポート) の送信の後、次のレポート (離すレポート) から送信を失敗させる。"""
     fail_after_sends(harness, 1)
+
+
+def test_send_failure_after_the_first_a_has_its_result():
+    harness = make_harness(steady("user_select"))
+    # 送信は A を押す 0 と離す 1。2 つ目の press の apply (押すレポート) から失敗させる
+    fail_after_sends(harness, 2)
+    with pytest.raises(SystemOutputError, match="sending operation 1 failed") as raised:
+        run(
+            harness,
+            press("user_select", "A"),
+            press("user_select", "RIGHT"),
+            press("user_select", "B"),
+            judged="user_select",
+        )
+    assert isinstance(raised.value.__cause__, BridgeDown)
+    assert raised.value.result == send_failed(1)
+    # 3 つ目は送らない (送ろうとしたのは A と、失敗した RIGHT だけ)
+    assert system_actions(harness) == [
+        PadAction(taps=frozenset({"A"})),
+        PadAction(taps=frozenset({"RIGHT"})),
+    ]
+    assert len(harness.sender.sent_t) == 2
+
+
+def test_send_failure_keeps_the_blocked_buttons_of_the_failed_press():
+    harness = make_harness(steady("home_menu"), allowed=frozenset({"DOWN"}))
+    harness.sender.fail_with = BridgeDown("bridge is down")
+    with pytest.raises(SystemOutputError) as raised:
+        run(harness, press("home_menu", "B", "DOWN"))
+    assert raised.value.result == send_failed(0, blocked=frozenset({"B"}))
 
 
 @pytest.mark.parametrize(
@@ -780,23 +830,30 @@ def test_output_error_is_a_runtime_error():
 
 
 def test_output_error_of_the_first_a_has_its_result():
-    # 先頭の A の押すレポートは届いたので、送った操作の数に入れる (この段階で送った決定に載せるため)
+    # 先頭の A は届いたかもしれないので、送った操作の数に入れる (この段階で送った決定に載せるため)。列の最後の操作でも
+    # cut_index は失敗した位置にする
     harness = make_harness(steady("user_select"))
     fail_after_the_first_send(harness)
     with pytest.raises(SystemOutputError) as raised:
         run(harness, press("user_select", "A"), judged="user_select")
     assert raised.value.result == SystemRunResult(
-        sent_count=1, cut_index=None, cut_reason=None, blocked_buttons=frozenset()
+        sent_count=1,
+        cut_index=0,
+        cut_reason=SystemCutReason.SEND_FAILED,
+        blocked_buttons=frozenset(),
     )
 
 
-def test_output_error_before_the_end_has_the_next_position():
+def test_output_error_before_the_end_has_the_failed_position():
     harness = make_harness(steady("home_menu"))
     fail_after_the_first_send(harness)
     with pytest.raises(SystemOutputError) as raised:
         run(harness, press("home_menu", "A"), press("home_menu", "DOWN"))
     assert raised.value.result == SystemRunResult(
-        sent_count=1, cut_index=1, cut_reason=None, blocked_buttons=frozenset()
+        sent_count=1,
+        cut_index=0,
+        cut_reason=SystemCutReason.SEND_FAILED,
+        blocked_buttons=frozenset(),
     )
 
 
@@ -813,8 +870,8 @@ def test_output_error_of_the_second_operation_has_its_result():
         )
     assert raised.value.result == SystemRunResult(
         sent_count=2,
-        cut_index=2,
-        cut_reason=None,
+        cut_index=1,
+        cut_reason=SystemCutReason.SEND_FAILED,
         blocked_buttons=frozenset({"HOME"}),
     )
     assert len(system_actions(harness)) == 2

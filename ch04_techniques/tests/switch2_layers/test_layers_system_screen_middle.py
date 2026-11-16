@@ -324,6 +324,26 @@ def test_user_message_history_has_operations_counts_and_cut_reason():
     assert "screen_mismatch" in joined
 
 
+def test_user_message_history_counts_the_operation_whose_send_failed():
+    # 送信に失敗した press は送った操作の数に入る。列の最後の操作で失敗しても、最後まで送ったとは書かない
+    record = history_record(
+        75.0,
+        operations=(
+            PRESS_DOWN,
+            SystemOperation(
+                screen="home_menu", kind="press", buttons=("RIGHT",), seconds=None
+            ),
+        ),
+        sent_count=2,
+        cut_reason=SystemCutReason.SEND_FAILED,
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
+    joined = "\n".join(user_texts(sent_payload(screen_input)))
+    assert "t=75.000" in joined
+    assert "送った操作 2/2、打ち切った理由 send_failed" in joined
+    assert "最後まで送った" not in joined
+
+
 # この段階で送った決定 (A) の節の見出し
 SENT_DECISIONS_TITLE = "この段階で送った決定 (A)"
 HISTORY_TITLE = "この段階のこれまでの呼び出し"
@@ -419,8 +439,36 @@ def test_sent_decisions_section_skips_a_that_was_not_sent():
     assert section == "まだ送っていません"
 
 
+def test_sent_decisions_section_includes_a_whose_send_failed():
+    # 送信に失敗した A は送った操作の数に入るので、届いたかもしれないものとして入る
+    record = history_record(
+        61.0,
+        judged_screen="user_select",
+        operations=(
+            press_a("user_select"),
+            SystemOperation(
+                screen="user_select", kind="press", buttons=("RIGHT",), seconds=None
+            ),
+        ),
+        sent_count=1,
+        cut_reason=SystemCutReason.SEND_FAILED,
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
+    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    assert section == "t=61.000 user_select で A"
+
+
 def test_developer_message_describes_the_sent_decisions_section():
     assert SENT_DECISIONS_TITLE in developer_text(sent_payload())
+
+
+def test_developer_message_describes_the_send_failed_reason():
+    text = developer_text(sent_payload())
+    assert "- send_failed: 操作の送信に失敗した。" in text
+    assert (
+        "送信に失敗した A (send_failed) は、届いたかもしれないものとして入ります。"
+        in text
+    )
 
 
 def test_details_after_success_have_usage_cost_and_response():
