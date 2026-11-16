@@ -33,6 +33,7 @@ from switch2_layers.notes.map_document import (
     map_document_to_json,
 )
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 JPEG_1 = b"\xff\xd8\xff\xe0frame-1"
 JPEG_2 = b"\xff\xd8\xff\xe0frame-2"
@@ -505,6 +506,11 @@ def test_instructions_cover_every_output_field_and_timeline_section():
     # user メッセージの節の見出しをすべて説明する
     for title in USER_SECTION_TITLES:
         assert title in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def test_instructions_include_the_safety_rules():
+    # 変わらない指示の中に入れる (毎回同じ文字列のまま、キャッシュから読む)
+    assert SAFETY_RULES in LUNA_DEVELOPER_INSTRUCTIONS
 
 
 def test_instructions_cover_the_map():

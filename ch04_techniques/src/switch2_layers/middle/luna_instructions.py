@@ -3,7 +3,10 @@
 指示は入力によらず同じ文字列にする (要求で、この指示の直後に明示のキャッシュの区切りを置き、毎回キャッシュから読むため)。
 時刻・場面の一覧・記録などの毎回変わる内容は、ここに入れずに user メッセージに置く (luna_request)。
 キャッシュされるのは、区切りまでが 1,024 トークン以上のときだけで、指示がそれより短いとキャッシュされない。
+指示の最後には、安全のための規則 (safety.safety_rules.SAFETY_RULES) の節 (SAFETY_SECTION) を置く。
 """
+
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 # 系列情報 (timeline) の節の見出し (この順に「## 見出し」で書かせる)
 TIMELINE_SECTION_TITLES: tuple[str, ...] = (
@@ -13,7 +16,16 @@ TIMELINE_SECTION_TITLES: tuple[str, ...] = (
     "詰まり方",
 )
 
-LUNA_DEVELOPER_INSTRUCTIONS = """\
+# 変わらない指示の最後に置く、安全のための規則の節
+SAFETY_SECTION = (
+    "\n# 安全のための規則\n\n"
+    "surface は短期タスクリストを進める操作を選びます。次の規則に反するタスク (通信対戦やオンラインの機能を"
+    "選ぶ、ショップで買う、HOME メニューで試行しているソフト以外を起動する、セーブデータを消す、本体の設定を"
+    "変えるなど) を書きません。\n\n" + SAFETY_RULES
+)
+
+LUNA_DEVELOPER_INSTRUCTIONS = (
+    """\
 あなたは、Nintendo Switch 2 のゲームを遊ぶエージェントの middle 層です。エージェントは次の 3 つの層でできています。
 
 - surface: 0.2〜2 秒ごとに直近の画面を見て、コントローラーの操作を決めて送ります。あなたが書く系列情報と短期タスクリストを読み、要求の間の待ち時間はあなたが決めた値に従います
@@ -129,3 +141,5 @@ surface が応答を受け取ってから次の要求を送るまでの待ち秒
 - 文章 (stuck_description・timeline・tasks と、new_connections の how・new_observations の description) は日本語で書きます
 - 画面に映っていないことや、記録に無いことを、事実として書きません
 """
+    + SAFETY_SECTION
+)

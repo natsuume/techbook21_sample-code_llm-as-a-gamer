@@ -26,6 +26,7 @@ from enum import StrEnum
 from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 from switch2_layers.surface.box_targets import BoxTarget
 
 # state の中でフレームの一覧を置くキー (問いの文がパスで参照する)
@@ -98,7 +99,10 @@ class QuestionType(StrEnum):
 
 
 class QuestionKind(StrEnum):
-    """surface の問いの種類 (モジュールの docstring の表)。"""
+    """Jev に送る問いの種類。SAFETY のほかは surface の問い (モジュールの docstring の表)。
+
+    SAFETY は安全の監視の問い (safety.safety_questions) で、surface の要求には入れない。
+    """
 
     BUTTON = "button"
     STICK_DIRECTION = "stick_direction"
@@ -108,6 +112,7 @@ class QuestionKind(StrEnum):
     SCENE_CHANGE = "scene_change"
     BOX_EXISTS = "box_exists"
     BOX = "box"
+    SAFETY = "safety"
 
 
 @dataclass(frozen=True)
@@ -131,7 +136,8 @@ class SurfaceQuestion:
     kind            問いの種類
     target          button はボタン名、stick_direction は `LS_x` の形、stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
-                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)
+                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
+                    safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素)
     question_type   Jev の問いの型。button と stick_direction は choice、box は box、ほかは noul
     choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE)。ほかの型では空のタプル
     """
@@ -176,7 +182,7 @@ STICK_DIRECTION_CHOICES = {
     ),
 }
 
-# 要求の state の instructions に入れる、役割と規則の説明
+# 要求の state の instructions に入れる、役割と規則の説明。最後に安全のための規則 (safety.safety_rules) を置く
 SURFACE_INSTRUCTIONS = (
     "あなたは、Nintendo Switch 2 のゲームを遊ぶエージェントの surface (コントローラーを操作する層) です。\n"
     "`frames` は直近 2 秒以内のゲームの画面で、古い順に並び、最後が最新です。"
@@ -191,7 +197,7 @@ SURFACE_INSTRUCTIONS = (
     "規則:\n"
     "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
     "- 操作の問い (ボタンとスティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
-    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。"
+    "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
 
 # advisor 判定の問いの文 (文書の種類 → 文)。build_advisor_questions が、末尾に ADVISOR_STATUS_RULE_TEXT の文を足す

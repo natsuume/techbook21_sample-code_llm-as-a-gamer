@@ -1,7 +1,8 @@
 """deep (Claude Code) に渡すプロンプトを、パッケージの中のプロンプトのファイルとジョブごとの値から作る。
 
 プロンプトのファイル (パッケージの switch2_layers/deep/prompts/ に置く。UTF-8 の Markdown):
-    common.md      共通の部分 (役割・今回のジョブ・対象の文書・読んでよいもの・文書の書き方の手順・守ること)。
+    common.md      共通の部分 (役割・今回のジョブ・対象の文書・読んでよいもの・文書の書き方の手順・
+                   安全のための規則 (safety.safety_rules.SAFETY_RULES と同じ文)・守ること)。
                    ${kind_instructions} の位置に種類ごとの指示を入れる
     controls.md    操作説明の指示
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)

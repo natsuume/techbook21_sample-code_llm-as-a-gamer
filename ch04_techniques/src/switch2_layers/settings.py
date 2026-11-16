@@ -6,7 +6,8 @@
 middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
 読む (openai_api_key_errors で有無を確かめる)。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
 環境変数 TYPESAFE_API_KEY_ENV から読む (typesafe_api_key_errors で有無を確かめる)。deep のジョブを実行するものは
---deep (DeepRunnerChoice) で選ぶ。
+--deep (DeepRunnerChoice) で選ぶ。安全の監視の実装は --safety (SafetyKind) で選ぶ。jev に要る API キーは surface と
+同じ環境変数 TYPESAFE_API_KEY_ENV から読む (safety_api_key_errors で有無を確かめる)。
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 """
 
@@ -86,6 +87,21 @@ class DeepRunnerChoice(StrEnum):
 DEFAULT_DEEP_RUNNER = DeepRunnerChoice.CLAUDE
 
 
+class SafetyKind(StrEnum):
+    """run の安全の監視の実装 (--safety の値)。"""
+
+    JEV = "jev"  # TypeSafe Jev に問う (safety.jev_safety.JevSafetyChecker)
+    FAKE = "fake"  # すべての確率を 0 として返すフェイク (safety.fake_safety.FakeSafetyChecker)
+
+
+DEFAULT_SAFETY = SafetyKind.JEV
+DEFAULT_SAFETY_INTERVAL_S = 1.0
+SAFETY_INTERVAL_MIN_S = 0.2
+SAFETY_INTERVAL_MAX_S = 10.0
+DEFAULT_THRESHOLD_SAFETY = 0.7
+DEFAULT_MAX_SAFETY_ERRORS = 3
+
+
 @dataclass(frozen=True)
 class RunSettings:
     """run の起動引数。
@@ -112,6 +128,13 @@ class RunSettings:
     box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
                                 (--box-requery-every、既定 5。1 以上)
     deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
+    safety                      安全の監視の実装 (--safety、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
+                                (safety_api_key_errors)
+    safety_interval_s           安全の監視が要求を送る間隔 (秒) (--safety-interval、既定 1.0。
+                                SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下)
+    threshold_safety            安全の問いのしきい値。確率がこれを超えた画面で止める
+                                (--threshold-safety、既定 0.7。0 より大きく 1 より小さい値)
+    max_safety_errors           安全の監視の失敗がこの回数続いたら全体を止める (--max-safety-errors、既定 3。1 以上)
     """
 
     runs_dir: Path = DEFAULT_RUNS_DIR
@@ -130,6 +153,10 @@ class RunSettings:
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
     deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
+    safety: SafetyKind = DEFAULT_SAFETY
+    safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S
+    threshold_safety: float = DEFAULT_THRESHOLD_SAFETY
+    max_safety_errors: int = DEFAULT_MAX_SAFETY_ERRORS
 
 
 @dataclass(frozen=True)
@@ -170,6 +197,9 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
     --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
+    安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
+    --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
+    safety は値の型 (SafetyKind) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -225,6 +255,20 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     if settings.box_requery_every < 1:
         errors.append(
             f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
+        )
+    if not SAFETY_INTERVAL_MIN_S <= settings.safety_interval_s <= SAFETY_INTERVAL_MAX_S:
+        errors.append(
+            f"--safety-interval must be {SAFETY_INTERVAL_MIN_S:g}..{SAFETY_INTERVAL_MAX_S:g}: "
+            f"{settings.safety_interval_s}"
+        )
+    if not 0.0 < settings.threshold_safety < 1.0:
+        errors.append(
+            "--threshold-safety must be more than 0 and less than 1: "
+            f"{settings.threshold_safety}"
+        )
+    if settings.max_safety_errors < 1:
+        errors.append(
+            f"--max-safety-errors must be 1 or more: {settings.max_safety_errors}"
         )
     return errors
 
@@ -311,15 +355,37 @@ def typesafe_api_key_errors(
     ]
 
 
+def safety_api_key_errors(safety: SafetyKind, environ: Mapping[str, str]) -> list[str]:
+    """--safety の実装に要る API キーが環境変数 environ にあるかを確かめ、無ければメッセージのリストを返す。
+
+    safety が JEV で、environ の TYPESAFE_API_KEY_ENV が無いか、空か空白だけなら、TYPESAFE_API_KEY と
+    --safety fake (API キーなしで動かす方法) を含むメッセージを 1 つ返す。それ以外 (キーがある、FAKE) は空のリスト。
+    メッセージに API キーの値は含めない。cli は実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば
+    終了コード 2 で終わる。
+    """
+    if safety is not SafetyKind.JEV:
+        return []
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--safety {SafetyKind.JEV.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV}. Set it, or use --safety {SafetyKind.FAKE.value} "
+            "to run without an API key"
+        )
+    ]
+
+
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep は値の文字列。
-    middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety は値の文字列。
+    middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake") にする。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
     value["surface"] = settings.surface.value
     value["deep"] = settings.deep.value
+    value["safety"] = settings.safety.value
     return value

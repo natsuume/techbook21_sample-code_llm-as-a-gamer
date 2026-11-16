@@ -26,6 +26,7 @@ from switch2_layers.deep.deep_prompt import (
     read_prompt_context,
 )
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 TIPS_NOTES = [
     "scenes/scene-001/tips.md",
@@ -433,6 +434,24 @@ def test_prompt_of_each_kind_embeds_values(tmp_path, name, kind, scene_id, docum
     # 種類ごとの指示は、その種類のファイルのもの
     kind_text = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind(kind)])
     assert kind_text.splitlines()[0] in prompt
+
+
+def test_common_prompt_includes_every_safety_rule_line():
+    # Markdown のファイルなので、安全のための規則の文を 1 行ずつ書き写してある
+    lines = raw_prompt_file(COMMON_PROMPT_FILE).splitlines()
+    for line in SAFETY_RULES.splitlines():
+        assert line in lines, line
+
+
+def test_prompt_of_every_kind_includes_the_safety_rules(tmp_path):
+    run_dir = make_run(tmp_path)
+    for job_dir in [
+        tips_job(run_dir),
+        make_job(run_dir, "strategy-001", "strategy", None, ["strategy.md"]),
+        make_job(run_dir, "map-001", "map", None, ["map/map.json", "map/places.md"]),
+    ]:
+        prompt = build_deep_prompt(read_prompt_context(job_dir))
+        assert SAFETY_RULES in prompt
 
 
 def test_prompt_does_not_embed_text_read_from_files(tmp_path):

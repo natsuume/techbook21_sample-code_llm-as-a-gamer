@@ -115,6 +115,11 @@ def test_middle_map_records_path():
     assert RunPaths(root).middle_map_records == root / "middle" / "map_records.jsonl"
 
 
+def test_safety_log_path():
+    root = Path("/runs/20261115-142233")
+    assert RunPaths(root).safety_log == root / "safety.jsonl"
+
+
 def test_frame_file_name_uses_nine_digit_milliseconds():
     assert frame_file_name(12.345) == "000012345.jpg"
     assert frame_file_name(0.0) == "000000000.jpg"
