@@ -665,3 +665,126 @@ surface が決めた操作は、コントローラーに送る直前に、押せ
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
 止まるときは、surface と middle のループと安全の監視のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。
+
+## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
+
+`switch2-harness` は、第3章と同じく Claude Code に Switch 2 をプレイさせるための、補助コマンドと指示ファイル (`CLAUDE.md`) を用意するパッケージ ([`src/switch2_harness/`](./src/switch2_harness/)) です。第1章で取り上げた先行研究の手法を要素として足し、要素ごとに有効・無効を切り替えて効果を比べます。要素をすべて無効にすると、撮影とボタン入力のコマンドだけを使う、第3章に近い条件になります。第3章と違うのは、`press` で HOME を押せないこと (HOME 画面に戻るときは `finish` を使う)、入力と撮影を記録すること、`run` で起動するときに起動した人の設定を混ぜないことです。
+
+映像と入力には第2章のデーモンを使います。デーモン (`switch2-remote-daemon`) は、`ch02_setup` ディレクトリーで先に起動しておいてください。
+
+### 作業ディレクトリーを作る
+
+プレイのたびに、`init` で作業ディレクトリーを作ります。このディレクトリーの中に、設定・指示ファイル・撮影した画像・記録が入ります。`plays/` は Git の管理から外してあります。
+
+```bash
+uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエストⅢ そして伝説へ…"
+```
+
+| 引数 | 内容 |
+|---|---|
+| `DIR` | 作る作業ディレクトリー。存在しないか、空のディレクトリーを指定します |
+| `--game NAME` | ゲーム名。指示ファイルに書きます |
+| `--goal TEXT` | 目標。省略すると「できるだけ先へ進める」です |
+| `--enable NAME` | 有効にする要素の名前。繰り返して複数を指定できます |
+
+作業ディレクトリーには次のものができます。
+
+| パス | 内容 |
+|---|---|
+| `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
+| `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
+| `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
+| `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
+| `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
+| `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
+
+### サブコマンド
+
+エージェントが使うサブコマンドは、作業ディレクトリーで実行します。`--workspace DIR` で作業ディレクトリーを指定することもできます。
+
+| サブコマンド | 使う人 | 動作 |
+|---|---|---|
+| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します |
+| `press ACTION ARGS...` | エージェント | `tap` / `hold` / `down` / `up` を、第2章のクライアントと同じ書き方でデーモンに送ります。HOME を含む入力は送らずにエラーにします |
+| `status` | エージェント | デーモンの動作状況を表示します |
+| `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
+| `init DIR ...` | 人 | 作業ディレクトリーを作ります |
+| `run --minutes N` | 人 | 作業ディレクトリーで Claude Code を起動し、N 分たったら止めます |
+| `report` | 人 | 記録から実験の集計を表示します。`--json` で JSON にします |
+
+`look`・`press`・`status`・`finish` は、成否によらず `records/events.jsonl` に記録します。記録は要素の有効・無効によらず取ります。
+
+### 実験の実行 (`run`)
+
+`run` は、作業ディレクトリーで Claude Code を headless (`claude -p`) で起動し、指定した分数がたったら止めます。
+
+```bash
+uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
+```
+
+| 引数 | 内容 | 既定値 |
+|---|---|---|
+| `--minutes N` | プレイする分数 (小数可) | なし (必須) |
+| `--model MODEL` | Claude Code に渡すモデル | `claude-opus-5-5` (第3章の試行と同じ) |
+| `--effort LEVEL` | Claude Code に渡す effort | 指定しない |
+| `--max-budget-usd X` | Claude Code に渡す費用の上限 | 指定しない |
+
+プレイ中のエージェントに、起動した人の環境の設定を混ぜないよう、次のように起動します。
+
+- `--restricted` で、ユーザー・プロジェクト・ローカルの設定ファイルを読み込ませません。ユーザー設定で有効にした plugin と hook も読み込まれません。ファイルのツールは作業ディレクトリーの中に限られます。`--settings` で `permissions.blockReadsOutsideWorkingDirectories` を渡すと、cat などの読み取り専用の Bash で作業ディレクトリーの外を読むときも承認が要るようになり、後に書く `dontAsk` で拒否されます
+- MCP サーバー (`--strict-mcp-config`)、Skill とスラッシュコマンド (`--disable-slash-commands`、`--disallowedTools Skill`) を読み込ませません。作業ディレクトリーは `ch04_techniques/` の下にあり、Claude Code は親ディレクトリーの `.claude/skills/` も読むため、既存の第4章の Skill を読ませないようにしています
+- 環境変数 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` で、`~/.claude/CLAUDE.md` を含むどの `CLAUDE.md` も読ませず、作業ディレクトリーの `CLAUDE.md` だけを `--append-system-prompt-file` で渡します。自動メモリーも `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` で無効にします
+- 子のプロセスには、起動した人の環境変数から、`CLAUDE` で始まる変数 (Claude Code の認証・設定の場所・プロバイダーの選択に使うものを除く) と、`ANTHROPIC_` で始まらない `*_API_KEY` を除いて渡します。Claude Code のセッションの中から `run` を起動しても、そのセッションの変数は子に渡りません
+- 使える組み込みのツールを Bash と Read に限り (`--tools Bash,Read`)、Bash は `uv run switch2-harness <サブコマンド>` だけを許可します。`--permission-mode dontAsk` で、許可していない呼び出しは確認なしで拒否します。Web 検索はできません
+
+2026-11-16 に Claude Code 2.1.325 で起動し、次のことを確かめました。
+
+- 読み込まれたツールは Bash と Read だけで、MCP サーバー・スラッシュコマンド・Skill は空、plugin は Claude Code の組み込みのものだけ
+- `uv run switch2-harness status` は許可されて実行され、出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
+- 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
+
+エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
+
+期限になったら SIGINT を送り、20 秒たっても終わらなければ SIGTERM、さらに 10 秒たっても終わらなければ強制終了します。止めた後は、デーモンに `up ALL` を送って押したままの入力を離します。`run` を Ctrl+C・SIGTERM・SIGHUP で止めた場合も、Claude Code を止めてから `up ALL` を送ります。HOME 画面には戻さないため、プレイを終えるときは人がゲームを終了するか、エージェントに `finish` を指示してください。
+
+`run` が止まった理由は、表示の `reason=` で確かめられます。
+
+| `reason` | 止まった理由 |
+|---|---|
+| `deadline` | 期限になった (期限より前に終わって、残りが 30 秒未満だった場合を含む) |
+| `budget_exhausted` | Claude Code が予算の上限で終わったか、run 全体の残りの予算がなくなった |
+| `resumes_exhausted` | 起動し直した回数が 20 回になった |
+| `no_session` | 起動し直すためのセッションの ID が、今回の run の出力に無かった |
+
+### 記録の集計 (`report`)
+
+`report` は、`records/events.jsonl`・`frames/` の画像・`records/agent.jsonl` から、実験の集計を表示します。
+
+```text
+$ uv run switch2-harness report --workspace plays/dq3-baseline
+記録の時間: 21.0 秒
+コマンドの回数: run=1 look=6 press=4
+error の数: 2
+look の間隔: 中央値 3.5 秒 / 平均 4.0 秒 / 最大 6.0 秒
+変化なしの look の組: 3 / 4
+変化なしが続いた最長の時間: 9.0 秒
+press の後も変化なしの組: 2 / 3
+エージェント: 起動 4 回 / 応答 12 回 / result 3 回
+result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 秒
+```
+
+| 行 | 内容 |
+|---|---|
+| 記録の時間 | 最初と最後の記録の時刻の差 |
+| コマンドの回数 | サブコマンドごとの記録の数 |
+| error の数 | 失敗した記録の数 (デーモンの error と、press の拒否を含む) |
+| look の間隔 | 成功した `look` どうしの時刻の差。エージェントの 1 サイクル (撮影・判断・入力) の長さの目安です |
+| 変化なしの look の組 | 続けて撮った 2 枚のうち、画面がほぼ変わらなかった組の数 / 組の数 |
+| 変化なしが続いた最長の時間 | 画面がほぼ変わらない組が続いた区間の、最も長い時間 |
+| press の後も変化なしの組 | 間に成功した `press` がある組のうち、画面がほぼ変わらなかった組の数 / 間に成功した `press` がある組の数 |
+| エージェント | `run` で起動した回数 / Claude Code の応答の数 / 終わったときに出る result の数 |
+| result を出した起動の分 | result に書かれた費用・ターン数・時間の合計 |
+
+画面の変化は、2 枚をグレースケールにして 160x90 に縮小し、明るさの差が 24 を超える画素の割合で測ります。割合が 1% 未満の組を「変化なし」とします。期限で止めた起動は result を出さないことがあり (Claude Code のドキュメントには、SIGTERM で止めると result を記録しないとある)、その起動の分は費用・ターン数・時間に含まれません。起動の回数と応答の数は、result の有無によらず数えます。
+
+`--json` を付けると、同じ集計を JSON の 1 行で表示します。

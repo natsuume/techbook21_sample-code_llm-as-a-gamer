@@ -7,6 +7,8 @@ Feature.instruction_file の節を続ける。テンプレートの読み込み�
 """
 
 from collections.abc import Callable
+from importlib import resources
+from string import Template
 
 from switch2_harness.features import FEATURES, Feature
 from switch2_harness.harness_config import HarnessConfig
@@ -24,7 +26,8 @@ def read_package_template(file_name: str) -> str:
     importlib.resources.files("switch2_harness") を起点に "instructions" と file_name をつないで読む
     (このモジュール switch2_harness.instructions ではなく、パッケージ switch2_harness を起点にする)。
     """
-    raise NotImplementedError
+    template = resources.files("switch2_harness") / "instructions" / file_name
+    return template.read_text(encoding="utf-8")
 
 
 def render_instructions(
@@ -39,4 +42,14 @@ def render_instructions(
     3. 各部分の末尾の改行を除き、空行 1 つ ("\\n\\n") で区切ってつなぎ、末尾を改行 1 つで終える
     例: base が "# B $game\\n"、要素の節が "## F $goal\\n\\n" なら "# B G\\n\\n## F X\\n" (game="G", goal="X")。
     """
-    raise NotImplementedError
+    enabled = set(config.features)
+    file_names = [BASE_TEMPLATE_FILE] + [
+        feature.instruction_file for feature in available if feature.name in enabled
+    ]
+    sections = [
+        Template(read_template(file_name))
+        .substitute(game=config.game, goal=config.goal)
+        .rstrip("\n")
+        for file_name in file_names
+    ]
+    return "\n\n".join(sections) + "\n"

@@ -2,8 +2,9 @@
 
 起動引数 (build_claude_args) と環境変数 (build_claude_env) の組み立て、agent.jsonl からの session_id・
 最後の result の subtype・最後の result の total_cost_usd の読み取り (last_session_id・last_result_subtype・
-last_total_cost_usd) は純粋関数。
-時間を区切った起動 (run_agent_until) は、プロセスの起動・時計・待機・デーモンへの送信・記録をすべて引数で受け取る。
+last_total_cost_usd)、終わったプロセスを起動し直すかの判定 (stop_reason_after_exit) は純粋関数。
+時間を区切った起動 (run_agent_until) は、プロセスの起動・時計・待機・デーモンへの送信・記録・
+後片付けの間の割り込みの扱いをすべて引数で受け取る。
 
 プレイ中のエージェントには、ユーザー・プロジェクト・ローカルの設定 (plugin・hook・許可の設定など)、MCP、
 CLAUDE.md (~/.claude/CLAUDE.md を含む)、自動メモリー、親ディレクトリーの .claude/skills (既存の第4章の Skill)、
@@ -28,14 +29,18 @@ errors="replace" でデコードし、JSON として読めない行は読み飛�
 """
 
 import json
+import math
+import signal
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
+from switch2_harness.signal_guard import ignore_interrupts
 from switch2_harness.workspace import WorkspacePaths
 
 CLAUDE_COMMAND = "claude"
@@ -67,19 +72,26 @@ CLAUDE_ENV_OVERRIDES: Mapping[str, str] = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 
-# 名前が "CLAUDE" で始まる環境変数のうち、claude に渡すもの。
+# 名前が "CLAUDE" で始まる環境変数は、claude に渡さないのを基本にする。
 # run は親の Claude Code のセッションの Bash から起動されることがあり、その環境には親のセッションの変数
 # (CLAUDECODE・CLAUDE_CODE_SESSION_ID・CLAUDE_EFFORT など) がある。それらで子が子のセッションとして扱われたり
-# effort が変わったりしないように、"CLAUDE" で始まる変数は除き、Claude Code 自身の認証と設定の場所に使う変数だけを残す
+# effort が変わったりしないようにするため。残すのは、Claude Code 自身の認証と設定の場所に使う次の変数と、
+# プロバイダーの選択 (KEPT_CLAUDE_ENV_PREFIX で始まるもの) と認証を省く変数 (SKIP_AUTH_ENV_PREFIX で始まり
+# SKIP_AUTH_ENV_SUFFIX で終わるもの)
 KEPT_CLAUDE_ENV_NAMES: tuple[str, ...] = (
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
 )
+KEPT_CLAUDE_ENV_PREFIX = (
+    "CLAUDE_CODE_USE_"  # 例: CLAUDE_CODE_USE_BEDROCK・CLAUDE_CODE_USE_VERTEX
+)
+SKIP_AUTH_ENV_PREFIX = "CLAUDE_CODE_SKIP_"  # 例: CLAUDE_CODE_SKIP_BEDROCK_AUTH
+SKIP_AUTH_ENV_SUFFIX = "_AUTH"
 
-# 名前が "_API_KEY" で終わる環境変数のうち、claude に渡すもの (ほかの API キーを子に渡す理由は無いため除く)
-KEPT_API_KEY_ENV_NAME = "ANTHROPIC_API_KEY"
+# 名前が "_API_KEY" で終わる環境変数は、この接頭辞で始まるもの (Claude Code のプロバイダーの API キー) だけを残す。
+# ほかの層の API キー (OPENAI_API_KEY など) を子に渡す理由は無いため除く
+KEPT_API_KEY_ENV_PREFIX = "ANTHROPIC_"
+API_KEY_ENV_SUFFIX = "_API_KEY"
 
 # claude -p が --max-budget-usd の上限に達して終わったときの、result メッセージの subtype
 BUDGET_EXHAUSTED_SUBTYPE = "error_max_budget_usd"
@@ -88,10 +100,14 @@ BUDGET_EXHAUSTED_SUBTYPE = "error_max_budget_usd"
 # deadline: 期限 (または残りが MIN_REMAINING_S 未満)
 # budget_exhausted: 予算を使い切った。次の 2 つの場合がある
 #     - CLI が予算切れで終わった (今回の run の agent.jsonl の最後の result の subtype が error_max_budget_usd)
-#     - run 全体の残りの予算 (--max-budget-usd − 今回の run の最後の result の total_cost_usd) が 0 以下になった
+#     - run 全体の残りの予算 (--max-budget-usd − 今回の run の最後の result の total_cost_usd) を
+#       format_budget_usd で丸めた値が 0 以下になった
 # no_session: 起動し直すための session_id が今回の run の agent.jsonl に無い
 # resumes_exhausted: 起動し直した回数が MAX_RESUMES に達した
 StopReason = Literal["deadline", "budget_exhausted", "no_session", "resumes_exhausted"]
+
+# 後片付けを割り込みから守るコンテキストマネージャーを作る関数の型 (本番は signal_guard.ignore_interrupts)
+Shield = Callable[[], AbstractContextManager[None]]
 
 
 @dataclass(frozen=True)
@@ -155,7 +171,7 @@ class StartProcess(Protocol):
 
 def first_prompt(game: str) -> str:
     """最初の起動のプロンプトを返す。例: game が "G" なら `指示に従って、ゲーム「G」のプレイを始めてください。`。"""
-    raise NotImplementedError
+    return f"指示に従って、ゲーム「{game}」のプレイを始めてください。"
 
 
 def allowed_tools(agent_commands: Sequence[str]) -> list[str]:
@@ -165,12 +181,12 @@ def allowed_tools(agent_commands: Sequence[str]) -> list[str]:
     (Read は作業ディレクトリーの中なら承認なしで通るため、挙げない)。
     例: ("look",) なら ["Bash(uv run switch2-harness look *)"]。
     """
-    raise NotImplementedError
+    return [f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands]
 
 
 def format_budget_usd(budget_usd: float) -> str:
     """--max-budget-usd に渡す文字列を返す。小数 4 桁 (f"{budget_usd:.4f}")。例: 0.6 は "0.6000"。"""
-    raise NotImplementedError
+    return f"{budget_usd:.4f}"
 
 
 def build_claude_args(
@@ -200,18 +216,87 @@ def build_claude_args(
     プロンプトを -p の直後に置くのは、可変長の --allowedTools などが後ろの位置引数を取り込まないようにするため。
     [] の中は、値が None でないときだけ付ける。
     """
-    raise NotImplementedError
+    args = [
+        CLAUDE_COMMAND,
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "dontAsk",
+        "--tools",
+        "Bash,Read",
+        "--allowedTools",
+        *allowed_tools(agent_commands),
+        "--disallowedTools",
+        "Skill",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--restricted",
+        "--settings",
+        CLAUDE_SETTINGS_JSON,
+        "--append-system-prompt-file",
+        str(instructions_path),
+        "--model",
+        options.model,
+    ]
+    if options.effort is not None:
+        args += ["--effort", options.effort]
+    if options.max_budget_usd is not None:
+        args += ["--max-budget-usd", format_budget_usd(options.max_budget_usd)]
+    if resume_session_id is not None:
+        args += ["--resume", resume_session_id]
+    return args
+
+
+def is_kept_env_name(name: str) -> bool:
+    """環境変数の名前 name を claude に渡すなら True を返す (名前の大文字小文字は区別する)。
+
+    - "CLAUDE" で始まる名前は、KEPT_CLAUDE_ENV_NAMES にあるもの、KEPT_CLAUDE_ENV_PREFIX で始まるもの、
+      SKIP_AUTH_ENV_PREFIX で始まり SKIP_AUTH_ENV_SUFFIX で終わるものだけを渡す
+      (例: CLAUDE_CODE_USE_FOUNDRY・CLAUDE_CODE_SKIP_BEDROCK_AUTH は渡し、CLAUDECODE・CLAUDE_CODE_SKIP_FOO は渡さない)
+    - API_KEY_ENV_SUFFIX ("_API_KEY") で終わる名前は、KEPT_API_KEY_ENV_PREFIX ("ANTHROPIC_") で始まるものだけを渡す
+      (例: ANTHROPIC_FOUNDRY_API_KEY は渡し、OPENAI_API_KEY は渡さない)
+    - それ以外の名前 (ANTHROPIC_BASE_URL、AWS_・GOOGLE_ で始まるもの、PATH など) は渡す
+    """
+    if name.startswith("CLAUDE"):
+        return (
+            name in KEPT_CLAUDE_ENV_NAMES
+            or name.startswith(KEPT_CLAUDE_ENV_PREFIX)
+            or (
+                name.startswith(SKIP_AUTH_ENV_PREFIX)
+                and name.endswith(SKIP_AUTH_ENV_SUFFIX)
+            )
+        )
+    if name.endswith(API_KEY_ENV_SUFFIX):
+        return name.startswith(KEPT_API_KEY_ENV_PREFIX)
+    return True
 
 
 def build_claude_env(base_env: Mapping[str, str]) -> dict[str, str]:
     """claude に渡す環境変数の辞書を返す。base_env は変えない。
 
-    base_env から次の変数を除き (名前の大文字小文字は区別する)、CLAUDE_ENV_OVERRIDES を足した (同じ名前は上書きした) ものを返す:
-        - 名前が "CLAUDE" で始まり、KEPT_CLAUDE_ENV_NAMES に無い変数 (例: CLAUDECODE、CLAUDE_CODE_SESSION_ID、CLAUDE_EFFORT)
-        - 名前が "_API_KEY" で終わり、KEPT_API_KEY_ENV_NAME ("ANTHROPIC_API_KEY") でない変数 (例: OPENAI_API_KEY)
-    それ以外の変数 (PATH・HOME など) はそのまま残す。
+    base_env のうち is_kept_env_name に当たる変数だけを残し、CLAUDE_ENV_OVERRIDES を足した
+    (同じ名前は上書きした) ものを返す。
     """
-    raise NotImplementedError
+    env = {name: value for name, value in base_env.items() if is_kept_env_name(name)}
+    env.update(CLAUDE_ENV_OVERRIDES)
+    return env
+
+
+def _json_objects(lines: Iterable[str]) -> Iterator[dict[str, object]]:
+    """行のうち、JSON のオブジェクトとして読める行を順に返す。読めない行と空行は読み飛ばす。"""
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            value: object = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            yield value
 
 
 def last_session_id(lines: Iterable[str]) -> str | None:
@@ -220,7 +305,12 @@ def last_session_id(lines: Iterable[str]) -> str | None:
     JSON として読めない行、JSON のオブジェクトでない行、"session_id" が無いか文字列でない行は読み飛ばす。
     見つからなければ None。
     """
-    raise NotImplementedError
+    found: str | None = None
+    for message in _json_objects(lines):
+        session_id = message.get("session_id")
+        if isinstance(session_id, str):
+            found = session_id
+    return found
 
 
 def last_result_subtype(lines: Iterable[str]) -> str | None:
@@ -230,7 +320,12 @@ def last_result_subtype(lines: Iterable[str]) -> str | None:
     "subtype" が無いか文字列でない行は読み飛ばす。見つからなければ None。
     例: subtype が "success" の result の後に "error_max_budget_usd" の result があれば "error_max_budget_usd"。
     """
-    raise NotImplementedError
+    found: str | None = None
+    for message in _json_objects(lines):
+        subtype = message.get("subtype")
+        if message.get("type") == "result" and isinstance(subtype, str):
+            found = subtype
+    return found
 
 
 def last_total_cost_usd(lines: Iterable[str]) -> float | None:
@@ -239,12 +334,24 @@ def last_total_cost_usd(lines: Iterable[str]) -> float | None:
     値は float にして返す。JSON として読めない行、JSON のオブジェクトでない行、"type" が "result" でない行、
     "total_cost_usd" が無いか数値でない行 (bool は数値とみなさない) は読み飛ばす。見つからなければ None。
     """
-    raise NotImplementedError
+    found: float | None = None
+    for message in _json_objects(lines):
+        cost = message.get("total_cost_usd")
+        if (
+            message.get("type") == "result"
+            and isinstance(cost, int | float)
+            and not isinstance(cost, bool)
+        ):
+            found = float(cost)
+    return found
 
 
 def agent_log_size(path: Path) -> int:
     """path (agent.jsonl) の大きさ (バイト数) を返す。path が無ければ 0。"""
-    raise NotImplementedError
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
 
 
 def read_agent_log_lines(path: Path, offset: int) -> list[str]:
@@ -254,22 +361,31 @@ def read_agent_log_lines(path: Path, offset: int) -> list[str]:
     (途中で切れたマルチバイト文字は置換文字になる)。行は "\\n" だけで分け、最後の "\\n" の後の空の要素は含めない
     (str.splitlines() は JSON の文字列の中にありうる U+2028 などでも分けてしまうため使わない)。
     """
-    raise NotImplementedError
+    try:
+        with path.open("rb") as log_file:
+            log_file.seek(offset)
+            data = log_file.read()
+    except FileNotFoundError:
+        return []
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def read_last_session_id(path: Path, offset: int) -> str | None:
     """read_agent_log_lines(path, offset) の行の last_session_id を返す。path が無ければ None。"""
-    raise NotImplementedError
+    return last_session_id(read_agent_log_lines(path, offset))
 
 
 def read_last_result_subtype(path: Path, offset: int) -> str | None:
     """read_agent_log_lines(path, offset) の行の last_result_subtype を返す。path が無ければ None。"""
-    raise NotImplementedError
+    return last_result_subtype(read_agent_log_lines(path, offset))
 
 
 def read_last_total_cost_usd(path: Path, offset: int) -> float | None:
     """read_agent_log_lines(path, offset) の行の last_total_cost_usd を返す。path が無ければ None。"""
-    raise NotImplementedError
+    return last_total_cost_usd(read_agent_log_lines(path, offset))
 
 
 def validate_minutes(minutes: float) -> None:
@@ -277,7 +393,20 @@ def validate_minutes(minutes: float) -> None:
 
     メッセージは `--minutes must be greater than 0: <minutes>`。
     """
-    raise NotImplementedError
+    if not minutes > 0:
+        raise ValueError(f"--minutes must be greater than 0: {minutes}")
+
+
+def validate_max_budget_usd(value: float | None) -> None:
+    """run の --max-budget-usd を検証する。None (指定なし) は通す。
+
+    None でなければ、正の有限の数 (0 より大きく、NaN・inf でない) でなければ ValueError にする。
+    メッセージは `--max-budget-usd must be a positive finite number: <値>`。
+    """
+    if value is None:
+        return
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"--max-budget-usd must be a positive finite number: {value}")
 
 
 def start_claude_process(
@@ -291,7 +420,15 @@ def start_claude_process(
 
     標準入力は subprocess.DEVNULL にする。開いたファイルは起動後に閉じる (子プロセスは複製を持つ)。
     """
-    raise NotImplementedError
+    with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
+        return subprocess.Popen(
+            args,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
 
 
 def stop_process(process: AgentProcess) -> None:
@@ -301,7 +438,64 @@ def stop_process(process: AgentProcess) -> None:
     2. まだ終わっていなければ (subprocess.TimeoutExpired) signal.SIGTERM を送り、process.wait(timeout=TERMINATE_GRACE_S) で待つ
     3. まだ終わっていなければ process.kill() を呼び、process.wait() で終わるのを待つ
     """
-    raise NotImplementedError
+    for sig, grace_s in (
+        (signal.SIGINT, STOP_GRACE_S),
+        (signal.SIGTERM, TERMINATE_GRACE_S),
+    ):
+        process.send_signal(sig)
+        try:
+            process.wait(timeout=grace_s)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    process.kill()
+    process.wait()
+
+
+def stop_reason_after_exit(
+    remaining_s: float,
+    last_subtype: str | None,
+    remaining_budget_usd: float | None,
+    resumes: int,
+    session_id: str | None,
+) -> StopReason | None:
+    """期限より前にプロセスが終わったとき、止める理由を返す。起動し直すなら None。
+
+    次の順に判定する:
+        1. remaining_s (期限までの残りの秒数) が MIN_REMAINING_S 未満なら "deadline"
+        2. last_subtype (今回の run の最後の result の subtype) が BUDGET_EXHAUSTED_SUBTYPE なら "budget_exhausted"
+        3. remaining_budget_usd (run 全体の残りの予算。上限が無ければ None) が None でなく、
+           float(format_budget_usd(remaining_budget_usd)) が 0 以下なら "budget_exhausted"
+           (丸めると "0.0000" になる残りでは起動しない)
+        4. resumes (起動し直した回数) が MAX_RESUMES 以上なら "resumes_exhausted"
+        5. session_id (今回の run の最後の session_id) が None なら "no_session"
+    """
+    if remaining_s < MIN_REMAINING_S:
+        return "deadline"
+    if last_subtype == BUDGET_EXHAUSTED_SUBTYPE:
+        return "budget_exhausted"
+    if (
+        remaining_budget_usd is not None
+        and float(format_budget_usd(remaining_budget_usd)) <= 0
+    ):
+        return "budget_exhausted"
+    if resumes >= MAX_RESUMES:
+        return "resumes_exhausted"
+    if session_id is None:
+        return "no_session"
+    return None
+
+
+def _run_event(
+    time: float,
+    args: tuple[str, ...],
+    reply: str,
+    ok: bool = True,
+    elapsed_s: float = 0.0,
+) -> CommandEvent:
+    return CommandEvent(
+        time=time, command="run", args=args, reply=reply, ok=ok, elapsed_s=elapsed_s
+    )
 
 
 def run_agent_until(
@@ -317,6 +511,7 @@ def run_agent_until(
     send: SendCommand,
     record: Callable[[CommandEvent], None],
     base_env: Mapping[str, str],
+    shield: Shield = ignore_interrupts,
 ) -> RunOutcome:
     """claude -p を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
 
@@ -326,29 +521,119 @@ def run_agent_until(
     最初の起動のプロンプトは first_prompt(game) で、--resume は付けず、--max-budget-usd には options.max_budget_usd を渡す。
 
     POLL_INTERVAL_S ごとに (sleep(POLL_INTERVAL_S)) 次を確かめる:
-        - プロセスが動いていて、clock() が期限以上なら stop_process で止め、理由 "deadline" で終える
-        - プロセスが終わっていたら、次の順に判定する:
-            1. 期限までの残りが MIN_REMAINING_S 未満なら、理由 "deadline" で終える
-            2. read_last_result_subtype が BUDGET_EXHAUSTED_SUBTYPE なら、
-               理由 "budget_exhausted" で終える (予算の上限で終わったプロセスは起動し直さない)
-            3. options.max_budget_usd が None でなければ、残りの予算 = options.max_budget_usd − read_last_total_cost_usd
-               (None なら options.max_budget_usd のまま) を求め、0 以下なら理由 "budget_exhausted" で終える
-            4. 起動し直した回数が MAX_RESUMES なら、理由 "resumes_exhausted" で終える
-            5. read_last_session_id が None なら、理由 "no_session" で終える
-            6. RESUME_PROMPT と --resume <session_id> で起動し直す。options.max_budget_usd が None でなければ、
-               dataclasses.replace(options, max_budget_usd=<残りの予算>) を build_claude_args に渡す
-               (CLI は --max-budget-usd を 1 つのプロセスが使った分だけで判定するため、run 全体の上限にするには残りを渡す)
-    終えるときは (例外・KeyboardInterrupt で抜けるときも finally で) send(["up", "ALL"]) を送る。
-    例外・KeyboardInterrupt で抜けるときにプロセスがまだ動いていれば、up ALL の前に stop_process で止める
-    (止めないと、up ALL の後もエージェントが入力を送り続けるため)。
+        - プロセスが動いていて、clock() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)
+        - プロセスが終わっていたら、stop_reason_after_exit で判定する。渡す値は、期限までの残りの秒数、
+          read_last_result_subtype、残りの予算 (options.max_budget_usd が None でなければ
+          options.max_budget_usd − read_last_total_cost_usd。read_last_total_cost_usd が None なら
+          options.max_budget_usd のまま。上限が無ければ None)、起動し直した回数、read_last_session_id。
+          理由が返ればその理由で終える。None なら RESUME_PROMPT と --resume <session_id> で起動し直す。
+          options.max_budget_usd が None でなければ、dataclasses.replace(options, max_budget_usd=<残りの予算>) を
+          build_claude_args に渡す (CLI は --max-budget-usd を 1 つのプロセスが使った分だけで判定するため、
+          run 全体の上限にするには残りを渡す)
+
+    後片付けは、終えるとき (例外・KeyboardInterrupt で抜けるときも finally で) に with shield(): の中で行う
+    (本番の shield は signal_guard.ignore_interrupts で、後片付けの途中の Ctrl-C などで up ALL の前に抜けないようにする)。
+        1. プロセスがまだ動いていれば stop_process で止める
+           (止めないと、up ALL の後もエージェントが入力を送り続けるため)
+        2. 理由が決まって終えるときは、停止のイベントを記録する
+        3. stop_process が例外になっても、send(["up", "ALL"]) を送り、そのイベントを記録する
+    後片付けの中では claude を起動しない (無視の設定を子が受け継ぐため)。
 
     record で次のイベントを記録する (command は "run"、frame は None):
         - 起動: args=("start",)、reply="launched claude launch=1"、ok=True、elapsed_s=0.0
         - 起動し直し: args=("resume", <session_id>)、reply="launched claude launch=<起動した回数> resume=<session_id>"、ok=True、elapsed_s=0.0
         - 停止: args=("stop", <理由>)、reply="stopped reason=<理由> launches=<起動した回数>"、ok=True、elapsed_s=0.0
-          (例外で抜けるときは記録しない)
+          (プロセスを止めた後に記録する。例外で抜けるときは記録しない)
         - up ALL: args=("release",)、reply=<デーモンの応答>、ok=<応答が error で始まらない>、elapsed_s=<送信にかかった秒数>
           (例外で抜けるときも記録する)
     各イベントの time はそのときの clock()。
     """
-    raise NotImplementedError
+    log_path = paths.agent_log_file
+    offset = agent_log_size(log_path)
+    env = build_claude_env(base_env)
+    deadline = clock() + minutes * 60.0
+    launches = 0
+    resumes = 0
+    process: AgentProcess | None = None
+    reason: StopReason | None = None
+
+    def launch(
+        launch_options: LaunchOptions, prompt: str, session_id: str | None
+    ) -> AgentProcess:
+        args = build_claude_args(
+            prompt, agent_commands, paths.instructions_file, launch_options, session_id
+        )
+        return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
+
+    try:
+        process = launch(options, first_prompt(game), None)
+        launches = 1
+        record(_run_event(clock(), ("start",), "launched claude launch=1"))
+        while True:
+            now = clock()
+            if process.poll() is None:
+                if now >= deadline:
+                    reason = "deadline"
+                    break
+                sleep(POLL_INTERVAL_S)
+                continue
+            remaining_budget: float | None = None
+            if options.max_budget_usd is not None:
+                spent = read_last_total_cost_usd(log_path, offset)
+                remaining_budget = options.max_budget_usd - (
+                    spent if spent is not None else 0.0
+                )
+            session_id = read_last_session_id(log_path, offset)
+            reason = stop_reason_after_exit(
+                remaining_s=deadline - now,
+                last_subtype=read_last_result_subtype(log_path, offset),
+                remaining_budget_usd=remaining_budget,
+                resumes=resumes,
+                session_id=session_id,
+            )
+            # session_id が None なら reason は "no_session" になっている (下の起動のために型も絞る)
+            if reason is not None or session_id is None:
+                break
+            resume_options = (
+                options
+                if remaining_budget is None
+                else replace(options, max_budget_usd=remaining_budget)
+            )
+            process = launch(resume_options, RESUME_PROMPT, session_id)
+            launches += 1
+            resumes += 1
+            record(
+                _run_event(
+                    clock(),
+                    ("resume", session_id),
+                    f"launched claude launch={launches} resume={session_id}",
+                )
+            )
+    finally:
+        with shield():
+            try:
+                if process is not None and process.poll() is None:
+                    stop_process(process)
+                if reason is not None:
+                    record(
+                        _run_event(
+                            clock(),
+                            ("stop", reason),
+                            f"stopped reason={reason} launches={launches}",
+                        )
+                    )
+            finally:
+                started = clock()
+                reply = send(["up", "ALL"])
+                record(
+                    _run_event(
+                        started,
+                        ("release",),
+                        reply,
+                        ok=not reply.startswith("error"),
+                        elapsed_s=clock() - started,
+                    )
+                )
+    # reason が None のまま finally を抜けるのは例外のときだけで、そのときはここに来ない
+    assert reason is not None
+    return RunOutcome(reason=reason, launches=launches)

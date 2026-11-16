@@ -3,7 +3,8 @@ import math
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,16 +20,20 @@ from harness_fakes import (
 )
 
 from switch2_harness.agent_launcher import (
+    API_KEY_ENV_SUFFIX,
     BUDGET_EXHAUSTED_SUBTYPE,
     CLAUDE_ENV_OVERRIDES,
     CLAUDE_SETTINGS_JSON,
     DEFAULT_MODEL,
-    KEPT_API_KEY_ENV_NAME,
+    KEPT_API_KEY_ENV_PREFIX,
     KEPT_CLAUDE_ENV_NAMES,
+    KEPT_CLAUDE_ENV_PREFIX,
     MAX_RESUMES,
     MIN_REMAINING_S,
     POLL_INTERVAL_S,
     RESUME_PROMPT,
+    SKIP_AUTH_ENV_PREFIX,
+    SKIP_AUTH_ENV_SUFFIX,
     STOP_GRACE_S,
     TERMINATE_GRACE_S,
     LaunchOptions,
@@ -39,6 +44,7 @@ from switch2_harness.agent_launcher import (
     build_claude_env,
     first_prompt,
     format_budget_usd,
+    is_kept_env_name,
     last_result_subtype,
     last_session_id,
     last_total_cost_usd,
@@ -49,11 +55,14 @@ from switch2_harness.agent_launcher import (
     run_agent_until,
     start_claude_process,
     stop_process,
+    stop_reason_after_exit,
+    validate_max_budget_usd,
     validate_minutes,
 )
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.features import BASE_AGENT_COMMANDS
+from switch2_harness.signal_guard import ignore_interrupts
 from switch2_harness.workspace import WorkspacePaths
 
 GAME = "ゲーム A"
@@ -97,13 +106,12 @@ def test_constants():
     assert MIN_REMAINING_S == 30.0
     assert MAX_RESUMES == 20
     assert BUDGET_EXHAUSTED_SUBTYPE == "error_max_budget_usd"
-    assert KEPT_CLAUDE_ENV_NAMES == (
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-    )
-    assert KEPT_API_KEY_ENV_NAME == "ANTHROPIC_API_KEY"
+    assert KEPT_CLAUDE_ENV_NAMES == ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+    assert KEPT_CLAUDE_ENV_PREFIX == "CLAUDE_CODE_USE_"
+    assert SKIP_AUTH_ENV_PREFIX == "CLAUDE_CODE_SKIP_"
+    assert SKIP_AUTH_ENV_SUFFIX == "_AUTH"
+    assert KEPT_API_KEY_ENV_PREFIX == "ANTHROPIC_"
+    assert API_KEY_ENV_SUFFIX == "_API_KEY"
 
 
 def test_claude_settings_json_blocks_reads_outside_the_workspace():
@@ -327,6 +335,53 @@ def test_build_claude_env_does_not_change_base():
     assert base == copy
 
 
+def test_build_claude_env_keeps_provider_selection_and_auth_variables():
+    provider = {
+        "CLAUDE_CODE_USE_FOUNDRY": "1",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
+        "ANTHROPIC_FOUNDRY_API_KEY": "foundry-key",
+        "ANTHROPIC_BASE_URL": "https://gateway.example",
+        "AWS_REGION": "us-east-1",
+        "GOOGLE_CLOUD_PROJECT": "project",
+    }
+    assert build_claude_env(provider) == {**provider, **OVERRIDES}
+
+
+def test_build_claude_env_removes_unknown_skip_variables_and_other_keys():
+    env = build_claude_env(
+        {
+            "CLAUDE_CODE_SKIP_FOO": "1",
+            "CLAUDE_CODE_SKIP_AUTH_LATER": "1",
+            "OPENAI_API_KEY": "openai-key",
+            "PATH": "/usr/bin",
+        }
+    )
+    assert env == {"PATH": "/usr/bin", **OVERRIDES}
+
+
+@pytest.mark.parametrize(
+    ("name", "kept"),
+    [
+        ("CLAUDE_CONFIG_DIR", True),
+        ("CLAUDE_CODE_OAUTH_TOKEN", True),
+        ("CLAUDE_CODE_USE_BEDROCK", True),
+        ("CLAUDE_CODE_USE_FOUNDRY", True),
+        ("CLAUDE_CODE_SKIP_VERTEX_AUTH", True),
+        ("CLAUDE_CODE_SKIP_FOO", False),
+        ("CLAUDECODE", False),
+        ("CLAUDE_EFFORT", False),
+        ("ANTHROPIC_API_KEY", True),
+        ("ANTHROPIC_FOUNDRY_API_KEY", True),
+        ("ANTHROPIC_MODEL", True),
+        ("OPENAI_API_KEY", False),
+        ("GEMINI_API_KEY", False),
+        ("PATH", True),
+    ],
+)
+def test_is_kept_env_name(name, kept):
+    assert is_kept_env_name(name) is kept
+
+
 # --- session_id の読み取り ---
 
 
@@ -533,6 +588,62 @@ def test_validate_minutes_rejects_zero_negative_and_nan(minutes):
     assert str(error.value).startswith("--minutes must be greater than 0: ")
 
 
+# --- --max-budget-usd の検証 ---
+
+
+@pytest.mark.parametrize("budget", [None, 0.01, 1.0, 25.5])
+def test_validate_max_budget_usd_accepts_none_and_positive_finite(budget):
+    assert validate_max_budget_usd(budget) is None
+
+
+@pytest.mark.parametrize(
+    ("budget", "shown"),
+    [(0.0, "0.0"), (-1.0, "-1.0"), (math.nan, "nan"), (math.inf, "inf")],
+)
+def test_validate_max_budget_usd_rejects_non_positive_and_non_finite(budget, shown):
+    with pytest.raises(ValueError) as error:
+        validate_max_budget_usd(budget)
+    assert str(error.value) == (
+        f"--max-budget-usd must be a positive finite number: {shown}"
+    )
+
+
+# --- 終わったプロセスを起動し直すかの判定 ---
+
+
+@pytest.mark.parametrize(
+    ("remaining_s", "subtype", "budget_left", "resumes", "session_id", "reason"),
+    [
+        (60.0, "success", 0.5, 0, "s1", None),
+        (60.0, None, None, 0, "s1", None),
+        (29.9, "success", 0.5, 0, "s1", "deadline"),
+        (29.9, "error_max_budget_usd", 0.0, 20, None, "deadline"),
+        (60.0, "error_max_budget_usd", 0.5, 0, "s1", "budget_exhausted"),
+        (60.0, "success", 0.0, 0, "s1", "budget_exhausted"),
+        (60.0, "success", -0.2, 0, "s1", "budget_exhausted"),
+        (60.0, "success", 0.00004, 0, "s1", "budget_exhausted"),
+        (60.0, "success", 0.0001, 0, "s1", None),
+        (60.0, "success", 0.0, 20, None, "budget_exhausted"),
+        (60.0, "success", None, 20, "s1", "resumes_exhausted"),
+        (60.0, "success", None, 20, None, "resumes_exhausted"),
+        (60.0, "success", None, 19, None, "no_session"),
+    ],
+)
+def test_stop_reason_after_exit(
+    remaining_s, subtype, budget_left, resumes, session_id, reason
+):
+    assert (
+        stop_reason_after_exit(
+            remaining_s=remaining_s,
+            last_subtype=subtype,
+            remaining_budget_usd=budget_left,
+            resumes=resumes,
+            session_id=session_id,
+        )
+        == reason
+    )
+
+
 # --- プロセスの起動と停止 ---
 
 
@@ -623,6 +734,7 @@ def run_scenario(
     options: LaunchOptions | None = None,
     send: SendCommand | None = None,
     sleep: Callable[[float], None] | None = None,
+    shield: Callable[[], AbstractContextManager[None]] = ignore_interrupts,
 ) -> RunOutcome:
     """scenario の fake で run_agent_until を呼ぶ。send と sleep は渡したときだけ置き換える。"""
     return run_agent_until(
@@ -637,6 +749,7 @@ def run_scenario(
         send=send if send is not None else scenario.daemon,
         record=scenario.events.append,
         base_env={"PATH": "/usr/bin"},
+        shield=shield,
     )
 
 
@@ -927,6 +1040,160 @@ def test_run_without_budget_does_not_pass_max_budget_usd(tmp_path):
     assert outcome == RunOutcome(reason="deadline", launches=2)
     for launch in scenario.starter.launches:
         assert "--max-budget-usd" not in launch.args
+
+
+def test_run_stops_when_the_rounded_remaining_budget_is_zero(tmp_path):
+    # 残り 0.00004 USD は format_budget_usd で "0.0000" になるため、起動し直さない
+    first = ProcessPlan(
+        runs_for_s=10.0,
+        output_lines=(session_line("s1"), result_line("s1", total_cost_usd=0.99996)),
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(
+        scenario, minutes=1.0, options=LaunchOptions(max_budget_usd=1.0)
+    )
+    assert outcome == RunOutcome(reason="budget_exhausted", launches=1)
+    assert len(scenario.starter.launches) == 1
+    assert scenario.events[-2].args == ("stop", "budget_exhausted")
+    assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+# --- 後片付けを割り込みから守る ---
+
+
+@dataclass
+class ShieldSnapshot:
+    """fake の shield に入ったときと出たときの、プロセスの操作・送信・記録の様子。"""
+
+    moment: str
+    process_calls: list[tuple[object, ...]]
+    sent: list[list[str]]
+    event_kinds: list[str]
+
+
+def recording_shield(
+    scenario: Scenario, snapshots: list[ShieldSnapshot]
+) -> Callable[[], AbstractContextManager[None]]:
+    """入ったときと出たときに scenario の様子を snapshots に記録する、fake の shield を返す。"""
+
+    def take(moment: str) -> ShieldSnapshot:
+        calls = (
+            scenario.starter.processes[-1].calls if scenario.starter.processes else []
+        )
+        return ShieldSnapshot(
+            moment=moment,
+            process_calls=list(calls),
+            sent=[list(args) for args in scenario.daemon.sent],
+            event_kinds=event_kinds(scenario.events),
+        )
+
+    @contextmanager
+    def shield() -> Iterator[None]:
+        snapshots.append(take("enter"))
+        try:
+            yield
+        finally:
+            snapshots.append(take("exit"))
+
+    return shield
+
+
+def test_run_cleans_up_inside_the_shield_at_deadline(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    snapshots: list[ShieldSnapshot] = []
+    run_scenario(scenario, minutes=1.0, shield=recording_shield(scenario, snapshots))
+    stopped = [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert snapshots == [
+        ShieldSnapshot("enter", [], [], ["start"]),
+        ShieldSnapshot("exit", stopped, [["up", "ALL"]], ["start", "stop", "release"]),
+    ]
+
+
+def test_run_cleans_up_inside_the_shield_on_keyboard_interrupt(tmp_path):
+    scenario = make_scenario(
+        tmp_path, [ProcessPlan(runs_for_s=None)], interrupt_at_call=3
+    )
+    snapshots: list[ShieldSnapshot] = []
+    with pytest.raises(KeyboardInterrupt):
+        run_scenario(
+            scenario, minutes=1.0, shield=recording_shield(scenario, snapshots)
+        )
+    stopped = [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert snapshots == [
+        ShieldSnapshot("enter", [], [], ["start"]),
+        ShieldSnapshot("exit", stopped, [["up", "ALL"]], ["start", "release"]),
+    ]
+
+
+def test_run_releases_buttons_even_if_stopping_fails(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+
+    def failing_signal(sig: int) -> None:
+        raise OSError("cannot signal the process")
+
+    def start_with_failing_signal(
+        args: list[str], cwd: Path, env: dict[str, str], stdout: Path, stderr: Path
+    ) -> FakeAgentProcess:
+        process = scenario.starter(args, cwd, env, stdout, stderr)
+        process.send_signal = failing_signal  # シグナルを送ると失敗するプロセスにする
+        return process
+
+    with pytest.raises(OSError):
+        run_agent_until(
+            1.0,
+            scenario.paths,
+            GAME,
+            BASE_AGENT_COMMANDS,
+            LaunchOptions(),
+            start_process=start_with_failing_signal,
+            clock=scenario.clock,
+            sleep=scenario.sleep,
+            send=scenario.daemon,
+            record=scenario.events.append,
+            base_env={},
+        )
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["start", "release"]
+
+
+def test_run_releases_buttons_when_the_first_launch_fails(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+
+    def failing_start(
+        args: list[str], cwd: Path, env: dict[str, str], stdout: Path, stderr: Path
+    ) -> FakeAgentProcess:
+        raise FileNotFoundError("claude")
+
+    with pytest.raises(FileNotFoundError):
+        run_agent_until(
+            1.0,
+            scenario.paths,
+            GAME,
+            BASE_AGENT_COMMANDS,
+            LaunchOptions(),
+            start_process=failing_start,
+            clock=scenario.clock,
+            sleep=scenario.sleep,
+            send=scenario.daemon,
+            record=scenario.events.append,
+            base_env={},
+        )
+    assert scenario.daemon.sent == [["up", "ALL"]]
+    assert event_kinds(scenario.events) == ["release"]
+
+
+def test_run_does_not_launch_inside_the_shield(tmp_path):
+    scenario = make_scenario(tmp_path, [ProcessPlan(runs_for_s=None)])
+    launches_at_enter: list[int] = []
+
+    @contextmanager
+    def shield() -> Iterator[None]:
+        launches_at_enter.append(len(scenario.starter.launches))
+        yield
+        assert len(scenario.starter.launches) == launches_at_enter[-1]
+
+    run_scenario(scenario, minutes=1.0, shield=shield)
+    assert launches_at_enter == [1]
 
 
 # --- 前の run の出力を判定に使わない ---

@@ -18,18 +18,24 @@ look の画像は引数の関数 (load_frame) で、agent.jsonl は行の列で�
 そのため起動の数は events.jsonl から数え、費用・ターン・時間は result メッセージを書いた起動の分だけを集計する。
 """
 
+import json
+import statistics
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
 from switch2_harness.event_log import CommandEvent
+from switch2_harness.screen_change import change_ratio, is_static
 
 # look の frame (作業ディレクトリーからの相対パス) を受け取り、グレースケールの画像を返す関数の型
 LoadFrame = Callable[[str], np.ndarray]
 
 # agent.jsonl のメッセージ (JSON のオブジェクトとして読める 1 行) の型
 AgentMessage = Mapping[str, object]
+
+# 起動のイベント (command が "run") の args の先頭の値
+LAUNCH_KINDS: tuple[str, ...] = ("start", "resume")
 
 
 @dataclass(frozen=True)
@@ -96,12 +102,27 @@ def agent_messages_from_lines(lines: Iterable[str]) -> list[dict[str, object]]:
 
     JSON として読めない行 (止めたときに途中で切れた行など)、空行、JSON のオブジェクトでない行は読み飛ばす。
     """
-    raise NotImplementedError
+    messages: list[dict[str, object]] = []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            value: object = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            messages.append(value)
+    return messages
 
 
 def count_launches(events: Sequence[CommandEvent]) -> int:
     """command が "run" で、args の先頭が "start" か "resume" のイベントの数を返す。args が空のイベントは数えない。"""
-    raise NotImplementedError
+    return sum(
+        1
+        for event in events
+        if event.command == "run" and event.args and event.args[0] in LAUNCH_KINDS
+    )
 
 
 def count_responses(messages: Sequence[AgentMessage]) -> int:
@@ -110,7 +131,26 @@ def count_responses(messages: Sequence[AgentMessage]) -> int:
     "message" オブジェクトの "id" が文字列のメッセージは、同じ id のものをまとめて 1 つと数える。
     "message" が無い・オブジェクトでない・"id" が無いか文字列でないメッセージは、1 つずつ数える。
     """
-    raise NotImplementedError
+    seen_ids: set[str] = set()
+    count = 0
+    for message in messages:
+        if message.get("type") != "assistant":
+            continue
+        body = message.get("message")
+        message_id = body.get("id") if isinstance(body, dict) else None
+        if isinstance(message_id, str):
+            if message_id in seen_ids:
+                continue
+            seen_ids.add(message_id)
+        count += 1
+    return count
+
+
+def _number_or_zero(value: object) -> float:
+    """value が数値 (int か float。bool は除く) ならその値を、そうでなければ 0.0 を返す。"""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
 
 
 def summarize_agent(
@@ -126,7 +166,78 @@ def summarize_agent(
     num_turns と duration_ms は、すべての result の値を int にして合計する。
     値が無い、または数値でない (bool も数値とみなさない) 項目は 0 として扱う。
     """
-    raise NotImplementedError
+    messages = agent_messages_from_lines(agent_lines)
+    has_run_event = any(event.command == "run" for event in events)
+    has_agent_output = any(
+        message.get("type") in ("assistant", "result") for message in messages
+    )
+    if not has_run_event and not has_agent_output:
+        return None
+    results = [message for message in messages if message.get("type") == "result"]
+    # --resume で続けたセッションの total_cost_usd は累計のため、セッションごとに最後の値だけを残す
+    last_cost_by_session: dict[str | None, float] = {}
+    for result in results:
+        session_id = result.get("session_id")
+        key = session_id if isinstance(session_id, str) else None
+        last_cost_by_session[key] = _number_or_zero(result.get("total_cost_usd"))
+    return AgentSummary(
+        launches=count_launches(events),
+        results=len(results),
+        total_cost_usd=sum(last_cost_by_session.values(), 0.0),
+        num_turns=sum(int(_number_or_zero(r.get("num_turns"))) for r in results),
+        duration_ms=sum(int(_number_or_zero(r.get("duration_ms"))) for r in results),
+        responses=count_responses(messages),
+    )
+
+
+@dataclass(frozen=True)
+class _LookPair:
+    """隣り合う 2 つの成功した look と、その組の判定。"""
+
+    first: CommandEvent
+    second: CommandEvent
+    static: bool
+    pressed: bool
+
+
+def _look_pairs(
+    ordered: Sequence[CommandEvent], load_frame: LoadFrame
+) -> list[_LookPair]:
+    """時刻順のイベントの列から、look の組を作る。各 look の画像は 1 回だけ読む。"""
+    looks = [
+        (index, event, event.frame)
+        for index, event in enumerate(ordered)
+        if event.command == "look" and event.ok and event.frame is not None
+    ]
+    images = [load_frame(frame) for _, _, frame in looks]
+    pairs: list[_LookPair] = []
+    for k in range(len(looks) - 1):
+        first_index, first, _ = looks[k]
+        second_index, second, _ = looks[k + 1]
+        between = ordered[first_index + 1 : second_index]
+        pairs.append(
+            _LookPair(
+                first=first,
+                second=second,
+                static=is_static(change_ratio(images[k], images[k + 1])),
+                pressed=any(e.command == "press" and e.ok for e in between),
+            )
+        )
+    return pairs
+
+
+def _longest_static_s(pairs: Sequence[_LookPair]) -> float:
+    """変化なしの組が連続した区間のうち、最初の look から最後の look までが最も長い秒数を返す。無ければ 0.0。"""
+    longest = 0.0
+    span_start: float | None = None
+    for pair in pairs:
+        if not pair.static:
+            span_start = None
+            continue
+        if span_start is None:
+            span_start = pair.first.time
+        longest = max(longest, pair.second.time - span_start)
+    return longest
 
 
 def summarize_session(
@@ -143,12 +254,40 @@ def summarize_session(
     look の間隔の中央値は statistics.median、平均は statistics.fmean で求める。
     agent は summarize_agent(events, agent_lines) の結果。
     """
-    raise NotImplementedError
+    ordered = sorted(events, key=lambda event: event.time)
+    duration_s = ordered[-1].time - ordered[0].time if len(ordered) >= 2 else 0.0
+    command_counts: dict[str, int] = {}
+    for event in ordered:
+        command_counts[event.command] = command_counts.get(event.command, 0) + 1
+    pairs = _look_pairs(ordered, load_frame)
+    intervals = [pair.second.time - pair.first.time for pair in pairs]
+    look_interval = (
+        IntervalStats(
+            median_s=statistics.median(intervals),
+            mean_s=statistics.fmean(intervals),
+            max_s=max(intervals),
+        )
+        if intervals
+        else None
+    )
+    pressed = [pair for pair in pairs if pair.pressed]
+    return SessionSummary(
+        duration_s=duration_s,
+        command_counts=command_counts,
+        error_count=sum(1 for event in ordered if not event.ok),
+        look_interval=look_interval,
+        static_pairs=sum(1 for pair in pairs if pair.static),
+        look_pairs=len(pairs),
+        longest_static_s=_longest_static_s(pairs),
+        unchanged_after_press=sum(1 for pair in pressed if pair.static),
+        pressed_pairs=len(pressed),
+        agent=summarize_agent(events, agent_lines),
+    )
 
 
 def summary_to_dict(summary: SessionSummary) -> dict[str, object]:
     """summary を JSON にできる辞書にする (dataclasses.asdict。キーはフィールド名、None は None のまま)。"""
-    raise NotImplementedError
+    return asdict(summary)
 
 
 def format_summary(summary: SessionSummary) -> str:
@@ -168,4 +307,37 @@ def format_summary(summary: SessionSummary) -> str:
     agent が None なら 8 行目と 9 行目の代わりに `エージェント: 記録なし` の 1 行にする (全体で 8 行)。
     例: `コマンドの回数: look=6 press=3`、`result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 秒`。
     """
-    raise NotImplementedError
+    counts = " ".join(
+        f"{command}={count}" for command, count in summary.command_counts.items()
+    )
+    interval = summary.look_interval
+    interval_line = (
+        "look の間隔: なし (成功した look が 2 回未満)"
+        if interval is None
+        else (
+            f"look の間隔: 中央値 {interval.median_s:.1f} 秒 / "
+            f"平均 {interval.mean_s:.1f} 秒 / 最大 {interval.max_s:.1f} 秒"
+        )
+    )
+    lines = [
+        f"記録の時間: {summary.duration_s:.1f} 秒",
+        f"コマンドの回数: {counts or 'なし'}",
+        f"error の数: {summary.error_count}",
+        interval_line,
+        f"変化なしの look の組: {summary.static_pairs} / {summary.look_pairs}",
+        f"変化なしが続いた最長の時間: {summary.longest_static_s:.1f} 秒",
+        f"press の後も変化なしの組: {summary.unchanged_after_press} / {summary.pressed_pairs}",
+    ]
+    agent = summary.agent
+    if agent is None:
+        lines.append("エージェント: 記録なし")
+    else:
+        lines.append(
+            f"エージェント: 起動 {agent.launches} 回 / 応答 {agent.responses} 回 / "
+            f"result {agent.results} 回"
+        )
+        lines.append(
+            f"result を出した起動の分: 費用 {agent.total_cost_usd:.4f} USD / "
+            f"ターン {agent.num_turns} / 時間 {agent.duration_ms / 1000:.1f} 秒"
+        )
+    return "\n".join(lines)

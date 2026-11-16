@@ -5,6 +5,7 @@ change_ratio と is_static は純粋関数で、ファイルの読み込みは l
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 # 比べる前に縮小する大きさ (幅, 高さ)。16:9 の画面を 160x90 にする
@@ -24,12 +25,16 @@ def change_ratio(a: np.ndarray, b: np.ndarray) -> float:
     画素ごとの差の絶対値が PIXEL_DIFF_THRESHOLD を超える画素の数を、画素の総数 (160 * 90) で割る。
     a と b の元の大きさは違ってよい。
     """
-    raise NotImplementedError
+    small_a = cv2.resize(a, SAMPLE_SIZE, interpolation=cv2.INTER_AREA)
+    small_b = cv2.resize(b, SAMPLE_SIZE, interpolation=cv2.INTER_AREA)
+    difference = cv2.absdiff(small_a, small_b)
+    changed = int(np.count_nonzero(difference > PIXEL_DIFF_THRESHOLD))
+    return changed / difference.size
 
 
 def is_static(ratio: float) -> bool:
     """変化の割合 ratio が STATIC_RATIO 未満 (変化なし) なら True を返す。"""
-    raise NotImplementedError
+    return ratio < STATIC_RATIO
 
 
 def load_gray(path: Path) -> np.ndarray:
@@ -37,4 +42,7 @@ def load_gray(path: Path) -> np.ndarray:
 
     読めなければ (ファイルが無い、画像でない) ValueError にする。メッセージは `cannot read image: <path>`。
     """
-    raise NotImplementedError
+    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise ValueError(f"cannot read image: {path}")
+    return np.asarray(image)

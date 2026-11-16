@@ -36,7 +36,7 @@ def available_names_text(available: tuple[Feature, ...] = FEATURES) -> str:
 
     例: 名前が "a" と "b" の 2 つなら "a, b"。
     """
-    raise NotImplementedError
+    return ", ".join(feature.name for feature in available) or "none"
 
 
 def validate_feature_names(
@@ -45,10 +45,20 @@ def validate_feature_names(
     """names を検証し、重複を除いて available の順に並べた名前のタプルを返す。
 
     available に無い名前があれば ValueError にする。メッセージは
-    `unknown feature: <無い名前を指定された順に ", " でつないだもの> (available: <available_names_text>)`。
+    `unknown feature: <無い名前を指定された順に (重複は除いて) ", " でつないだもの> (available: <available_names_text>)`。
     例: available が空で names が ["x"] なら `unknown feature: x (available: none)`。
     """
-    raise NotImplementedError
+    requested = list(names)
+    known = {feature.name for feature in available}
+    # dict.fromkeys で、指定された順を保ったまま重複を除く
+    unknown = list(dict.fromkeys(name for name in requested if name not in known))
+    if unknown:
+        raise ValueError(
+            f"unknown feature: {', '.join(unknown)} "
+            f"(available: {available_names_text(available)})"
+        )
+    wanted = set(requested)
+    return tuple(feature.name for feature in available if feature.name in wanted)
 
 
 def agent_commands(
@@ -59,4 +69,11 @@ def agent_commands(
     BASE_AGENT_COMMANDS に、enabled に名前がある要素の commands を available の順に続けたもの。
     enabled は validate_feature_names を通した名前を渡す。
     """
-    raise NotImplementedError
+    enabled_names = set(enabled)
+    feature_commands = tuple(
+        command
+        for feature in available
+        if feature.name in enabled_names
+        for command in feature.commands
+    )
+    return BASE_AGENT_COMMANDS + feature_commands

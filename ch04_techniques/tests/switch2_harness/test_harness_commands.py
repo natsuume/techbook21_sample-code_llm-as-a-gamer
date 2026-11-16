@@ -1,5 +1,7 @@
 import json
+import math
 import os
+import signal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,6 +37,7 @@ from switch2_harness.commands import (
 )
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import BASE_AGENT_COMMANDS
+from switch2_harness.signal_guard import RunTerminated
 from switch2_harness.workspace import WorkspacePaths
 
 JST = timezone(timedelta(hours=9))
@@ -705,3 +708,65 @@ def test_run_rejects_unknown_feature_in_harness_json(paths, clock):
     assert result.stderr_lines[0].startswith("error unknown feature: zoom")
     assert starter.launches == []
     assert daemon.sent == []
+
+
+@pytest.mark.parametrize(
+    ("budget", "shown"),
+    [(0.0, "0.0"), (-1.0, "-1.0"), (math.nan, "nan"), (math.inf, "inf")],
+)
+def test_run_rejects_invalid_max_budget_usd(paths, clock, budget, shown):
+    write_harness_json(paths, [])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(max_budget_usd=budget),
+        start_process=starter,
+        clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    assert result == CommandResult(
+        exit_code=1,
+        stderr_lines=(
+            f"error --max-budget-usd must be a positive finite number: {shown}",
+        ),
+    )
+    assert starter.launches == []
+    assert daemon.sent == []
+
+
+def test_run_terminated_by_signal_reports_an_error_after_cleanup(paths, clock):
+    write_harness_json(paths, [])
+    starter, daemon, _ = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        # 3 回目の待ちの間に SIGTERM を受けたことにする
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 3:
+            raise RunTerminated(signal.SIGTERM)
+        clock.advance(seconds)
+
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    assert result == CommandResult(
+        exit_code=1, stderr_lines=("error run terminated by signal",)
+    )
+    assert starter.processes[0].calls == [("signal", signal.SIGINT), ("wait", 20.0)]
+    assert daemon.sent == [["up", "ALL"]]
+    assert [event.args[0] for event in read_events(paths.events_file)] == [
+        "start",
+        "release",
+    ]

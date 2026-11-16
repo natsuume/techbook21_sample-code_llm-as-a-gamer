@@ -8,10 +8,11 @@
       frames/        撮影した PNG (000001.png から連番)
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from switch2_harness.harness_config import HarnessConfig
+from switch2_harness.harness_config import HarnessConfig, write_config
 
 HARNESS_FILE_NAME = "harness.json"
 INSTRUCTIONS_FILE_NAME = "CLAUDE.md"
@@ -59,7 +60,18 @@ def workspace_paths(directory: str | Path) -> WorkspacePaths:
 
     ファイルシステムには触れない (存在の確認もしない)。
     """
-    raise NotImplementedError
+    root = Path(os.path.abspath(directory))
+    records_dir = root / RECORDS_DIR_NAME
+    return WorkspacePaths(
+        root=root,
+        harness_file=root / HARNESS_FILE_NAME,
+        instructions_file=root / INSTRUCTIONS_FILE_NAME,
+        records_dir=records_dir,
+        frames_dir=root / FRAMES_DIR_NAME,
+        events_file=records_dir / EVENTS_FILE_NAME,
+        agent_log_file=records_dir / AGENT_LOG_FILE_NAME,
+        agent_stderr_file=records_dir / AGENT_STDERR_FILE_NAME,
+    )
 
 
 def require_workspace(directory: str | Path) -> WorkspacePaths:
@@ -68,7 +80,12 @@ def require_workspace(directory: str | Path) -> WorkspacePaths:
     harness.json が無ければ NotAWorkspaceError にする。メッセージは
     `not a harness workspace (harness.json not found): <作業ディレクトリーの絶対パス>`。
     """
-    raise NotImplementedError
+    paths = workspace_paths(directory)
+    if not paths.harness_file.is_file():
+        raise NotAWorkspaceError(
+            f"not a harness workspace (harness.json not found): {paths.root}"
+        )
+    return paths
 
 
 def create_workspace(
@@ -82,4 +99,11 @@ def create_workspace(
     続けて harness.json (harness_config.write_config)、CLAUDE.md (instructions_text を UTF-8 で書く)、
     records/、frames/ を作る。records/ の中のファイルは作らない。
     """
-    raise NotImplementedError
+    root = paths.root
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        raise WorkspaceNotEmptyError(f"directory is not empty: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    write_config(paths.harness_file, config)
+    paths.instructions_file.write_text(instructions_text, encoding="utf-8")
+    paths.records_dir.mkdir()
+    paths.frames_dir.mkdir()

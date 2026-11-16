@@ -26,7 +26,7 @@ def split_press_args(args: Sequence[str]) -> tuple[str, ...]:
 
     空の要素は含めない。例: ["RIGHT RIGHT", "A"] は ("RIGHT", "RIGHT", "A")、[" ", "B"] は ("B",)。
     """
-    raise NotImplementedError
+    return tuple(token for arg in args for token in arg.split())
 
 
 def unknown_action_message(action: str) -> str:
@@ -34,7 +34,12 @@ def unknown_action_message(action: str) -> str:
 
     例: "shot" なら `error press accepts tap / hold / down / up: shot`。
     """
-    raise NotImplementedError
+    return f"error press accepts tap / hold / down / up: {action}"
+
+
+def _contains_home(token: str) -> bool:
+    """CHORD か TARGET の 1 つのトークンが HOME を含めば True を返す。"""
+    return any(part.strip().upper() == FORBIDDEN_BUTTON for part in token.split("+"))
 
 
 def press_args_error(action: str, tokens: Sequence[str]) -> str | None:
@@ -51,4 +56,9 @@ def press_args_error(action: str, tokens: Sequence[str]) -> str | None:
        (例: "home"、"B+HOME" はいずれも HOME を含む)
     3. どちらにも当たらなければ None を返す。トークンの数や書式の誤りはデーモンが判定するため、ここでは調べない
     """
-    raise NotImplementedError
+    if action not in PRESS_ACTIONS:
+        return unknown_action_message(action)
+    checked = tokens[:1] if action == "hold" else tokens
+    if any(_contains_home(token) for token in checked):
+        return HOME_REJECTED_MESSAGE
+    return None

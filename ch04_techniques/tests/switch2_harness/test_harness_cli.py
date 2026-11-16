@@ -336,6 +336,19 @@ def test_run_zero_minutes_fails(workspace, harness, capsys):
     assert harness.daemon.sent == []
 
 
+@pytest.mark.parametrize("budget", ["0", "-2", "nan", "inf"])
+def test_run_invalid_max_budget_usd_fails(workspace, harness, capsys, budget):
+    argv = ["run", "--minutes", "1", "--max-budget-usd", budget]
+    assert harness.run(*argv, "--workspace", str(workspace)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(
+        "error --max-budget-usd must be a positive finite number: "
+    )
+    assert harness.starter.launches == []
+    assert harness.daemon.sent == []
+
+
 # --- main と本番の依存 ---
 
 

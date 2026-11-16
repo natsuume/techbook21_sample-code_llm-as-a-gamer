@@ -5,9 +5,11 @@
 失敗は例外にせず `error <説明>` の 1 行で返し、呼び出し側はデーモンの応答と同じく先頭の error で失敗を判定する。
 """
 
+import os
+import socket
 from collections.abc import Callable
 
-from switch2_remote.client import SOCKET_ADDRESS
+from switch2_remote.client import SOCKET_ADDRESS, build_request, peer_uid
 
 # デーモンに引数の列を送り、応答の 1 行を返す関数の型。commands と agent_launcher はこの型で送信を受け取る
 SendCommand = Callable[[list[str]], str]
@@ -26,4 +28,24 @@ def send_command(args: list[str], address: str = SOCKET_ADDRESS) -> str:
         - 応答が空のまま接続が閉じた: `error no reply from daemon`
     address は抽象名前空間のソケット名 (先頭が "\\0")。既定は第2章のデーモンの "\\0switch2-remote"。
     """
-    raise NotImplementedError
+    try:
+        request = build_request(args)
+    except ValueError as e:
+        return f"error {e}"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        try:
+            conn.connect(address)
+        except OSError as e:
+            return f"error cannot connect to daemon: {e}"
+        try:
+            # 抽象名前空間のソケット名は誰でも先に取れるため、接続先が自分と同じユーザーかを確かめる
+            if peer_uid(conn) != os.getuid():
+                return "error daemon is owned by another user"
+            conn.sendall(request.encode())
+            with conn.makefile(encoding="utf-8", errors="replace") as reader:
+                reply = reader.readline().strip()
+        except OSError as e:
+            return f"error lost connection to daemon: {e}"
+    if not reply:
+        return "error no reply from daemon"
+    return reply
