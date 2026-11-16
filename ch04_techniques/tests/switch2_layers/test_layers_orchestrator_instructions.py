@@ -7,6 +7,7 @@ from switch2_remote.controller_state import BUTTON_ORDER
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
 from switch2_layers.orchestrator.orchestrator_instructions import (
     HANDOFF_NOTE,
+    PROCEDURE_MAX_COUNT,
     handoff_request_text,
     orchestrator_instructions,
 )
@@ -152,6 +153,29 @@ def test_instructions_say_game_skills_go_to_notes_and_wait_a_turn():
     text = orchestrator_instructions()
     assert sentences_with(text, ("notes/skills/game-", "SKILL.md"))
     assert sentences_with(text, ("ターン", "使えない"), any_of=("書いた", "写"))
+
+
+def test_procedure_count_limit_is_the_one_of_the_action_executor():
+    # 操作の実行の部品は、tap_repeat・walk の count を 1 以上 100 以下の整数にし、超えると JSON の誤りにする
+    assert PROCEDURE_MAX_COUNT == 100
+
+
+def test_instructions_state_the_upper_limit_of_procedure_counts():
+    assert sentences_with(
+        orchestrator_instructions(), ("count", str(PROCEDURE_MAX_COUNT))
+    )
+
+
+def test_instructions_state_the_rules_for_copying_game_skills():
+    text = orchestrator_instructions()
+    # frontmatter は name と description だけ
+    assert sentences_with(
+        text, ("frontmatter", "name", "description"), any_of=("だけ",)
+    )
+    # シェルのコマンドを実行する書き方を書かない
+    assert sentences_with(text, ("シェル",))
+    # 守らないスキルは写されず、理由が次の入力の節で届く
+    assert sentences_with(text, ("写さなかったスキル",))
 
 
 def test_handoff_request_asks_for_the_handoff_note_and_json_without_actions():

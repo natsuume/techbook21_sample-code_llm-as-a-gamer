@@ -144,6 +144,8 @@ class OrchestratorMainLoop:
         1. 始める: 番号 (1 始まり) を 1 増やし、paths.orchestrator_session_dir(番号) を (親を含めて) 作る。
            skill_copy.prepare_claude_skills_dir で .claude/skills/ を作り、copy_switch_skills(switch_skills_dir) と
            copy_game_skills で写す (claude を起動する前に行う。写すスキルが無くても .claude/skills/ は作る)。
+           copy_game_skills の結果の skipped を、写さなかったスキルとして覚える (copy_game_skills を呼ぶたびに
+           置き換え、次の入力の TurnContext.skipped_skills に渡す)。
            run_dir = paths.root のシンボリックリンクを解決した絶対パスとして、
            command = claude_session_command.build_session_command(RunPaths(run_dir),
            orchestrator_instructions.orchestrator_instructions(), parent_skill_names.find_parent_skill_names(run_dir),
@@ -153,11 +155,16 @@ class OrchestratorMainLoop:
            orchestrator_session_start {"session"} を書く。起動できなければ (OSError)、開始の行は書かずに、終了の行
            (理由 exit、returncode null、error に説明) と orchestrator_session_end を書き、最初のターンを終えずに終わった
            セッションとして数える
-        2. 最初の入力: events = controller.take_events() を受け取り、turn_input.build_session_opening_text(
-           SessionOpening(initial_instruction, list_note_files(paths.notes_dir), notes/handoff.md の中身
-           (notes.note_reader.read_note_text))) と build_turn_text(TurnContext(clock.now(), events,
-           read_progress_state(paths.progress_state), 前の JSON の誤り)) を改行でつないだテキストと、
-           select_turn_frames(frames.jsonl の記録, None, now) (最新の 1 枚) の画像を、build_turn_content の内容にして送る
+        2. 最初の入力: events = turn_input.carry_over_events(繰り越した出来事, controller.take_events()) とし、
+           turn_input.build_session_opening_text(SessionOpening(initial_instruction, list_note_files(paths.notes_dir),
+           notes/handoff.md の中身 (notes.note_reader.read_note_text))) と build_turn_text(TurnContext(clock.now(),
+           events, read_progress_state(paths.progress_state), 前の JSON の誤り, 写さなかったスキル)) を改行でつないだ
+           テキストと、select_turn_frames(frames.jsonl の記録, None, now) (最新の 1 枚) の画像を、build_turn_content の
+           内容にして送る。入力を作ったら、繰り越した出来事を None に戻す
+           出来事の繰り越し: ふつうのターンの入力が result を受け取れなかったとき (送れなかった・ターンの途中で
+           子プロセスが終わった・turn_timeout_s で打ち切った)、その入力に載せた events (繰り越した分を含む) を
+           繰り越した出来事として覚え、次の入力 (次のセッションの最初の入力を含む) で carry_over_events に渡す
+           (一度だけの出来事を失わないため)。停止の合図で打ち切ったときは、主ループが戻るため繰り越さない
         3. ターンを待つ: READ_POLL_S 秒ごとに ClaudeStreamSession.read で行を受け取る。ターンの最後の文と使用量は、
            次のように読む (stream_messages):
              - assistant の行: deep.claude_stream_log.assistant_text が None でなければ、そのターンの最後の文にする
@@ -166,7 +173,7 @@ class OrchestratorMainLoop:
              - compact_boundary の行: sessions.jsonl に要約の行を書く。セッションは続ける
              - result の行: そのターンを終える (4)
              - ほかの行 (system/init・thinking_tokens・rate_limit_event など): 何もしない (stream.jsonl には書かれる)
-        4. result を受け取ったら、copy_game_skills で写してから:
+        4. result を受け取ったら、copy_game_skills で写し (写さなかったスキルを覚え直す) てから:
              ふつうのターン: 最後の文 (None なら空文字列) を parse_decision に渡す。
                Decision なら controller.apply(decision) を呼び、JSON の誤りが続いた回数を 0 にし、前の JSON の誤りを
                None にする。DecisionError なら回数を 1 増やし、前の JSON の誤りをそれにし、run.jsonl に
@@ -179,7 +186,7 @@ class OrchestratorMainLoop:
                handoff_request_text() のテキストだけの入力 (画像を付けず、take_events も呼ばない。出来事は次の
                セッションの最初の入力に入る) を、引き継ぎの依頼として送る。
                そうでなければ、すぐ次の入力を送る (2 と同じ材料で、セッションの開始の節は付けず、画像は
-               select_turn_frames(記録, 前の入力を送った時刻, now))
+               select_turn_frames(記録, 前の入力を送った時刻, now)。出来事も 2 と同じく carry_over_events で作る)
              引き継ぎの依頼: JSON は読まない (parse_decision も apply も呼ばず、JSON の誤りの回数も変えない)。
                turns.jsonl に行 (kind HANDOFF、outcome HANDOFF) を書き、セッションを終える (理由 rotate)
         5. ターンを終えずにセッションを終えるとき (turns.jsonl に、t_result が null の行を書く):

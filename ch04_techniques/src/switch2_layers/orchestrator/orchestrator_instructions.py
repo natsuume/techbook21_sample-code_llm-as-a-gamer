@@ -5,6 +5,8 @@
 
 # Claude が引き継ぎを書く、notes/ からの相対パス
 HANDOFF_NOTE = "handoff.md"
+# コードの手順 (tap_repeat・walk) の count の上限。操作の実行の部品が、これを超える count を JSON の誤りにする
+PROCEDURE_MAX_COUNT = 100
 
 
 def orchestrator_instructions() -> str:
@@ -20,7 +22,8 @@ def orchestrator_instructions() -> str:
        repeat (every か once))・stop・null。押せないボタンは実行のときに外れて、次の入力で知らされること。
        JSON に誤りがあれば、操作・マクロ・監視のどれも変わらず、誤りの説明が次の入力で届くこと
     3. コードの手順 (tap_repeat: button・count・interval_seconds、walk: direction・count・seconds・
-       interval_seconds)・マクロ (実行ディレクトリーの間残る。マクロの中から macro は呼べない)・監視 (同時に 1 つ。
+       interval_seconds。どちらも count は 1 以上 PROCEDURE_MAX_COUNT 以下の整数で、超えると JSON の誤り)・マクロ
+       (実行ディレクトリーの間残る。マクロの中から macro は呼べない)・監視 (同時に 1 つ。
        条件に当たると操作を実行する)・スキル (Skill のツールで .claude/skills/ のスキルを使う) の使い方。
        Claude の操作 (actions) の実行中は、監視が止まること
     4. 判断は休まず続き、次の JSON の actions は前の actions の残りを捨てて置き換えること。空の actions なら前の
@@ -29,7 +32,10 @@ def orchestrator_instructions() -> str:
     6. 監視の条件の文は画面の見た目だけで書き、ゲーム名や作品に固有の名前を書かないこと
     7. notes/ に、分かったこと (操作の割り当て、攻略の情報、方針) を書くこと
     8. ゲームの内容の手順を、notes/skills/game-<名前>/SKILL.md にスキル (frontmatter に name と description) として
-       書いてよいこと。コードが .claude/skills/ に写して読ませるため、書いたそのターンには使えないこと
+       書いてよいこと。コードが .claude/skills/ に写して読ませるため、書いたそのターンには使えないこと。
+       コードが写すのは SKILL.md だけで、frontmatter の欄は name (ディレクトリーの名前と同じ) と description の
+       1 行ずつだけ、本文にシェルのコマンドを実行する書き方を書かないこと (skill_copy.check_game_skill_text の規則)。
+       守らないスキルは写されず、次の入力の「写さなかったスキル」の節で理由が届くこと
     9. 古いフレームは frames/interval/ から必要なときだけ読むこと (読んだ画像もコンテキストに残るため)
     """
     raise NotImplementedError

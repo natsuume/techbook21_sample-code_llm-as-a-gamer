@@ -417,13 +417,22 @@ def no_events() -> OrchestratorEvents:
 
 
 class FakeController:
-    """apply・take_events・run・set_started を持つフェイク。"""
+    """apply・take_events・run・set_started を持つフェイク。
+
+    events      取り出すたびに返す出来事 (sequence が無いとき)
+    sequence    取り出すたびに、前から 1 つずつ返す出来事の並び。使い切ったら no_events() を返す
+    error       取り出すときに出す例外
+    """
 
     def __init__(
-        self, events: OrchestratorEvents | None = None, error: Exception | None = None
+        self,
+        events: OrchestratorEvents | None = None,
+        error: Exception | None = None,
+        sequence: list[OrchestratorEvents] | None = None,
     ):
         self.events = events if events is not None else no_events()
         self.error = error
+        self.sequence = list(sequence) if sequence is not None else None
         self.applied: list[Decision] = []
         self.take_count = 0
 
@@ -434,6 +443,8 @@ class FakeController:
         self.take_count += 1
         if self.error is not None:
             raise self.error
+        if self.sequence is not None:
+            return self.sequence.pop(0) if self.sequence else no_events()
         return self.events
 
     def run(self, stop: threading.Event) -> None:
@@ -1504,6 +1515,167 @@ def test_invalid_turn_records_the_errors(tmp_path):
     assert turn["outcome"] == "invalid"
     assert turn["errors"] == ["invalid #1"]
     assert turn["response_json"] is None
+
+
+# --- 届かなかった出来事の繰り越し ---
+
+
+def events_with(
+    condition: str | None = None,
+    *,
+    discarded: int = 0,
+    blocked: tuple[str, ...] = (),
+    running: bool = False,
+    remaining: int = 0,
+) -> OrchestratorEvents:
+    """条件の当たり (condition) を 1 つ持つ出来事。condition が None なら当たりは無し。"""
+    hits = ()
+    if condition is not None:
+        hits = (
+            CaseHit(
+                monitor="dialog",
+                case_index=0,
+                condition=condition,
+                count=1,
+                actions=(PressAction(buttons=("A",), sticks={}, seconds=None),),
+            ),
+        )
+    return OrchestratorEvents(
+        case_hits=hits,
+        monitor_ends=(),
+        discarded_action_count=discarded,
+        blocked_buttons=blocked,
+        running=running,
+        remaining_action_count=remaining,
+        macros={},
+        monitor=None,
+    )
+
+
+def test_events_of_an_input_cut_by_an_exit_are_carried_to_the_next_session(tmp_path):
+    controller = FakeController(
+        sequence=[
+            events_with("届いた条件"),
+            events_with("届かなかった条件", discarded=2, blocked=("HOME",)),
+            events_with(
+                "新しい条件",
+                discarded=1,
+                blocked=("HOME", "ZL"),
+                running=True,
+                remaining=4,
+            ),
+        ]
+    )
+    fake = FakeClaude([[Reply(), Exit(code=1)], [Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    text = text_of(inputs_of(fake, 1)[0])
+    assert "届かなかった条件" in text
+    assert "新しい条件" in text
+    assert text.index("届かなかった条件") < text.index("新しい条件")
+    # result を受け取った入力の出来事は、もう一度は載せない
+    assert "届いた条件" not in text
+    assert "新しい actions で捨てた前の操作: 3 個" in text
+    assert "押せずに外したボタン: HOME, ZL" in text
+    assert "実行中: はい" in text
+    assert "残りの操作: 4 個" in text
+
+
+def test_events_of_an_input_cut_by_the_turn_timeout_are_carried(tmp_path):
+    controller = FakeController(
+        sequence=[events_with("時間切れの条件"), events_with("新しい条件")]
+    )
+    fake = FakeClaude([[Hang()], [Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
+    advance_after_send(harness, 120.0)
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    text = text_of(inputs_of(fake, 1)[0])
+    assert text.index("時間切れの条件") < text.index("新しい条件")
+
+
+def test_events_of_an_input_that_could_not_be_sent_are_carried(tmp_path):
+    controller = FakeController(
+        sequence=[
+            events_with("届いた条件"),
+            events_with("送れなかった条件"),
+            events_with("新しい条件"),
+        ]
+    )
+    fake = FakeClaude(
+        [[Reply(), Hang()], [Hang()]],
+        options=[ProcessOptions(fail_writes_after=1), ProcessOptions()],
+    )
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    text = text_of(inputs_of(fake, 1)[0])
+    assert text.index("送れなかった条件") < text.index("新しい条件")
+    assert "届いた条件" not in text
+
+
+def test_events_of_a_delivered_input_are_not_repeated(tmp_path):
+    controller = FakeController(
+        sequence=[events_with("届いた条件"), events_with("新しい条件")]
+    )
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    second = text_of(inputs_of(fake, 0)[1])
+    assert "新しい条件" in second
+    assert "届いた条件" not in second
+
+
+# --- 写さなかったゲームの内容のスキル ---
+
+
+# allowed-tools の欄があるため写さないスキル
+REJECTED_SKILL_TEXT = "---\nname: game-tools\ndescription: 会話を進める\nallowed-tools: Bash\n---\n\n本文\n"
+
+
+def write_rejected_skill(root: Path) -> None:
+    skill = root / "notes" / "skills" / "game-tools"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(REJECTED_SKILL_TEXT, encoding="utf-8")
+
+
+def test_rejected_game_skill_is_reported_in_the_first_input(tmp_path):
+    fake = FakeClaude([[Hang()]])
+    harness = make_harness(tmp_path, fake)
+    write_rejected_skill(harness.root)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
+    harness.finish()
+    assert fake.launch_skills == [[]]
+    text = text_of(inputs_of(fake, 0)[0])
+    assert "## 写さなかったスキル" in text
+    assert "- game-tools: " in text
+    assert "allowed-tools" in text
+
+
+def test_game_skill_rejected_after_a_result_is_reported_in_the_next_input(tmp_path):
+    fake = FakeClaude()
+    harness = make_harness(tmp_path, fake)
+
+    def write_rejected(process: FakeClaudeProcess) -> None:
+        write_rejected_skill(harness.root)
+
+    fake.scripts = [[Reply(before=write_rejected), Hang()]]
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    first, second = (text_of(message) for message in inputs_of(fake, 0))
+    assert "- game-tools: " not in first
+    assert "- game-tools: " in second
+    assert "allowed-tools" in second
+    assert not (harness.root / ".claude" / "skills" / "game-tools").exists()
 
 
 # --- 設定の確かめ ---

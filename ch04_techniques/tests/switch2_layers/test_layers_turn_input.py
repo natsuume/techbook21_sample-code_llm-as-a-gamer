@@ -21,6 +21,7 @@ from switch2_layers.orchestrator.orchestrator_events import (
     MonitorEnd,
     OrchestratorEvents,
 )
+from switch2_layers.orchestrator.skill_copy import SkippedGameSkill
 from switch2_layers.orchestrator.turn_input import (
     FRAMES_GUIDE_TEXT,
     NONE_TEXT,
@@ -32,12 +33,14 @@ from switch2_layers.orchestrator.turn_input import (
     build_session_opening_text,
     build_turn_content,
     build_turn_text,
+    carry_over_events,
     describe_decision_error,
     describe_events,
     describe_macros,
     describe_monitor,
     describe_progress_for_turn,
     describe_running,
+    describe_skipped_skills,
     image_label,
     list_note_files,
     read_turn_images,
@@ -356,6 +359,17 @@ def test_macros_are_written_as_json_in_name_order():
 # --- ふつうのターンのテキスト ---
 
 
+SKIPPED = (
+    SkippedGameSkill(
+        name="game-tools",
+        reason="frontmatter に name と description のほかの欄がある: allowed-tools",
+    ),
+    SkippedGameSkill(
+        name="game-shell", reason="スキルからシェルのコマンドを実行する書き方がある"
+    ),
+)
+
+
 def test_turn_text_has_every_section_in_order():
     error = DecisionError(messages=("no json block",))
     context = TurnContext(
@@ -369,6 +383,7 @@ def test_turn_text_has_every_section_in_order():
         ),
         progress=progress(10.0),
         previous_error=error,
+        skipped_skills=SKIPPED,
     )
     text = build_turn_text(context)
     headings = [line for line in text.splitlines() if line.startswith("## ")]
@@ -378,6 +393,7 @@ def test_turn_text_has_every_section_in_order():
         "## 主ループの操作",
         "## 画面の停滞 (コードの計測)",
         "## 前の JSON の誤り",
+        "## 写さなかったスキル",
         "## 今の監視",
         "## 今のマクロ",
         "## 古いフレーム",
@@ -387,6 +403,7 @@ def test_turn_text_has_every_section_in_order():
     assert describe_running(context.events) in text
     assert describe_progress_for_turn(context.progress, 12.345) in text
     assert describe_decision_error(error) in text
+    assert describe_skipped_skills(SKIPPED) in text
     assert describe_monitor(DIALOG_MONITOR) in text
     assert describe_macros({"next_message": (PRESS_A,)}) in text
     assert FRAMES_GUIDE_TEXT in text
@@ -394,11 +411,82 @@ def test_turn_text_has_every_section_in_order():
 
 
 def test_turn_text_without_anything_to_report():
-    text = build_turn_text(
-        TurnContext(now_t=1.0, events=events(), progress=None, previous_error=None)
+    context = TurnContext(
+        now_t=1.0, events=events(), progress=None, previous_error=None
     )
+    assert context.skipped_skills == ()
+    text = build_turn_text(context)
     assert NO_PROGRESS_TEXT in text
-    assert text.count(NONE_TEXT) >= 4
+    assert text.count(NONE_TEXT) >= 5
+
+
+# --- 写さなかったスキル ---
+
+
+def test_skipped_skills_are_listed_with_their_reasons():
+    assert describe_skipped_skills(SKIPPED) == (
+        "- game-tools: frontmatter に name と description のほかの欄がある: allowed-tools\n"
+        "- game-shell: スキルからシェルのコマンドを実行する書き方がある"
+    )
+    assert describe_skipped_skills(()) == NONE_TEXT
+
+
+# --- 出来事の繰り越し ---
+
+
+HIT_OLD = CaseHit(
+    monitor="dialog", case_index=0, condition="会話の枠", count=2, actions=(PRESS_A,)
+)
+HIT_NEW = CaseHit(
+    monitor="dialog", case_index=1, condition="選択肢", count=1, actions=(WAIT,)
+)
+END_OLD = MonitorEnd(name="dialog", reason="completed", detail="C1 を実行した")
+END_NEW = MonitorEnd(name="menu", reason="failed", detail="Jev failed 5 times")
+
+
+def test_without_carried_events_the_taken_events_are_used():
+    taken = events(case_hits=(HIT_NEW,), discarded_action_count=1)
+    assert carry_over_events(None, taken) == taken
+
+
+def test_one_time_events_are_combined_and_current_state_is_taken():
+    carried = events(
+        case_hits=(HIT_OLD,),
+        monitor_ends=(END_OLD,),
+        discarded_action_count=2,
+        blocked_buttons=("HOME", "CAPTURE"),
+        running=False,
+        remaining_action_count=0,
+        macros={"old": (PRESS_A,)},
+        monitor=None,
+    )
+    taken = events(
+        case_hits=(HIT_NEW,),
+        monitor_ends=(END_NEW,),
+        discarded_action_count=3,
+        blocked_buttons=("CAPTURE", "ZL"),
+        running=True,
+        remaining_action_count=4,
+        macros={"new": (WAIT,)},
+        monitor=DIALOG_MONITOR,
+    )
+    assert carry_over_events(carried, taken) == events(
+        case_hits=(HIT_OLD, HIT_NEW),
+        monitor_ends=(END_OLD, END_NEW),
+        discarded_action_count=5,
+        blocked_buttons=("HOME", "CAPTURE", "ZL"),
+        running=True,
+        remaining_action_count=4,
+        macros={"new": (WAIT,)},
+        monitor=DIALOG_MONITOR,
+    )
+
+
+def test_carried_events_are_kept_when_nothing_new_happened():
+    carried = events(case_hits=(HIT_OLD,), blocked_buttons=("HOME",))
+    merged = carry_over_events(carried, events())
+    assert merged.case_hits == (HIT_OLD,)
+    assert merged.blocked_buttons == ("HOME",)
 
 
 # --- セッションの最初の入力 ---

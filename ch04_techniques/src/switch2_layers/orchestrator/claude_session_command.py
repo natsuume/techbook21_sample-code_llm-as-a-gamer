@@ -22,8 +22,13 @@
       組み込みのスキルのうち disableBundledSkills でも残るもの (BUNDLED_SKILLS_TO_HIDE) は、skillOverrides で off にする
     - Bash・PowerShell・WebSearch・WebFetch・Agent と MCP のツール (mcp__*) は、拒むルールで外す
     - dontAsk のモードでは、.claude/ の下 (notes/.claude/ を含む) への Write は保護されたパスとして拒まれる。
-      そのため、ゲームの内容のスキルは notes/skills/game-<名前>/SKILL.md に書かせ、主ループのコードが写す
-      (orchestrator.skill_copy)
+      そのため、ゲームの内容のスキルは notes/skills/game-<名前>/SKILL.md に書かせ、主ループのコードが中身を
+      確かめてから写す (orchestrator.skill_copy)
+    - スキルの本文は、!`<コマンド>` と ```! のブロックで、読み込むときにシェルのコマンドを実行できる
+      (https://code.claude.com/docs/en/skills の dynamic context injection)。--settings の
+      disableSkillShellExecution を true にし、実行せずに [shell command execution disabled by policy] に置き換えさせる
+      (https://code.claude.com/docs/en/settings-reference の disableSkillShellExecution。Scope は Any file。
+      組み込みのスキルと managed のスキルは置き換えの対象にならない)
 ユーザーの設定・plugin・hook・CLAUDE.md・自動メモリ・MCP を読ませない方法:
     - --setting-sources project: ユーザーとローカルの設定ファイルを読まない
     - --strict-mcp-config: --mcp-config で渡したもの以外の MCP サーバーを読まない (--mcp-config は渡さない)
@@ -47,6 +52,9 @@
       (accept にした同じ形のセッションには渡り、新しいターンが始まる)。init の行の messaging_socket_path は、
       refuse でも出る
     - 各ユーザーのターンの最初に、system/init の行が出る
+    - disableSkillShellExecution を足した引数で起動しても (2026-11-17)、system/init の行と 1 ターンの終わり方は同じ。
+      実行ディレクトリーのスキルの本文の !`echo ...` と ```! のブロックは、Skill のツールの結果で
+      [shell command execution disabled by policy] に置き換わり、コマンドの出力は出ない
 """
 
 from collections.abc import Collection, Mapping, Sequence
@@ -112,6 +120,9 @@ SESSION_SETTINGS_BASE: dict[str, object] = {
     "autoMemoryEnabled": False,
     "disableClaudeAiConnectors": True,
     "disableBundledSkills": True,
+    # スキルの本文の !`...` と ```! のブロックを、シェルで実行せずに
+    # [shell command execution disabled by policy] に置き換える
+    "disableSkillShellExecution": True,
     "syncClaudeAiSkills": False,
     "permissions": {
         "blockReadsOutsideWorkingDirectories": True,

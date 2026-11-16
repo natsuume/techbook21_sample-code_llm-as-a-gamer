@@ -8,11 +8,14 @@
     ## 主ループの操作                 describe_running
     ## 画面の停滞 (コードの計測)       describe_progress_for_turn
     ## 前の JSON の誤り               describe_decision_error
+    ## 写さなかったスキル              describe_skipped_skills
     ## 今の監視                       describe_monitor
     ## 今のマクロ                     describe_macros
     ## 古いフレーム                   FRAMES_GUIDE_TEXT
 セッションの最初の入力では、この前に build_session_opening_text の節を置く (人の初期指示・notes/ のファイルの一覧・
 notes/handoff.md の中身)。
+出来事の繰り越し (carry_over_events): result を受け取れなかった入力に載せた一度だけの出来事 (条件の当たり・監視の
+終わり・捨てた操作の数・外したボタン) は、次の入力で新しく取り出した出来事と合わせて渡す。
 画像 (select_turn_frames): 前の入力を送った時刻から今までの一定間隔のフレームから、均等に最大 TURN_MAX_IMAGES 枚
 (frames/interval/ に保存した幅 640 の JPEG をそのまま使う)。セッションの最初のターンは最新の 1 枚。
 メッセージの内容 (build_turn_content): テキストのブロックの後に、画像ごとに時刻のラベルのテキストのブロックと画像の
@@ -30,6 +33,7 @@ from switch2_layers.orchestrator.decision_types import (
     MonitorCreate,
 )
 from switch2_layers.orchestrator.orchestrator_events import OrchestratorEvents
+from switch2_layers.orchestrator.skill_copy import SkippedGameSkill
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.run_directory import RunPaths
 
@@ -65,15 +69,19 @@ class TurnContext:
     """ふつうのターンのテキストの材料。
 
     now_t            今の時刻 (入力を作る時刻)
-    events           前の判断以降の出来事と、今のマクロと監視 (OrchestratorController.take_events の結果)
+    events           前の判断以降の出来事と、今のマクロと監視 (OrchestratorController.take_events の結果に、
+                     繰り越した出来事を carry_over_events で合わせたもの)
     progress         画面の停滞の計測の最新の値 (progress/state.json)。無ければ None
     previous_error   前のターンの JSON の誤り。前のターンに誤りが無かった・前のターンが無ければ None
+    skipped_skills   最後にゲームの内容のスキルを写したとき (skill_copy.copy_game_skills) に、中身を確かめて
+                     写さなかったスキル
     """
 
     now_t: float
     events: OrchestratorEvents
     progress: ProgressState | None
     previous_error: DecisionError | None
+    skipped_skills: tuple[SkippedGameSkill, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,30 @@ def describe_progress_for_turn(progress: ProgressState | None, now_t: float) -> 
 
 def describe_decision_error(error: DecisionError | None) -> str:
     """前の JSON の誤りを文にする。None なら NONE_TEXT、そうでなければ説明ごとに `- <説明>` の行。"""
+    raise NotImplementedError
+
+
+def describe_skipped_skills(skipped: Sequence[SkippedGameSkill]) -> str:
+    """写さなかったゲームの内容のスキルを、1 件 1 行の `- <name>: <reason>` の文にする。無ければ NONE_TEXT。
+
+    Claude が notes/skills/<name>/SKILL.md を直せるよう、名前と理由をそのまま書く。
+    """
+    raise NotImplementedError
+
+
+def carry_over_events(
+    carried: OrchestratorEvents | None, taken: OrchestratorEvents
+) -> OrchestratorEvents:
+    """result を受け取れなかった入力に載せた出来事 carried を、新しく取り出した出来事 taken と合わせて返す (I/O なし)。
+
+    carried が None なら taken をそのまま返す。そうでなければ次の値の OrchestratorEvents を返す:
+        case_hits                carried の後に taken を並べる (古い順)
+        monitor_ends             carried の後に taken を並べる (古い順)
+        discarded_action_count   carried と taken の和
+        blocked_buttons          carried の後に taken を並べ、2 回目以降に出てきたボタンを除く (重ねない)
+        running・remaining_action_count・macros・monitor
+                                 taken の値 (取り出した時点の値のため)
+    """
     raise NotImplementedError
 
 

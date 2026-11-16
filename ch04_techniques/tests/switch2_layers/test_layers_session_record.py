@@ -60,6 +60,33 @@ def test_no_json_block_gives_none():
     assert last_json_block(None) is None
 
 
+def test_unclosed_block_before_a_correct_block_is_not_recorded():
+    # 閉じ忘れたブロックの中に新しい ```json の行が現れたら、そこから数え直す
+    text = (
+        '書きかけ\n```json\n{"actions": [\n'
+        "書き直す\n"
+        '```json\n{"actions": [{"type": "wait", "seconds": 1}]}\n```\n'
+    )
+    assert last_json_block(text) == '{"actions": [{"type": "wait", "seconds": 1}]}'
+
+
+def test_fence_with_a_language_name_does_not_close_the_block():
+    text = '```json\n{"note": "x"}\n```text\n{"actions": []}\n```\n'
+    assert last_json_block(text) == '{"note": "x"}\n```text\n{"actions": []}'
+
+
+def test_block_left_open_at_the_end_is_not_used():
+    text = (
+        '```json\n{"actions": []}\n```\n補足\n```json\n{"actions": [{"type": "press"\n'
+    )
+    assert last_json_block(text) == '{"actions": []}'
+
+
+def test_fences_with_surrounding_spaces_and_windows_line_endings():
+    text = '答え\r\n  ```json  \r\n{"actions": []}\r\n  ```  \r\n'
+    assert last_json_block(text) == '{"actions": []}'
+
+
 # --- sessions.jsonl の行 ---
 
 

@@ -33,8 +33,10 @@ logger = logging.getLogger(__name__)
 SESSION_EVENT_START = "start"
 SESSION_EVENT_END = "end"
 SESSION_EVENT_COMPACT = "compact"
-# 応答の本文の ```json のブロック (```json の行から、次の ``` の行まで)
-JSON_BLOCK_PATTERN = re.compile(r"```json[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL)
+# 応答の本文の ```json のブロックの開きの行 (行全体。前後の空白を許す)
+JSON_FENCE_OPEN_PATTERN = re.compile(r"[ \t]*```json[ \t]*")
+# ブロックの閉じの行 (言語名の付かない、フェンスだけの行。前後の空白を許す)
+FENCE_CLOSE_PATTERN = re.compile(r"[ \t]*```[ \t]*")
 
 
 class SessionEndReason(StrEnum):
@@ -82,9 +84,16 @@ class TurnRecord:
 
 
 def last_json_block(text: str | None) -> str | None:
-    """text の最後の ```json のブロック (JSON_BLOCK_PATTERN) の中身を返す。text が None か、ブロックが無ければ None。
+    """text の最後の、閉じた ```json のブロックの中身を返す。text が None か、閉じたブロックが無ければ None。
 
-    記録 (turns.jsonl の response_json) のためだけに使う。JSON として読めるかは確かめない。
+    text を行に分け (\\n と \\r\\n)、前から次の規則で読む:
+        - JSON_FENCE_OPEN_PATTERN に fullmatch する行で、ブロックを開く。開いている間に同じ形の行が現れたら、
+          そこから数え直す (前の開きの行と、その後の行は捨てる)
+        - 開いている間に FENCE_CLOSE_PATTERN に fullmatch する行が現れたら、そのブロックを閉じる。中身は開きの行と
+          閉じの行の間の行を \\n でつないだもの。```text のように言語名の付いた行は閉じの行にしない (中身に含める)
+        - 最後まで閉じなかったブロックは使わない
+    閉じたブロックのうち最後のものの中身を返す。記録 (turns.jsonl の response_json) のためだけに使い、JSON として
+    読めるかは確かめない。
     """
     raise NotImplementedError
 

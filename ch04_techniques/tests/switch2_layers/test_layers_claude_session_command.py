@@ -32,12 +32,15 @@ from switch2_layers.run_directory import RunPaths
 ROOT = Path("/home/user/runs/20261116-120000")
 R = ROOT.as_posix()
 INSTRUCTIONS = "あなたは画面だけを見てゲームを進める。"
-# 実際に起動して確かめたとき (2026-11-16、Claude Code 2.1.325) の、親のディレクトリーのスキルの名前
+# 実際に起動して確かめたとき (2026-11-16 と 2026-11-17、Claude Code 2.1.325) の、親のディレクトリーのスキルの名前
 PARENT_SKILLS = ("record-tips", "record-advice", "record-strategy", "record-controls")
-# そのときの --settings の値 (実行ディレクトリーのパスに依らない)
+# 2026-11-17 に起動して確かめた --settings の値 (実行ディレクトリーのパスに依らない)。
+# disableSkillShellExecution は https://code.claude.com/docs/en/skills (dynamic context injection) と
+# https://code.claude.com/docs/en/settings-reference (disableSkillShellExecution) による
 VERIFIED_SETTINGS_JSON = (
     '{"disableAllHooks":true,"autoMemoryEnabled":false,"disableClaudeAiConnectors":true,'
-    '"disableBundledSkills":true,"syncClaudeAiSkills":false,"permissions":'
+    '"disableBundledSkills":true,"disableSkillShellExecution":true,"syncClaudeAiSkills":false,'
+    '"permissions":'
     '{"blockReadsOutsideWorkingDirectories":true,"blockWritesOutsideWorkingDirectories":true},'
     '"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}},'
     '"skillOverrides":{"design":"off","doctor":"off","record-advice":"off","record-controls":"off",'
@@ -270,6 +273,13 @@ def test_settings_keep_the_base_keys_in_order_and_add_overrides_and_inbound():
     assert settings["disableAllHooks"] is True
     assert settings["autoMemoryEnabled"] is False
     assert settings["crossSessionInbound"] == "refuse"
+
+
+def test_settings_stop_skills_from_running_shell_commands():
+    # スキルの本文の !`...` と ```! のブロックを実行させない
+    # (https://code.claude.com/docs/en/settings-reference の disableSkillShellExecution)
+    assert SESSION_SETTINGS_BASE["disableSkillShellExecution"] is True
+    assert build_session_settings([])["disableSkillShellExecution"] is True
 
 
 def test_skill_overrides_turn_off_parent_and_bundled_skills_in_name_order():
