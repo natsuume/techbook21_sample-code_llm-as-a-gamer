@@ -32,8 +32,14 @@
     書く (このモジュールは記録の関数を持たず、行を書かない)。
     apply の送信の例外は外に出さない (PadOutput が ok=False の行を書く。その操作は時刻どおりに進める)。
     apply が OutputStoppedError を出したら (全体を止める処理が出力を止めた)、今の列とこの後に始める列をすべて捨てる
-    (以後は何も送らない)。start の時点で PadOutput.output_stopped が True なら、列を持たない (送る前に止まった
-    ことが分かるので、最初の操作が wait でも、押し直しの間を待つ押下でも、列を始めない)。
+    (以後は何も送らない)。start の時点で PadOutput.output_stopped が True なら、OutputStoppedError を受けたときと
+    同じく、列を持たず以後も持たない (送る前に止まったことが分かるので、最初の操作が wait でも、押し直しの間を待つ
+    押下でも、列を始めない)。
+送る前に止まったか (stopped_before_sending):
+    最後の start の後、押す操作を 1 つも送らないうちに出力の停止が分かったら True。分かるのは、start の時点で
+    PadOutput.output_stopped が True だったときと、押す操作を送ろうとして OutputStoppedError を受けたときだけ
+    (このモジュールを呼ぶスレッドで決まる)。start の後に別のスレッドが stop_output を呼んでも、送ろうとするまでは
+    False のまま。押す操作を送った後に止まった列は、始めた列として扱う。
 OrchestratorController の run のループのスレッドからだけ呼ぶ (ロックを持たない)。
 """
 
@@ -163,7 +169,10 @@ class ActionExecutor:
         self._last_release_t: float | None = None
         self._blocked: set[str] = set()
         self._finished_owner: ActionOwner | None = None
+        # 出力の停止を、このモジュールを呼ぶスレッドで知ったか (start の確かめか、OutputStoppedError)
         self._output_stopped = False
+        # 最後の start の後に、押す操作を送ったか (送信の失敗を含む。OutputStoppedError で拒まれたものは含めない)
+        self._pressed_since_start = False
 
     def start(self, operations: Sequence[PrimitiveAction], owner: ActionOwner) -> int:
         """今の列を捨て (cancel と同じ)、operations を owner の列として持つ。捨てた操作の数を返す。
@@ -171,7 +180,10 @@ class ActionExecutor:
         最初の操作は、この後の advance で送る。operations が空なら、列を持たない状態になる。
         """
         discarded = self.cancel()
-        if self.output_stopped or not operations:
+        self._pressed_since_start = False
+        if self._pad_output.output_stopped:
+            self._stop_after_output_stopped()
+        if self._output_stopped or not operations:
             return discarded
         self._operations = list(operations)
         self._source = owner
@@ -228,6 +240,11 @@ class ActionExecutor:
     def output_stopped(self) -> bool:
         """PadOutput.stop_output の後 (PadOutput.output_stopped が True か、apply が OutputStoppedError を出した後) なら True。"""
         return self._output_stopped or self._pad_output.output_stopped
+
+    @property
+    def stopped_before_sending(self) -> bool:
+        """最後の start の後、押す操作を 1 つも送らないうちに出力の停止が分かったら True (モジュールの docstring)。"""
+        return self._output_stopped and not self._pressed_since_start
 
     @property
     def last_release_t(self) -> float | None:
@@ -287,6 +304,7 @@ class ActionExecutor:
             # 送信の失敗は PadOutput が ok=False の行に書く。押下状態は送ろうとした値に変わっているので、そのまま進める
             logger.debug("pressing failed", exc_info=True)
             result = filter_action(action, self._pad_output.allowed_buttons)
+        self._pressed_since_start = True
         self._blocked.update(result.blocked_buttons)
         self._pressed_buttons = frozenset(result.action.held)
         self._tilted_sticks = tilted_sticks(result.action)

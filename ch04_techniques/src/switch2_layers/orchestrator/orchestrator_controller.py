@@ -55,8 +55,9 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
         - 答えがあった: ActiveMonitor.record_answer (失敗の回数を 0 に戻す)。要求を送った後に、空でない actions を
           apply で受け付けていれば、ほかに何もしない (操作の前の画面への答えで操作しない)。当たった条件があれば、
           条件の操作の列 (ActiveMonitor.operations_of。展開した後の列) を監視の列 (source が monitor) として始め、
-          その場で 1 回進める (ActionExecutor.advance)。出力が止まっていて始められなければ (output_stopped。列の
-          最初の操作が wait で、まだ何も送っていないときも含む)、当たりに数えず、monitor.jsonl の hit も null にする。始められたら、その条件の CaseHit の回数を 1 足す。展開した後の
+          その場で 1 回進める (ActionExecutor.advance)。押す操作を 1 つも送らないうちに出力の停止が分かったら
+          (ActionExecutor.stopped_before_sending。列を始める時点で止まっていたときと、最初の押す操作が
+          OutputStoppedError で拒まれたとき)、当たりに数えず、monitor.jsonl の hit も null にする。始められたら、その条件の CaseHit の回数を 1 足す。展開した後の
           列が空なら (条件の actions が空のときと、展開すると空になるマクロのとき)、CaseHit の回数を 1 足し、列を
           始めずに、その場で次の「実行し終えた」の扱いをする
         - 監視の列を最後まで実行し終えたら、ActiveMonitor.case_finished。MonitorEnd が返ったら (once の条件) 監視を
@@ -415,10 +416,10 @@ class OrchestratorController:
             self._count_case_hit_locked(monitor, case_index)
             self._case_done_locked(monitor, case_index)
             return case_index
-        # 列を始めてすぐ 1 回進め、出力が止まっていて始められなかったら当たりに数えない
+        # 列を始めてすぐ 1 回進め、押す操作を 1 つも送らないうちに出力の停止が分かったら当たりに数えない
         self._executor.start(operations, "monitor")
         self._executor.advance()
-        if self._executor.output_stopped:
+        if self._executor.stopped_before_sending:
             return None
         self._count_case_hit_locked(monitor, case_index)
         self._running_case = (monitor.generation, case_index)
