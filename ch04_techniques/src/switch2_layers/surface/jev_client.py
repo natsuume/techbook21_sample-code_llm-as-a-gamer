@@ -97,11 +97,13 @@ class JevAnswers:
     choices   choice の問いの ID → (選択肢の名前 → 確率)。問いのすべての選択肢を含む
     nouls     noul の問いの ID → 真である確率
     boxes     box の問いの ID → JevBox。使えない box (座標か確信度が 0〜1 の外、幅か高さが 0 以下) は None
+    usage     応答の usage (受け取った JSON の値のまま。中身は確かめない)。応答に usage が無いか null なら None
     """
 
     choices: Mapping[str, Mapping[str, float]]
     nouls: Mapping[str, float]
     boxes: Mapping[str, JevBox | None]
+    usage: object | None = None
 
 
 def new_asset_reference() -> str:
@@ -261,6 +263,7 @@ def parse_answers(
     read_box_answer) なら JevError。questions に無い ID の答えと、問いに無い選択肢の名前は無視する。
     box の問いの答えは read_box_answer の値 (使える box が無ければ None) を boxes に入れる。
     選択肢の確率の合計は確かめない (公式ドキュメントは「およそ 1」としか書いていない)。
+    usage は body["usage"] をそのまま入れる (キーが無ければ None。型も中身も確かめない)。
     """
     answers = body.get("answers")
     if not isinstance(answers, dict):
@@ -383,7 +386,7 @@ class JevClient:
     ) -> JevAnswers:
         """build_payload(state, questions, images, model) を post し、parse_answers(本文, questions) を返す。
 
-        with_images は needs_images_header(questions, images)。
+        with_images は needs_images_header(questions, images)。戻り値の usage は応答の本文の usage (無ければ None)。
         """
         payload = build_payload(state, questions, images, self.model)
         body = self.post(payload, needs_images_header(questions, images))

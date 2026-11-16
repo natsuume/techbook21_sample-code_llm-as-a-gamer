@@ -1,9 +1,14 @@
-"""surface.jsonl の 1 行 (surface の 1 回の要求の記録) を作る。
+"""surface.jsonl の 1 行 (surface の 1 回の要求の記録) と、surface_requests.jsonl の 1 行 (Jev に送った要求の記録) を作る。
 
-行の形:
+surface.jsonl の行の形:
     {"t_sent", "t_received", "frames": [{"t", "file"}], "scene_id", "uses_common": {"controls": 真偽, "tips": 真偽},
      "middle_generated_t", "action", "blocked_buttons", "deep_requests", "info_labels", "boxes", "scene_changed",
-     "wait_s", "error"}
+     "wait_s", "error", "request", "answers": {"choices": {問いの ID: {選択肢の名前: 確率}}, "nouls": {問いの ID: 確率}},
+     "usage"}
+surface_requests.jsonl の行の形:
+    {"request", "t_sent", "model", "state", "questions": [{"id", "type", "instructions", "criteria"}]}
+    questions の各要素は、問いの ID と、Jev に送った問いの値 (surface.jev_client.build_question_json) を並べたもの
+    (criteria は choice の問いだけ)。API キーと HTTP のヘッダーは書かない。
 """
 
 from collections.abc import Sequence
@@ -11,7 +16,14 @@ from dataclasses import dataclass
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction, action_to_json
-from switch2_layers.surface.surface_types import Box, InfoLabel, SurfaceDocuments
+from switch2_layers.surface.jev_client import JevAnswers
+from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_types import (
+    Box,
+    InfoLabel,
+    SurfaceDocuments,
+    SurfaceRequest,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,9 @@ class SurfaceRecord:
     scene_changed        場面転換を検知したか
     wait_s               この要求の後に待つ秒数
     error                失敗の説明 (decide の例外、操作の送信の失敗)。無ければ None
+    request              surface の要求の番号 (SurfaceRequest.request_index)。Jev を呼ばない要求 (フェイク) と、
+                         要求を送る前に失敗した要求は None
+    answers              受け取った答え (usage を含む)。応答を読めなかった要求 (decide の失敗) とフェイクの要求は None
     """
 
     t_sent: float
@@ -62,6 +77,8 @@ class SurfaceRecord:
     scene_changed: bool
     wait_s: float
     error: str | None
+    request: int | None = None
+    answers: JevAnswers | None = None
 
 
 def info_label_to_json(label: InfoLabel) -> dict[str, object]:
@@ -85,6 +102,15 @@ def box_to_json(box: Box) -> dict[str, object]:
     }
 
 
+def answers_to_json(answers: JevAnswers) -> dict[str, object]:
+    """答えを {"choices": {問いの ID: {選択肢の名前: 確率}}, "nouls": {問いの ID: 確率}} にする。
+
+    choices と nouls は answers の並びのまま入れる。box の問いの答え (answers.boxes) と usage は入れない
+    (box は surface.jsonl の boxes に、usage は usage に書く)。
+    """
+    raise NotImplementedError
+
+
 def surface_row(record: SurfaceRecord) -> dict[str, object]:
     """surface.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
@@ -92,6 +118,8 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
     {"controls": documents.uses_common_controls, "tips": documents.uses_common_tips}、
     action は pad_action.action_to_json(action) (None なら null)、blocked_buttons はリスト、
     deep_requests は種類の値 (文字列) のリスト、info_labels と boxes は info_label_to_json・box_to_json のリスト。
+    request は record.request (None なら null)、answers は answers_to_json(record.answers) (None なら null)、
+    usage は record.answers.usage (answers が None なら null)。
     """
     documents = record.documents
     return {
@@ -113,3 +141,21 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
         "wait_s": record.wait_s,
         "error": record.error,
     }
+
+
+def question_to_json(question: SurfaceQuestion) -> dict[str, object]:
+    """問い 1 つを surface_requests.jsonl の questions の要素 {"id", "type", "instructions", "criteria"} にする。
+
+    id は question.name。続くキーと値は jev_client.build_question_json(question) と同じ (criteria は choice の
+    問いだけで、選択肢の名前 → 説明を question.choices の順で持つ)。
+    """
+    raise NotImplementedError
+
+
+def surface_request_row(request: SurfaceRequest, t_sent: float) -> dict[str, object]:
+    """surface_requests.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
+
+    request は request.request_index、t_sent は Jev に送った時刻 (送る直前に surface のループの時計で読んだ値)、
+    model は request.model、state は request.state、questions は request.questions の順の question_to_json のリスト。
+    """
+    raise NotImplementedError

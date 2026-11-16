@@ -18,7 +18,9 @@ recent_actions と frames は古い順。画像 (SurfaceInput.frames の JPEG) �
        前回読んだ一覧と名前が同じで説明が違う対象は、追跡をやめる (forget。3 で問い直す対象になる)
     3. 問い直す対象を box_tracking_state.select_requery_targets で選ぶ
        (2 と 3 は、送る画像を作る前に plan_boxes で済ませていれば、そのときの結果を使う)
-    4. 問いの一覧 (surface_questions.build_surface_questions) と state を作り、JevClient.ask で送る
+    4. 問いの一覧 (surface_questions.build_surface_questions) と state を作る。送る直前に、記録の形の要求
+       (surface_types.SurfaceRequest。state は build_recorded_state) を SurfaceInput.request_sink に渡し
+       (None なら渡さない)、JevClient.ask で送る
     5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)
     6. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
        Jev の box を出す (出どころ jev)。Jev の box が使えない (座標か確信度が 0〜1 の外、幅か高さが 0 以下で
@@ -84,6 +86,11 @@ NO_TIMELINE_TEXT = "まだ作られていない"  # 系列情報がまだ無い�
 
 class JevAsker(Protocol):
     """Jev に問いを送って答えを受け取るもの。run では surface.jev_client.JevClient。"""
+
+    @property
+    def model(self) -> str:
+        """要求の model (モデル名)。送った要求の記録 (SurfaceRequest.model) に書く。"""
+        ...
 
     def ask(
         self,
@@ -204,6 +211,15 @@ def build_surface_state(
     }
 
 
+def build_recorded_state(surface_input: SurfaceInput) -> dict[str, object]:
+    """記録に書く state (SurfaceRequest.state) を返す。
+
+    build_surface_state と同じキー・同じ内容で、frames の各要素の image だけを、画像の参照文字列ではなく
+    そのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    """
+    raise NotImplementedError
+
+
 class JevSurfaceDecider:
     """SurfaceDecider の実装。TypeSafe Jev に問いを送り、操作と付随する情報を決める (モジュールの docstring)。
 
@@ -282,6 +298,12 @@ class JevSurfaceDecider:
         存在の確率に依らず追跡をやめ (BoxTrackingState.forget)、box を出さない (次の要求で問い直す)。
         直前の plan_boxes の結果が、この要求の番号と場面 ID (surface_input.documents.scene_id) のものなら、対象の一覧と
         問い直す対象はその結果を使う。そうでなければ、ここで決める。
+
+        送る要求の記録: ask を呼ぶ直前に、surface_input.request_sink (None なら呼ばない) を 1 回だけ
+        SurfaceRequest(要求の番号, client.model, build_recorded_state(surface_input), 問いの一覧) で呼ぶ。
+        要求を作る前に失敗したとき (notes_dir が無いときなど) は呼ばない。ask が失敗したとき
+        (送った後の失敗) は呼んだ後に例外が出る。request_sink が例外を出したら、ask を呼ばずにその例外を出す。
+        出力の exchange は SurfaceExchange(request_sink に渡したものと同じ SurfaceRequest, ask の答え)。
         """
         if self.notes_dir is None:
             raise RuntimeError("JevSurfaceDecider.decide needs the run directory")

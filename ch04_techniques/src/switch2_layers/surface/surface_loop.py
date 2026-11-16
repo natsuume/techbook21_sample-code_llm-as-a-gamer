@@ -8,7 +8,8 @@
        書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
        Box を問い直す対象は、最新のフレームの画像に書き込まない)。
        送る画像は frames/surface/ に保存する (t と、書き込んだ box の内容の組ごとに 1 回だけ)
-    4. SurfaceDecider.decide を呼ぶ
+    4. SurfaceDecider.decide を呼ぶ。Jev を呼ぶ実装は、Jev に送る直前に、送る要求を surface_requests.jsonl に
+       1 行書く (書き込み先 SurfaceRequestWriter をこのループが渡す)
     5. 出力の操作をボタンの制限に通してから送る (PadOutput.apply)
     6. 1 行を surface.jsonl に書く
     7. deep を呼ぶ要求を deep のスケジューラーに渡す
@@ -18,6 +19,7 @@ decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S �
 止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (5 の apply と、decide の失敗の後の neutral) が戻ったとき
 (成功・失敗とも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、その回の
 残りの送信・記録 (surface.jsonl・run.jsonl)・deep の要求をせずにループを抜ける (止めた後に記録を増やさない)。
+surface.jsonl と surface_requests.jsonl の追記の失敗は、どちらも step の外に例外として出し、run が全体を止める。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。
 """
 
@@ -27,6 +29,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from switch2_layers.buttons import filter_action
 from switch2_layers.deep.deep_types import (
@@ -71,6 +74,7 @@ from switch2_layers.surface.surface_types import (
     SurfaceFrame,
     SurfaceInput,
     SurfaceOutput,
+    SurfaceRequest,
 )
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
@@ -134,7 +138,7 @@ class SurfaceLoopSettings:
 class SurfaceLoopParts:
     """surface のループが使う部品。
 
-    paths           実行ディレクトリー (middle/state.json・notes/・surface.jsonl を使う)
+    paths           実行ディレクトリー (middle/state.json・notes/・surface.jsonl・surface_requests.jsonl を使う)
     decider         surface の判断
     frame_buffer    直近のフレーム
     frame_store     送った画像の保存
@@ -168,6 +172,31 @@ class SurfaceLoopParts:
 def surface_failure_reason(count: int) -> str:
     """decide の失敗が count 回続いて止まるときの理由 `surface failed <count> times in a row` を返す。"""
     return f"surface failed {count} times in a row"
+
+
+class SurfaceRequestWriter:
+    """surface_requests.jsonl の書き込み先。step が要求ごとに作り、SurfaceInput.request_sink として decide に渡す。
+
+    path            surface_requests.jsonl のパス (RunPaths.surface_requests_log)
+    clock           実行の経過秒の時計 (行の t_sent を読む)
+    request_index   書いた要求の番号。まだ書いていなければ None
+    write_error     追記で出た例外。出ていなければ None
+    """
+
+    def __init__(self, path: Path, clock: RunClock) -> None:
+        """まだ何も書いていない状態 (request_index と write_error が None) で作る。"""
+        self.path = path
+        self.clock = clock
+        self.request_index: int | None = None
+        self.write_error: Exception | None = None
+
+    def __call__(self, request: SurfaceRequest) -> None:
+        """surface_record.surface_request_row(request, clock.now()) を path に追記し (file_io.append_json_line)、
+        request_index を request.request_index にする。
+
+        追記が例外 (Exception) を出したら、write_error にその例外を持ってから、そのまま出す (request_index は変えない)。
+        """
+        raise NotImplementedError
 
 
 class SurfaceLoop:
@@ -205,15 +234,21 @@ class SurfaceLoop:
            frames.surface_frames.select_boxes_to_draw(boxes, plan, 最新のフレームか) で書き込む box を選び、
            build_surface_image(frame, image_width, jpeg_quality, その box, plan.target_numbers (plan が None なら None))
            で JPEG にする。frame_store.save_surface(t, 画像, drawn_boxes_key(その box, 同じ target_numbers)) で保存して、
-           SurfaceFrame(t, jpeg, format_frame_label(t)) にする。boxes_at が例外 (Exception) を出したら、logging で
-           警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。保存する画像と送る画像は同じもの
-        5. t_sent = clock.now() で SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t,
-           直近の操作) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
+           SurfaceFrame(t, jpeg, format_frame_label(t), save_surface の戻り値) にする。boxes_at が例外 (Exception) を
+           出したら、logging で警告を書き、その画像には box を書き込まない (decide の失敗には数えない)。
+           保存する画像と送る画像は同じもの
+        5. writer = SurfaceRequestWriter(paths.surface_requests_log, clock) を作る。t_sent = clock.now() で
+           SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t, 直近の操作, request_sink=writer) を
+           decide に渡し、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる。
+           続けて、writer.write_error があれば (surface_requests.jsonl の追記の失敗)、decide の成否に依らず、その例外を
+           step の外にそのまま出す (surface.jsonl の追記の失敗と同じ扱い。操作の送信・失敗の回数の変更・
+           run.jsonl と surface.jsonl への書き込み・deep の要求をしない)
         6. decide が例外 (Exception) を出したら:
            pad_output.neutral() を呼び、戻ったら stop を確かめる。続けて失敗した回数を 1 増やし、run_log に
            surface_error {"error": 説明, "count": 続けて失敗した回数} を書き、surface.jsonl に error の行
            (action は null、blocked_buttons・deep_requests・info_labels・boxes は空、scene_changed は False、
-           wait_s は DECIDE_ERROR_WAIT_S) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
+           wait_s は DECIDE_ERROR_WAIT_S、request は writer.request_index (要求を送る前に失敗して書いていなければ
+           null)、answers と usage は null) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
            on_stop(surface_failure_reason(回数)) を呼ぶ。DECIDE_ERROR (wait_s = DECIDE_ERROR_WAIT_S) を返す
         7. 成功したら、続けて失敗した回数を 0 にし、pad_output.apply(出力の操作) で送る。apply が戻ったら
            (例外でも) stop を確かめる。行の action と blocked_buttons は
@@ -222,7 +257,9 @@ class SurfaceLoop:
            blocked_buttons は buttons.filter_action(出力の操作, pad_output.allowed_buttons) の結果にする。送れたら、送った操作を
            直近の操作に足す (RECENT_ACTIONS_COUNT 件まで)。apply の例外は、decide の失敗の回数に数えない
         8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に
-           並べたもの、wait_s は SurfaceContext.wait_s)。surface.jsonl に書くのはこのスレッドだけ
+           並べたもの、wait_s は SurfaceContext.wait_s、request は出力の exchange.request.request_index、answers は
+           exchange.answers (usage はその usage)。exchange が None (フェイク) なら request・answers・usage は null)。
+           surface.jsonl と surface_requests.jsonl に書くのはこのスレッドだけ
         9. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、request の直前に stop を確かめてから、
            deep_requests.request(種類, DeepTrigger.SURFACE, 現在の場面 ID) を呼ぶ。request が例外 (Exception) を出したら、
            外に出さずに run_log に deep_request_error {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、
