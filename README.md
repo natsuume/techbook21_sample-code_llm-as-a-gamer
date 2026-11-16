@@ -40,6 +40,7 @@ ch04_techniques/         第4章: 型付きの判断を返すモデルと adviso
   pyproject.toml
   .claude/skills/        advisor がゲームの情報を書き込む手順 (Skill)
   src/switch2_agent/     エージェントのパッケージ
+  src/switch2_harness/   Claude Code に補助コマンドと指示ファイルを渡すハーネスのパッケージ
   tests/                 パッケージのテスト
 tools/run-dashboard/     第4章の試行の記録を見る読み取り専用のダッシュボード (API サーバーの uv プロジェクトと画面)
   pyproject.toml
@@ -54,7 +55,7 @@ tools/run-dashboard/     第4章の試行の記録を見る読み取り専用の
 |---|---|---|
 | [`ch02_setup`](./ch02_setup/) | 第2章 | 機材の準備、デーモンとクライアントの使い方と実装 |
 | [`ch03_playtest`](./ch03_playtest/) | 第3章 | 試行でエージェントに読ませた指示ファイル (`CLAUDE.md`)。操作には `ch02_setup` のデーモンとクライアントを使います |
-| [`ch04_techniques`](./ch04_techniques/) | 第4章 | 型付きの判断を返すモデル (Decision Model) と、Claude Code の advisor でゲームを遊ぶエージェント (`switch2-agent`) の使い方と実装。映像と入力には `ch02_setup` のパッケージを使います |
+| [`ch04_techniques`](./ch04_techniques/) | 第4章 | 型付きの判断を返すモデル (Decision Model) と、Claude Code の advisor でゲームを遊ぶエージェント (`switch2-agent`) の使い方と実装。Claude Code に補助コマンドと指示ファイルを渡し、先行研究の手法を要素ごとに切り替えて試すハーネス (`switch2-harness`) もここにあります。映像と入力には `ch02_setup` のパッケージを使います |
 
 ### ツール
 
