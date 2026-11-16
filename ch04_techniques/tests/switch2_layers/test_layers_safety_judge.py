@@ -219,6 +219,43 @@ def test_monitor_with_allow_home_still_stops_at_other_screens(name):
     )
 
 
+# --- 監視: 失敗した確かめをはさむとき (答えのあった確かめだけを続けて数える) ---
+
+
+def test_monitor_stops_when_over_then_failure_then_over():
+    monitor = judge(max_errors=3)
+    assert monitor.record_answer(probabilities(online=0.9)) is None
+    assert monitor.record_failure() is None
+    # 失敗した確かめは、続けて超えた回数を消さない
+    assert monitor.streak("online") == 1
+    assert monitor.record_answer(probabilities(online=0.9)) == "unsafe screen: online"
+
+
+def test_monitor_stops_when_over_and_failure_alternate():
+    # 答えのたびに失敗の回数は 0 に戻るため、交互では失敗の回数では止まらない。続けて超えた回数で止まる
+    monitor = judge(max_errors=2)
+    reasons: list[str | None] = []
+    for _ in range(5):
+        reasons.append(monitor.record_answer(probabilities(online=0.9)))
+        if reasons[-1] is not None:
+            break
+        reasons.append(monitor.record_failure())
+        if reasons[-1] is not None:
+            break
+    assert reasons == [None, None, "unsafe screen: online"]
+
+
+def test_monitor_answer_below_the_threshold_after_a_failure_starts_counting_again():
+    monitor = judge(max_errors=3)
+    assert monitor.record_answer(probabilities(online=0.9)) is None
+    assert monitor.record_failure() is None
+    # 答えのあった確かめで超えなければ、続けて超えた回数は 0 に戻る
+    assert monitor.record_answer(probabilities(online=0.7)) is None
+    assert monitor.streak("online") == 0
+    assert monitor.record_answer(probabilities(online=0.9)) is None
+    assert monitor.streak("online") == 1
+
+
 # --- 監視: 失敗の回数 ---
 
 

@@ -11,6 +11,8 @@ on_stop(理由) を呼ぶ (app.LayersApp.request_stop。操作を中立にして
     3. 止める合図が立つまで、settings.interval_s 秒ごとに監視の確かめを行う。前の確かめの応答を待ってから次を送る
        (safety_judge.next_check_wait_s)。止まる条件に当たったら on_stop を呼んで終わる
 ブリッジの状態は見ない (ブリッジの復旧中も監視を続ける)。
+スレッドが想定外の例外で終わるときも、on_stop(`safety monitor failed: <例外の説明>`) で全体を止める
+(安全の監視が動かないまま操作を続けないため。safety_monitor_failure_reason)。
 確かめのたびに safety.jsonl に 1 行書く (safety.safety_record)。止める合図は SafetyChecker.check が戻ったときに確かめ、
 立っていたら、その回の行を書かず、判定もせずに抜ける (止めた後に記録を増やさない)。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。

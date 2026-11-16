@@ -321,6 +321,43 @@ def test_monitor_success_between_failures_starts_counting_again(tmp_path):
     assert calls.stops == []
 
 
+def test_monitor_stops_when_over_then_failure_then_over(tmp_path):
+    # 失敗した確かめをはさんでも、答えのあった確かめを続けて数える
+    checker = ScriptedChecker(
+        [answer(), answer(online=0.9), RuntimeError("timeout"), answer(online=0.9)]
+    )
+    monitor, calls = make_monitor(tmp_path, checker, max_errors=3)
+    outcomes = [monitor.step().outcome for _ in range(4)]
+    assert outcomes == [
+        SafetyStepOutcome.PASSED,
+        SafetyStepOutcome.PASSED,
+        SafetyStepOutcome.FAILED,
+        SafetyStepOutcome.STOP,
+    ]
+    assert calls.stops == ["unsafe screen: online"]
+
+
+def test_monitor_stops_when_over_and_failure_alternate(tmp_path):
+    error = RuntimeError("timeout")
+    over = answer(purchase=0.9)
+    checker = ScriptedChecker([answer(), over, error, over, error, over, error])
+    monitor, calls = make_monitor(tmp_path, checker, max_errors=2)
+    outcomes: list[SafetyStepOutcome] = []
+    for _ in range(7):
+        outcomes.append(monitor.step().outcome)
+        if outcomes[-1] is SafetyStepOutcome.STOP:
+            break
+    assert outcomes[-1] is SafetyStepOutcome.STOP
+    assert calls.stops == ["unsafe screen: purchase"]
+    rows = read_rows(tmp_path / "safety.jsonl")
+    assert [row["probabilities"] is None for row in rows] == [
+        False,
+        False,
+        True,
+        False,
+    ]
+
+
 @pytest.mark.parametrize(
     "duration, expected_wait",
     [(0.3, 0.7), (1.0, 0.0), (1.5, 0.0)],

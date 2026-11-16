@@ -5,9 +5,11 @@
         どれかの問いの確率がしきい値を超えた      unsafe screen at start: <問いの名前>
         確かめが失敗した                          safety check failed at start
     監視の確かめ (MonitorJudge)
-        同じ問いの確率が、続けて UNSAFE_STREAK_TO_STOP 回の確かめでしきい値を超えた
+        同じ問いの確率が、答えのあった確かめで続けて UNSAFE_STREAK_TO_STOP 回しきい値を超えた
                                                   unsafe screen: <問いの名前>
         確かめの失敗が続けて max_errors 回起きた    safety check failed <回数> times in a row
+「続けて超えた」は、答えのあった確かめだけを並べて数える。失敗した確かめは数えず、それまでに続けて超えた回数も
+消さない (例: 超えた → 失敗 → 超えた で止まる。超えた・失敗が交互に続いても止まる)。
 「超えた」は、確率がしきい値より大きいこと (ちょうど同じ値は超えない)。--allow-home を付けたときは、
 safety_questions.ALLOW_HOME_EXEMPT_NAMES の問い (home_menu・user_select) では、どちらの確かめでも止めない。
 同時に複数の問いが条件に当たったら、safety_questions.SAFETY_QUESTION_NAMES の順で先の問いの名前を理由に書く。
@@ -112,7 +114,9 @@ class MonitorJudge:
         """失敗した確かめ 1 回を数え、止まる理由を返す。止めなければ None。
 
         続けて失敗した回数を 1 増やし、max_errors 以上なら safety_failure_reason(回数) を返す。
-        問いごとの続けて超えた回数は変えない (失敗した確かめをはさんでも、その前後の答えを続けて数える)。
+        問いごとの続けて超えた回数は変えない (0 に戻さない)。失敗した確かめをはさんでも、その前後の答えを続けて数える
+        ため、「超えた → 失敗 → 超えた」で止まり、超えた・失敗が交互に続いても止まる (失敗の回数は、答えのあった
+        確かめのたびに 0 に戻るため、交互のときは失敗の回数では止まらない)。
         """
         raise NotImplementedError
 
