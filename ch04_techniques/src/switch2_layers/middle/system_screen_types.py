@@ -30,7 +30,7 @@ class SystemGoal(StrEnum):
 
     PREPARE = "prepare"  # 準備: コントローラーを 1P に登録し、指定のソフトを指定のユーザーで起動する
     RECOVER = "recover"  # 復帰: 指定のソフトのゲームの画面に戻る
-    CLEAN_UP = "clean_up"  # 片付け: HOME メニューに戻り、指定のソフトを終了する
+    CLEAN_UP = "clean_up"  # 片付け: HOME メニューに戻る (指定のソフトは終了しない)
 
 
 class SystemCutReason(StrEnum):
@@ -90,7 +90,7 @@ class SystemScreenInput:
 
     t                入力を作った時刻 (run_clock.RunClock の t)
     goal             目的
-    software_name    指定のソフトの名前 (起動・再開・終了するソフト。呼び出し側が渡す)
+    software_name    指定のソフトの名前 (起動・再開するソフト。呼び出し側が渡す)
     user_name        指定のユーザーの名前 (ユーザー選択で選ぶユーザー。呼び出し側が渡す)
     frame_jpeg       今の画像 (キャプチャーの最新のフレーム) の JPEG のバイト列
     frame_t          今の画像のフレームの時刻
