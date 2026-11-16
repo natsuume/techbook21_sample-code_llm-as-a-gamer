@@ -10,18 +10,17 @@
         確かめの失敗が続けて max_errors 回起きた    safety check failed <回数> times in a row
 「続けて超えた」は、答えのあった確かめだけを並べて数える。失敗した確かめは数えず、それまでに続けて超えた回数も
 消さない (例: 超えた → 失敗 → 超えた で止まる。超えた・失敗が交互に続いても止まる)。
-「超えた」は、確率がしきい値より大きいこと (ちょうど同じ値は超えない)。--allow-home を付けたときは、
-safety_questions.ALLOW_HOME_EXEMPT_NAMES の問い (home_menu・user_select) では、どちらの確かめでも止めない。
-同時に複数の問いが条件に当たったら、safety_questions.SAFETY_QUESTION_NAMES の順で先の問いの名前を理由に書く。
+「超えた」は、確率がしきい値より大きいこと (ちょうど同じ値は超えない)。
+止める条件に使う問いは safety_questions.SAFETY_QUESTION_NAMES の 3 つ (online・purchase・system_settings) だけで、
+本体の画面の照合 (system_screen) の確率と結果では止めない (HOME メニューやユーザー選択が映っていても、3 つの問いが
+超えなければ止めない)。照合の確率は validate_system_screen_probabilities で確かめ、合わなければ確かめの失敗とする。
+同時に複数の問いが条件に当たったら、SAFETY_QUESTION_NAMES の順で先の問いの名前を理由に書く。
 """
 
 import math
 from collections.abc import Mapping
 
-from switch2_layers.safety.safety_questions import (
-    ALLOW_HOME_EXEMPT_NAMES,
-    SAFETY_QUESTION_NAMES,
-)
+from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 
 # 同じ問いがしきい値を超えた確かめがこの回数続いたら止める
 UNSAFE_STREAK_TO_STOP = 2
@@ -41,18 +40,6 @@ def unsafe_screen_at_start_reason(name: str) -> str:
 def safety_failure_reason(count: int) -> str:
     """監視の確かめの失敗が count 回続いて止まるときの理由 `safety check failed <count> times in a row` を返す。"""
     return f"safety check failed {count} times in a row"
-
-
-def watched_names(allow_home: bool) -> tuple[str, ...]:
-    """止める対象の問いの名前を SAFETY_QUESTION_NAMES の順で返す。
-
-    allow_home が True なら ALLOW_HOME_EXEMPT_NAMES の名前を除く。
-    """
-    if not allow_home:
-        return SAFETY_QUESTION_NAMES
-    return tuple(
-        name for name in SAFETY_QUESTION_NAMES if name not in ALLOW_HOME_EXEMPT_NAMES
-    )
 
 
 def validate_probabilities(probabilities: Mapping[str, object]) -> dict[str, float]:
@@ -75,6 +62,19 @@ def validate_probabilities(probabilities: Mapping[str, object]) -> dict[str, flo
     return result
 
 
+def validate_system_screen_probabilities(
+    probabilities: Mapping[str, object],
+) -> dict[str, float]:
+    """SafetyChecker の答えの照合の確率 (SafetyAnswer.system_screen) を確かめ、
+    system_screen.system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES の順の (選択肢の名前 → 確率) の dict にして返す。
+
+    SYSTEM_SCREEN_CHOICE_NAMES のどれかの名前が無い (答えが空のときを含む)、値が数 (int か float。bool は除く) でない、
+    有限でない、0〜1 の外なら ValueError (安全の監視は、確かめの失敗として数える)。SYSTEM_SCREEN_CHOICE_NAMES に無い
+    名前は無視する。確率の合計は確かめない。
+    """
+    raise NotImplementedError
+
+
 def _as_probability(value: object) -> float | None:
     """value が 0〜1 の有限の数 (int か float。bool は除く) なら float にして返し、そうでなければ None を返す。"""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -86,27 +86,27 @@ def _as_probability(value: object) -> float | None:
 
 
 def names_over_threshold(
-    probabilities: Mapping[str, float], threshold: float, allow_home: bool
+    probabilities: Mapping[str, float], threshold: float
 ) -> tuple[str, ...]:
-    """watched_names(allow_home) のうち、確率が threshold を超えた (ちょうど同じ値は超えない) 名前を、
+    """SAFETY_QUESTION_NAMES のうち、確率が threshold を超えた (ちょうど同じ値は超えない) 名前を、
     SAFETY_QUESTION_NAMES の順で返す。probabilities は validate_probabilities の値 (すべての名前を含む)。"""
     return tuple(
-        name for name in watched_names(allow_home) if probabilities[name] > threshold
+        name for name in SAFETY_QUESTION_NAMES if probabilities[name] > threshold
     )
 
 
 def start_stop_reason(
-    probabilities: Mapping[str, float] | None, threshold: float, allow_home: bool
+    probabilities: Mapping[str, float] | None, threshold: float
 ) -> str | None:
     """実行を始めるときの確かめの結果から、止まる理由を返す。止めなければ None。
 
     probabilities が None (確かめが失敗した) なら REASON_SAFETY_FAILED_AT_START。
-    names_over_threshold(probabilities, threshold, allow_home) が空でなければ、その先頭の名前の
+    names_over_threshold(probabilities, threshold) が空でなければ、その先頭の名前の
     unsafe_screen_at_start_reason。どちらでもなければ None。
     """
     if probabilities is None:
         return REASON_SAFETY_FAILED_AT_START
-    over = names_over_threshold(probabilities, threshold, allow_home)
+    over = names_over_threshold(probabilities, threshold)
     if over:
         return unsafe_screen_at_start_reason(over[0])
     return None
@@ -116,19 +116,16 @@ class MonitorJudge:
     """監視の確かめの結果を順に受け取り、止まる条件 (モジュールの docstring) に当たったら理由を返す。
 
     threshold    しきい値 (--threshold-safety)
-    allow_home   --allow-home。True なら home_menu と user_select の問いでは止めない
     max_errors   確かめの失敗がこの回数続いたら止める (--max-safety-errors)
     1 つのスレッド (安全の監視) からだけ呼ぶ。止まる理由を返した後も呼んでよい (同じ規則で数え続ける)。
     """
 
-    def __init__(self, threshold: float, allow_home: bool, max_errors: int) -> None:
+    def __init__(self, threshold: float, max_errors: int) -> None:
         """続けて超えた回数と、続けて失敗した回数を 0 にして作る。"""
         self.threshold = threshold
-        self.allow_home = allow_home
         self.max_errors = max_errors
-        self._watched = watched_names(allow_home)
-        # 止める対象の問いの名前 → 答えのあった確かめで続けてしきい値を超えた回数
-        self._streaks: dict[str, int] = dict.fromkeys(self._watched, 0)
+        # 問いの名前 → 答えのあった確かめで続けてしきい値を超えた回数
+        self._streaks: dict[str, int] = dict.fromkeys(SAFETY_QUESTION_NAMES, 0)
         self._consecutive_errors = 0
 
     @property
@@ -137,26 +134,26 @@ class MonitorJudge:
         return self._consecutive_errors
 
     def streak(self, name: str) -> int:
-        """問い name の確率が、続けてしきい値を超えた確かめの回数を返す。止める対象でない名前は常に 0。"""
+        """問い name の確率が、続けてしきい値を超えた確かめの回数を返す。SAFETY_QUESTION_NAMES に無い名前は常に 0。"""
         return self._streaks.get(name, 0)
 
     def record_answer(self, probabilities: Mapping[str, float]) -> str | None:
         """答えのあった確かめ 1 回を数え、止まる理由を返す。止めなければ None。
 
         1. 続けて失敗した回数を 0 に戻す
-        2. watched_names(allow_home) の問いごとに、確率が threshold を超えていれば続けて超えた回数を 1 増やし、
+        2. SAFETY_QUESTION_NAMES の問いごとに、確率が threshold を超えていれば続けて超えた回数を 1 増やし、
            超えていなければ 0 に戻す
         3. 続けて超えた回数が UNSAFE_STREAK_TO_STOP 以上の問いがあれば、SAFETY_QUESTION_NAMES の順で先のものの
            unsafe_screen_reason を返す
         probabilities は validate_probabilities の値 (すべての名前を含む)。
         """
         self._consecutive_errors = 0
-        for name in self._watched:
+        for name in SAFETY_QUESTION_NAMES:
             if probabilities[name] > self.threshold:
                 self._streaks[name] += 1
             else:
                 self._streaks[name] = 0
-        for name in self._watched:
+        for name in SAFETY_QUESTION_NAMES:
             if self._streaks[name] >= UNSAFE_STREAK_TO_STOP:
                 return unsafe_screen_reason(name)
         return None
