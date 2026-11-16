@@ -1,29 +1,95 @@
-"""マップの場所とつながりの一覧 notes/map/map.json の形 (MapDocument) と、その読み取り。
+"""マップの場所とつながりの一覧 notes/map/map.json の形 (MapDocument と GridMapDocument) と、その読み取り。
 
-map.json は deep の map の種類のジョブが書き、middle が入力として読む。形:
-    {"places": [{"name": 文字列, "aliases": [文字列, ...], "description": 文字列, "exits": [文字列, ...],
+map.json は deep の map の種類のジョブが書き、middle が入力として読む。最上位の layout でマップの型を決める:
+    - "free" (自由型): MapDocument。出口と通れない位置を文で持つ
+    - "grid" (マス目型): GridMapDocument。場所ごとに、マスの図 (tiles) と座標で出口・通れないマス・目印を持つ
+layout が無い map.json は free として読む。
+
+free の形:
+    {"layout": "free",
+     "places": [{"name": 文字列, "aliases": [文字列, ...], "description": 文字列, "exits": [文字列, ...],
                  "blocked": [文字列, ...], "state": 文字列, "changes_on_entry": 真偽}, ...],
      "connections": [{"from": 文字列, "to": 文字列, "how": 文字列}, ...]}
-- 最上位は object で、places と connections の 2 つの配列を持つ。最上位のほかのキーは無視する
-- places の各要素は、上の 7 つのキーをすべて持つ object。name は空でない (前後の空白を除いても空でない) 文字列
-- connections の各要素は、上の 3 つのキーをすべて持つ object。from と to は空でない (前後の空白を除いても空でない) 文字列
-- 要素の object のほかのキーも無視する
-形に合わない要素が 1 つでもあれば、ファイル全体を形に合わないものとして扱う (parse_map_document が ValueError)。
+grid の形:
+    {"layout": "grid",
+     "places": [{"name": 文字列, "aliases": [文字列, ...], "description": 文字列, "state": 文字列,
+                 "changes_on_entry": 真偽, "origin": {"x": 整数, "y": 整数}, "tiles": [文字列, ...],
+                 "exits": [{"x": 整数, "y": 整数, "description": 文字列}, ...],
+                 "blocked": [{"x": 整数, "y": 整数, "description": 文字列}, ...],
+                 "landmarks": [{"x": 整数, "y": 整数, "description": 文字列}, ...]}, ...],
+     "connections": [{"from": 文字列, "to": 文字列, "how": 文字列,
+                      "from_tile": {"x": 整数, "y": 整数} か null, "to_tile": {"x": 整数, "y": 整数} か null}, ...]}
+- 最上位は object で、places と connections の 2 つの配列を持つ。layout は省けるキーで、あれば "grid" か "free" の
+  文字列 (大文字と小文字を区別する)。最上位のほかのキーは無視する
+- places の各要素は、その型の形のキー (free は 7 つ、grid は 10 個) をすべて持つ object。connections の各要素も、
+  その型の形のキー (free は 3 つ、grid は 5 つ) をすべて持つ object。name・from・to は空でない (前後の空白を除いても
+  空でない) 文字列
+- grid の座標は、x が右に、y が下に増える整数。マス (x, y) の文字は tiles[y - origin.y] の x - origin.x 文字目
+  (0 から数える)。origin は tiles の 1 行目の 1 文字目のマスの座標
+- grid の tiles の各行は同じ文字数で、文字は TILE_CHARACTERS (# . E ?) だけ。まだ図を描けない場所は空の配列
+- grid の exits・blocked・landmarks の座標は、tiles の範囲の外でもよい。from_tile は出たマス (from の場所の座標)、
+  to_tile は着いたマス (to の場所の座標)
+- 整数は JSON の小数点を含まない数に限る (1.0 と真偽は形に合わない)
+- 要素の object と座標の object のほかのキーも無視する
+layout が grid なら、すべての場所とつながりを grid の形で確かめ、free なら free の形で確かめる。形に合わない要素が
+1 つでもあれば、ファイル全体を形に合わないものとして扱う (parse_map_document が ValueError)。
 middle の入力には、読めない・形に合わない map.json を「マップなし」(None) として渡す (read_map_document)。
 """
 
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import ClassVar
 
 from switch2_layers.notes.note_paths import MAP_JSON_NOTE
 from switch2_layers.notes.note_reader import read_note_bytes
 
+# grid のマスの図 (tiles) の文字
+TILE_BLOCKED = "#"  # 通れない
+TILE_PASSABLE = "."  # 通れる
+TILE_EXIT = "E"  # 出口
+TILE_UNKNOWN = "?"  # まだ確かめていない
+TILE_CHARACTERS: frozenset[str] = frozenset(
+    {TILE_BLOCKED, TILE_PASSABLE, TILE_EXIT, TILE_UNKNOWN}
+)
+
+
+class MapLayout(StrEnum):
+    """マップの型 (map.json の最上位の layout の値)。"""
+
+    GRID = "grid"  # マス目型
+    FREE = "free"  # 自由型
+
+
+@dataclass(frozen=True)
+class TilePosition:
+    """grid のマスの座標。x は右に、y は下に増える整数。
+
+    JSON では {"x": 整数, "y": 整数} (tile_position_to_json)。map.json の origin・from_tile・to_tile、
+    middle の出力の current_tile・from_tile・to_tile・tile、middle/state.json と middle/map_records.jsonl の座標に使う。
+    """
+
+    x: int
+    y: int
+
+
+@dataclass(frozen=True)
+class TileMark:
+    """grid の場所の exits・blocked・landmarks の要素 1 つ (座標の付いた説明)。
+
+    position      マスの座標 (JSON では x と y のキー)。tiles の範囲の外でもよい
+    description   説明
+    """
+
+    position: TilePosition
+    description: str
+
 
 @dataclass(frozen=True)
 class MapPlace:
-    """map.json の places の要素 1 つ (場所 1 つ)。
+    """free の map.json の places の要素 1 つ (場所 1 つ)。
 
     name               場所の名前 (空でない)
     aliases            同じ場所の別の名前 (deep が重複をまとめたときに残す、middle が前に使った名前)
@@ -44,42 +110,107 @@ class MapPlace:
 
 
 @dataclass(frozen=True)
+class GridMapPlace:
+    """grid の map.json の places の要素 1 つ (場所 1 つ)。
+
+    name・aliases・description・state・changes_on_entry   MapPlace と同じ
+    origin       tiles の 1 行目の 1 文字目のマスの座標
+    tiles        マスの図 (1 行が 1 つの y。各行は同じ文字数で、文字は TILE_CHARACTERS)。まだ図を描けなければ空
+    exits        出口 (座標と説明)
+    blocked      通れないマス (座標と説明)
+    landmarks    目印 (座標と説明)
+    """
+
+    name: str
+    aliases: tuple[str, ...]
+    description: str
+    state: str
+    changes_on_entry: bool
+    origin: TilePosition
+    tiles: tuple[str, ...]
+    exits: tuple[TileMark, ...]
+    blocked: tuple[TileMark, ...]
+    landmarks: tuple[TileMark, ...]
+
+
+@dataclass(frozen=True)
 class MapConnection:
     """場所から場所への移動 1 つ。map.json の connections の要素と、middle の出力の new_connections の要素。
 
     from_place   移る前の場所の名前 (JSON のキーは from)
     to_place     移った後の場所の名前 (JSON のキーは to)
     how          移り方 (出た位置・方向・直前の操作の説明)
+    from_tile    出たマス (from の場所の座標)。分からなければ None
+    to_tile      着いたマス (to の場所の座標)。分からなければ None
+    free の map.json のつながりは from_tile と to_tile を持たない (読むと None。JSON に戻すときは書かない)。
+    from_tile・to_tile の既定値は、座標を持たないつながり (free のマップやテストなど) のため。
     """
 
     from_place: str
     to_place: str
     how: str
+    from_tile: TilePosition | None = None
+    to_tile: TilePosition | None = None
 
 
 @dataclass(frozen=True)
 class MapDocument:
-    """map.json の中身 (場所とつながりの一覧)。
+    """free (自由型) の map.json の中身 (場所とつながりの一覧)。
 
     places        場所 (map.json の places の順)
-    connections   つながり (map.json の connections の順)
+    connections   つながり (map.json の connections の順。from_tile と to_tile は None)
+    layout        マップの型 (常に MapLayout.FREE。インスタンスの値ではなくクラスの値)
     """
 
     places: tuple[MapPlace, ...]
     connections: tuple[MapConnection, ...]
+    layout: ClassVar[MapLayout] = MapLayout.FREE
 
 
-def parse_map_document(value: object) -> MapDocument:
-    """map.json を JSON として読んだ値 value を、形 (モジュールの docstring) を確かめて MapDocument にする。
+@dataclass(frozen=True)
+class GridMapDocument:
+    """grid (マス目型) の map.json の中身 (場所とつながりの一覧)。
 
+    places        場所 (map.json の places の順)
+    connections   つながり (map.json の connections の順)
+    layout        マップの型 (常に MapLayout.GRID。インスタンスの値ではなくクラスの値)
+    """
+
+    places: tuple[GridMapPlace, ...]
+    connections: tuple[MapConnection, ...]
+    layout: ClassVar[MapLayout] = MapLayout.GRID
+
+
+def tile_position_to_json(position: TilePosition) -> dict[str, int]:
+    """座標 position を JSON の形 {"x": x, "y": y} (この順のキー) にする。"""
+    raise NotImplementedError
+
+
+def parse_map_document(value: object) -> MapDocument | GridMapDocument:
+    """map.json を JSON として読んだ値 value を、形 (モジュールの docstring) を確かめて MapDocument か GridMapDocument
+    にする。
+
+    layout が無ければ free、"free" なら free、"grid" なら grid の形で確かめる。free なら MapDocument、grid なら
+    GridMapDocument を返す。
     形に合わなければ ValueError にする:
         - value が object でない。places か connections が無いか、配列でない
-        - places の要素が object でない、7 つのキーのどれかが無い、型が合わない (name・description・state は文字列、
-          aliases・exits・blocked は文字列の配列、changes_on_entry は真偽)、name が空 (前後の空白を除くと空)
-        - connections の要素が object でない、3 つのキーのどれかが無い、型が合わない (from・to・how は文字列)、
+        - layout があり、文字列でないか、"grid"・"free" (大文字と小文字を区別する) のどちらでもない
+        - free: places の要素が object でない、7 つのキーのどれかが無い、型が合わない (name・description・state は
+          文字列、aliases・exits・blocked は文字列の配列、changes_on_entry は真偽)、name が空 (前後の空白を除くと空)
+        - free: connections の要素が object でない、3 つのキーのどれかが無い、型が合わない (from・to・how は文字列)、
           from か to が空 (前後の空白を除くと空)
-    最上位と要素の object のほかのキーは無視する。値は書かれたまま (前後の空白も除かない) にし、配列はタプルにする。
-    空の places・connections は形に合う。
+        - grid: places の要素が object でない、10 個のキーのどれかが無い、型が合わない (name・aliases・description・
+          state・changes_on_entry は free と同じ。origin は座標の object、tiles は文字列の配列、exits・blocked・
+          landmarks は座標と説明の object の配列)、name が空
+        - grid: tiles の行の文字数が同じでない、TILE_CHARACTERS 以外の文字がある
+        - grid: connections の要素が object でない、5 つのキーのどれかが無い、型が合わない (from・to・how は free と
+          同じ。from_tile・to_tile は座標の object か null)、from か to が空
+        - grid: 座標の object (origin・from_tile・to_tile と、exits・blocked・landmarks の要素) に x か y が無いか、
+          整数でない (真偽と小数 (1.0 を含む) は整数でない)。exits・blocked・landmarks の要素に description が無いか、
+          文字列でない
+    座標は負でもよい。tiles の空の配列は形に合う (各行が空文字列の配列も、文字数がそろっていれば形に合う)。
+    最上位と要素と座標の object のほかのキーは無視する (free の要素の from_tile・origin なども無視する)。
+    値は書かれたまま (前後の空白も除かない) にし、配列はタプルにする。空の places・connections は形に合う。
     """
     top = _object(value, "map.json")
     places = _array(top, "places", "map.json")
@@ -90,8 +221,8 @@ def parse_map_document(value: object) -> MapDocument:
     )
 
 
-def read_map_document(notes_dir: Path) -> MapDocument | None:
-    """notes_dir の map.json (note_paths.MAP_JSON_NOTE) を読み、MapDocument を返す。
+def read_map_document(notes_dir: Path) -> MapDocument | GridMapDocument | None:
+    """notes_dir の map.json (note_paths.MAP_JSON_NOTE) を読み、MapDocument か GridMapDocument を返す。
 
     文書は notes.note_reader.read_note_bytes で読む (シンボリックリンクを解決した先が notes/ の中の通常のファイルで
     なければ、無い文書として扱う)。次のときは None (マップなし) を返し、例外は出さない:
@@ -109,12 +240,17 @@ def read_map_document(notes_dir: Path) -> MapDocument | None:
         return None
 
 
-def map_document_to_json(document: MapDocument) -> dict[str, object]:
-    """MapDocument を map.json の形の辞書に戻す (middle の入力に、マップの全体を JSON として渡すため)。
+def map_document_to_json(document: MapDocument | GridMapDocument) -> dict[str, object]:
+    """MapDocument か GridMapDocument を map.json の形の辞書に戻す (middle の入力に、マップの全体を JSON として
+    渡すため)。
 
-    キーの順は、最上位が places・connections、places の要素が name・aliases・description・exits・blocked・state・
-    changes_on_entry、connections の要素が from・to・how。タプルはリストにする。
-    parse_map_document(map_document_to_json(document)) は document と等しい。
+    最上位は layout (document.layout の値)・places・connections の順のキーにする。要素のキーの順:
+        free   places の要素は name・aliases・description・exits・blocked・state・changes_on_entry、
+               connections の要素は from・to・how (from_tile と to_tile は書かない)
+        grid   places の要素は name・aliases・description・state・changes_on_entry・origin・tiles・exits・blocked・
+               landmarks、connections の要素は from・to・how・from_tile・to_tile
+    座標は tile_position_to_json の形 (None は null)、exits・blocked・landmarks の要素は x・y・description の順の
+    キーにする。タプルはリストにする。parse_map_document(map_document_to_json(document)) は document と等しい。
     """
     return {
         "places": [

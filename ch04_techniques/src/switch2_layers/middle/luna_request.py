@@ -28,18 +28,20 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     2. 場面ラベルの一覧                 describe_scene_labels(middle_input.scene_labels)
     3. 場所の名前の一覧                 describe_place_names(middle_input.place_names)
     4. マップ                           describe_map_document(middle_input.map_document)
-    5. 前回の middle の出力             describe_previous_state(middle_input.previous_state, middle_input.t)
-    6. ゲームの性質                     middle_input.game の前後の空白を除いたもの。空なら EMPTY_TEXT
+    5. 現在地からの経路 (コードの計算)  route_section.describe_route_section(middle_input.map_document,
+                                        middle_input.previous_state) (見出しは route_section.ROUTE_SECTION_TITLE)
+    6. 前回の middle の出力             describe_previous_state(middle_input.previous_state, middle_input.t)
+    7. ゲームの性質                     middle_input.game の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (待ち時間と、タスクにしない行動を決めるために渡す)
-    7. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
-    8. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
-    9. 現在の場面の操作説明             middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
+    8. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
+    9. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
+    10. 現在の場面の操作説明            middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (unknown のボタンを確かめるタスクを作るために渡す)
-    10. 前回以降の surface の記録       record_summary.summarize_surface_rows(middle_input.surface_rows)
-    11. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
-    12. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
+    11. 前回以降の surface の記録       record_summary.summarize_surface_rows(middle_input.surface_rows)
+    12. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
+    13. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
                                         SCENE_CHANGE_NOT_REPORTED_TEXT
-    13. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
+    14. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
                                         0 枚なら NO_FRAMES_TEXT
 節の後ろに、middle_input.frames の順 (古い順) に、時刻のラベル (frame_label) と画像 (input_image) を 1 組ずつ置く。
 画像の detail は指定しない (既定の auto)。
@@ -57,7 +59,11 @@ from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
 )
-from switch2_layers.notes.map_document import MapDocument, map_document_to_json
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    MapDocument,
+    map_document_to_json,
+)
 from switch2_layers.notes.scene_labels import SceneLabel
 
 LUNA_MODEL = "gpt-6-luna"
@@ -125,11 +131,12 @@ def describe_place_names(names: Sequence[str]) -> str:
     return "\n".join(f"- {name}" for name in names)
 
 
-def describe_map_document(document: MapDocument | None) -> str:
+def describe_map_document(document: MapDocument | GridMapDocument | None) -> str:
     """マップの節の中身を返す。
 
     document が None (マップなし) なら NO_MAP_TEXT。そうでなければ、マップの全体
-    notes.map_document.map_document_to_json(document) を json.dumps(..., ensure_ascii=False) で JSON にした文字列。
+    notes.map_document.map_document_to_json(document) (最上位の最初のキーは layout) を
+    json.dumps(..., ensure_ascii=False) で JSON にした文字列。
     """
     if document is None:
         return NO_MAP_TEXT

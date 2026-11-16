@@ -26,10 +26,19 @@ from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
     summarize_surface_rows,
 )
+from switch2_layers.middle.route_section import (
+    ROUTE_NO_MAP_TEXT,
+    ROUTE_SECTION_TITLE,
+    describe_route_section,
+)
 from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    GridMapPlace,
     MapConnection,
     MapDocument,
     MapPlace,
+    TileMark,
+    TilePosition,
     map_document_to_json,
 )
 from switch2_layers.notes.scene_labels import SceneLabel
@@ -92,6 +101,7 @@ MAP_DOCUMENT = MapDocument(
     ),
 )
 MAP_JSON = {
+    "layout": "free",
     "places": [
         {
             "name": "家の 1 階",
@@ -262,6 +272,7 @@ def test_section_titles_and_order():
         "場面ラベルの一覧",
         "場所の名前の一覧",
         "マップ",
+        "現在地からの経路 (コードの計算)",
         "前回の middle の出力",
         "ゲームの性質",
         "大方針",
@@ -294,6 +305,10 @@ def test_section_contents_of_full_input():
     )
     # マップ (notes/map/map.json) の全体を JSON で渡す
     assert json.loads(section_body(sections, "マップ")) == MAP_JSON
+    # マップの直後に、現在地からの経路の節
+    assert section_body(sections, ROUTE_SECTION_TITLE) == describe_route_section(
+        MAP_DOCUMENT, PREVIOUS_STATE
+    )
     assert section_body(sections, "前回の middle の出力") == describe_previous_state(
         PREVIOUS_STATE, FULL_INPUT.t
     )
@@ -338,6 +353,7 @@ def test_section_contents_of_empty_input():
     assert section_body(sections, "場面ラベルの一覧") == "(無い)"
     assert section_body(sections, "場所の名前の一覧") == "(無い)"
     assert section_body(sections, "マップ") == "マップなし"
+    assert section_body(sections, ROUTE_SECTION_TITLE) == ROUTE_NO_MAP_TEXT
     assert section_body(sections, "前回の middle の出力") == "(無い)"
     assert section_body(sections, "ゲームの性質") == "(無い)"
     assert section_body(sections, "大方針") == "(無い)"
@@ -394,7 +410,9 @@ def test_describe_map_document():
     assert "家の 1 階" in text
     # 空のマップも JSON で渡す (マップなしとは区別する)
     empty = describe_map_document(MapDocument(places=(), connections=()))
-    assert json.loads(empty) == {"places": [], "connections": []}
+    assert json.loads(empty) == {"layout": "free", "places": [], "connections": []}
+    # layout を最上位の最初のキーにする
+    assert list(json.loads(text)) == ["layout", "places", "connections"]
 
 
 def test_describe_previous_state():
@@ -488,8 +506,13 @@ def test_first_task_time_without_record_is_empty_text():
 
 
 def test_instructions_cover_every_output_field_and_timeline_section():
-    for key in MIDDLE_OUTPUT_SCHEMA["properties"]:
-        assert key in LUNA_DEVELOPER_INSTRUCTIONS
+    properties = MIDDLE_OUTPUT_SCHEMA["properties"]
+    item_keys = [
+        *properties["new_connections"]["items"]["properties"],
+        *properties["new_observations"]["items"]["properties"],
+    ]
+    for key in [*properties, *item_keys]:
+        assert key in LUNA_DEVELOPER_INSTRUCTIONS, key
     assert TIMELINE_SECTION_TITLES == (
         "操作のまとめ",
         "画面の変化",
@@ -687,3 +710,88 @@ def test_instructions_decide_surface_wait_with_the_game_document():
 def test_instructions_keep_damage_and_game_over_out_of_tasks():
     section = instructions_section("短期タスクリスト (tasks)")
     assert "ダメージとゲームオーバーの条件" in section
+
+
+# --- マス目型 (grid) のマップと、現在地からの経路の節 ---
+
+GRID_MAP_DOCUMENT = GridMapDocument(
+    places=(
+        GridMapPlace(
+            name="家の 1 階",
+            aliases=("1 階の部屋",),
+            description="自分の部屋から階段で下りた先の部屋",
+            state="訪問済み",
+            changes_on_entry=False,
+            origin=TilePosition(0, 0),
+            tiles=("#########", "#.......#", "#E......#"),
+            exits=(TileMark(TilePosition(1, 2), "左下の赤いマット"),),
+            blocked=(TileMark(TilePosition(4, 1), "机"),),
+            landmarks=(TileMark(TilePosition(6, 1), "テレビ"),),
+        ),
+    ),
+    connections=(
+        MapConnection(
+            from_place="家の 1 階",
+            to_place="町",
+            how="左下のマットから下へ",
+            from_tile=TilePosition(1, 2),
+            to_tile=None,
+        ),
+    ),
+)
+GRID_INPUT = dataclasses.replace(
+    FULL_INPUT,
+    map_document=GRID_MAP_DOCUMENT,
+    previous_state=dataclasses.replace(
+        PREVIOUS_STATE, place_name="家の 1 階", current_tile=TilePosition(7, 1)
+    ),
+)
+
+
+def test_grid_map_and_route_sections():
+    sections = build_user_sections(GRID_INPUT)
+    assert len(sections) == 13
+    map_json = json.loads(section_body(sections, "マップ"))
+    assert map_json == map_document_to_json(GRID_MAP_DOCUMENT)
+    assert map_json["layout"] == "grid"
+    # 前回の出力の現在地 (家の 1 階の (7, 1)) から、出口までの経路をコードで計算して書く
+    assert section_body(sections, ROUTE_SECTION_TITLE) == lines_of(
+        [
+            "前回の middle の出力 (入力の時刻 t=10.000) の現在地: 家の 1 階 のマス (x=7, y=1)",
+            "- 出口「左下の赤いマット」(x=1, y=2)。行き先: 町。手順: 下に 1 マス → 左に 6 マス (合計 7 マス)",
+        ]
+    )
+    # 経路の節はマップの節の直後
+    titles = [text.split("\n", 1)[0] for text in sections]
+    assert titles.index(f"## {ROUTE_SECTION_TITLE}") == titles.index("## マップ") + 1
+
+
+def test_developer_message_does_not_depend_on_the_grid_map():
+    grid = build_luna_payload(GRID_INPUT)
+    empty = build_luna_payload(EMPTY_INPUT)
+    assert json.dumps(grid["input"][0], ensure_ascii=False) == json.dumps(
+        empty["input"][0], ensure_ascii=False
+    )
+    # 経路の計算の結果は developer メッセージに入らない
+    assert "左に 6 マス" not in LUNA_DEVELOPER_INSTRUCTIONS
+
+
+def test_instructions_cover_the_grid_map_and_the_route_section():
+    for phrase in [
+        # マップの型と、grid の読み方 (origin・tiles・文字の意味・座標の向き)
+        "layout",
+        "grid",
+        "free",
+        "origin",
+        "tiles",
+        "landmarks",
+        # 座標の書き方
+        "current_tile",
+        "from_tile",
+        "to_tile",
+        "null",
+        # 経路の節の使い方 (マス目型では、短期タスクに手順を書く)
+        ROUTE_SECTION_TITLE,
+        "上に 3 マス",
+    ]:
+        assert phrase in LUNA_DEVELOPER_INSTRUCTIONS, phrase

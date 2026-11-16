@@ -696,6 +696,24 @@ def test_game_prompt_follows_the_issue():
         assert phrase in text, phrase
 
 
+# --- マップの型 (マス目型の grid と、自由型の free) ---
+
+
+def test_map_prompt_decides_the_layout_from_the_game_document():
+    text = raw_prompt_file("map.md")
+    for phrase in [
+        # ゲームの性質の文書の「マップの形式」の節を読み、マス目型なら grid、それ以外なら free にする
+        "game.md",
+        "マップの形式",
+        "マス目型",
+        "自由型",
+        "`layout`",
+        '"grid"',
+        '"free"',
+    ]:
+        assert phrase in text, phrase
+
+
 def test_game_prompt_forbids_writing_the_game_title():
     text = raw_prompt_file("game.md")
     assert "ゲームの名前" in text
@@ -756,3 +774,34 @@ def test_prompt_does_not_embed_text_read_from_the_game_note(tmp_path):
     ]:
         prompt = build_deep_prompt(read_prompt_context(job_dir))
         assert MARKER not in prompt
+
+
+def test_map_prompt_describes_the_grid_map():
+    text = raw_prompt_file("map.md")
+    for phrase in [
+        # grid の場所の形 (マスの図と座標)
+        "`origin`",
+        "`tiles`",
+        "`landmarks`",
+        "`from_tile`",
+        "`to_tile`",
+        '"layout": "grid"',
+        # middle の記録の座標を取り込む
+        "`current_tile`",
+        "`tile`",
+        # 範囲が左や上に広がっても、既にあるマスの座標を変えない
+        "座標を変えない",
+        # places.md にもマスの図を書く
+        "マスの図",
+        # 書いてある layout とゲームの性質から決めた型が違うときは、新しい型の形で書き直す
+        "書き直",
+    ]:
+        assert phrase in text, phrase
+
+
+def test_strategy_and_advice_read_the_grid_map_by_tiles():
+    for kind in [DocumentKind.STRATEGY, DocumentKind.ADVICE]:
+        text = raw_prompt_file(KIND_PROMPT_FILES[kind])
+        # grid のマップでは、出口と通れないマスを座標とマスの図で読む
+        for phrase in ["grid", "座標", "マスの図"]:
+            assert phrase in text, (kind, phrase)

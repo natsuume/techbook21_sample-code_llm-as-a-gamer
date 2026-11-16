@@ -6,15 +6,16 @@ deep が重複をまとめた別の名前 (aliases) も一覧に入れ、middle 
 
 from collections.abc import Sequence
 
-from switch2_layers.notes.map_document import MapDocument
+from switch2_layers.notes.map_document import GridMapDocument, MapDocument
 
 
 def collect_place_names(
-    document: MapDocument | None, recorded_names: Sequence[str]
+    document: MapDocument | GridMapDocument | None, recorded_names: Sequence[str]
 ) -> list[str]:
     """場所の名前の一覧を返す。
 
-    document         notes/map/map.json の中身。None はマップなし
+    document         notes/map/map.json の中身 (free と grid のどちらも、places の name と aliases を使う)。
+                     None はマップなし
     recorded_names   middle/map_records.jsonl の place_name (書かれた順。middle.map_records.read_recorded_place_names)
     並べる順: document の places の順に、各場所の name、続けてその場所の aliases (aliases の順)。その後に recorded_names
     の順。各名前は前後の空白を除いた形にし、除いて空になるものは入れない。同じ名前 (前後の空白を除いた形で比べる) は、

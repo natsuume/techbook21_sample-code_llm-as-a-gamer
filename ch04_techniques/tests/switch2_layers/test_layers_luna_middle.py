@@ -34,6 +34,7 @@ OUTPUT = {
     "scene_name": "タイトル画面",
     # タイトル画面にはゲームの世界の中の場所が映っていない
     "place_name": "",
+    "current_tile": None,
     "new_connections": [],
     "new_observations": [],
     "is_stuck": False,
@@ -129,6 +130,7 @@ def test_analyze_returns_parsed_output():
         timeline="## 操作のまとめ\n- まだ操作していない",
         tasks="- A でゲームを始める\n",
         place_name=None,
+        current_tile=None,
         new_connections=(),
         new_observations=(),
     )
@@ -151,6 +153,7 @@ def test_analyze_sends_the_expected_request():
     assert text_format["schema"]["required"] == [
         "scene_name",
         "place_name",
+        "current_tile",
         "new_connections",
         "new_observations",
         "is_stuck",

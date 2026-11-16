@@ -5,13 +5,16 @@
 
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
-     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t"}
+     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t", "place_name", "current_tile"}
 surface_rows_offset と operations_rows_offset は、次の middle の入力で surface.jsonl と operations.jsonl を読み始める
 バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
 docstring)。
 first_task は出力の短期タスクリストの最初のタスクの文、first_task_since_t は最初のタスクが今の文になった時刻
 (最初のタスクが無いときと記録が無いときは null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを
 伝えるのに使う (middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
+place_name は出力の現在地の場所の名前 (前後の空白を除いたもの。決められなければ null)、current_tile は出力の現在地の
+マス ({"x": 整数, "y": 整数}。place_name が null のときと書かれなかったときは null)。次の middle の入力で、現在地から
+出口までの経路を計算するのに使う (middle.route_section)。読むときは、2 つのキーが無ければどちらも null とみなす。
 """
 
 from collections.abc import Mapping
@@ -19,7 +22,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from switch2_layers.notes.map_document import MapConnection, MapDocument
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    MapConnection,
+    MapDocument,
+    TilePosition,
+)
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
 
@@ -39,11 +47,14 @@ class MapObservation:
     kind          観察の種類
     place         観察した場所の名前
     description   画面上の位置などの説明
+    tile          観察したマス (place の場所の、マップの座標)。書かれなければ None
+    tile の既定値は、座標を持たない観察 (free のマップやテストなど) のため。
     """
 
     kind: ObservationKind
     place: str
     description: str
+    tile: TilePosition | None = None
 
 
 @dataclass(frozen=True)
@@ -80,8 +91,13 @@ class MiddleState:
                              無ければ空文字列
     first_task_since_t       最初のタスクが今の文になった時刻 (middle.task_progress.first_task_since の値)。
                              最初のタスクが無いときと記録が無いときは None
+    place_name               この出力の現在地の場所の名前 (MiddleOutput.place_name の前後の空白を除いたもの)。
+                             決められなければ None
+    current_tile             この出力の現在地のマス (MiddleOutput.current_tile)。place_name が None のときと、
+                             書かれなかったときは None
     first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
-    記録しない値 (テストなど) のため。
+    記録しない値 (テストなど) のため。place_name・current_tile の既定値も同じく、2 つのキーが無い middle/state.json を
+    読むときと、現在地を記録しない値 (テストなど) のため。
     """
 
     generated_t: float
@@ -96,6 +112,8 @@ class MiddleState:
     operations_rows_offset: int
     first_task: str = ""
     first_task_since_t: float | None = None
+    place_name: str | None = None
+    current_tile: TilePosition | None = None
 
 
 @dataclass(frozen=True)
@@ -122,8 +140,9 @@ class MiddleInput:
     place_names              場所の名前の一覧 (middle.place_names.collect_place_names)。notes/map/map.json の places の
                              name と aliases、middle/map_records.jsonl の place_name を合わせ、重複を除いて最初に現れた順に
                              並べたもの。既定値の空のタプルは、マップを渡さない入力 (テストなど) のため
-    map_document             notes/map/map.json の全体 (notes.map_document.read_map_document)。無い・読めない・形に
-                             合わないときは None (マップなし)。既定値の None は、マップを渡さない入力 (テストなど) のため
+    map_document             notes/map/map.json の全体 (notes.map_document.read_map_document。free なら MapDocument、
+                             grid なら GridMapDocument)。無い・読めない・形に合わないときは None (マップなし)。
+                             既定値の None は、マップを渡さない入力 (テストなど) のため
     game                     ゲームの性質 (notes/game.md。場面に依らない)。読んだまま (前後の空白も除かない) で、
                              無い・読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
     """
@@ -141,7 +160,7 @@ class MiddleInput:
     operations_rows_offset: int
     current_controls: str = ""
     place_names: tuple[str, ...] = ()
-    map_document: MapDocument | None = None
+    map_document: MapDocument | GridMapDocument | None = None
     game: str = ""
 
 
@@ -157,9 +176,12 @@ class MiddleOutput:
     tasks               現在の場面の短期タスクリスト (Markdown)
     place_name          現在地の場所の名前。場所の名前の一覧から選び、当てはまるものが無いときだけ新しい名前にする。
                         ゲームの世界の中の場所が映っていない (メニュー・タイトル・戦闘など) か、決められなければ None
+    current_tile        現在地のマス (入力のマップの、place_name の場所の座標)。出力が null なら None
+                        (出力の値のまま。place_name が None でも None にしない)
     new_connections     前回の実行より後に新しく分かった、場所から場所への移動 (無ければ空)
     new_observations    新しく分かった、出口・目印・通れなかった位置 (無ければ空)
-    place_name・new_connections・new_observations の既定値は、マップを記録しない出力 (フェイクやテストなど) のため。
+    place_name・current_tile・new_connections・new_observations の既定値は、マップを記録しない出力 (フェイクや
+    テストなど) のため。
     """
 
     scene_name: str | None
@@ -169,6 +191,7 @@ class MiddleOutput:
     timeline: str
     tasks: str
     place_name: str | None = None
+    current_tile: TilePosition | None = None
     new_connections: tuple[MapConnection, ...] = ()
     new_observations: tuple[MapObservation, ...] = ()
 
@@ -182,7 +205,10 @@ class MiddleAnalyzer(Protocol):
 
 
 def middle_state_to_json(state: MiddleState) -> dict[str, object]:
-    """MiddleState を middle/state.json の辞書 (モジュールの docstring のキーの順) にする。"""
+    """MiddleState を middle/state.json の辞書 (モジュールの docstring のキーの順) にする。
+
+    current_tile は notes.map_document.tile_position_to_json の形 ({"x", "y"} の順のキー)。None は null。
+    """
     return {
         "generated_t": state.generated_t,
         "based_on_t": state.based_on_t,
@@ -208,6 +234,9 @@ def middle_state_from_json(value: object) -> MiddleState:
     文字列。scene_id が文字列なら場面 ID の形に限る。
     first_task と first_task_since_t は省けるキーで、無ければ既定値 (空文字列と None) にする。あれば、first_task は
     文字列、first_task_since_t は数 (bool を除く) か null でなければ ValueError にする。
+    place_name と current_tile も省けるキーで、無ければどちらも None にする。あれば、place_name は文字列か null
+    (文字列は書かれたまま)、current_tile は {"x": 整数, "y": 整数} の object か null でなければ ValueError にする
+    (x か y が無い、整数でない (bool と小数 (1.0 を含む) は整数でない) ときも ValueError。object のほかのキーは無視する)。
     """
     if isinstance(value, dict):
         return _middle_state_from_object(value)
