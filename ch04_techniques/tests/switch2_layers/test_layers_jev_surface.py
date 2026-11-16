@@ -484,19 +484,20 @@ ADVISOR_STATUSES: dict[DocumentKind, DeepDocumentStatus | None] = {
     DocumentKind.TIPS: None,
     DocumentKind.CONTROLS: CONTROLS_STATUS,
 }
-# REQUEST_T (10.0) の要求での、ADVISOR_STATUSES の advisor
+# REQUEST_T (10.0) の要求での、ADVISOR_STATUSES の advisor (渡していない game は状況を取得できない)
 ADVISOR_STATE = {
     "controls": CONTROLS_TEXT,
     "tips": "状況を取得できない",
     "strategy": STRATEGY_TEXT,
     "advice": IDLE_TEXT,
+    "game": "状況を取得できない",
 }
 
 
 def test_advisor_to_state_lists_advisor_kinds_in_order():
     value = advisor_to_state(ADVISOR_STATUSES, REQUEST_T)
     # 渡した順ではなく ADVISOR_KINDS の順
-    assert list(value) == ["controls", "tips", "strategy", "advice"]
+    assert list(value) == ["controls", "tips", "strategy", "advice", "game"]
     assert value == ADVISOR_STATE
 
 
@@ -509,12 +510,14 @@ def test_advisor_to_state_treats_missing_kinds_as_unreadable_and_ignores_others(
         "tips": "状況を取得できない",
         "strategy": "状況を取得できない",
         "advice": IDLE_TEXT,
+        "game": "状況を取得できない",
     }
     assert advisor_to_state({}, 10.0) == {
         "controls": "状況を取得できない",
         "tips": "状況を取得できない",
         "strategy": "状況を取得できない",
         "advice": "状況を取得できない",
+        "game": "状況を取得できない",
     }
 
 
@@ -541,6 +544,7 @@ def test_build_surface_state_has_keys_in_order():
         "tips": "状況を取得できない",
         "strategy": "状況を取得できない",
         "advice": "状況を取得できない",
+        "game": "状況を取得できない",
     }
     assert state["frames"] == [
         {"label": "t=9.000 秒 (1.0 秒前)", "image": "a"},

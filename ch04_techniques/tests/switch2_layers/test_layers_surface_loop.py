@@ -546,6 +546,7 @@ def test_advisor_statuses_are_read_for_advisor_kinds_in_current_scene(tmp_path):
         DocumentKind.TIPS: RUNNING_STATUS,
         DocumentKind.STRATEGY: IDLE_STATUS,
         DocumentKind.ADVICE: ENDED_STATUS,
+        DocumentKind.GAME: IDLE_STATUS,
     }
     # 読み取りは deep の要求ではない
     assert harness.deep_sink.requests == []
@@ -593,6 +594,7 @@ def test_advisor_status_error_is_unreadable_without_counting_as_failure(
         DocumentKind.TIPS: None,
         DocumentKind.STRATEGY: IDLE_STATUS,
         DocumentKind.ADVICE: ENDED_STATUS,
+        DocumentKind.GAME: IDLE_STATUS,
     }
     # surface の失敗には数えず、全体も止めず、run.jsonl にも書かない。logging で警告を書く
     assert harness.loop.consecutive_errors == 0
