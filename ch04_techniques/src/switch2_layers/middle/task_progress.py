@@ -38,15 +38,21 @@ def is_same_task_text(a: str, b: str) -> bool:
 
 
 def first_task_since(
-    previous_state: MiddleState | None, first_task: str, written_t: float
+    previous_state: MiddleState | None,
+    first_task: str,
+    written_t: float,
+    scene_id: str | None = None,
 ) -> float | None:
     """最初のタスクが今の文 first_task になった時刻を返す。最初のタスクが無ければ None を返す。
 
-    previous_state は前回の middle/state.json、written_t は今回の出力を書いた時刻 (MiddleState.generated_t)。
+    previous_state は前回の middle/state.json、written_t は今回の出力を書いた時刻 (MiddleState.generated_t)、
+    scene_id は今回の出力の場面 ID (場面が決まらなければ None)。
     - first_task が空 (空白文字だけの場合を含む) なら None (最初のタスクが無いので、時刻を記録しない)
     - previous_state が None でなく、previous_state.first_task_since_t が None でなく、
-      is_same_task_text(previous_state.first_task, first_task) なら previous_state.first_task_since_t
-      (最初のタスクが前回と同じ文のまま)
+      is_same_task_text(previous_state.first_task, first_task) で、場面が変わっていなければ
+      previous_state.first_task_since_t (最初のタスクが前回と同じ文のまま)。場面が変わったとみなすのは、
+      previous_state.scene_id と scene_id がどちらも None でなく、違うときだけ (暗転などで場面が決まらない回を
+      挟んでも、時刻は引き継ぐ)
     - それ以外は written_t (今回、最初のタスクが今の文になった)
     """
     if not _without_whitespace(first_task):
@@ -55,9 +61,19 @@ def first_task_since(
         previous_state is not None
         and previous_state.first_task_since_t is not None
         and is_same_task_text(previous_state.first_task, first_task)
+        and not _scene_changed(previous_state.scene_id, scene_id)
     ):
         return previous_state.first_task_since_t
     return written_t
+
+
+def _scene_changed(previous_scene_id: str | None, scene_id: str | None) -> bool:
+    """前回と今回の場面 ID がどちらも決まっていて違えば True を返す。"""
+    return (
+        previous_scene_id is not None
+        and scene_id is not None
+        and previous_scene_id != scene_id
+    )
 
 
 def _without_whitespace(text: str) -> str:

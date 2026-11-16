@@ -557,7 +557,7 @@ def test_instructions_keep_first_task_text_unchanged():
         "\n- 前回のタスクリストのうち、終わったものは消し、続いているものは前回の文を一字一句"
         "そのまま引き継ぎます。最初のタスクの文が変わると、タスクが進んだとみなされます。"
         "最初のタスクの文を変えるのは、そのタスクを終えたときと、詰まりを解くためにやり方を"
-        "変えるときだけにします\n"
+        "変えるときと、確かめていないボタンを試すタスクを先頭に入れるときだけにします\n"
     ) in LUNA_DEVELOPER_INSTRUCTIONS
     assert "続いているものは引き継ぎます" not in LUNA_DEVELOPER_INSTRUCTIONS
 

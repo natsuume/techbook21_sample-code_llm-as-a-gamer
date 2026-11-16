@@ -77,8 +77,9 @@ def write_middle_output(
        stuck_description, surface_wait_s, timeline, surface_rows_offset=middle_input.surface_rows_offset,
        operations_rows_offset=middle_input.operations_rows_offset, first_task, first_task_since_t) を
        middle/state.json に置き換えて書く。first_task は middle.task_progress.first_task_of(output.tasks)、
-       first_task_since_t は middle.task_progress.first_task_since(middle_input.previous_state, first_task, generated_t)
-       (first_task が空なら None)。場面が決まらない (tasks.md を書かない) 回も同じに計算する
+       first_task_since_t は middle.task_progress.first_task_since(middle_input.previous_state, first_task, generated_t,
+       scene_id=今回の場面 ID) (first_task が空なら None。前回と今回の場面 ID がどちらも決まっていて違えば引き継がない)。
+       場面が決まらない (tasks.md を書かない) 回も同じに計算する
     4. 新しい場面なら、notes.scene_labels.add_scene_label(notes/scene_labels.json, 新しい場面) で一覧に足す。
        足した場面が戻り値の new_scene
     2〜4 のそれぞれのファイルを書く直前に stop を確かめ、立っていれば残りを書かずに None を返す
@@ -98,10 +99,11 @@ def write_middle_output(
         tasks_path.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(tasks_path, output.tasks)
     first_task = first_task_of(output.tasks)
+    scene_id = None if scene is None else scene.id
     state = MiddleState(
         generated_t=generated_t,
         based_on_t=middle_input.t,
-        scene_id=None if scene is None else scene.id,
+        scene_id=scene_id,
         scene_name=None if scene is None else scene.name,
         is_stuck=output.is_stuck,
         stuck_description=output.stuck_description,
@@ -111,7 +113,7 @@ def write_middle_output(
         operations_rows_offset=middle_input.operations_rows_offset,
         first_task=first_task,
         first_task_since_t=first_task_since(
-            middle_input.previous_state, first_task, generated_t
+            middle_input.previous_state, first_task, generated_t, scene_id=scene_id
         ),
     )
     if _is_stopped(stop):

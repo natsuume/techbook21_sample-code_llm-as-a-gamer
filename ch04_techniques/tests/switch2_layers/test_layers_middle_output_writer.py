@@ -330,6 +330,24 @@ def test_tasks_without_bullet_record_no_first_task_time(tmp_path, previous, scen
     assert state["first_task_since_t"] is None
 
 
+def test_same_first_task_in_another_scene_starts_at_generated_t(tmp_path):
+    # 前回の場面は scene-001 (町)。今回は別の場面 (scene-002) なので、同じ文でも時刻を引き継がない
+    root = make_run(tmp_path)
+    (root / "notes" / "scene_labels.json").write_text(
+        '{"scenes": [{"id": "scene-001", "name": "町", "first_seen_t": 1.0}]}',
+        encoding="utf-8",
+    )
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0, previous_state=previous_state("宿屋に入る", 3.0)),
+        output("宿屋の中", tasks="- 宿屋に入る\n"),
+        12.8,
+    )
+    assert result.state.scene_id == "scene-002"
+    assert result.state.first_task == "宿屋に入る"
+    assert result.state.first_task_since_t == 12.8
+
+
 def test_first_task_after_tasks_without_bullet_starts_at_generated_t(tmp_path):
     root = make_run(tmp_path)
     result = write_middle_output(

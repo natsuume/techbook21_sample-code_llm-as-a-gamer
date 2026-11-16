@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from switch2_layers.middle.middle_types import MiddleState
@@ -144,3 +146,25 @@ def test_first_task_after_empty_one_starts_at_written_t(previous_time):
     assert (
         first_task_since(previous_state("", previous_time), "宿屋に入る", 12.8) == 12.8
     )
+
+
+def test_same_first_task_in_another_scene_starts_at_written_t():
+    # 前回の場面は scene-001。今回の場面が決まっていて違えば、同じ文でも引き継がない
+    previous = previous_state("宿屋に入る", 3.0)
+    assert first_task_since(previous, "宿屋に入る", 12.8, scene_id="scene-002") == 12.8
+
+
+def test_same_first_task_in_the_same_scene_keeps_the_previous_time():
+    previous = previous_state("宿屋に入る", 3.0)
+    assert first_task_since(previous, "宿屋に入る", 12.8, scene_id="scene-001") == 3.0
+
+
+def test_same_first_task_without_current_scene_keeps_the_previous_time():
+    # 暗転などで今回の場面が決まらない回は、場面では区切らない
+    previous = previous_state("宿屋に入る", 3.0)
+    assert first_task_since(previous, "宿屋に入る", 12.8, scene_id=None) == 3.0
+
+
+def test_same_first_task_after_a_round_without_scene_keeps_the_previous_time():
+    previous = dataclasses.replace(previous_state("宿屋に入る", 3.0), scene_id=None)
+    assert first_task_since(previous, "宿屋に入る", 12.8, scene_id="scene-002") == 3.0
