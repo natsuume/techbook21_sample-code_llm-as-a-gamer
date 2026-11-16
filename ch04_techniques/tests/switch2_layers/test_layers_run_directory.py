@@ -141,6 +141,7 @@ def test_orchestrator_paths():
         root / "orchestrator" / "session-012" / "stream.jsonl"
     )
     assert paths.claude_skills_dir == root / ".claude" / "skills"
+    assert paths.orchestrator_monitor_log == root / "orchestrator" / "monitor.jsonl"
 
 
 def test_session_directory_name_uses_three_digits():

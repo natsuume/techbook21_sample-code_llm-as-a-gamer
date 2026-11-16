@@ -24,8 +24,11 @@
     orchestrator/session-<連番3桁>/stream.jsonl
                                             主ループのセッションごとの stream-json の出力
                                             (deep の stream.jsonl と同じ形)
+    orchestrator/monitor.jsonl              Orchestrator 型の監視が Jev に送った要求の記録 (orchestrator.monitor_record)。
+                                            monitor_record は、orchestrator/ が無ければ作ってから書く
     .claude/skills/<名前>/                   主ループの Claude Code に読ませるスキル (orchestrator.skill_copy が写す)
-orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop) が作る。
+orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop) と監視の記録
+(orchestrator.monitor_record) が作る。
 """
 
 from collections.abc import Collection
@@ -70,13 +73,14 @@ DEEP_DIR = "deep"
 # 画面の停滞の計測 (progress.progress_loop)
 PROGRESS_DIR = "progress"
 PROGRESS_STATE_FILE = "state.json"
-# Orchestrator 型の主ループの記録 (orchestrator.session_record)
+# Orchestrator 型の記録 (orchestrator/。主ループは orchestrator.session_record、監視は orchestrator.monitor_record)
 ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SESSIONS_FILE = "sessions.jsonl"
 ORCHESTRATOR_TURNS_FILE = "turns.jsonl"
 ORCHESTRATOR_SESSION_DIR_PREFIX = "session-"
 ORCHESTRATOR_SESSION_NUMBER_DIGITS = 3  # セッションのディレクトリーの名前の連番の桁数
 ORCHESTRATOR_STREAM_FILE = "stream.jsonl"
+ORCHESTRATOR_MONITOR_LOG_FILE = "monitor.jsonl"
 # 主ループの Claude Code に読ませるスキルの置き場 (orchestrator.skill_copy)
 CLAUDE_DIR = ".claude"
 CLAUDE_SKILLS_DIR = "skills"
@@ -207,6 +211,11 @@ class RunPaths:
         """主ループの number 番目のセッションの stream-json の記録
         orchestrator_session_dir(number) / ORCHESTRATOR_STREAM_FILE。"""
         return self.orchestrator_session_dir(number) / ORCHESTRATOR_STREAM_FILE
+
+    @property
+    def orchestrator_monitor_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE
 
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""

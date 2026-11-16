@@ -41,6 +41,7 @@ from pathlib import Path
 from switch2_layers.deep.deep_job_directory import (
     create_job_directory,
     find_previous_latest_frame_t,
+    read_job_map_layout,
 )
 from switch2_layers.deep.deep_types import (
     DOCUMENT_KINDS,
@@ -359,9 +360,11 @@ class DeepScheduler:
            "reason": SKIP_REPLACED} を書く。この要求 (trigger と now) を key の保留中の要求にし、deep_pending {"kind",
            "scene_id", "trigger", "since_last_start_s": 前回の起動からの秒数 (ミリ秒に丸める)} を書き、
            DeepRequestResult(started=False, reason=REQUEST_PENDING) を返す。ジョブのディレクトリーはまだ作らない
-        4. 起動する: DeepJob(kind, key.scene_id, trigger, requested_t=now, previous_latest_frame_t=
-           deep_job_directory.find_previous_latest_frame_t(paths, key) (同じ文書の、前回の正常に終わったジョブの
-           latest_frame_t。失敗・stop・kill のジョブは飛ばす), latest_frame_t=latest_frame_t()) を作り、
+        4. 起動する: map_layout = deep_job_directory.read_job_map_layout(notes/, kind) (map ならゲームの性質の文書から
+           決めた型。判定が付かなければ map.json の型、それも無ければ free。map 以外は None) を 1 回だけ求め、DeepJob(kind, key.scene_id, trigger, requested_t=now,
+           previous_latest_frame_t=deep_job_directory.find_previous_latest_frame_t(paths, key, map_layout) (同じ文書の、
+           前回の正常に終わったジョブの latest_frame_t。失敗・stop・kill のジョブは飛ばす。map の文書で、map.json の
+           layout が map_layout と違えば None), latest_frame_t=latest_frame_t(), map_layout=map_layout) を作り、
            prepare_job_directory(paths, job) でディレクトリーを用意し、key の前回の起動の t を now にし、実行中に数え、
            run_log に deep_start {"kind", "scene_id", "trigger", "job": 実行ディレクトリーからの相対パス,
            "pending_t": null} を書いてから、start_job_thread(ジョブの本体) を呼ぶ。
@@ -421,13 +424,17 @@ class DeepScheduler:
                 return DeepRequestResult(started=False, reason=SKIP_MIN_START_INTERVAL)
             if self._is_running_locked(key):
                 return self._hold_request_locked(key, trigger, now)
+            map_layout = read_job_map_layout(parts.paths.notes_dir, kind)
             job = DeepJob(
                 kind=kind,
                 scene_id=key.scene_id,
                 trigger=trigger,
                 requested_t=now,
-                previous_latest_frame_t=find_previous_latest_frame_t(parts.paths, key),
+                previous_latest_frame_t=find_previous_latest_frame_t(
+                    parts.paths, key, map_layout
+                ),
                 latest_frame_t=parts.latest_frame_t(),
+                map_layout=map_layout,
             )
             try:
                 job_dir = parts.prepare_job_directory(parts.paths, job)
@@ -836,10 +843,12 @@ class DeepScheduler:
         ジョブの終わりを記録したのと同じロックの区間で、_finish_locked から呼ぶ。
         close の後、key のジョブが実行中、または key に保留中の要求が無ければ、何もせずに None を返す。
         そうでなければ、保留中の要求 (trigger, requested_t) を取り出し (key の保留中の要求は無くなる)、次を行う:
-        1. DeepJob(key.kind, key.scene_id, trigger, requested_t=保留した要求の t, previous_latest_frame_t=
-           deep_job_directory.find_previous_latest_frame_t(paths, key) (終わったばかりのジョブが正常に終わっていれば、
-           その latest_frame_t), latest_frame_t=latest_frame_t()) を作り、prepare_job_directory(paths, job) で
-           ディレクトリーを用意する。最小の起動間隔は確かめ直さない (保留した要求は、前回の起動から
+        1. map_layout = deep_job_directory.read_job_map_layout(notes/, key.kind) を 1 回だけ求め (このときの
+           ゲームの性質の文書から決める。判定が付かなければ map.json の型、それも無ければ free。map 以外は None)、DeepJob(key.kind, key.scene_id, trigger,
+           requested_t=保留した要求の t, previous_latest_frame_t=deep_job_directory.find_previous_latest_frame_t(
+           paths, key, map_layout) (終わったばかりのジョブが正常に終わっていれば、その latest_frame_t。map の文書で、
+           map.json の layout が map_layout と違えば None), latest_frame_t=latest_frame_t(), map_layout=map_layout) を
+           作り、prepare_job_directory(paths, job) でディレクトリーを用意する。最小の起動間隔は確かめ直さない (保留した要求は、前回の起動から
            min_start_interval_s 秒たった後に来たものであるため)
         2. 1 が例外 (Exception) を出したら、key の前回の終了を (now, DeepJobStatus.ERROR) にし (前回の起動の t は
            変えない)、run_log に deep_request_error {"source": "pending", "kind", "trigger": 保留した要求のきっかけ,
@@ -856,13 +865,17 @@ class DeepScheduler:
             return None
         parts = self.parts
         try:
+            map_layout = read_job_map_layout(parts.paths.notes_dir, key.kind)
             job = DeepJob(
                 kind=key.kind,
                 scene_id=key.scene_id,
                 trigger=pending.trigger,
                 requested_t=pending.requested_t,
-                previous_latest_frame_t=find_previous_latest_frame_t(parts.paths, key),
+                previous_latest_frame_t=find_previous_latest_frame_t(
+                    parts.paths, key, map_layout
+                ),
                 latest_frame_t=parts.latest_frame_t(),
+                map_layout=map_layout,
             )
             job_dir = parts.prepare_job_directory(parts.paths, job)
         except Exception as error:
@@ -988,10 +1001,12 @@ def run_deep_once(
     1. scene_id が None で kind が controls・tips なら、middle/state.json の現在の場面
        (surface.middle_state_reader.read_surface_context の scene_id。無ければ None = 共通の文書) を使う
     2. 時刻 now は frames.jsonl の最新の t (frame_store.latest_frame_t。無ければ 0.0)
-    3. DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL, requested_t=now,
-       previous_latest_frame_t=find_previous_latest_frame_t (同じ文書の、前回の正常に終わったジョブの latest_frame_t),
-       latest_frame_t=frames.jsonl の最新の t (無ければ None)) で create_job_directory → execute_deep_job を呼び、
-       結果を返す
+    3. map_layout = deep_job_directory.read_job_map_layout(notes/, kind) (map ならゲームの性質の文書から決めた型。
+       判定が付かなければ map.json の型、それも無ければ free。map 以外は None) を 1 回だけ求め、DeepJob(kind, document_key(kind, scene_id).scene_id, MANUAL,
+       requested_t=now, previous_latest_frame_t=find_previous_latest_frame_t(paths, key, map_layout) (同じ文書の、
+       前回の正常に終わったジョブの latest_frame_t。map の文書で、map.json の layout が map_layout と違えば None),
+       latest_frame_t=frames.jsonl の最新の t (無ければ None), map_layout=map_layout) で create_job_directory →
+       execute_deep_job を呼び、結果を返す
     最小の起動間隔とタイムアウトは確かめない (run が戻るまで待つ)。run.jsonl には書かない。
     run_dir がディレクトリーでなければ FileNotFoundError、scene_id が場面 ID の形でなければ ValueError にする。
     """
@@ -1002,13 +1017,15 @@ def run_deep_once(
         scene_id = read_surface_context(paths.middle_state).scene_id
     key = document_key(kind, scene_id)
     latest = latest_frame_t(paths)
+    map_layout = read_job_map_layout(paths.notes_dir, kind)
     job = DeepJob(
         kind=kind,
         scene_id=key.scene_id,
         trigger=DeepTrigger.MANUAL,
         requested_t=latest if latest is not None else 0.0,
-        previous_latest_frame_t=find_previous_latest_frame_t(paths, key),
+        previous_latest_frame_t=find_previous_latest_frame_t(paths, key, map_layout),
         latest_frame_t=latest,
+        map_layout=map_layout,
     )
     job_dir = create_job_directory(paths, job)
     outcome = execute_deep_job(runner, job, job_dir)

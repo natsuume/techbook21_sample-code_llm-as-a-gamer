@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 switch2-agent = "switch2_agent.run:main"
 switch2-layers = "switch2_layers.cli:main"
+switch2-harness = "switch2_harness.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -21,7 +22,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # プロジェクト名とパッケージ名が異なるため、同梱するパッケージを明示する
-packages = ["src/switch2_agent", "src/switch2_layers"]
+packages = ["src/switch2_agent", "src/switch2_layers", "src/switch2_harness"]
 
 [tool.uv.sources]
 llm-as-a-gamer-sample-code = { path = "../ch02_setup", editable = true }

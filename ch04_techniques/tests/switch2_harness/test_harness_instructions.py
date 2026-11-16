@@ -1,0 +1,78 @@
+from harness_fakes import FAKE_FEATURES, read_fake_template
+
+from switch2_harness.harness_config import HarnessConfig
+from switch2_harness.instructions import (
+    BASE_TEMPLATE_FILE,
+    read_package_template,
+    render_instructions,
+)
+
+
+def make_config(features: tuple[str, ...]) -> HarnessConfig:
+    return HarnessConfig(
+        game="ゲーム A",
+        goal="ボスを倒す",
+        features=features,
+        created_at="2026-11-16T21:00:05+09:00",
+    )
+
+
+def test_base_template_file_name():
+    assert BASE_TEMPLATE_FILE == "base.md"
+
+
+def test_render_instructions_with_no_feature_substitutes_base_only():
+    text = render_instructions(make_config(()), read_fake_template, FAKE_FEATURES)
+    assert text == "# 基本 ゲーム A\n\n目標: ボスを倒す\n"
+
+
+def test_render_instructions_appends_enabled_sections_in_available_order():
+    config = make_config(("memo-files", "action-history"))
+    text = render_instructions(config, read_fake_template, FAKE_FEATURES)
+    assert text == (
+        "# 基本 ゲーム A\n"
+        "\n"
+        "目標: ボスを倒す\n"
+        "\n"
+        "## 行動履歴 (ゲーム A)\n"
+        "\n"
+        "## メモ\n"
+        "\n"
+        "ボスを倒す を目指す\n"
+    )
+
+
+def test_render_instructions_reads_only_enabled_templates():
+    requested: list[str] = []
+
+    def read_template(file_name: str) -> str:
+        requested.append(file_name)
+        return read_fake_template(file_name)
+
+    render_instructions(make_config(("memo-files",)), read_template, FAKE_FEATURES)
+    assert requested == ["base.md", "memo-files.md"]
+
+
+def test_render_instructions_ends_with_exactly_one_newline():
+    def read_template(file_name: str) -> str:
+        return "# $game\n\n\n"
+
+    text = render_instructions(make_config(()), read_template, FAKE_FEATURES)
+    assert text == "# ゲーム A\n"
+
+
+def test_read_package_template_reads_base_md():
+    text = read_package_template("base.md")
+    assert text.startswith("# Switch 2 の操作ルール\n")
+    assert "- ゲーム名: $game\n" in text
+    assert "- 目標: $goal\n" in text
+
+
+def test_render_instructions_with_package_base_template():
+    text = render_instructions(make_config(()), read_package_template)
+    assert "- ゲーム名: ゲーム A\n" in text
+    assert "- 目標: ボスを倒す\n" in text
+    assert "$game" not in text
+    assert "$goal" not in text
+    assert text.endswith("確かめてください。\n")
+    assert not text.endswith("\n\n")

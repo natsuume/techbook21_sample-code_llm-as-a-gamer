@@ -46,6 +46,10 @@ from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
 from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
+from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
 # 画面の停滞の計測のテストで止めるまで動かす秒数 (最初の 2 秒のフレームは新しい画面になるため、長めにとる)
@@ -947,16 +951,30 @@ def test_jev_surface_sends_and_records_deep_status_with_mock_jev(tmp_path):
 
 
 # --- 安全の監視 ---
-# 止める条件の境界 (しきい値ちょうど・続けて 2 回・失敗の回数・--allow-home) は、test_layers_safety_judge と
-# test_layers_safety_monitor で 1 回ずつ確かめる。ここでは、3 層と組み合わせたときの止まり方を確かめる
+# 止める条件と照合の結果の境界 (しきい値ちょうど・続けて 2 回・失敗の回数・照合の確率の欠け) は、
+# test_layers_safety_judge・test_layers_safety_monitor・test_layers_screen_judgment で確かめる。ここでは、3 層と
+# 組み合わせたときの止まり方と、照合の結果が app の LatestSystemScreen に届くことを確かめる
 
 SAFETY_INTERVAL_S = 0.2  # 監視の間隔 (テストを短くするため、範囲の下限にする)
 ALL_SAFE = {name: 0.0 for name in SAFETY_QUESTION_NAMES}
 
 
-def safety_answer(**values: float) -> SafetyAnswer:
-    """すべての問いを 0 にし、values の問いだけをその確率にした答え。"""
-    return SafetyAnswer(probabilities={**ALL_SAFE, **values})
+def screen_choices(screen: str | None = None) -> dict[str, float]:
+    """照合の確率 (選択肢の順)。screen が None なら none を 1.0、そうでなければ screen を 0.98 にする。"""
+    values = dict.fromkeys(SYSTEM_SCREEN_CHOICE_NAMES, 0.0)
+    if screen is None:
+        values["none"] = 1.0
+    else:
+        values["none"] = 0.02
+        values[screen] = 0.98
+    return values
+
+
+def safety_answer(screen: str | None = None, **values: float) -> SafetyAnswer:
+    """すべての問いを 0 にし、values の問いだけをその確率にした答え。照合の確率は screen_choices(screen)。"""
+    return SafetyAnswer(
+        probabilities={**ALL_SAFE, **values}, system_screen=screen_choices(screen)
+    )
 
 
 class ScriptedSafety:
@@ -1003,10 +1021,10 @@ def assert_no_operation_was_sent(root: Path, sender: FakeSender) -> None:
 
 def test_unsafe_screen_at_start_stops_without_sending_operations(tmp_path):
     sender = FakeSender()
-    safety = ScriptedSafety([safety_answer(home_menu=0.9)])
+    safety = ScriptedSafety([safety_answer(online=0.9)])
     app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
     reason, root = run_app(app, stop_after=3.0)
-    assert reason == "unsafe screen at start: home_menu"
+    assert reason == "unsafe screen at start: online"
     assert read_rows(root / "run.jsonl")[-1]["reason"] == reason
     assert_no_operation_was_sent(root, sender)
     # middle のループも始めない
@@ -1015,7 +1033,7 @@ def test_unsafe_screen_at_start_stops_without_sending_operations(tmp_path):
     assert safety.count == 1
     [row] = read_rows(root / "safety.jsonl")
     assert row["phase"] == "start"
-    assert row["probabilities"]["home_menu"] == 0.9
+    assert row["probabilities"]["online"] == 0.9
     assert row["frame_t"] >= 0
 
 
@@ -1087,12 +1105,12 @@ def test_consecutive_safety_failures_stop_everything(tmp_path):
     assert [row["probabilities"] is None for row in rows] == [False, True, True]
 
 
-def test_allow_home_keeps_running_on_the_home_menu(tmp_path):
+@pytest.mark.parametrize("screen", ["home_menu", "user_select"])
+def test_system_screen_at_start_keeps_running_without_allow_home(tmp_path, screen):
+    # HOME メニューやユーザー選択が映っていても、3 つの問いが超えなければ止めない (--allow-home は要らない)
     sender = FakeSender()
-    safety = ScriptedSafety([safety_answer(home_menu=0.99, user_select=0.99)])
-    app = LayersApp(
-        safety_settings(tmp_path, allow_home=True), parts(sender, safety=safety)
-    )
+    safety = ScriptedSafety([safety_answer(screen=screen)])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
     reason, root = run_app(app, stop_after=1.5)
     assert reason == REASON_INTERRUPTED
     assert read_rows(root / "surface.jsonl")
@@ -1100,6 +1118,59 @@ def test_allow_home_keeps_running_on_the_home_menu(tmp_path):
     assert rows[0]["phase"] == "start"
     assert len(rows) >= 3
     assert all(row["phase"] == "monitor" for row in rows[1:])
+    assert all(row["system_screen_result"] == screen for row in rows)
+
+
+def test_allow_home_does_not_change_the_safety_monitor(tmp_path):
+    # --allow-home は押せるボタンに HOME を足すだけで、安全の監視の止め方は変えない
+    sender = FakeSender()
+    safety = ScriptedSafety(
+        [safety_answer(screen="home_menu"), safety_answer(online=0.9)]
+    )
+    app = LayersApp(
+        safety_settings(tmp_path, allow_home=True), parts(sender, safety=safety)
+    )
+    reason, root = run_app(app, stop_after=5.0)
+    assert reason == "unsafe screen: online"
+    rows = read_rows(root / "safety.jsonl")
+    assert [row["phase"] for row in rows] == ["start", "monitor", "monitor"]
+    assert [row["system_screen_result"] for row in rows] == ["home_menu", None, None]
+
+
+class LatestSystemScreenRecorder:
+    """app モジュールの LatestSystemScreen を包み、start が作ったものを覚える。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch):
+        self.made: list[LatestSystemScreen] = []
+        original = app_module.LatestSystemScreen
+
+        def build() -> LatestSystemScreen:
+            latest = original()
+            self.made.append(latest)
+            return latest
+
+        monkeypatch.setattr(app_module, "LatestSystemScreen", build)
+
+
+def test_app_passes_the_latest_system_screen_judgment_to_latest_system_screen(
+    tmp_path, monkeypatch
+):
+    recorder = LatestSystemScreenRecorder(monkeypatch)
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(), safety_answer(screen="controllers")])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    reason, root = run_app(app, stop_after=1.5)
+    assert reason == REASON_INTERRUPTED
+    [latest] = recorder.made
+    rows = read_rows(root / "safety.jsonl")
+    assert len(rows) >= 3
+    # 最後の確かめの行と同じ照合の結果を持つ (止めた後は、行も照合の結果も増えない)
+    judgment = latest.latest()
+    assert judgment is not None
+    assert judgment.frame_t == rows[-1]["frame_t"]
+    assert judgment.t_received == rows[-1]["t_received"]
+    assert judgment.screen == "controllers"
+    assert judgment.probabilities == rows[-1]["system_screen"]
 
 
 def test_safety_monitor_keeps_checking_while_the_bridge_is_recovering(tmp_path):

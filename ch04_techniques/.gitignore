@@ -5,3 +5,5 @@ game_notes/*
 runs/
 # API キーを書くファイル (見本の .env.sample は管理する)
 .env
+# switch2-harness init で作るプレイ用の作業ディレクトリー (設定・撮影した画像・記録が入る)
+plays/
