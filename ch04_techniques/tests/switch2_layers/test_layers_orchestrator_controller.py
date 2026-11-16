@@ -845,7 +845,7 @@ def test_discarded_counts_add_up_until_taken(tmp_path, cleanups):
     h.controller.apply(act(hold(1.0, "A"), tap("X")))
     h.wait_pressed({"A"})
     h.controller.apply(act(hold(1.0, "B"), tap("Y"), tap("Z")))
-    h.controller.apply(act(tap("C")))
+    h.controller.apply(act(tap("X")))
     events = h.controller.take_events()
     assert events.discarded_action_count == 2 + 3
     assert events.remaining_action_count == 1
@@ -913,10 +913,10 @@ def test_nothing_runs_before_set_started(tmp_path, cleanups):
 def test_actions_applied_before_set_started_can_still_be_replaced(tmp_path, cleanups):
     h = make_harness(tmp_path, cleanups, started=False)
     h.controller.apply(act(tap("A"), tap("B")))
-    h.controller.apply(act(tap("C")))
+    h.controller.apply(act(tap("X")))
     assert h.controller.take_events().discarded_action_count == 2
     h.controller.set_started()
-    h.wait_pressed({"C"})
+    h.wait_pressed({"X"})
     h.drive(1.0)
     assert h.sender.press_starts("A") == []
     assert h.sender.press_starts("B") == []
