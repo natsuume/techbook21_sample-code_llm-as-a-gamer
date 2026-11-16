@@ -28,7 +28,7 @@ from switch2_layers.middle.middle_types import (
     MiddleOutput,
     ObservationKind,
 )
-from switch2_layers.notes.map_document import MapConnection
+from switch2_layers.notes.map_document import MapConnection, TilePosition
 from switch2_layers.surface.middle_state_reader import (
     SURFACE_WAIT_MAX_S,
     SURFACE_WAIT_MIN_S,
@@ -179,6 +179,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
 _OUTPUT_KEYS: tuple[str, ...] = (
     "scene_name",
     "place_name",
+    "current_tile",
     "new_connections",
     "new_observations",
     "is_stuck",
@@ -188,9 +189,11 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "tasks",
 )
 # new_connections の要素のキー (スキーマの items の properties と同じ順)
-_CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how")
+_CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how", "from_tile", "to_tile")
 # new_observations の要素のキー (スキーマの items の properties と同じ順)
-_OBSERVATION_KEYS: tuple[str, ...] = ("kind", "place", "description")
+_OBSERVATION_KEYS: tuple[str, ...] = ("kind", "place", "description", "tile")
+# 座標の object のキー (_tile_or_null_schema の object の properties と同じ順)
+_TILE_KEYS: tuple[str, ...] = ("x", "y")
 
 
 def build_text_format() -> dict[str, object]:
@@ -215,7 +218,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
           surface_wait_s が数 (bool を除く) でないか有限でない (NaN・Infinity を含む)
         - surface_wait_s が SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S (両端を含む) の外
         - new_connections・new_observations が配列でない。要素が object でない、要素のキーがスキーマと一致しない
-          (足りない・余分なキーがある)、要素の値が文字列でない
+          (足りない・余分なキーがある)、要素の from・to・how・place・description が文字列でない
         - new_observations の要素の kind が ObservationKind の値 (exit・landmark・blocked。大文字と小文字を区別する)
           でない
         - current_tile と、new_connections の要素の from_tile・to_tile、new_observations の要素の tile が、null でも
@@ -238,6 +241,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
         timeline=_string(value, "timeline"),
         tasks=_string(value, "tasks"),
         place_name=place_name if place_name.strip() else None,
+        current_tile=_tile(value["current_tile"], "'current_tile' in middle output"),
         new_connections=tuple(
             _connection(item) for item in _array(value, "new_connections")
         ),
@@ -303,6 +307,8 @@ def _connection(item: object) -> MapConnection:
         from_place=_string(value, "from"),
         to_place=_string(value, "to"),
         how=_string(value, "how"),
+        from_tile=_tile(value["from_tile"], f"'from_tile' in {where}"),
+        to_tile=_tile(value["to_tile"], f"'to_tile' in {where}"),
     )
 
 
@@ -315,7 +321,35 @@ def _observation(item: object) -> MapObservation:
         kind=_observation_kind(value["kind"]),
         place=_string(value, "place"),
         description=_string(value, "description"),
+        tile=_tile(value["tile"], f"'tile' in {where}"),
     )
+
+
+def _tile(item: object, where: str) -> TilePosition | None:
+    """座標の値 item が null なら None、{"x": 整数, "y": 整数} の object なら TilePosition にする。
+
+    object のキーが x と y に一致しない (足りない・余分なキーがある) か、x か y が整数でない (bool と小数は整数でない)
+    とき、null でも object でもないときは ValueError。where は誤りの説明に入れる、確かめる値の名前。
+    """
+    if item is None:
+        return None
+    if isinstance(item, dict):
+        _check_keys(item, _TILE_KEYS, where)
+        return TilePosition(
+            x=_tile_integer(item, "x", where), y=_tile_integer(item, "y", where)
+        )
+    raise ValueError(f"{where} must be a JSON object or null: {item!r}")
+
+
+def _tile_integer(value: Mapping[str, object], key: str, where: str) -> int:
+    """座標の object value の value[key] が整数 (bool を除く) ならその値を返す。それ以外は ValueError。
+
+    JSON の 1.0 は json.loads で float になるため、整数としない。
+    """
+    item = value[key]
+    if isinstance(item, int) and not isinstance(item, bool):
+        return item
+    raise ValueError(f"{key!r} of {where} must be an integer: {item!r}")
 
 
 def _observation_kind(item: object) -> ObservationKind:
