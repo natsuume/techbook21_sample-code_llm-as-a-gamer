@@ -139,8 +139,10 @@ class SurfaceQuestion:
     target          button はボタン名、stick_direction は `LS_x` の形、stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
                     scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
-                    safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素)、monitor は監視の名前
-    question_type   Jev の問いの型。button・stick_direction・monitor は choice、box は box、ほかは noul
+                    safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素か
+                    SYSTEM_SCREEN_QUESTION_NAME)、monitor は監視の名前
+    question_type   Jev の問いの型。button・stick_direction・monitor と、safety の SYSTEM_SCREEN_QUESTION_NAME は
+                    choice、box は box、ほかは noul
     choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE)。ほかの型では空のタプル
     """
 

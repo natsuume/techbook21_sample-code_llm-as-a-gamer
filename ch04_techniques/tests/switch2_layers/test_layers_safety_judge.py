@@ -1,9 +1,11 @@
-"""止めるかの判定 (純粋な関数とクラス)。しきい値ちょうど・続けて 2 回・失敗の回数・--allow-home の境界を確かめる。"""
+"""止めるかの判定 (純粋な関数とクラス)。しきい値ちょうど・続けて 2 回・失敗の回数・照合の確率の確かめの境界を確かめる。"""
 
+import inspect
 import math
 
 import pytest
 
+import switch2_layers.safety.safety_judge as safety_judge_module
 from switch2_layers.safety.safety_judge import (
     REASON_SAFETY_FAILED_AT_START,
     UNSAFE_STREAK_TO_STOP,
@@ -15,12 +17,16 @@ from switch2_layers.safety.safety_judge import (
     unsafe_screen_at_start_reason,
     unsafe_screen_reason,
     validate_probabilities,
-    watched_names,
+    validate_system_screen_probabilities,
 )
 from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 THRESHOLD = 0.7
 ALL_ZERO = {name: 0.0 for name in SAFETY_QUESTION_NAMES}
+NO_SCREEN = {name: 0.0 for name in SYSTEM_SCREEN_CHOICE_NAMES} | {"none": 1.0}
 
 
 def probabilities(**values: float) -> dict[str, float]:
@@ -33,23 +39,21 @@ def probabilities(**values: float) -> dict[str, float]:
 
 def test_reason_texts_follow_the_issue():
     assert unsafe_screen_reason("online") == "unsafe screen: online"
-    assert unsafe_screen_at_start_reason("home_menu") == (
-        "unsafe screen at start: home_menu"
+    assert unsafe_screen_at_start_reason("purchase") == (
+        "unsafe screen at start: purchase"
     )
     assert safety_failure_reason(3) == "safety check failed 3 times in a row"
     assert REASON_SAFETY_FAILED_AT_START == "safety check failed at start"
     assert UNSAFE_STREAK_TO_STOP == 2
 
 
-# --- 止める対象の問い ---
+# --- --allow-home は判定に使わない ---
 
 
-def test_watched_names_without_allow_home_are_all_questions():
-    assert watched_names(False) == SAFETY_QUESTION_NAMES
-
-
-def test_watched_names_with_allow_home_drop_home_menu_and_user_select():
-    assert watched_names(True) == ("online", "purchase", "system_settings")
+def test_judge_has_no_allow_home_exemption():
+    assert not hasattr(safety_judge_module, "watched_names")
+    for function in (names_over_threshold, start_stop_reason, MonitorJudge):
+        assert "allow_home" not in inspect.signature(function).parameters
 
 
 # --- 答えの確率の確かめ ---
@@ -87,79 +91,111 @@ def test_validate_probabilities_rejects_missing_names():
         validate_probabilities(value)
 
 
+# --- 照合の確率の確かめ ---
+
+
+def test_validate_system_screen_orders_by_choice_and_ignores_unknown_names():
+    value = {"unknown": 3.0, **dict(reversed(NO_SCREEN.items())), "home_menu": 1}
+    result = validate_system_screen_probabilities(value)
+    assert list(result) == list(SYSTEM_SCREEN_CHOICE_NAMES)
+    assert result["home_menu"] == 1.0
+    assert type(result["home_menu"]) is float
+    assert result["none"] == 1.0
+
+
+def test_validate_system_screen_accepts_the_edges_of_the_range():
+    value = {**NO_SCREEN, "none": 0, "controllers": 1.0}
+    result = validate_system_screen_probabilities(value)
+    assert result["none"] == 0.0
+    assert result["controllers"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"user_select": None},
+        {"user_select": "0.5"},
+        {"user_select": True},
+        {"none": -0.01},
+        {"software_close": 1.01},
+        {"controllers": math.nan},
+        {"controller_order": math.inf},
+    ],
+)
+def test_validate_system_screen_rejects_broken_values(broken):
+    with pytest.raises(ValueError):
+        validate_system_screen_probabilities({**NO_SCREEN, **broken})
+
+
+@pytest.mark.parametrize("missing", SYSTEM_SCREEN_CHOICE_NAMES)
+def test_validate_system_screen_rejects_a_missing_choice(missing):
+    value = dict(NO_SCREEN)
+    del value[missing]
+    with pytest.raises(ValueError):
+        validate_system_screen_probabilities(value)
+
+
+def test_validate_system_screen_rejects_an_empty_answer():
+    with pytest.raises(ValueError):
+        validate_system_screen_probabilities({})
+
+
 # --- しきい値を超えた問い ---
 
 
 def test_exactly_the_threshold_is_not_over():
-    assert names_over_threshold(probabilities(online=0.7), THRESHOLD, False) == ()
+    assert names_over_threshold(probabilities(online=0.7), THRESHOLD) == ()
 
 
 def test_just_over_the_threshold_is_over():
-    assert names_over_threshold(probabilities(online=0.7001), THRESHOLD, False) == (
-        "online",
-    )
+    assert names_over_threshold(probabilities(online=0.7001), THRESHOLD) == ("online",)
 
 
 def test_names_over_threshold_are_in_question_order():
-    values = probabilities(system_settings=0.9, home_menu=0.8, purchase=0.95)
-    assert names_over_threshold(values, THRESHOLD, False) == (
-        "home_menu",
+    values = probabilities(system_settings=0.9, online=0.8, purchase=0.95)
+    assert names_over_threshold(values, THRESHOLD) == (
+        "online",
         "purchase",
         "system_settings",
     )
-
-
-def test_allow_home_ignores_home_menu_and_user_select_only():
-    values = probabilities(home_menu=0.99, user_select=0.99, online=0.99)
-    assert names_over_threshold(values, THRESHOLD, True) == ("online",)
 
 
 # --- 実行を始めるときの確かめ (1 回で決める) ---
 
 
 def test_start_stops_at_once_when_a_question_is_over():
-    reason = start_stop_reason(probabilities(home_menu=0.71), THRESHOLD, False)
-    assert reason == "unsafe screen at start: home_menu"
+    reason = start_stop_reason(probabilities(online=0.71), THRESHOLD)
+    assert reason == "unsafe screen at start: online"
 
 
 def test_start_does_not_stop_at_exactly_the_threshold():
-    assert start_stop_reason(probabilities(home_menu=0.7), THRESHOLD, False) is None
+    assert start_stop_reason(probabilities(online=0.7), THRESHOLD) is None
 
 
 def test_start_does_not_stop_when_every_question_is_low():
-    assert start_stop_reason(ALL_ZERO, THRESHOLD, False) is None
+    assert start_stop_reason(ALL_ZERO, THRESHOLD) is None
 
 
 def test_start_reason_names_the_first_question_in_order():
-    values = probabilities(purchase=0.9, user_select=0.9)
-    assert start_stop_reason(values, THRESHOLD, False) == (
-        "unsafe screen at start: user_select"
-    )
+    values = probabilities(system_settings=0.9, purchase=0.9)
+    assert start_stop_reason(values, THRESHOLD) == ("unsafe screen at start: purchase")
 
 
 def test_start_failure_stops():
-    assert start_stop_reason(None, THRESHOLD, False) == "safety check failed at start"
-    assert start_stop_reason(None, THRESHOLD, True) == "safety check failed at start"
-
-
-@pytest.mark.parametrize("name", ["home_menu", "user_select"])
-def test_start_with_allow_home_does_not_stop_at_home_menu_or_user_select(name):
-    assert start_stop_reason(probabilities(**{name: 0.99}), THRESHOLD, True) is None
+    assert start_stop_reason(None, THRESHOLD) == "safety check failed at start"
 
 
 @pytest.mark.parametrize("name", ["online", "purchase", "system_settings"])
-def test_start_with_allow_home_still_stops_at_other_screens(name):
-    reason = start_stop_reason(probabilities(**{name: 0.99}), THRESHOLD, True)
+def test_start_stops_at_each_question(name):
+    reason = start_stop_reason(probabilities(**{name: 0.99}), THRESHOLD)
     assert reason == f"unsafe screen at start: {name}"
 
 
 # --- 監視: 同じ問いが続けて 2 回 ---
 
 
-def judge(allow_home: bool = False, max_errors: int = 3) -> MonitorJudge:
-    return MonitorJudge(
-        threshold=THRESHOLD, allow_home=allow_home, max_errors=max_errors
-    )
+def judge(max_errors: int = 3) -> MonitorJudge:
+    return MonitorJudge(threshold=THRESHOLD, max_errors=max_errors)
 
 
 def test_monitor_stops_when_the_same_question_is_over_twice_in_a_row():
@@ -197,26 +233,24 @@ def test_monitor_counts_each_question_separately():
 
 def test_monitor_reason_names_the_first_question_in_order():
     monitor = judge()
-    both = probabilities(system_settings=0.9, home_menu=0.9)
+    both = probabilities(system_settings=0.9, purchase=0.9)
     assert monitor.record_answer(both) is None
-    assert monitor.record_answer(both) == "unsafe screen: home_menu"
-
-
-@pytest.mark.parametrize("name", ["home_menu", "user_select"])
-def test_monitor_with_allow_home_does_not_stop_at_home_menu_or_user_select(name):
-    monitor = judge(allow_home=True)
-    for _ in range(5):
-        assert monitor.record_answer(probabilities(**{name: 0.99})) is None
-    assert monitor.streak(name) == 0
+    assert monitor.record_answer(both) == "unsafe screen: purchase"
 
 
 @pytest.mark.parametrize("name", ["online", "purchase", "system_settings"])
-def test_monitor_with_allow_home_still_stops_at_other_screens(name):
-    monitor = judge(allow_home=True)
+def test_monitor_stops_at_each_question(name):
+    monitor = judge()
     assert monitor.record_answer(probabilities(**{name: 0.99})) is None
     assert monitor.record_answer(probabilities(**{name: 0.99})) == (
         f"unsafe screen: {name}"
     )
+
+
+def test_monitor_streak_of_an_unknown_name_is_zero():
+    monitor = judge()
+    monitor.record_answer(probabilities(online=0.9))
+    assert monitor.streak("home_menu") == 0
 
 
 # --- 監視: 失敗した確かめをはさむとき (答えのあった確かめだけを続けて数える) ---

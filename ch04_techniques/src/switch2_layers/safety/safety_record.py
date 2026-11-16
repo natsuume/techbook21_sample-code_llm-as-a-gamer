@@ -1,8 +1,11 @@
 """safety.jsonl の 1 行 (安全の確かめ 1 回の記録) を作る。
 
-行の形:
-    {"t_sent", "t_received", "frame_t", "phase": "start" か "monitor", "probabilities": {問いの名前: 確率} か null,
+行の形 (キーはこの順):
+    {"t_sent", "t_received", "frame_t", "phase": "start" か "monitor",
+     "probabilities": {止める条件に使う問いの名前: 確率} か null,
+     "system_screen": {照合の選択肢の名前: 確率} か null, "system_screen_result": 照合の結果の見本の名前か null,
      "usage", "error"}
+失敗した行では、probabilities・system_screen・system_screen_result・usage を null にする。
 """
 
 from collections.abc import Mapping
@@ -10,19 +13,26 @@ from dataclasses import dataclass
 
 from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyPhase
+from switch2_layers.system_screen.system_screen_references import (
+    SYSTEM_SCREEN_CHOICE_NAMES,
+)
 
 
 @dataclass(frozen=True)
 class SafetyRecord:
     """安全の確かめ 1 回の記録。
 
-    t_sent          SafetyChecker.check を呼んだ時刻 (実行の経過秒)
-    t_received      check が戻った (または例外を出した) 時刻
-    frame_t         確かめたフレームの時刻
-    phase           段階 (実行を始めるときか、監視か)
-    probabilities   問いの名前 → 確率 (safety_judge.validate_probabilities の値)。失敗したら None
-    usage           API の usage。無いか、失敗したら None
-    error           失敗の説明 (error_text.describe_exception)。成功したら None
+    t_sent                 SafetyChecker.check を呼んだ時刻 (実行の経過秒)
+    t_received             check が戻った (または例外を出した) 時刻
+    frame_t                確かめたフレームの時刻
+    phase                  段階 (実行を始めるときか、監視か)
+    probabilities          止める条件に使う問いの名前 → 確率 (safety_judge.validate_probabilities の値)。失敗したら None
+    system_screen          照合の選択肢の名前 → 確率 (safety_judge.validate_system_screen_probabilities の値)。
+                           失敗したら None
+    system_screen_result   照合の結果の見本の名前 (system_screen.screen_judgment.judge_system_screen の値)。
+                           どの見本の画面でもないか、失敗したら None
+    usage                  API の usage。無いか、失敗したら None
+    error                  失敗の説明 (error_text.describe_exception)。成功したら None
     """
 
     t_sent: float
@@ -30,6 +40,8 @@ class SafetyRecord:
     frame_t: float
     phase: SafetyPhase
     probabilities: Mapping[str, float] | None
+    system_screen: Mapping[str, float] | None
+    system_screen_result: str | None
     usage: object | None
     error: str | None
 
@@ -37,13 +49,19 @@ class SafetyRecord:
 def safety_row(record: SafetyRecord) -> dict[str, object]:
     """safety.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
-    phase は段階の値の文字列、probabilities は safety_questions.SAFETY_QUESTION_NAMES の順の辞書 (None なら null)、
-    usage はそのまま (None なら null)。
+    phase は段階の値の文字列。probabilities は safety_questions.SAFETY_QUESTION_NAMES の順、system_screen は
+    system_screen.system_screen_references.SYSTEM_SCREEN_CHOICE_NAMES の順の辞書 (どちらも None なら null)。
+    system_screen_result と usage はそのまま (None なら null)。
     """
     probabilities = (
         None
         if record.probabilities is None
         else {name: record.probabilities[name] for name in SAFETY_QUESTION_NAMES}
+    )
+    system_screen = (
+        None
+        if record.system_screen is None
+        else {name: record.system_screen[name] for name in SYSTEM_SCREEN_CHOICE_NAMES}
     )
     return {
         "t_sent": record.t_sent,
@@ -51,6 +69,8 @@ def safety_row(record: SafetyRecord) -> dict[str, object]:
         "frame_t": record.frame_t,
         "phase": record.phase.value,
         "probabilities": probabilities,
+        "system_screen": system_screen,
+        "system_screen_result": record.system_screen_result,
         "usage": record.usage,
         "error": record.error,
     }

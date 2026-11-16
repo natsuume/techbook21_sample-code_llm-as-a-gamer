@@ -252,7 +252,7 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 
 surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層と安全の監視をすべてフェイクにしても (`--surface fake --middle fake --deep fake --safety fake`。API キーは要りません)、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
-3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。HOME メニュー・ユーザー選択・オンライン・通報・購入などの画面を見つけたら、操作を中立にして実行全体を止めます。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視はすべての確率を 0 として返すフェイクになります。
+3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。オンライン・通報・購入・本体の設定などの画面を見つけたら、操作を中立にして実行全体を止めます。同じ要求で、今の画面が本体のどの画面 (HOME メニュー・ユーザー選択など) かを見本の画像と照合して記録します。照合の結果では止めません。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視は、止める問いの確率をすべて 0 とし、どの見本の画面でもないと答えるフェイクになります。
 
 ### サブコマンド
 
@@ -264,7 +264,7 @@ surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。
 
 middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
 
-run を始める前に、対象のゲームの起動と、ユーザー選択の画面で AI に遊ばせるユーザー (AIプレイヤー) を選ぶことは、人が行います。ゲームの画面になってから run を始めてください。run は、最初のフレームが届いた後、surface と middle を始める前に画面を確かめ、HOME メニュー・ユーザー選択・オンラインなどの画面なら、操作を 1 つも送らずに止まります。
+run を始める前に、対象のゲームの起動と、ユーザー選択の画面で AI に遊ばせるユーザー (AIプレイヤー) を選ぶことは、人が行います。ゲームの画面になってから run を始めてください。run は、最初のフレームが届いた後、surface と middle を始める前に画面を確かめ、オンライン・購入・本体の設定などの画面なら、操作を 1 つも送らずに止まります。HOME メニューやユーザー選択の画面では止まらず、そのまま surface と middle を始めます。
 
 ```bash
 uv run --env-file .env switch2-layers run
@@ -536,22 +536,34 @@ Claude Code を起動する前に、対象の文書と、その親のディレ�
 | middle | gpt-6-luna の変わらない指示の最後の「安全のための規則」の節。規則に反するタスクを書かないよう指示します |
 | deep | プロンプトの共通部分 ([`deep/prompts/common.md`](./src/switch2_layers/deep/prompts/common.md)) の「安全のための規則」の節。規則に反する進め方を文書に書かないよう指示します |
 
-押せるボタンから HOME を外すだけでは、HOME メニューの画面でソフトを起動する操作 (A など) は防げません。そこで、surface とは別のスレッドで安全の監視を動かします。安全の監視は surface の判断に依らず、キャプチャーの最新のフレーム 1 枚 (時刻も box も書き込まない画像。幅 1280 まで縮小) を Jev に送り、次の 5 つの問い (Noul) を問います。
+surface とは別のスレッドで、安全の監視を動かします。安全の監視は surface の判断に依らず、キャプチャーの最新のフレーム 1 枚 (時刻も box も書き込まない画像。幅 1280 まで縮小) と、本体の画面の見本の画像 5 枚 (「本体の画面の見本」の項) を 1 つの要求に入れて Jev に送り、次の 4 つの問いを問います。
 
-| 問いの名前 | 真になる画面 |
-|---|---|
-| `home_menu` | Nintendo Switch 2 の HOME メニュー (ソフトのアイコンが並ぶ本体の画面) |
-| `user_select` | ソフトを遊ぶユーザーを選ぶ画面 |
-| `online` | オンラインのロビー・対戦・マッチング、ほかのプレイヤーの情報、通報、投稿のどれかの画面 |
-| `purchase` | ショップ・購入・課金の画面 |
-| `system_settings` | 本体の設定、またはセーブデータの削除などのデータの管理の画面 |
+| 問いの名前 | 型 | 問うこと |
+|---|---|---|
+| `online` | Noul | オンラインのロビー・対戦・マッチング、ほかのプレイヤーの情報、通報、投稿のどれかの画面か |
+| `purchase` | Noul | ショップ・購入・課金の画面か |
+| `system_settings` | Noul | 本体の設定、またはセーブデータの削除などのデータの管理の画面か |
+| `system_screen` | Choice | 今のフレームが、どの見本の本体の画面か。選択肢は、`none` (どの見本の画面でもない) を先頭に、見本の名前を「本体の画面の見本」の表の順に並べます |
+
+止める条件に使うのは、`online`・`purchase`・`system_settings` の 3 つの問いだけです。`system_screen` の照合の結果は、記録して安全の監視の外に渡します。そのため、実行を始めるときに HOME メニューやユーザー選択の画面が映っていても、3 つの問いが超えなければ止まりません。
+
+要求の state は `{"instructions": <役割の説明>, "frame": <今のフレーム>, "references": {<見本の名前>: <見本の画像>, ...}}` です。役割の説明には、`references` が本体の画面の一部を切り出した見本であることを書いています。画像の参照文字列は要求ごとに新しく振り、state の中に 1 回ずつ置きます。問いの文と選択肢の説明は、画像を state の中のパス (`frame`・`references`・`references.<見本の名前>`) で指します。見本の画像は run の始めに 1 回だけ読みます。実行を始めるときの確かめと監視の確かめは、同じ形の要求を送ります。
+
+照合の結果は次のように決めます。
+
+- `system_screen` の確率がいちばん高い選択肢が `none` でなく、その確率が 0.5 を超えたら、その見本の名前を照合の結果とします (ちょうど 0.5 は超えません)
+- `none` がいちばん高いときと、いちばん高い確率が 0.5 以下のときは、照合の結果なし (null) とします
+- いちばん高い確率の選択肢が複数あれば、選択肢の並びで先のものを選びます (`none` と並んだときは、照合の結果なしです)。確率の合計は確かめません
+- しきい値の 0.5 は、起動引数ではなくコードの定数 (`SYSTEM_SCREEN_THRESHOLD`) です
+
+答えのあった確かめのたびに、照合の結果を、確かめたフレームの時刻とともに、最新の照合の結果を持つ部品 (`system_screen.screen_judgment.LatestSystemScreen`) に渡します。この部品は、受け取った結果のうち、フレームの時刻がいちばん新しいものを持ちます。失敗した確かめと、止まることが決まった後に受け取った応答では渡しません。
 
 | `--safety` の値 | 内容 |
 |---|---|
-| `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) に問います。API キーは surface と同じ環境変数 `TYPESAFE_API_KEY` から読みます。HTTP のクライアントは surface と別に作ります |
-| `fake` | 画像を見ずに、すべての確率を 0 として返すフェイクです。API キーは要りません |
+| `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) に問います。API キーは surface と同じ環境変数 `TYPESAFE_API_KEY` から読みます。HTTP のクライアントは surface と別に作ります。見本の画像は、組み立てるときに 1 回読みます (ファイルが無ければ、実機に触れる前に例外 `FileNotFoundError` で終わります) |
+| `fake` | 画像を見ずに、3 つの問いの確率を 0、`system_screen` の確率を `none` が 1・ほかの選択肢が 0 として返すフェイクです (照合の結果は常に null)。API キーは要りません |
 
-安全の監視は、次の 2 つの確かめをします。どちらも、確率が `--threshold-safety` (既定 0.7) より大きいときに「超えた」とします (ちょうど同じ値は超えません)。`--allow-home` を付けたときは、ゲームの起動と終了まで含めて試すため、どちらの確かめでも `home_menu` と `user_select` では止めません (ほかの 3 つの問いでは止めます)。
+安全の監視は、次の 2 つの確かめをします。どちらも、3 つの問いの確率が `--threshold-safety` (既定 0.7) より大きいときに「超えた」とします (ちょうど同じ値は超えません)。`--allow-home` は surface の押せるボタンに HOME を足すだけで、安全の監視には関係しません。
 
 | 確かめ | いつ | 止める条件 |
 |---|---|---|
@@ -560,14 +572,39 @@ Claude Code を起動する前に、対象の文書と、その親のディレ�
 
 - 監視の確かめは、前の確かめを送ってから `--safety-interval` 秒たったら次を送ります。前の確かめの応答を待ってから次を送り、応答がそれより遅ければ、受け取ってすぐに次を送ります
 - 「続けて 2 回超えた」は、答えのあった確かめだけを並べて数えます。失敗した確かめは数えず、それまでに続けて超えた回数も消しません。たとえば「超えた → 失敗 → 超えた」で止まり、超えた・失敗が交互に続いても止まります。答えのあった確かめで超えなければ、その問いは数え直します
-- 確かめの失敗は、接続できない・タイムアウト (10 秒)・HTTP のエラー、JSON として読めない応答、確率が無い・数でない・0〜1 の外の応答です。再試行はしません。失敗の回数は、答えのあった確かめで数え直します
+- 確かめの失敗は、接続できない・タイムアウト (10 秒)・HTTP のエラー、JSON として読めない応答、3 つの問いか `system_screen` の答えが無い・`system_screen` の選択肢の確率が欠けている・確率が数でない・0〜1 の外の応答です。再試行はしません。失敗の回数は、答えのあった確かめで数え直します
 - ブリッジの復旧中も、安全の監視は続けます
 - 安全の監視のスレッドが想定外の例外で終わったときも、全体を止めます
-- 止め方は、ほかの止まる条件と同じです (「止まる条件」の節)。理由は `unsafe screen at start: <問いの名前>`・`safety check failed at start`・`unsafe screen: <問いの名前>`・`safety check failed <回数> times in a row`・`safety monitor failed: <例外の説明>` です。同時に複数の問いが条件に当たったら、上の表の順で先の問いの名前を書きます
+- 止め方は、ほかの止まる条件と同じです (「止まる条件」の節)。理由は `unsafe screen at start: <問いの名前>`・`safety check failed at start`・`unsafe screen: <問いの名前>`・`safety check failed <回数> times in a row`・`safety monitor failed: <例外の説明>` です。同時に複数の問いが条件に当たったら、`online`・`purchase`・`system_settings` の順で先の問いの名前を書きます
 
-確かめのたびに、`safety.jsonl` に 1 行 `{"t_sent", "t_received", "frame_t", "phase", "probabilities", "usage", "error"}` を書きます。`t_sent` と `t_received` は Jev に送った時刻と応答を受け取った (または失敗した) 時刻、`frame_t` は確かめたフレームの時刻、`phase` は実行を始めるときの確かめなら `start`、監視の確かめなら `monitor` です。`probabilities` は問いの名前ごとの確率 (失敗した行では null)、`usage` は Jev の応答の `usage` (受け取った形のまま。フェイクと失敗した行では null)、`error` は失敗の説明 (成功した行では null) です。止まることが決まった後に受け取った応答は、記録も判定もせずに捨てます。
+確かめのたびに、`safety.jsonl` に 1 行 `{"t_sent", "t_received", "frame_t", "phase", "probabilities", "system_screen", "system_screen_result", "usage", "error"}` を書きます。
 
-安全の監視は、既定の 1 秒の間隔では 1 時間に約 3,600 回 Jev に要求を送ります。そのぶん、surface とは別に Jev の料金がかかります。
+| キー | 内容 |
+|---|---|
+| `t_sent`・`t_received` | Jev に送った時刻と、応答を受け取った (または失敗した) 時刻 |
+| `frame_t` | 確かめたフレームの時刻 |
+| `phase` | 実行を始めるときの確かめなら `start`、監視の確かめなら `monitor` |
+| `probabilities` | 3 つの問い (`online`・`purchase`・`system_settings`) の名前ごとの確率。失敗した行では null |
+| `system_screen` | 照合の選択肢 (`none` と見本の名前) ごとの確率。選択肢の順に並べます。失敗した行では null |
+| `system_screen_result` | 照合の結果の見本の名前。照合の結果なしの行と、失敗した行では null |
+| `usage` | Jev の応答の `usage` (受け取った形のまま)。フェイクと失敗した行では null |
+| `error` | 失敗の説明。成功した行では null |
+
+止まることが決まった後に受け取った応答は、記録も判定もせず、照合の結果も渡さずに捨てます。
+
+安全の監視は、既定の 1 秒の間隔では 1 時間に約 3,600 回 Jev に要求を送ります。1 要求あたりの入力のトークンは、見本の画像を入れるため約 15,460 で、見本を入れずにフレーム 1 枚だけを送る要求 (約 3,000) の約 5 倍です (2026-11-17 に、見本 5 枚の要求で計測)。そのぶん、surface とは別に Jev の料金がかかります。
+
+#### 本体の画面の見本
+
+見本の画像は [`system_screen/references/`](./src/switch2_layers/system_screen/references/) にあり、見本の名前・照合の選択肢の説明の文・ファイル名は [`system_screen/system_screen_references.py`](./src/switch2_layers/system_screen/system_screen_references.py) の 1 か所に定義しています。見本は 1 つの名前に 1 枚です。どれも画面と同じ 1280x720 の JPEG (品質 90) で、残した範囲の外を (128, 128, 128) の灰色で塗りつぶしています。切り出したままの寸法 (例: 840x100) で送ると、Jev が HTTP 400 (`Invalid image dimensions.`) を返すためです (2026-11-17 に確認)。見本には、ソフトのアイコンの絵、ソフトの名前、アカウントの名前とアイコンを含めません。元の撮影にはそれらが写るため、元の撮影はリポジトリーに入れていません。
+
+| 名前 | 元の画面と、撮ったときの出し方 | 残した範囲 (x0, y0, x1, y1。1280x720 の画素) |
+|---|---|---|
+| `home_menu` | HOME メニュー。HOME ボタンで出します | 下段の、本体の機能のアイコンの段 (220, 510, 1060, 610) |
+| `controllers` | HOME メニューの「コントローラー」。HOME メニューの下段のコントローラーのアイコンから開きます | 右側の項目の並び (「持ちかた/順番を変える」など) (860, 140, 1225, 590) |
+| `controller_order` | 「持ちかた/順番を変える」(コントローラーの枠が空のとき)。「コントローラー」の「持ちかた/順番を変える」から開きます | 「使いたいコントローラーの L + R を押してください。」から「用意ができたら A を押してください。」まで (0, 165, 1280, 645) |
+| `user_select` | ソフトを起動したときのユーザー選択。HOME メニューでソフトを起動すると出ます | 「だれがソフトをあそびますか？」の見出しの帯 (30, 312, 1250, 400) |
+| `software_close` | HOME メニューでソフトを終了するときの確認。HOME メニューで「プレイ中」のソフトを選んで X (ソフトをおわる) を押して出し、撮った後に決定せずに B で閉じました。出たときは「終了する」が選ばれています | 「プレイ中のソフトを終了します。」「セーブしていない内容は消えてしまいます。」の文 (560, 262, 990, 352) と、「キャンセル」のボタン (292, 466, 637, 542)、「終了する」のボタン (637, 466, 998, 545) の 3 か所。ダイアログの左のソフトのアイコンと、ダイアログの外の背後の HOME メニューは含めません |
 
 ### 画面の停滞の計測
 
@@ -617,7 +654,7 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | `--deep-min-start-interval S` | 同じ文書の deep を、前回の起動からこの秒数たつまで、起動も保留もしません | 30 | 0 以上の有限の値 |
 | `--deep-auto-seconds S` | 同じ文書の前回の deep の終了からこの秒数たったら、自動で deep を呼びます | 60 | 0 より大きい有限の値で、`--deep-min-start-interval` 以上 |
 | `--deep-timeout S` | deep のジョブの実行時間の上限 (秒) | 300 | 0 より大きい有限の値 |
-| `--allow-home` | 押せるボタンに HOME を足します | オフ | なし (付けるとオン) |
+| `--allow-home` | surface の押せるボタンに HOME を足します (「押せるボタン」の節)。安全の監視には関係しません | オフ | なし (付けるとオン) |
 | `--middle {fake,luna}` | middle の実装 (「middle の実装」の節)。`luna` は gpt-6-luna を呼び、環境変数 `OPENAI_API_KEY` が要ります | `luna` | `fake`、`luna` |
 | `--surface {jev,fake}` | surface の実装 (「surface の実装」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
 | `--threshold-advisor P` | surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求めます | 0.5 | 0〜1 |
@@ -625,7 +662,7 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | `--deep {claude,fake}` | deep のジョブを実行するもの (「deep の実装」の節)。`claude` は Claude Code を起動します | `claude` | `claude`、`fake` |
 | `--safety {jev,fake}` | 安全の監視の実装 (「安全のための規則と安全の監視」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
 | `--safety-interval S` | 安全の監視が最新のフレームを確かめる間隔 (秒) | 1.0 | 0.2 以上 10 以下 |
-| `--threshold-safety P` | 安全の問いのしきい値。確率がこれを超えた画面で止まります | 0.7 | 0 より大きく 1 より小さい値 |
+| `--threshold-safety P` | 安全の問い (`online`・`purchase`・`system_settings`) のしきい値。確率がこれを超えた画面で止まります。照合 (`system_screen`) のしきい値には使いません | 0.7 | 0 より大きく 1 より小さい値 |
 | `--max-safety-errors N` | 安全の監視の失敗がこの回数続いたら止まります | 3 | 1 以上の整数 |
 | `--progress-window S` | 画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数。「画面の停滞の計測」の節) | 300 | 0 より大きい有限の値 |
 | `--stuck-advice-seconds S` | 新しい画面が出ていない秒数がこれを超えたら、助言の deep を求めます。超えたまま続く間は、この秒数ごとに求めます | 60 | 0 より大きい有限の値 |
@@ -663,7 +700,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
-| `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、段階 (`phase`。`start` か `monitor`)、問いの名前ごとの確率 (`probabilities`。失敗した行では null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます |
+| `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、段階 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
 | `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
@@ -694,7 +731,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 ### 押せるボタン
 
-surface が決めた操作は、コントローラーに送る直前に、押せるボタンに制限します。既定では HOME を押せません。`--allow-home` を付けると押せます。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーを 1 方向に絞ってから送ります。これは、ほかの実装から来る操作のための処理です)。
+surface が決めた操作は、コントローラーに送る直前に、押せるボタンに制限します。既定では HOME を押せません。`--allow-home` を付けると押せます。`--allow-home` は押せるボタン (surface の問いと、起動時の `notes/common/controls.md` のボタンの並びを含みます) だけを変え、安全の監視の止め方は変えません。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーを 1 方向に絞ってから送ります。これは、ほかの実装から来る操作のための処理です)。
 
 短押しは 120 ミリ秒押して離します。秒数を指定した押し続け (`hold_short` は 0.3 秒、`hold_long` は 1.0 秒) は、押したレポートの送信が戻ってからその秒数がたったら、次の操作を待たずに離します。押し続けているボタンを次の操作でも押し続けにすると、離さずに、その操作の送信が戻った時刻から新しい秒数を数え直します。秒数の無い押し続けは、次の操作まで押したままにします。秒数が 0 以下・nan・無限大の押し続けは、押さずに外します (`blocked_buttons` には書きません)。秒数の上限は 60 秒で、超えた値は 60 秒として扱います。スティックは次の操作まで倒したままにします。
 
@@ -713,12 +750,154 @@ surface が決めた操作は、コントローラーに送る直前に、押せ
 | コントローラーのブリッジが復旧できない状態 (第2章の `failed`) になった | `bridge recovery failed` |
 | surface の失敗が `--max-surface-errors` 回続いた | `surface failed <回数> times in a row` |
 | middle の失敗が `--max-middle-errors` 回続いた | `middle failed <回数> times in a row` |
-| 実行を始めるときの安全の確かめで、どれかの問いの確率が `--threshold-safety` を超えた | `unsafe screen at start: <問いの名前>` |
+| 実行を始めるときの安全の確かめで、3 つの問い (`online`・`purchase`・`system_settings`) のどれかの確率が `--threshold-safety` を超えた | `unsafe screen at start: <問いの名前>` |
 | 実行を始めるときの安全の確かめが失敗した | `safety check failed at start` |
-| 安全の監視で、同じ問いの確率が、答えのあった確かめで続けて 2 回 `--threshold-safety` を超えた | `unsafe screen: <問いの名前>` |
+| 安全の監視で、3 つの問いの同じ問いの確率が、答えのあった確かめで続けて 2 回 `--threshold-safety` を超えた | `unsafe screen: <問いの名前>` |
 | 安全の監視の失敗が `--max-safety-errors` 回続いた | `safety check failed <回数> times in a row` |
 | 安全の監視のスレッドが想定外の例外で終わった | `safety monitor failed: <例外の説明>` |
 
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
 止まるときは、surface と middle のループと安全の監視のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。
+
+## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
+
+`switch2-harness` は、第3章と同じく Claude Code に Switch 2 をプレイさせるための、補助コマンドと指示ファイル (`CLAUDE.md`) を用意するパッケージ ([`src/switch2_harness/`](./src/switch2_harness/)) です。第1章で取り上げた先行研究の手法を要素として足し、要素ごとに有効・無効を切り替えて効果を比べます。要素をすべて無効にすると、撮影とボタン入力のコマンドだけを使う、第3章に近い条件になります。第3章と違うのは、`press` で HOME を押せないこと (HOME 画面に戻るときは `finish` を使う)、入力と撮影を記録すること、`run` で起動するときに起動した人の設定を混ぜないことです。
+
+映像と入力には第2章のデーモンを使います。デーモン (`switch2-remote-daemon`) は、`ch02_setup` ディレクトリーで先に起動しておいてください。
+
+### 作業ディレクトリーを作る
+
+プレイのたびに、`init` で作業ディレクトリーを作ります。このディレクトリーの中に、設定・指示ファイル・撮影した画像・記録が入ります。`plays/` は Git の管理から外してあります。
+
+```bash
+uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエストⅢ そして伝説へ…"
+```
+
+| 引数 | 内容 |
+|---|---|
+| `DIR` | 作る作業ディレクトリー。存在しないか、空のディレクトリーを指定します |
+| `--game NAME` | ゲーム名。指示ファイルに書きます |
+| `--goal TEXT` | 目標。省略すると「できるだけ先へ進める」です |
+| `--enable NAME` | 有効にする要素の名前。繰り返して複数を指定できます |
+
+作業ディレクトリーには次のものができます。
+
+| パス | 内容 |
+|---|---|
+| `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
+| `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
+| `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
+| `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
+| `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
+| `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
+
+### サブコマンド
+
+エージェントが使うサブコマンドは、作業ディレクトリーで実行します。`--workspace DIR` で作業ディレクトリーを指定することもできます。
+
+| サブコマンド | 使う人 | 動作 |
+|---|---|---|
+| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します |
+| `press ACTION ARGS...` | エージェント | `tap` / `hold` / `down` / `up` を、第2章のクライアントと同じ書き方でデーモンに送ります。HOME を含む入力と、11 個以上を並べた `tap` は送らずにエラーにします |
+| `status` | エージェント | デーモンの動作状況を表示します |
+| `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
+| `init DIR ...` | 人 | 作業ディレクトリーを作ります |
+| `run --minutes N` | 人 | 作業ディレクトリーで Claude Code を起動し、N 分たったら止めます |
+| `report` | 人 | 記録から実験の集計を表示します。`--json` で JSON にします |
+
+`look`・`press`・`status`・`finish` は、成否によらず `records/events.jsonl` に記録します。記録は要素の有効・無効によらず取ります。
+
+第2章のデーモンは `tap` を送り終えるまで次のコマンドを受け付けず、1 つの入力に約 370 ミリ秒かかります。`press tap` に並べる数を 10 個 (約 3.7 秒) までに限っているのは、`run` を止めたときに、実行中の `tap` が終わってから後片付けの `up ALL` が応答の上限 (10 秒) の中で実行されるようにするためです。
+
+### 実験の実行 (`run`)
+
+`run` は、作業ディレクトリーで Claude Code を headless (`claude -p`) で起動し、指定した分数がたったら止めます。
+
+```bash
+uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
+```
+
+| 引数 | 内容 | 既定値 |
+|---|---|---|
+| `--minutes N` | プレイする分数 (小数可) | なし (必須) |
+| `--model MODEL` | Claude Code に渡すモデル | `claude-opus-5-5` (第3章の試行と同じ) |
+| `--effort LEVEL` | Claude Code に渡す effort | 指定しない |
+| `--max-budget-usd X` | Claude Code に渡す費用の上限 | 指定しない |
+
+プレイ中のエージェントに、起動した人の環境の設定を混ぜないよう、次のように起動します。
+
+- `--restricted` で、ユーザー・プロジェクト・ローカルの設定ファイルを読み込ませません。ユーザー設定で有効にした plugin と hook も読み込まれません。ファイルのツールは作業ディレクトリーの中に限られます。`--settings` で `permissions.blockReadsOutsideWorkingDirectories` を渡すと、cat などの読み取り専用の Bash で作業ディレクトリーの外を読むときも承認が要るようになり、後に書く `dontAsk` で拒否されます
+- MCP サーバー (`--strict-mcp-config`)、Skill とスラッシュコマンド (`--disable-slash-commands`、`--disallowedTools Skill`) を読み込ませません。作業ディレクトリーは `ch04_techniques/` の下にあり、Claude Code は親ディレクトリーの `.claude/skills/` も読むため、既存の第4章の Skill を読ませないようにしています
+- 環境変数 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` で、`~/.claude/CLAUDE.md` を含むどの `CLAUDE.md` も読ませず、作業ディレクトリーの `CLAUDE.md` だけを `--append-system-prompt-file` で渡します。自動メモリーも `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` で無効にします
+- 子のプロセスには、起動した人の環境変数から、`CLAUDE` で始まる変数 (Claude Code の認証・設定の場所・プロバイダーの選択に使うものを除く) と、`ANTHROPIC_` で始まらない `*_API_KEY` を除いて渡します。Claude Code のセッションの中から `run` を起動しても、そのセッションの変数は子に渡りません
+- 子のプロセスの環境変数 `SWITCH2_HARNESS_WORKSPACE` に作業ディレクトリーのパスを入れます。この変数があるとき、`look`・`press`・`status`・`finish` はその作業ディレクトリーだけを使い、別の `--workspace` を指定するとエラーにします。エージェントが別の実験の作業ディレクトリーに画像や記録を書かないようにするためです
+- 使える組み込みのツールを Bash と Read に限り (`--tools Bash,Read`)、Bash は `uv run switch2-harness <サブコマンド>` だけを許可します。`--permission-mode dontAsk` で、許可していない呼び出しは確認なしで拒否します。Web 検索はできません
+
+2026-11-16〜17 に Claude Code 2.1.325 で起動し、次のことを確かめました。
+
+- 読み込まれたツールは Bash と Read だけで、MCP サーバー・スラッシュコマンド・Skill は空、plugin は Claude Code の組み込みのものだけ
+- `uv run switch2-harness status` は許可されて実行され、許可したサブコマンドの後ろに付けた出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・変数の展開 (`$HOME`・`"$PATH"`・`${USER}`)・`~` と、`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
+- 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
+- `uv run switch2-harness status --workspace ..` と、環境変数を書き換えて起動する形 (`SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`・`env SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`) は拒否される
+- `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる。`--resume` で起動したプロセスの `--max-budget-usd` は、累計ではなくそのプロセスが使った分と比べられる (累計 0.00015 USD・そのプロセスの分 0.00008 USD で、予算 0.0001 USD の起動が `success` で終わった)
+
+エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
+
+期限になったら Claude Code に SIGINT を送り、20 秒たっても終わらなければ SIGTERM、さらに 10 秒たっても終わらなければ強制終了 (SIGKILL) します。止めた後は、デーモンに `up ALL` を送って押したままの入力を離します。応答を待つのは合わせて 10 秒までです。デーモンが処理中で接続が拒否されたときは、その 10 秒の間に送り直します。
+
+Claude Code の Bash ツールは、コマンドを別のセッションで起動します。2026-11-17 に Claude Code 2.1.325 で確かめたところ、SIGINT と SIGTERM では Claude Code が終わるときに Bash ツールのコマンドも止めました。強制終了する場合は Claude Code がコマンドを止められないため、強制終了の直前に Claude Code の子孫のプロセスとそのセッションを控えておき、強制終了の後に、控えたセッションに残っているプロセスを止めます。
+
+`run` を Ctrl+C・SIGTERM・SIGHUP で止めた場合も、同じ順序で Claude Code を止めてから `up ALL` を送ります。Claude Code は新しいセッションで起動するため、端末の Ctrl+C は Claude Code に直接は届かず、`run` が受け取って止めます。`nohup` で起動したときのように、起動した時点で無視しているシグナルは無視したままにします。
+
+`run` は HOME 画面には戻さないため、プレイを終えるときは人がゲームを終了するか、エージェントに `finish` を指示してください。
+
+期限などで止まったときは `ok run finished reason=<理由> ...` を表示して終了コード 0 で終わり、止まった理由は `reason=` で確かめられます。Ctrl+C で止めたときは `error run interrupted`、SIGTERM・SIGHUP で止めたときは `error run terminated by signal` を表示して、終了コード 1 で終わります。後片付けの `up ALL` の成功を確かめられなかったときは、`ok run finished ...` に加えて `error up ALL after the run was not confirmed: <デーモンの応答>` を表示し、終了コード 1 で終わります。押したままの入力が残っているかもしれないので、デーモンの状態を確かめてください。
+
+| `reason` | 止まった理由 |
+|---|---|
+| `deadline` | 期限になった (期限より前に終わって、残りが 30 秒未満だった場合を含む) |
+| `budget_exhausted` | Claude Code が予算の上限で終わったか、run 全体の残りの予算がなくなった |
+| `resumes_exhausted` | 起動し直した回数が 20 回になった |
+| `no_session` | 起動し直すためのセッションの ID が、今回の run の出力に無かった |
+
+### 記録の集計 (`report`)
+
+`report` は、`records/events.jsonl`・`frames/` の画像・`records/agent.jsonl` から、実験の集計を表示します。
+
+```text
+$ uv run switch2-harness report --workspace plays/dq3-baseline
+記録の時間: 21.0 秒
+コマンドの回数: run=1 look=6 press=4
+error の数: 2
+look の間隔: 中央値 3.5 秒 / 平均 4.0 秒 / 最大 6.0 秒
+変化なしの look の組: 3 / 4
+変化なしが続いた最長の時間: 9.0 秒
+press の後も変化なしの組: 2 / 3
+エージェント: 起動 4 回 / 応答 12 回 / result 3 回
+result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 秒
+```
+
+| 行 | 内容 |
+|---|---|
+| 記録の時間 | 最初と最後の記録の時刻の差 |
+| コマンドの回数 | サブコマンドごとの記録の数 |
+| error の数 | 失敗した記録の数 (デーモンの error と、press の拒否を含む) |
+| look の間隔 | 成功した `look` どうしの時刻の差。エージェントの 1 サイクル (撮影・判断・入力) の長さの目安です |
+| 変化なしの look の組 | 続けて撮った 2 枚のうち、画面がほぼ変わらなかった組の数 / 組の数 |
+| 変化なしが続いた最長の時間 | 画面がほぼ変わらない組が続いた区間の、最も長い時間 |
+| press の後も変化なしの組 | 間に成功した `press` がある組のうち、画面がほぼ変わらなかった組の数 / 間に成功した `press` がある組の数 |
+| エージェント | `run` で起動した回数 / Claude Code の応答の数 / 終わったときに出る result の数 |
+| result を出した起動の分 | result に書かれた費用・ターン数・時間。費用は、セッションごとに最も大きい値を取って合計する (`--resume` で続けたセッションの費用は累計で書かれ、途中で異常終了した result には 0 が書かれることがあるため)。ターン数と時間は、起動ごとの値を合計する |
+
+画面の変化は、2 枚をグレースケールにして 160x90 に縮小し、明るさの差が 24 を超える画素の割合で測ります。割合が 1% 未満の組を「変化なし」とします。期限で止めた起動は result を出さないことがあり (Claude Code のドキュメントには、SIGTERM で止めると result を記録しないとある)、その起動の分は費用・ターン数・時間に含まれません。起動の回数と応答の数は、result の有無によらず数えます。
+
+`--json` を付けると、同じ集計を JSON の 1 行で表示します。
+
+### 既知の制限
+
+- Claude Code を強制終了 (SIGKILL) する場合、子孫のセッションを控えた後に、Bash ツールが新しいセッションで起動したコマンドは止められず、`up ALL` の後に入力を送る可能性があります。強制終了まで進むのは、Claude Code が SIGINT と SIGTERM の両方に 30 秒応じない場合だけです。2026-11-17 に確かめた範囲では、Claude Code は SIGINT 1 回で終わりました
+- シグナルを受けてから後片付けに入るまでのごく短い間に、2 回目のシグナルが届いた場合の動作は確かめていません。期限などで `run` のループを抜けた直後の、後片付けの関数に入るまでのごく短い間に最初のシグナルが届いた場合は、後片付けが行われません
+- Claude Code を起動している最中に割り込みが届くと、その起動の start / resume が記録されず、`report` の起動の回数が 1 少なくなります
+- `run` を SIGKILL で止めると、後片付けは行われません。別のセッションで動く Claude Code は残るため、人が止めてから、`ch02_setup` ディレクトリーで `uv run switch2-remote up ALL` を送ってください
+- 費用の集計と予算の残りは、Claude Code が result に書く `total_cost_usd` (Claude Code が計算した推定値) にもとづきます。Claude Code が result を書かずに異常終了してから起動し直した場合は、その起動の費用が次の起動に渡す残りの予算の計算に入らないため、`--max-budget-usd` をその分超えることがあります
