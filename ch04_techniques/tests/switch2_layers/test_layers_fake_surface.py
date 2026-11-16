@@ -1,3 +1,5 @@
+import dataclasses
+
 from switch2_layers.pad_action import NEUTRAL_ACTION
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.surface_types import (
@@ -35,3 +37,12 @@ def test_fake_surface_returns_neutral_action_without_deep_requests():
     assert output.info_labels == ()
     assert output.boxes == ()
     assert output.scene_changed is False
+
+
+def test_fake_surface_records_no_request():
+    received = []
+    surface = dataclasses.replace(surface_input(), request_sink=received.append)
+    output = FakeSurfaceDecider().decide(surface)
+    # Jev を呼ばないので、送る要求の書き込み先を呼ばず、記録のための情報も無い
+    assert received == []
+    assert output.exchange is None

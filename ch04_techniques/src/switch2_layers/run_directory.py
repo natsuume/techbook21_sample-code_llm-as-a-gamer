@@ -7,6 +7,7 @@
     frames/surface/<tミリ秒9桁>.jpg           surface に送った画像 (同じ t で書き込んだ box が違う 2 つ目以降は
                                             <tミリ秒9桁>-2.jpg・<tミリ秒9桁>-3.jpg …)
     surface.jsonl                           surface の 1 回ごとの記録
+    surface_requests.jsonl                  surface が Jev に送った要求の記録 (surface.surface_record)
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
@@ -46,6 +47,7 @@ FRAMES_DIR = "frames"
 INTERVAL_FRAMES_DIR = "interval"
 SURFACE_FRAMES_DIR = "surface"
 SURFACE_LOG_FILE = "surface.jsonl"
+SURFACE_REQUESTS_LOG_FILE = "surface_requests.jsonl"
 OPERATIONS_LOG_FILE = "operations.jsonl"
 NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
@@ -97,6 +99,11 @@ class RunPaths:
     def surface_log(self) -> Path:
         """root / SURFACE_LOG_FILE"""
         return self.root / SURFACE_LOG_FILE
+
+    @property
+    def surface_requests_log(self) -> Path:
+        """root / SURFACE_REQUESTS_LOG_FILE"""
+        return self.root / SURFACE_REQUESTS_LOG_FILE
 
     @property
     def operations_log(self) -> Path:
