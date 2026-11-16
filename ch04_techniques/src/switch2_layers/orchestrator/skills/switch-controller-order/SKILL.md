@@ -33,7 +33,7 @@ description: Switch 2 のコントローラーの持ちかたと順番を変え�
 {"actions": [{"type": "press", "buttons": ["A"], "seconds": 0.12}, {"type": "wait", "seconds": 1.5}]}
 ```
 
-4. 閉じた後に HOME 画面が出たときは、switch-return-to-game の手順で、遊んでいたソフトへ戻る
+4. 閉じた後に HOME 画面が出たときは、「プレイ中」の印のある絵を探す。印のある絵があれば、switch-return-to-game の手順で遊んでいたソフトへ戻る。どの絵にも印が無ければ、switch-launch-software の手順に進む
 
 ## してはいけない操作
 
