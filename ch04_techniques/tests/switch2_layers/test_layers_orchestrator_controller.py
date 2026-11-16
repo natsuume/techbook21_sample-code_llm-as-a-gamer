@@ -1859,6 +1859,24 @@ def test_hit_of_a_case_starting_with_wait_after_the_output_stopped_is_not_counte
     assert not any(sent.buttons for sent in h.sender.reports())
 
 
+def test_hit_of_an_empty_case_after_the_output_stopped_is_not_counted(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(monitor(case("c0", repeat="once")))
+    request = h.wait_request(1)
+    # 要求の応答を待つ間に出力を止める。空の列の条件でも、当たりに数えず、監視を終えない
+    h.pad_output.stop_output()
+    h.jev.respond(hit(request, 0))
+    h.wait_until(lambda: len(h.monitor_rows()) == 1, "the answer is recorded")
+    h.wait_rounds()
+    [row] = h.monitor_rows()
+    assert row["hit"] is None
+    events = h.controller.take_events()
+    assert events.case_hits == ()
+    assert events.monitor_ends == ()
+
+
 def test_no_request_after_stop_output_even_before_any_operation_is_sent(
     tmp_path, cleanups
 ):
