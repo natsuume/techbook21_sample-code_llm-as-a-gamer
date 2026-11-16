@@ -191,6 +191,8 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
         "timeline": state.timeline,
         "surface_rows_offset": state.surface_rows_offset,
         "operations_rows_offset": state.operations_rows_offset,
+        "first_task": state.first_task,
+        "first_task_since_t": state.first_task_since_t,
     }
 
 
@@ -214,6 +216,13 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
     scene_id = _optional_string(value, "scene_id")
     if scene_id is not None and not is_scene_id(scene_id):
         raise ValueError(f"invalid scene id in middle state: {scene_id!r}")
+    # first_task と first_task_since_t は省けるキー: 無ければ既定値にする
+    first_task = _string(value, "first_task") if "first_task" in value else ""
+    first_task_since_t = (
+        _optional_number(value, "first_task_since_t")
+        if "first_task_since_t" in value
+        else None
+    )
     return MiddleState(
         generated_t=_number(value, "generated_t"),
         based_on_t=_number(value, "based_on_t"),
@@ -225,6 +234,8 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         timeline=_string(value, "timeline"),
         surface_rows_offset=_offset(value, "surface_rows_offset"),
         operations_rows_offset=_offset(value, "operations_rows_offset"),
+        first_task=first_task,
+        first_task_since_t=first_task_since_t,
     )
 
 
@@ -245,6 +256,16 @@ def _number(value: Mapping[str, object], key: str) -> float:
     if isinstance(item, int | float) and not isinstance(item, bool):
         return float(item)
     raise ValueError(f"{key!r} in middle state must be a number: {item!r}")
+
+
+def _optional_number(value: Mapping[str, object], key: str) -> float | None:
+    """value[key] が数 (bool を除く) か null ならその値を返す。それ以外は ValueError。"""
+    item = _field(value, key)
+    if item is None:
+        return None
+    if isinstance(item, int | float) and not isinstance(item, bool):
+        return float(item)
+    raise ValueError(f"{key!r} in middle state must be a number or null: {item!r}")
 
 
 def _offset(value: Mapping[str, object], key: str) -> int:

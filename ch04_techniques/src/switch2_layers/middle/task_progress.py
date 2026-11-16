@@ -11,6 +11,9 @@ gpt-6-luna に渡し (luna_request)、詰まりの判定と待ち時間の決め
 
 from switch2_layers.middle.middle_types import MiddleState
 
+# 短期タスクリストのタスクの行の先頭 (Markdown の箇条書きの記号と空白)
+TASK_BULLET = "- "
+
 
 def first_task_of(tasks: str) -> str:
     """短期タスクリスト tasks (Markdown) の最初のタスクの文を返す。
@@ -18,7 +21,11 @@ def first_task_of(tasks: str) -> str:
     tasks の行のうち、前後の空白を除いて「- 」で始まる最初の行の、「- 」より後ろを前後の空白を除いて返す
     (インデントされた行も、前後の空白を除いて「- 」で始まれば対象にする)。該当する行が無ければ空文字列。
     """
-    raise NotImplementedError
+    for line in tasks.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(TASK_BULLET):
+            return stripped[len(TASK_BULLET) :].strip()
+    return ""
 
 
 def is_same_task_text(a: str, b: str) -> bool:
@@ -27,7 +34,7 @@ def is_same_task_text(a: str, b: str) -> bool:
     空白文字 (半角・全角の空白、タブ、改行。str.split() が区切る文字) をすべて除いた文字列どうしを比べる
     (例: 「A で話しかける」と「Aで話しかける」は同じ)。両方空なら True。
     """
-    raise NotImplementedError
+    return _without_whitespace(a) == _without_whitespace(b)
 
 
 def first_task_since(
@@ -42,4 +49,17 @@ def first_task_since(
       (最初のタスクが前回と同じ文のまま)
     - それ以外は written_t (今回、最初のタスクが今の文になった)
     """
-    raise NotImplementedError
+    if not _without_whitespace(first_task):
+        return None
+    if (
+        previous_state is not None
+        and previous_state.first_task_since_t is not None
+        and is_same_task_text(previous_state.first_task, first_task)
+    ):
+        return previous_state.first_task_since_t
+    return written_t
+
+
+def _without_whitespace(text: str) -> str:
+    """text から空白文字 (str.split() が区切る文字) をすべて除いた文字列を返す。"""
+    return "".join(text.split())

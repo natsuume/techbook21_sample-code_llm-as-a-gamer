@@ -29,6 +29,7 @@ from switch2_layers.middle.middle_types import (
     MiddleState,
     middle_state_to_json,
 )
+from switch2_layers.middle.task_progress import first_task_of, first_task_since
 from switch2_layers.notes.note_paths import SCENE_LABELS_FILE, scene_note
 from switch2_layers.notes.scene_labels import (
     SceneLabel,
@@ -96,6 +97,7 @@ def write_middle_output(
         tasks_path = paths.notes_dir / scene_note(scene.id, "tasks")
         tasks_path.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(tasks_path, output.tasks)
+    first_task = first_task_of(output.tasks)
     state = MiddleState(
         generated_t=generated_t,
         based_on_t=middle_input.t,
@@ -107,6 +109,10 @@ def write_middle_output(
         timeline=output.timeline,
         surface_rows_offset=middle_input.surface_rows_offset,
         operations_rows_offset=middle_input.operations_rows_offset,
+        first_task=first_task,
+        first_task_since_t=first_task_since(
+            middle_input.previous_state, first_task, generated_t
+        ),
     )
     if _is_stopped(stop):
         return None

@@ -158,6 +158,14 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
         scene = "(決まっていない)"
     else:
         scene = f"{state.scene_name} ({state.scene_id})"
+    if state.first_task_since_t is None:
+        first_task_since_text = EMPTY_TEXT
+    else:
+        elapsed_s = max(0.0, now_t - state.first_task_since_t)
+        first_task_since_text = (
+            f"{format_frame_label(state.first_task_since_t)} "
+            f"(入力の時刻まで {elapsed_s:.1f} 秒)"
+        )
     return "\n".join(
         [
             (
@@ -168,6 +176,8 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
             f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
             f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
             f"surface の待ち時間: {state.surface_wait_s:g} 秒",
+            f"最初のタスク: {state.first_task or EMPTY_TEXT}",
+            f"最初のタスクが今の文になった時刻: {first_task_since_text}",
             "系列情報:",
             state.timeline or EMPTY_TEXT,
         ]
