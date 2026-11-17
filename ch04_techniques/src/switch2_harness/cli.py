@@ -65,7 +65,7 @@ class CliDependencies:
 
     send: デーモンへの送信 (本番は daemon_client.send_command)
     clock: 現在の epoch 秒。記録の時刻に使う (本番は time.time)
-    monotonic: run の期限と経過時間を計る単調時計 (本番は time.monotonic)
+    deadline_clock: run の期限と経過時間を計る時計 (本番は time.time。WSL2 では time.monotonic が実時間より遅く進むため使わない)
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
@@ -76,7 +76,7 @@ class CliDependencies:
 
     send: SendCommand
     clock: Callable[[], float]
-    monotonic: Callable[[], float]
+    deadline_clock: Callable[[], float]
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     start_process: StartProcess
@@ -95,7 +95,7 @@ def production_dependencies() -> CliDependencies:
     return CliDependencies(
         send=send_command,
         clock=time.time,
-        monotonic=time.monotonic,
+        deadline_clock=time.time,
         now=_local_now,
         sleep=time.sleep,
         start_process=start_claude_process,
@@ -246,7 +246,7 @@ def _dispatch(
             options,
             start_process=deps.start_process,
             clock=deps.clock,
-            monotonic=deps.monotonic,
+            deadline_clock=deps.deadline_clock,
             sleep=deps.sleep,
             send=deps.send,
             base_env=deps.environ,
