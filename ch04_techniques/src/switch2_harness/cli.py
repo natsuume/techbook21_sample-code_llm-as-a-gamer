@@ -46,6 +46,7 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    MULTI_FRAME_FEATURE,
     REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
@@ -250,6 +251,16 @@ def _look_reflection_notice(
     return REFLECTION_FEATURE in config.features
 
 
+def _look_multi_frame(paths: WorkspacePaths, available: tuple[Feature, ...]) -> bool:
+    """look に渡す multi_frame を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に複数フレームの要素
+    (features.MULTI_FRAME_FEATURE) があれば True、無ければ False。
+    """
+    config = read_config(paths.harness_file, available)
+    return MULTI_FRAME_FEATURE in config.features
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
@@ -263,6 +274,8 @@ def _dispatch(
             frames_changed=_look_frames_changed(paths, deps.available),
             last_new_screen_time=_look_last_new_screen_time(paths, deps.available),
             reflection_notice=_look_reflection_notice(paths, deps.available),
+            multi_frame=_look_multi_frame(paths, deps.available),
+            sleep=deps.sleep,
         )
     if command == "press":
         return handle_press(
@@ -315,6 +328,9 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     無効なら渡さない。
     さらに look は、振り返りの要素 (features.REFLECTION_FEATURE) が有効なら reflection_notice=True を渡す
     (批評を notes.md に書いた後の最初の look で、振り返りの知らせの行を表示する)。無効なら False。
+    また look は、複数フレームの要素 (features.MULTI_FRAME_FEATURE) が有効なら multi_frame=True を渡し
+    (続けて撮った画面を並べた画像を保存し、look の応答の直後にそのパスの行を表示する)、無効なら multi_frame=False を渡す。
+    どちらの場合も、撮影の間の待ちに使う deps.sleep を sleep として渡す。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)

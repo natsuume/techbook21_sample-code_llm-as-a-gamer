@@ -1283,6 +1283,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 | `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
 | `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ。振り返り (`reflection`) も有効にすると、末尾の「振り返り」の節をハーネスが書き換える |
 | `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
+| `multi-frames/` | 複数フレーム (`multi-frame`) を有効にしたときだけ作られる。`look` で続けて撮った 6 枚を縮小して並べた画像 (`frames/` の画像と同じ番号) |
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
 | `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
@@ -1295,7 +1296,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 
 | サブコマンド | 使う人 | 動作 |
 |---|---|---|
-| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します。停滞の知らせ (`stagnation-alert`) を有効にすると、新しい画面が 120 秒出ていないときに知らせの行も表示します。振り返り (`reflection`) を有効にすると、批評を `notes.md` に書いた後の最初の `look` で知らせの行を表示します。行動履歴 (`action-history`) を有効にすると、続けて直近の行動も表示します |
+| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します。複数フレーム (`multi-frame`) を有効にすると、0.2 秒おきに 6 回撮り、6 枚を並べた画像のパスの行も表示します。停滞の知らせ (`stagnation-alert`) を有効にすると、新しい画面が 120 秒出ていないときに知らせの行も表示します。振り返り (`reflection`) を有効にすると、批評を `notes.md` に書いた後の最初の `look` で知らせの行を表示します。行動履歴 (`action-history`) を有効にすると、続けて直近の行動も表示します |
 | `press ACTION ARGS...` | エージェント | `tap` / `hold` / `down` / `up` を、第2章のクライアントと同じ書き方でデーモンに送ります。HOME を含む入力と、11 個以上を並べた `tap` は送らずにエラーにします |
 | `status` | エージェント | デーモンの動作状況を表示します |
 | `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
@@ -1405,6 +1406,7 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 | `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
 | `stagnation-alert` | 停滞の知らせ。`run` の間に裏で画面を撮り、新しい画面が 120 秒出ていないと、`look` の出力に知らせの行を付けます |
 | `reflection` | 振り返り。`notes` と一緒に有効にします。`run` の間に 5 分ごとに別の Claude (批評役) に進め方を批評させ、`notes.md` の「振り返り」の節に書きます |
+| `multi-frame` | 複数フレーム。`look` のときに 0.2 秒おきに 6 回撮り、6 枚を縮小して 1 枚に並べた画像のパスを、`look` の出力に付けます |
 
 #### 行動履歴 (`action-history`)
 
@@ -1512,7 +1514,7 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 - ...
 ```
 
-書いた後の最初の `look` は、保存した PNG のパスの行の後 (停滞の知らせがあればその後) に、次の行を表示します。
+書いた後の最初の `look` は、保存した PNG のパスの行の後 (複数フレームの行と停滞の知らせがあればその後) に、次の行を表示します。
 
 ```text
 振り返り: notes.md の「振り返り」の節を書き換えました
@@ -1527,6 +1529,24 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 | `critic-stderr.log` | 批評役の標準エラー出力 |
 
 2026-11-17 に Claude Code 2.1.326 で、批評役と同じ起動引数に、1280x720 の PNG の撮影 8 枚 (入力の 1 行で約 10.9 MB) を渡したところ、約 11 秒で批評が返り、費用は 0.10 USD でした (Claude Code が計算した推定値)。
+
+#### 複数フレーム (`multi-frame`)
+
+`look` は、デーモンへ `shot` を 0.2 秒おきに 6 回送って画面を撮ります。6 回目の画像は、要素を有効にしないときと同じく `frames/` に元の大きさで保存します。6 枚は 640x360 に縮め、上の段の左から 1・2・3、下の段の左から 4・5・6 の順に並べた 1920x720 の画像にして、`multi-frames/` に `frames/` の画像と同じ番号で保存します。各コマの左上には番号を描きます。
+
+`look` は、保存した PNG のパスの行の後に、並べた画像のパスの行を表示します。停滞の知らせ・振り返りの知らせ・行動履歴の行は、この行の後に続きます。
+
+```text
+ok /home/user/ch04_techniques/plays/mahou-joshikousei/frames/000044.png
+複数フレーム: /home/user/ch04_techniques/plays/mahou-joshikousei/multi-frames/000044.png
+```
+
+- 撮影の間隔は、撮影を始めてから次の撮影を始めるまでで数えます。撮影に 0.2 秒以上かかったときは待たずに次を撮ります。1 回目から 6 回目までは約 1 秒かかり、`look` の応答はその分遅くなります
+- 1〜5 回目の画像は、デーモンに `multi-frames/` の一時ファイル (`000044-1.png`〜`000044-5.png`) として保存させ、並べた後に消します。元の大きさで残るのは 6 回目の画像だけです
+- `records/events.jsonl` の `look` の行は 1 つだけです。`time` は 1 回目の撮影の前の時刻、`elapsed_s` は 6 回目の応答までの秒数、`frame` は `frames/` の画像です。行動履歴と `report` が画面の変化を比べるのは、`frames/` の画像だけです。振り返りの批評役に渡す撮影も、`frames/` の画像から選びます
+- 6 回の撮影のどれかが失敗すると、残りは撮らずにその応答を表示し、終了コード 1 で終わります。`frames/` と `multi-frames/` には画像を残しません
+
+`CLAUDE.md` の節 (`src/switch2_harness/instructions/multi-frame.md`) には、撮り方・並び・番号と、並べた画像を読み、細かい文字を読むときは保存した PNG も開くことを書きます。並べた画像がどんな場面で役に立つか (点滅する表示、動いているものの向きなど) は書きません。
 
 ### 既知の制限
 

@@ -1,6 +1,10 @@
 from harness_fakes import FAKE_FEATURES, FAKE_STAGNATION_ALERT, read_fake_template
 
-from switch2_harness.features import REFLECTION_FEATURE, STAGNATION_ALERT_FEATURE
+from switch2_harness.features import (
+    MULTI_FRAME_FEATURE,
+    REFLECTION_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+)
 from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.instructions import (
     BASE_TEMPLATE_FILE,
@@ -170,6 +174,40 @@ def test_read_package_template_reads_reflection_critic_md():
     text = read_package_template("reflection-critic.md")
     assert "- ゲーム名: $game\n" in text
     assert "- 目標: $goal\n" in text
+
+
+# 複数フレームの節の、承認済みの文面
+MULTI_FRAME_SECTION = (
+    "## 複数フレーム\n"
+    "\n"
+    "`look` は、0.2 秒おきに 6 回画面を撮ります。保存した PNG のパスの行の後に、"
+    "6 枚を縮小して 1 枚に並べた画像のパスを、次の形で表示します。\n"
+    "\n"
+    "```text\n"
+    "複数フレーム: /…/multi-frames/000012.png\n"
+    "```\n"
+    "\n"
+    "- 並べた画像は、上の段の左から 1・2・3、下の段の左から 4・5・6 の順に撮った画面です。"
+    "各コマの左上に番号があります。6 は保存した PNG と同じ画面で、1 から 6 までは約 1 秒です\n"
+    "- 並べた画像を Read ツールで開いて読みます。細かい文字を読むときは、保存した PNG も開きます\n"
+    "- `look` の出力は、`head` などで切り詰めずにすべて読んでください\n"
+)
+
+
+def test_read_package_template_reads_multi_frame_md():
+    text = read_package_template("multi-frame.md")
+    assert text.startswith("## 複数フレーム\n")
+    assert text == MULTI_FRAME_SECTION
+
+
+def test_render_instructions_with_multi_frame_adds_its_section():
+    config = make_config((MULTI_FRAME_FEATURE,))
+    text = render_instructions(config, read_package_template)
+    assert "\n\n## 複数フレーム\n\n" in text
+    assert text.index("## 守ること") < text.index("## 複数フレーム")
+    # 節のテンプレートには置換する $game・$goal が無いため、本文はテンプレートのまま最後に続く
+    section = read_package_template("multi-frame.md").rstrip("\n")
+    assert text.endswith("\n\n" + section + "\n")
 
 
 def test_read_package_template_reads_notes_initial_md():

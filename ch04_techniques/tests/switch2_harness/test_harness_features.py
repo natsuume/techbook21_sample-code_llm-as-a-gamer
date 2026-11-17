@@ -5,6 +5,7 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    MULTI_FRAME_FEATURE,
     NOTES_FEATURE,
     NOTES_FILE_NAME,
     REFLECTION_FEATURE,
@@ -49,6 +50,7 @@ def test_features_lists_every_feature_in_order():
         "notes",
         "stagnation-alert",
         "reflection",
+        "multi-frame",
     )
 
 
@@ -64,7 +66,7 @@ def test_features_has_stagnation_alert_third():
     assert FEATURES[2].writable_files == ()
 
 
-def test_features_has_reflection_last_requiring_notes():
+def test_features_has_reflection_fourth_requiring_notes():
     assert REFLECTION_FEATURE == "reflection"
     # CLAUDE.md に節を足し、notes.md の末尾に「振り返り」の見出しを足す。サブコマンドも書き換えられるファイルも増やさない
     assert FEATURES[3] == Feature(
@@ -77,6 +79,18 @@ def test_features_has_reflection_last_requiring_notes():
             FileAppend(name="notes.md", template_file="reflection-notes-section.md"),
         ),
     )
+
+
+def test_features_has_multi_frame_last():
+    assert MULTI_FRAME_FEATURE == "multi-frame"
+    # CLAUDE.md に節を足し、サブコマンドも書き換えられるファイルも増やさない
+    assert FEATURES[4] == Feature(
+        name="multi-frame",
+        title="複数フレーム",
+        instruction_file="multi-frame.md",
+        commands=(),
+    )
+    assert FEATURES[4].writable_files == ()
 
 
 def test_feature_has_no_writable_files_by_default():

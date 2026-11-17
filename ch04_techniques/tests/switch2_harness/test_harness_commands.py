@@ -18,9 +18,11 @@ from harness_fakes import (
     FakeDaemon,
     FakeProcessStarter,
     FakeSleep,
+    ImageWritingDaemon,
     ProcessPlan,
     make_paths,
     read_fake_template,
+    shot_color,
 )
 
 from switch2_harness.agent_launcher import (
@@ -567,6 +569,124 @@ def test_look_prints_the_alert_before_the_history(paths, clock):
             "- 10 秒前 press tap A: 画面の変化 あり",
         ),
     )
+
+
+# --- look の複数フレーム ---
+
+
+def multi_frame_look(
+    paths: WorkspacePaths, clock: FakeClock, daemon: ImageWritingDaemon
+) -> CommandResult:
+    """複数フレームを有効にした look を、daemon に送り、時計を進める sleep で待って動かす。"""
+    return handle_look(
+        paths, send=daemon, clock=clock, multi_frame=True, sleep=FakeSleep(clock)
+    )
+
+
+def test_look_with_multi_frame_prints_the_tile_line_after_the_reply(paths, clock):
+    result = multi_frame_look(paths, clock, ImageWritingDaemon(clock, step_s=0.05))
+    frame_path = paths.frames_dir / "000001.png"
+    tile_path = paths.root / "multi-frames" / "000001.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(f"ok {frame_path}", f"複数フレーム: {tile_path}"),
+    )
+
+
+def test_look_with_multi_frame_keeps_the_sixth_shot_and_the_tile_only(paths, clock):
+    multi_frame_look(paths, clock, ImageWritingDaemon(clock, step_s=0.05))
+    assert [path.name for path in paths.frames_dir.glob("*")] == ["000001.png"]
+    frame = cv2.imread(str(paths.frames_dir / "000001.png"))
+    assert frame is not None
+    # frames/ の PNG は、6 回目の撮影の元の大きさの画像
+    assert frame.shape == (720, 1280, 3)
+    assert tuple(int(value) for value in frame[360, 640]) == shot_color(6)
+    # multi-frames/ には並べた画像だけが残り、1〜5 回目の一時ファイルは残らない
+    multi_frames_dir = paths.root / "multi-frames"
+    assert [path.name for path in multi_frames_dir.glob("*")] == ["000001.png"]
+    tile = cv2.imread(str(multi_frames_dir / "000001.png"))
+    assert tile is not None
+    assert tile.shape == (720, 1920, 3)
+
+
+def test_look_with_multi_frame_shoots_six_times_ending_with_the_frame(paths, clock):
+    daemon = ImageWritingDaemon(clock, step_s=0.05)
+    multi_frame_look(paths, clock, daemon)
+    assert [args[0] for args in daemon.sent] == ["shot"] * 6
+    assert daemon.sent[-1] == ["shot", str(paths.frames_dir / "000001.png")]
+
+
+def test_look_with_multi_frame_records_one_look_event(paths, clock):
+    multi_frame_look(paths, clock, ImageWritingDaemon(clock, step_s=0.05))
+    frame_path = paths.frames_dir / "000001.png"
+    [event] = read_events(paths.events_file)
+    assert event.command == "look"
+    assert event.args == ()
+    # time は 1 回目の撮影の前の時刻。elapsed_s は 6 回目の応答までの秒数
+    # (送信に 0.05 秒ずつかかり、撮影の間に 0.15 秒ずつ待つので 0.05 * 6 + 0.15 * 5)
+    assert event.time == START_TIME
+    assert event.elapsed_s == pytest.approx(1.05)
+    assert event.reply == f"ok {frame_path}"
+    assert event.ok is True
+    assert event.frame == "frames/000001.png"
+
+
+def test_look_with_multi_frame_fails_at_an_error_shot_and_leaves_no_png(paths, clock):
+    daemon = ImageWritingDaemon(clock, step_s=0.05, fail_on_shot=3)
+    result = multi_frame_look(paths, clock, daemon)
+    assert result == CommandResult(exit_code=1, stdout_lines=("error no frame yet",))
+    assert list(paths.frames_dir.glob("*.png")) == []
+    assert list((paths.root / "multi-frames").glob("*.png")) == []
+
+
+def test_look_with_multi_frame_stops_and_records_the_error_shot(paths, clock):
+    daemon = ImageWritingDaemon(clock, step_s=0.05, fail_on_shot=3)
+    multi_frame_look(paths, clock, daemon)
+    assert len(daemon.sent) == 3
+    [event] = read_events(paths.events_file)
+    assert event.command == "look"
+    assert event.ok is False
+    assert event.frame is None
+    assert event.reply == "error no frame yet"
+
+
+def test_look_with_multi_frame_prints_the_tile_line_before_the_alert_and_the_history(
+    paths, clock
+):
+    record_earlier_actions(paths)
+    result = handle_look(
+        paths,
+        send=ImageWritingDaemon(clock, step_s=0.05),
+        clock=clock,
+        frames_changed=RecordingFramesChanged(changed=True),
+        last_new_screen_time=RecordingLastNewScreenTime(START_TIME - 135.7),
+        multi_frame=True,
+        sleep=FakeSleep(clock),
+    )
+    frame_path = paths.frames_dir / "000002.png"
+    tile_path = paths.root / "multi-frames" / "000002.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(
+            f"ok {frame_path}",
+            f"複数フレーム: {tile_path}",
+            ALERT_LINE_135,
+            HISTORY_HEADER,
+            "- 20 秒前 look 000001.png",
+            "- 10 秒前 press tap A: 画面の変化 あり",
+        ),
+    )
+
+
+def test_look_without_multi_frame_shoots_once_without_sleeping(paths, clock):
+    daemon = FakeDaemon(clock)
+    sleep = FakeSleep(clock)
+    result = handle_look(paths, send=daemon, clock=clock, sleep=sleep)
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+    assert daemon.sent == [["shot", str(frame_path)]]
+    assert sleep.calls == []
+    assert not (paths.root / "multi-frames").exists()
 
 
 # --- look の振り返りの知らせ ---

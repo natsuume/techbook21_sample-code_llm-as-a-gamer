@@ -2,8 +2,9 @@
 
 要素は先行研究の手法を 1 つずつ足したもので、有効にすると、要素によって、CLAUDE.md に節が加わるか、
 エージェントが使えるサブコマンドが増えるか、エージェントが書き換えられるファイルが増えるか、
-サブコマンドの出力が変わる (行動履歴・停滞の知らせ・振り返り。停滞の知らせは、run の間に裏で撮った画面をもとに、
-look の出力に知らせの行を足す。振り返りは、run の間に別のモデルに批評させて notes.md に書き、look で知らせる)。
+サブコマンドの出力が変わる (行動履歴・停滞の知らせ・振り返り・複数フレーム。停滞の知らせは、run の間に裏で撮った画面をもとに、
+look の出力に知らせの行を足す。振り返りは、run の間に別のモデルに批評させて notes.md に書き、look で知らせる。
+複数フレームは、look のときに続けて撮った画面を縮小して 1 枚に並べた画像を保存し、look の出力にそのパスの行を足す)。
 ほかの要素と併用する要素 (Feature.requires) は、併用する要素を有効にしないと有効にできない。
 すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
@@ -75,6 +76,10 @@ STAGNATION_ALERT_FEATURE = "stagnation-alert"
 # 批評させ、ハーネスが notes.md の「振り返り」の節に書く (reflection_critic)。書いた後の最初の look が知らせの行を表示する (reflection)
 REFLECTION_FEATURE = "reflection"
 
+# 複数フレームの要素の名前。有効にすると、look が 0.2 秒おきに 6 回画面を撮り、6 枚を縮小して 1 枚に並べた画像を
+# multi-frames/ に保存して、そのパスの行を表示する (multi_frame)
+MULTI_FRAME_FEATURE = "multi-frame"
+
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順、
 # ファイルの末尾に足す内容の順になる
 FEATURES: tuple[Feature, ...] = (
@@ -110,6 +115,12 @@ FEATURES: tuple[Feature, ...] = (
                 name=NOTES_FILE_NAME, template_file="reflection-notes-section.md"
             ),
         ),
+    ),
+    Feature(
+        name=MULTI_FRAME_FEATURE,
+        title="複数フレーム",
+        instruction_file="multi-frame.md",
+        commands=(),
     ),
 )
 
