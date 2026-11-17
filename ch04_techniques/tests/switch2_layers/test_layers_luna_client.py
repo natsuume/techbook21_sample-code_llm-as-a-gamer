@@ -190,6 +190,43 @@ def test_read_output_text_joins_parts_in_order():
     assert read_output_text(body) == '{"a": 1}'
 
 
+def phased_message(phase: str | None, text: str) -> dict:
+    return {**message(output_text_part(text)), "phase": phase}
+
+
+def test_read_output_text_reads_only_the_final_answer_message():
+    # commentary の message には、JSON の後に意味の無い文字が続くことがある
+    body = response_body(
+        output=[
+            phased_message("commentary", '{"a": 1}壊れた文字\n{"a": '),
+            phased_message("final_answer", '{"a": 2}'),
+        ]
+    )
+    assert read_output_text(body) == '{"a": 2}'
+
+
+def test_read_output_text_reads_all_messages_without_a_final_answer():
+    body = response_body(
+        output=[phased_message(None, '{"a": '), phased_message(None, "1}")]
+    )
+    assert read_output_text(body) == '{"a": 1}'
+
+
+def test_refusal_in_the_final_answer_message_is_an_error():
+    body = response_body(
+        output=[
+            phased_message("commentary", '{"a": 1}'),
+            {
+                **message({"type": "refusal", "refusal": "I can't help with that."}),
+                "phase": "final_answer",
+            },
+        ]
+    )
+    with pytest.raises(LunaCallError) as error_info:
+        read_output_text(body)
+    assert "I can't help with that." in str(error_info.value)
+
+
 def test_incomplete_response_is_an_error_with_reason():
     body = response_body(
         status="incomplete",
