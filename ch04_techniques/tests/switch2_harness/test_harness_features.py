@@ -7,6 +7,7 @@ from switch2_harness.features import (
     FEATURES,
     NOTES_FEATURE,
     NOTES_FILE_NAME,
+    STAGNATION_ALERT_FEATURE,
     Feature,
     WritableFile,
     agent_commands,
@@ -40,6 +41,7 @@ def test_features_has_action_history_and_notes():
 
 
 def test_features_has_stagnation_alert_last():
+    assert STAGNATION_ALERT_FEATURE == "stagnation-alert"
     assert tuple(feature.name for feature in FEATURES) == (
         "action-history",
         "notes",

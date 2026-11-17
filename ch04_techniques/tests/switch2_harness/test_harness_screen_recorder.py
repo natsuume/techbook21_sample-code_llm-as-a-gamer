@@ -10,6 +10,7 @@ import pytest
 from harness_fakes import FakeClock, FakeDaemon, make_paths
 
 from switch2_harness.screen_recorder import (
+    SAMPLE_INTERVAL_S,
     SHOT_TIMEOUT_S,
     next_run_dir,
     record_sample,
@@ -39,7 +40,7 @@ class ShotWritingDaemon:
     """send の fake。shot PATH を受けると、PATH に shot_image() の PNG を書いて `ok PATH` を返す。
 
     送るたびに、送った引数を sent に、受け取った timeout_s を timeouts に記録し、clock を step_s 秒進める
-    (撮影にかかった時間の代わり)。
+    (撮影にかかった時間の代わり。負なら時計を戻す)。
     replies に呼び出しの回 (1 から数える) があれば、その回は PNG を書かずにその応答を返す。
     stop と stop_at_call を渡すと、その回の呼び出しで stop を set する (記録を止める合図の代わり)。
     max_calls を渡すと、呼ばれた回数がそれを超えたら AssertionError にし、ループの誤りでテストが止まらなくなるのを防ぐ。
@@ -77,6 +78,18 @@ class ShotWritingDaemon:
             return self.replies[calls]
         assert cv2.imwrite(args[1], shot_image())
         return f"ok {args[1]}"
+
+
+class WaitRecordingEvent(threading.Event):
+    """stop の fake。wait に渡った秒数を waits に控え、実際には待たずに、set されているかを返す。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return self.is_set()
 
 
 def read_sample_lines(run_dir: Path) -> list[dict[str, object]]:
@@ -211,6 +224,18 @@ def test_run_recording_does_not_skip_image_numbers_after_an_error(run_dir, clock
         "000002.png",
         "samples.jsonl",
     ]
+
+
+def test_run_recording_waits_at_most_the_interval_when_the_clock_goes_back(
+    run_dir, clock
+):
+    stop = WaitRecordingEvent()
+    # 撮影のたびに時計を 30 秒戻し、撮影を始めてからの経過時間を負にする
+    daemon = ShotWritingDaemon(
+        clock, step_s=-30.0, stop=stop, stop_at_call=3, max_calls=10
+    )
+    run_recording(run_dir, stop, send=daemon, clock=clock)
+    assert stop.waits == [SAMPLE_INTERVAL_S] * 3
 
 
 # --- recording_screens ---

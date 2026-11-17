@@ -41,7 +41,7 @@ from switch2_harness.commands import (
     release_not_confirmed_message,
 )
 from switch2_harness.event_log import CommandEvent, append_event, read_events
-from switch2_harness.features import BASE_AGENT_COMMANDS
+from switch2_harness.features import BASE_AGENT_COMMANDS, STAGNATION_ALERT_FEATURE
 from switch2_harness.signal_guard import RunTerminated
 from switch2_harness.workspace import WorkspacePaths
 
@@ -1122,7 +1122,7 @@ class FakeScreenRecording:
 
 
 def test_run_with_stagnation_alert_records_screens_around_the_agent(paths, clock):
-    write_harness_json(paths, ["stagnation-alert"])
+    write_harness_json(paths, [STAGNATION_ALERT_FEATURE])
     starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
     recording = FakeScreenRecording(starter, daemon)
     result = handle_run(
@@ -1179,7 +1179,7 @@ def test_run_without_stagnation_alert_does_not_record_screens(paths, clock):
 def test_run_stops_recording_screens_when_interrupted(
     paths, clock, interruption, message
 ):
-    write_harness_json(paths, ["stagnation-alert"])
+    write_harness_json(paths, [STAGNATION_ALERT_FEATURE])
     starter, daemon, _ = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
     recording = FakeScreenRecording(starter, daemon)
     sleep_calls: list[float] = []

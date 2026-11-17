@@ -1,8 +1,8 @@
 """要素 (feature) の一覧と、要素の名前の検証。
 
-要素は先行研究の手法を 1 つずつ足したもので、有効にすると CLAUDE.md に節が加わり、要素によって、
+要素は先行研究の手法を 1 つずつ足したもので、有効にすると、要素によって、CLAUDE.md に節が加わるか、
 エージェントが使えるサブコマンドが増えるか、エージェントが書き換えられるファイルが増えるか、
-サブコマンドの出力が変わる。
+サブコマンドの出力が変わるか、run の間に裏で画面が記録される (エージェントには知らせない)。
 すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
 
@@ -29,14 +29,14 @@ class Feature:
 
     name: CLI (init --enable) と harness.json で使う名前 (例: "action-history")
     title: 日本語の名前
-    instruction_file: CLAUDE.md に足す節のテンプレートの、instructions/ の下のファイル名
+    instruction_file: CLAUDE.md に足す節のテンプレートの、instructions/ の下のファイル名。None なら CLAUDE.md に節を足さない
     commands: この要素で使えるようになる、エージェント用のサブコマンドの名前
     writable_files: この要素で、エージェントが Write・Edit ツールで書き換えられるようになるファイル
     """
 
     name: str
     title: str
-    instruction_file: str
+    instruction_file: str | None
     commands: tuple[str, ...]
     writable_files: tuple[WritableFile, ...] = ()
 
@@ -47,6 +47,10 @@ ACTION_HISTORY_FEATURE = "action-history"
 # メモファイルの要素の名前。有効にすると、エージェントが作業ディレクトリーの notes.md を Write・Edit ツールで書き換えられる
 NOTES_FEATURE = "notes"
 NOTES_FILE_NAME = "notes.md"
+
+# 停滞の知らせの要素の名前。有効にすると、run の間に裏で画面を撮り、縮小画像と時刻を records/screen-samples/ に記録する
+# (screen_recorder)。エージェントへの知らせは出さず、CLAUDE.md にも節を足さない
+STAGNATION_ALERT_FEATURE = "stagnation-alert"
 
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順になる
 FEATURES: tuple[Feature, ...] = (
@@ -64,6 +68,12 @@ FEATURES: tuple[Feature, ...] = (
         writable_files=(
             WritableFile(name=NOTES_FILE_NAME, template_file="notes-initial.md"),
         ),
+    ),
+    Feature(
+        name=STAGNATION_ALERT_FEATURE,
+        title="停滞の知らせ",
+        instruction_file=None,
+        commands=(),
     ),
 )
 

@@ -1,5 +1,6 @@
 from harness_fakes import FAKE_FEATURES, FAKE_STAGNATION_ALERT, read_fake_template
 
+from switch2_harness.features import STAGNATION_ALERT_FEATURE
 from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.instructions import (
     BASE_TEMPLATE_FILE,
@@ -62,7 +63,7 @@ def test_render_instructions_adds_no_section_for_feature_without_instruction_fil
         return read_fake_template(file_name)
 
     with_alert = render_instructions(
-        make_config(("stagnation-alert",)), read_template, available
+        make_config((STAGNATION_ALERT_FEATURE,)), read_template, available
     )
     without_features = render_instructions(make_config(()), read_template, available)
     assert with_alert == without_features

@@ -14,6 +14,7 @@ look / press / status / finish は、成否によらず records/events.jsonl に
 これらの送信には待ち時間の上限を付けない (send に timeout_s を渡さない。長い tap はデーモンの応答まで時間がかかるため)。
 """
 
+import contextlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import (
     FEATURES,
+    STAGNATION_ALERT_FEATURE,
     Feature,
     agent_commands,
     agent_writable_files,
@@ -48,7 +50,7 @@ from switch2_harness.harness_config import (
 from switch2_harness.instructions import ReadTemplate, render_instructions
 from switch2_harness.press_args import press_args_error, split_press_args
 from switch2_harness.screen_change import load_sample
-from switch2_harness.screen_recorder import ScreenRecording
+from switch2_harness.screen_recorder import ScreenRecording, recording_screens
 from switch2_harness.session_report import (
     format_summary,
     summarize_session,
@@ -387,8 +389,15 @@ def handle_run(
         writable_file.name
         for writable_file in agent_writable_files(config.features, available)
     )
+    recording: contextlib.AbstractContextManager[object]
+    if STAGNATION_ALERT_FEATURE not in config.features:
+        recording = contextlib.nullcontext()
+    elif screen_recording is not None:
+        recording = screen_recording(paths)
+    else:
+        recording = recording_screens(paths, send=send, clock=clock)
     try:
-        with interrupts_as_exceptions():
+        with interrupts_as_exceptions(), recording:
             outcome = run_agent_until(
                 minutes,
                 paths,
