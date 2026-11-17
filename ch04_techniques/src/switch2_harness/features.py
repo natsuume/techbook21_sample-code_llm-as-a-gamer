@@ -1,11 +1,26 @@
 """要素 (feature) の一覧と、要素の名前の検証。
 
-要素は先行研究の手法を 1 つずつ足したもので、有効にすると CLAUDE.md に節が加わり、
-エージェントが使えるサブコマンドが増える。すべての要素を無効にした状態が、第3章と同じ基準条件になる。
+要素は先行研究の手法を 1 つずつ足したもので、有効にすると CLAUDE.md に節が加わり、要素によって、
+エージェントが使えるサブコマンドが増えるか、エージェントが書き換えられるファイルが増えるか、
+サブコマンドの出力が変わる。
+すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class WritableFile:
+    """要素が作業ディレクトリーの直下に置き、エージェントが Write・Edit ツールで書き換えられるファイル。
+
+    name: 作業ディレクトリーの直下のファイル名 (例: "notes.md")
+    template_file: init で置く最初の内容の、instructions/ の下のファイル名 (例: "notes-initial.md")。
+        置換 ($game などの string.Template) はせず、そのまま書く
+    """
+
+    name: str
+    template_file: str
 
 
 @dataclass(frozen=True)
@@ -16,16 +31,41 @@ class Feature:
     title: 日本語の名前
     instruction_file: CLAUDE.md に足す節のテンプレートの、instructions/ の下のファイル名
     commands: この要素で使えるようになる、エージェント用のサブコマンドの名前
+    writable_files: この要素で、エージェントが Write・Edit ツールで書き換えられるようになるファイル
     """
 
     name: str
     title: str
     instruction_file: str
     commands: tuple[str, ...]
+    writable_files: tuple[WritableFile, ...] = ()
 
 
-# 利用できる要素の一覧。この順が CLAUDE.md の節の順とサブコマンドの順になる
-FEATURES: tuple[Feature, ...] = ()
+# 行動履歴の要素の名前。有効にすると、look が直近の行動 (look と press) を表示する (action_history)
+ACTION_HISTORY_FEATURE = "action-history"
+
+# メモファイルの要素の名前。有効にすると、エージェントが作業ディレクトリーの notes.md を Write・Edit ツールで書き換えられる
+NOTES_FEATURE = "notes"
+NOTES_FILE_NAME = "notes.md"
+
+# 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順になる
+FEATURES: tuple[Feature, ...] = (
+    Feature(
+        name=ACTION_HISTORY_FEATURE,
+        title="行動履歴",
+        instruction_file="action-history.md",
+        commands=(),
+    ),
+    Feature(
+        name=NOTES_FEATURE,
+        title="メモファイル",
+        instruction_file="notes.md",
+        commands=(),
+        writable_files=(
+            WritableFile(name=NOTES_FILE_NAME, template_file="notes-initial.md"),
+        ),
+    ),
+)
 
 # 要素によらずエージェントが使えるサブコマンド
 BASE_AGENT_COMMANDS: tuple[str, ...] = ("look", "press", "status", "finish")
@@ -77,3 +117,20 @@ def agent_commands(
         for command in feature.commands
     )
     return BASE_AGENT_COMMANDS + feature_commands
+
+
+def agent_writable_files(
+    enabled: Iterable[str], available: tuple[Feature, ...] = FEATURES
+) -> tuple[WritableFile, ...]:
+    """エージェントが書き換えられるファイルを返す。
+
+    enabled に名前がある要素の writable_files を、available の順に続けたもの。
+    enabled は validate_feature_names を通した名前を渡す。
+    """
+    enabled_names = set(enabled)
+    return tuple(
+        writable_file
+        for feature in available
+        if feature.name in enabled_names
+        for writable_file in feature.writable_files
+    )

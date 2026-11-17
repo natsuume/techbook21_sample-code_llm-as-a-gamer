@@ -1,6 +1,7 @@
 """実行の記録 run.jsonl。1 件を {"t": 秒, "event": 名前, ...} の 1 行で追記する。
 
-surface・middle・deep のスケジューラー・deep のジョブ・終了処理の各スレッドから書くため、追記は 1 つのロックの中で行う。
+surface・middle・deep のスケジューラー・deep のジョブ・Orchestrator 型の主ループ・終了処理の各スレッドから書くため、
+追記は 1 つのロックの中で行う。
 """
 
 import threading
@@ -32,6 +33,12 @@ EVENT_FRAMES_DROPPED = "frames_dropped"  # 画像の保存を捨てた件数 (�
 EVENT_PHASE = "phase"
 # 片付けが終わった。result (system_screen.run_phase.CleanUpResult の値) を含む
 EVENT_CLEAN_UP_END = "clean_up_end"
+# Orchestrator 型の主ループのセッションの開始。session (番号) を含む
+EVENT_ORCHESTRATOR_SESSION_START = "orchestrator_session_start"
+# 主ループのセッションの終了。session・reason・returncode・usage_tokens を含む
+EVENT_ORCHESTRATOR_SESSION_END = "orchestrator_session_end"
+# 主ループの JSON の誤り。session・count (続けて誤った回数)・errors (誤りの説明) を含む
+EVENT_ORCHESTRATOR_DECISION_ERROR = "orchestrator_decision_error"
 
 
 class RunLog:

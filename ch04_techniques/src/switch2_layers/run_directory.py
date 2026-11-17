@@ -10,6 +10,7 @@
     surface_requests.jsonl                  surface が Jev に送った要求の記録 (surface.surface_record)
     safety.jsonl                            安全の確かめの 1 回ごとの記録 (safety.safety_record)
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
+    tasks.jsonl                             短期タスクのキューの出来事の記録 (tasks.task_events)
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
@@ -21,6 +22,16 @@
                                             (deep.claude_stream_log)
     progress/state.json                     画面の停滞の計測の最新の値 (progress.progress_state)。
                                             まだフレームが無いときは無い
+    orchestrator/sessions.jsonl             Orchestrator 型の主ループのセッションの開始と終了 (orchestrator.session_record)
+    orchestrator/turns.jsonl                主ループのターンごとの記録 (orchestrator.session_record)
+    orchestrator/session-<連番3桁>/stream.jsonl
+                                            主ループのセッションごとの stream-json の出力
+                                            (deep の stream.jsonl と同じ形)
+    orchestrator/monitor.jsonl              Orchestrator 型の監視が Jev に送った要求の記録 (orchestrator.monitor_record)。
+                                            monitor_record は、orchestrator/ が無ければ作ってから書く
+    .claude/skills/<名前>/                   主ループの Claude Code に読ませるスキル (orchestrator.skill_copy が写す)
+orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop) と監視の記録
+(orchestrator.monitor_record) が作る。
 """
 
 from collections.abc import Collection
@@ -55,6 +66,8 @@ SURFACE_LOG_FILE = "surface.jsonl"
 SURFACE_REQUESTS_LOG_FILE = "surface_requests.jsonl"
 SAFETY_LOG_FILE = "safety.jsonl"
 OPERATIONS_LOG_FILE = "operations.jsonl"
+# 短期タスクのキューの出来事の記録 (tasks.task_events)
+TASKS_LOG_FILE = "tasks.jsonl"
 NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
@@ -67,6 +80,17 @@ DEEP_DIR = "deep"
 # 画面の停滞の計測 (progress.progress_loop)
 PROGRESS_DIR = "progress"
 PROGRESS_STATE_FILE = "state.json"
+# Orchestrator 型の記録 (orchestrator/。主ループは orchestrator.session_record、監視は orchestrator.monitor_record)
+ORCHESTRATOR_DIR = "orchestrator"
+ORCHESTRATOR_SESSIONS_FILE = "sessions.jsonl"
+ORCHESTRATOR_TURNS_FILE = "turns.jsonl"
+ORCHESTRATOR_SESSION_DIR_PREFIX = "session-"
+ORCHESTRATOR_SESSION_NUMBER_DIGITS = 3  # セッションのディレクトリーの名前の連番の桁数
+ORCHESTRATOR_STREAM_FILE = "stream.jsonl"
+ORCHESTRATOR_MONITOR_LOG_FILE = "monitor.jsonl"
+# 主ループの Claude Code に読ませるスキルの置き場 (orchestrator.skill_copy)
+CLAUDE_DIR = ".claude"
+CLAUDE_SKILLS_DIR = "skills"
 FRAME_FILE_DIGITS = 9  # 画像のファイル名の t のミリ秒の桁数
 FRAME_FILE_SUFFIX = ".jpg"
 
@@ -127,6 +151,11 @@ class RunPaths:
         return self.root / OPERATIONS_LOG_FILE
 
     @property
+    def tasks_log(self) -> Path:
+        """root / TASKS_LOG_FILE"""
+        return self.root / TASKS_LOG_FILE
+
+    @property
     def notes_dir(self) -> Path:
         """root / NOTES_DIR"""
         return self.root / NOTES_DIR
@@ -171,6 +200,40 @@ class RunPaths:
         """root / PROGRESS_DIR / PROGRESS_STATE_FILE"""
         return self.root / PROGRESS_DIR / PROGRESS_STATE_FILE
 
+    @property
+    def orchestrator_dir(self) -> Path:
+        """root / ORCHESTRATOR_DIR"""
+        return self.root / ORCHESTRATOR_DIR
+
+    @property
+    def orchestrator_sessions_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_SESSIONS_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_SESSIONS_FILE
+
+    @property
+    def orchestrator_turns_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_TURNS_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_TURNS_FILE
+
+    @property
+    def claude_skills_dir(self) -> Path:
+        """root / CLAUDE_DIR / CLAUDE_SKILLS_DIR"""
+        return self.root / CLAUDE_DIR / CLAUDE_SKILLS_DIR
+
+    def orchestrator_session_dir(self, number: int) -> Path:
+        """主ループの number 番目 (1 始まり) のセッションのディレクトリー orchestrator_dir / session_directory_name(number)。"""
+        return self.orchestrator_dir / session_directory_name(number)
+
+    def orchestrator_session_stream(self, number: int) -> Path:
+        """主ループの number 番目のセッションの stream-json の記録
+        orchestrator_session_dir(number) / ORCHESTRATOR_STREAM_FILE。"""
+        return self.orchestrator_session_dir(number) / ORCHESTRATOR_STREAM_FILE
+
+    @property
+    def orchestrator_monitor_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE
+
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
         return self.interval_frames_dir / frame_file_name(t)
@@ -201,6 +264,16 @@ def frame_file_name(t: float, number: int = 1) -> str:
     if number > 1:
         stem = f"{stem}-{number}"
     return f"{stem}{FRAME_FILE_SUFFIX}"
+
+
+def session_directory_name(number: int) -> str:
+    """主ループの number 番目 (1 始まり) のセッションのディレクトリーの名前 `session-<連番3桁>` を返す。
+
+    例: 1 → session-001、12 → session-012、1000 → session-1000。number が 1 未満なら ValueError。
+    """
+    if number < 1:
+        raise ValueError(f"session number must be 1 or more: {number}")
+    return f"{ORCHESTRATOR_SESSION_DIR_PREFIX}{number:0{ORCHESTRATOR_SESSION_NUMBER_DIGITS}d}"
 
 
 def run_directory_name(started_at: datetime) -> str:

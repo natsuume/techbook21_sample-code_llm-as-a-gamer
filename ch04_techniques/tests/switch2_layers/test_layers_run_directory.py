@@ -13,12 +13,14 @@ from switch2_layers.run_directory import (
     MIDDLE_MAP_RECORDS_FILE,
     MIDDLE_SYSTEM_CALLS_FILE,
     SURFACE_REQUESTS_LOG_FILE,
+    TASKS_LOG_FILE,
     RunPaths,
     create_run_directory,
     frame_file_name,
     initial_common_controls,
     open_run_directory,
     run_directory_name,
+    session_directory_name,
     write_initial_notes,
 )
 from switch2_layers.surface.box_targets import (
@@ -134,6 +136,41 @@ def test_system_calls_path():
 def test_safety_log_path():
     root = Path("/runs/20261115-142233")
     assert RunPaths(root).safety_log == root / "safety.jsonl"
+
+
+def test_tasks_log_path():
+    root = Path("/runs/20261115-142233")
+    assert TASKS_LOG_FILE == "tasks.jsonl"
+    assert RunPaths(root).tasks_log == root / "tasks.jsonl"
+
+
+def test_orchestrator_paths():
+    root = Path("/runs/20261115-142233")
+    paths = RunPaths(root)
+    assert paths.orchestrator_dir == root / "orchestrator"
+    assert paths.orchestrator_sessions_log == root / "orchestrator" / "sessions.jsonl"
+    assert paths.orchestrator_turns_log == root / "orchestrator" / "turns.jsonl"
+    assert paths.orchestrator_session_dir(1) == root / "orchestrator" / "session-001"
+    assert paths.orchestrator_session_stream(12) == (
+        root / "orchestrator" / "session-012" / "stream.jsonl"
+    )
+    assert paths.claude_skills_dir == root / ".claude" / "skills"
+    assert paths.orchestrator_monitor_log == root / "orchestrator" / "monitor.jsonl"
+
+
+def test_session_directory_name_uses_three_digits():
+    assert session_directory_name(1) == "session-001"
+    assert session_directory_name(999) == "session-999"
+    assert session_directory_name(1000) == "session-1000"
+    with pytest.raises(ValueError):
+        session_directory_name(0)
+
+
+def test_create_run_directory_does_not_create_orchestrator_directories(tmp_path):
+    # orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループが作る
+    paths = create_run_directory(tmp_path, STARTED_AT)
+    assert not paths.orchestrator_dir.exists()
+    assert not (paths.root / ".claude").exists()
 
 
 def test_frame_file_name_uses_nine_digit_milliseconds():

@@ -146,6 +146,42 @@ def test_init_enables_features_in_available_order(tmp_path):
     )
 
 
+def test_init_writes_initial_files_of_enabled_features_unsubstituted(tmp_path):
+    directory = tmp_path / "play"
+    result = handle_init(
+        directory,
+        "G",
+        "X",
+        ["memo-files"],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert result.exit_code == 0
+    memo = directory / "memo.md"
+    assert memo.is_file()
+    assert memo.read_text(encoding="utf-8") == "# メモ $goal\n"
+
+
+def test_init_without_features_creates_only_the_base_files(tmp_path):
+    directory = tmp_path / "play"
+    handle_init(
+        directory,
+        "G",
+        "X",
+        [],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert sorted(os.listdir(directory)) == [
+        "CLAUDE.md",
+        "frames",
+        "harness.json",
+        "records",
+    ]
+
+
 def test_init_prints_absolute_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = handle_init(
@@ -282,6 +318,87 @@ def test_report_ignores_frames_of_failed_looks(paths, clock):
     result = handle_report(paths, as_json=True)
     assert result.exit_code == 0
     assert json.loads(result.stdout_lines[0])["command_counts"] == {"look": 2}
+
+
+# --- look の行動履歴 ---
+
+HISTORY_HEADER = "直近の行動 (古い順、最大 20 件。秒数はこの撮影の何秒前か):"
+
+
+class RecordingFramesChanged:
+    """frames_changed の fake。呼ばれた (前, 後) の組を calls に記録し、changed を返す。"""
+
+    def __init__(self, changed: bool) -> None:
+        self.changed = changed
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, before: str, after: str) -> bool:
+        self.calls.append((before, after))
+        return self.changed
+
+
+def record_earlier_actions(paths: WorkspacePaths) -> None:
+    """20 秒前の look (frames/000001.png) と 10 秒前の press を events.jsonl に記録する。
+
+    次の look が frames/000002.png に保存するよう、frames/000001.png の場所も埋めておく。
+    """
+    (paths.frames_dir / "000001.png").write_bytes(b"")
+    append_event(
+        paths.events_file,
+        CommandEvent(START_TIME - 20, "look", (), "ok", True, 0.2, "frames/000001.png"),
+    )
+    append_event(
+        paths.events_file,
+        CommandEvent(START_TIME - 10, "press", ("tap", "A"), "ok tap A", True, 0.4),
+    )
+
+
+def test_look_with_frames_changed_prints_the_history_after_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    frames_changed = RecordingFramesChanged(changed=True)
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, frames_changed=frames_changed
+    )
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(
+            f"ok {frame_path}",
+            HISTORY_HEADER,
+            "- 20 秒前 look 000001.png",
+            "- 10 秒前 press tap A: 画面の変化 あり",
+        ),
+    )
+    assert frames_changed.calls == [("frames/000001.png", "frames/000002.png")]
+
+
+def test_look_with_frames_changed_prints_no_actions_in_a_new_workspace(paths, clock):
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        frames_changed=RecordingFramesChanged(changed=True),
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {frame_path}", "直近の行動: なし")
+    )
+
+
+def test_failed_look_with_frames_changed_prints_only_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    frames_changed = RecordingFramesChanged(changed=True)
+    daemon = FakeDaemon(clock, {"shot": "error no frame yet"})
+    result = handle_look(paths, send=daemon, clock=clock, frames_changed=frames_changed)
+    assert result == CommandResult(exit_code=1, stdout_lines=("error no frame yet",))
+    assert frames_changed.calls == []
+
+
+def test_look_without_frames_changed_prints_only_the_reply(paths, clock):
+    record_earlier_actions(paths)
+    result = handle_look(paths, send=FakeDaemon(clock), clock=clock)
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
 
 
 # --- press ---
@@ -663,7 +780,7 @@ def test_run_launches_and_reports_the_outcome(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={"PATH": "/usr/bin"},
@@ -697,7 +814,7 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -707,6 +824,26 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
     assert "Bash(uv run switch2-harness note *)" in args
     assert "Bash(uv run switch2-harness notes *)" in args
     assert "Bash(uv run switch2-harness history *)" not in args
+
+
+def test_run_allows_writing_files_of_enabled_features(paths, clock):
+    write_harness_json(paths, ["memo-files"])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    args = starter.launches[0].args
+    assert args[args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+    assert "Edit(./memo.md)" in args
 
 
 def test_run_reports_budget_exhausted(paths, clock):
@@ -731,7 +868,7 @@ def test_run_reports_budget_exhausted(paths, clock):
         LaunchOptions(max_budget_usd=1.0),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -755,7 +892,7 @@ def test_run_reports_an_unconfirmed_release(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=FakeSleep(clock),
         send=daemon,
         base_env={},
@@ -788,7 +925,7 @@ def test_run_rejects_non_positive_minutes(paths, clock, minutes):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -811,7 +948,7 @@ def test_run_rejects_unknown_feature_in_harness_json(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -836,7 +973,7 @@ def test_run_rejects_invalid_max_budget_usd(paths, clock, budget, shown):
         LaunchOptions(max_budget_usd=budget),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -870,7 +1007,7 @@ def test_run_terminated_by_signal_reports_an_error_after_cleanup(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -905,7 +1042,7 @@ def test_run_interrupted_by_ctrl_c_reports_an_error_after_cleanup(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -921,7 +1058,7 @@ def test_run_interrupted_by_ctrl_c_reports_an_error_after_cleanup(paths, clock):
     ]
 
 
-def test_run_uses_the_monotonic_clock_for_the_deadline(paths):
+def test_run_uses_the_deadline_clock_for_the_deadline(paths):
     write_harness_json(paths, [])
     wall = FakeClock(START_TIME)
     mono = FakeClock(50.0)
@@ -933,7 +1070,7 @@ def test_run_uses_the_monotonic_clock_for_the_deadline(paths):
         LaunchOptions(),
         start_process=starter,
         clock=wall,
-        monotonic=mono,
+        deadline_clock=mono,
         sleep=sleep,
         send=FakeDaemon(mono),
         base_env={},

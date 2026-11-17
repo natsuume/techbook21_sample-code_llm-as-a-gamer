@@ -952,9 +952,9 @@ surface が決めた操作は、コントローラーに送る直前に、surfac
 
 ## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
 
-`switch2-harness` は、第3章と同じく Claude Code に Switch 2 をプレイさせるための、補助コマンドと指示ファイル (`CLAUDE.md`) を用意するパッケージ ([`src/switch2_harness/`](./src/switch2_harness/)) です。第1章で取り上げた先行研究の手法を要素として足し、要素ごとに有効・無効を切り替えて効果を比べます。要素をすべて無効にすると、撮影とボタン入力のコマンドだけを使う、第3章に近い条件になります。第3章と違うのは、`press` で HOME を押せないこと (HOME 画面に戻るときは `finish` を使う)、入力と撮影を記録すること、`run` で起動するときに起動した人の設定を混ぜないことです。
+`switch2-harness` は、第3章と同じく Claude Code に Switch 2 をプレイさせるための、補助コマンドと指示ファイル (`CLAUDE.md`) を用意するパッケージ ([`src/switch2_harness/`](./src/switch2_harness/)) です。第1章で取り上げた先行研究の手法を要素として足し、要素ごとに有効・無効を切り替えて効果を比べます。要素をすべて無効にすると、撮影とボタン入力のコマンドだけを使う、第3章に近い条件になります。第3章と違うのは、`press` で HOME を押せないこと (HOME 画面に戻るときは `finish` を使う)、人から指示されたとき以外はソフトを終了しないよう `CLAUDE.md` で指示すること、入力と撮影を記録すること、`run` で起動するときに起動した人の設定を混ぜないことです。
 
-映像と入力には第2章のデーモンを使います。デーモン (`switch2-remote-daemon`) は、`ch02_setup` ディレクトリーで先に起動しておいてください。
+映像と入力には第2章のデーモンを使います。デーモン (`switch2-remote-daemon`) は、`ch02_setup` ディレクトリーで先に起動しておいてください。Pico 2 W は、[第2章の README](../ch02_setup/README.md) の「7. Switch 2 で Pico 2 W を 1P に登録する」の手順で 1P にしておきます。2026-11-17 に『ポケットモンスター ファイアレッド』で試したところ、2P のままでも HOME メニューは操作でき、ソフトの起動まで進みましたが、ゲームは入力に応じませんでした。
 
 ### 作業ディレクトリーを作る
 
@@ -977,6 +977,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 |---|---|
 | `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
 | `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
+| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ |
 | `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
@@ -988,7 +989,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 
 | サブコマンド | 使う人 | 動作 |
 |---|---|---|
-| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します |
+| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します。行動履歴 (`action-history`) を有効にすると、続けて直近の行動も表示します |
 | `press ACTION ARGS...` | エージェント | `tap` / `hold` / `down` / `up` を、第2章のクライアントと同じ書き方でデーモンに送ります。HOME を含む入力と、11 個以上を並べた `tap` は送らずにエラーにします |
 | `status` | エージェント | デーモンの動作状況を表示します |
 | `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
@@ -1023,6 +1024,7 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - 子のプロセスには、起動した人の環境変数から、`CLAUDE` で始まる変数 (Claude Code の認証・設定の場所・プロバイダーの選択に使うものを除く) と、`ANTHROPIC_` で始まらない `*_API_KEY` を除いて渡します。Claude Code のセッションの中から `run` を起動しても、そのセッションの変数は子に渡りません
 - 子のプロセスの環境変数 `SWITCH2_HARNESS_WORKSPACE` に作業ディレクトリーのパスを入れます。この変数があるとき、`look`・`press`・`status`・`finish` はその作業ディレクトリーだけを使い、別の `--workspace` を指定するとエラーにします。エージェントが別の実験の作業ディレクトリーに画像や記録を書かないようにするためです
 - 使える組み込みのツールを Bash と Read に限り (`--tools Bash,Read`)、Bash は `uv run switch2-harness <サブコマンド>` だけを許可します。`--permission-mode dontAsk` で、許可していない呼び出しは確認なしで拒否します。Web 検索はできません
+- メモファイル (`notes`) を有効にしたときは、`--tools` に Write と Edit を足し、`--allowedTools "Edit(./notes.md)"` で `notes.md` だけに書き込めるようにします
 
 2026-11-16〜17 に Claude Code 2.1.325 で起動し、次のことを確かめました。
 
@@ -1030,7 +1032,10 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 - `uv run switch2-harness status` は許可されて実行され、許可したサブコマンドの後ろに付けた出力のリダイレクト (`> out.txt`)・コマンド置換 (`$(...)`)・変数の展開 (`$HOME`・`"$PATH"`・`${USER}`)・`~` と、`cat ~/.bashrc`・Read での `~/.bashrc` の読み取りは拒否される
 - 作業ディレクトリーの `CLAUDE.md` の内容がシステムプロンプトに入る
 - `uv run switch2-harness status --workspace ..` と、環境変数を書き換えて起動する形 (`SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`・`env SWITCH2_HARNESS_WORKSPACE=/tmp uv run ...`) は拒否される
+- `--tools` に Write と Edit を足して `--allowedTools "Edit(./<ファイル名>)"` を渡すと、そのファイルへの Write と Edit は通り、作業ディレクトリーのほかのファイル (`CLAUDE.md`・`records/` の中など) と作業ディレクトリーの外への書き込みは拒否される
 - `--resume` で続けても session_id は変わらず、result の `total_cost_usd` はセッションの累計 (前の起動の分を含む)、`num_turns` はその起動の分になる。`--resume` で起動したプロセスの `--max-budget-usd` は、累計ではなくそのプロセスが使った分と比べられる (累計 0.00015 USD・そのプロセスの分 0.00008 USD で、予算 0.0001 USD の起動が `success` で終わった)
+
+期限と経過時間は、記録の時刻と同じく壁時計 (`time.time`) で計ります。第3章の試行も、撮影のたびに `date` で時刻を取って期限を判断しました。`time.monotonic` を使わないのは、2026-11-17 に WSL2 で確かめたところ、実時間より約 8% 遅く進んだためです (20 分で約 1.5 分の差)。壁時計が NTP などで進んだり戻ったりすると、期限もその分ずれます。
 
 エージェントが期限より前に終わった場合は、残りが 30 秒以上あれば、同じセッションを `--resume` で続けます (最大 20 回)。`--max-budget-usd` は、起動し直しを含めた run 全体の上限です。起動し直すときは、それまでの費用を引いた残りを渡し、残りがなくなったら止めます。
 
@@ -1083,6 +1088,52 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 画面の変化は、2 枚をグレースケールにして 160x90 に縮小し、明るさの差が 24 を超える画素の割合で測ります。割合が 1% 未満の組を「変化なし」とします。期限で止めた起動は result を出さないことがあり (Claude Code のドキュメントには、SIGTERM で止めると result を記録しないとある)、その起動の分は費用・ターン数・時間に含まれません。起動の回数と応答の数は、result の有無によらず数えます。
 
 `--json` を付けると、同じ集計を JSON の 1 行で表示します。
+
+### 要素
+
+要素は `init --enable <名前>` で有効にします。有効にした要素は `harness.json` に記録され、`CLAUDE.md` にその要素の節が加わります。
+
+| 名前 | 内容 |
+|---|---|
+| `action-history` | 行動履歴。`look` の出力に、直近の行動と、`press` の前後の画面の変化を付けます |
+| `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
+
+#### 行動履歴 (`action-history`)
+
+`look` が成功すると、保存した PNG のパスの行の後に、直近の行動 (`look` と `press`、最大 20 件) を古い順に表示します。履歴は `records/events.jsonl` から作るので、前の `run` のセッションの行動も含みます。
+
+```text
+ok /home/user/ch04_techniques/plays/honogurashi/frames/000044.png
+直近の行動 (古い順、最大 20 件。秒数はこの撮影の何秒前か):
+- 40 秒前 look 000042.png
+- 35 秒前 press hold LS:-1,0 500: 画面の変化 あり
+- 20 秒前 look 000043.png
+- 15 秒前 press tap A: 画面の変化 なし
+- 14 秒前 press tap A: 画面の変化 なし
+- 2 秒前 press tap B: error already pressed: B
+```
+
+- 画面の変化は、その `press` の直前と直後の撮影 (成功した `look` の画像) を、`report` と同じ方法で比べた結果です。直後の撮影がまだ無い `press` は、今回の撮影と比べます
+- 同じ 2 枚の撮影の間に複数の `press` があれば、どれも同じ結果になります
+- 直前の撮影が無い `press` (作業ディレクトリーで最初の `look` より前の `press`) は「不明」です
+- 失敗した `press` と `look` は、画面の変化の代わりにエラーの応答を表示します
+
+#### メモファイル (`notes`)
+
+`init` で作業ディレクトリーの直下に `notes.md` を置き、エージェントが Write・Edit ツールで `notes.md` だけに書き込めるようにします。`CLAUDE.md` の節では、セッションを始めたら操作の前に `notes.md` を Read で読むことと、分かったことをその場で書くことを指示します。セッションは予告なしに終わるため、後でまとめて書く時間はありません。
+
+同じ作業ディレクトリーで `run` を繰り返すと、`run` ごとに、前の会話を持たない新しいセッションが始まります。前のセッションで分かったことは、`notes.md` を通して次のセッションに渡ります。`run` の中で Claude Code が期限より前に終わり、`--resume` で続けた場合は、同じセッションの続きです。
+
+`notes.md` の最初の内容は、次の 4 つの節の見出しだけです (`src/switch2_harness/instructions/notes-initial.md`)。
+
+| 節 | 書くこと (`CLAUDE.md` の指示) |
+|---|---|
+| 操作方法 | ボタンの割り当て、会話の送り方、メニューの開き方など |
+| ゲームの仕組み | 進め方、場所、物、人物など |
+| 試して効かなかったこと | 試した入力と、そのときの場面 |
+| 今の状況と次にやること | 今の場面と、次に試すこと。状況が変わったら書き直す |
+
+`notes.md` への書き込みは `records/events.jsonl` には記録されません。Write・Edit の呼び出しは `records/agent.jsonl` (stream-json) に残ります。
 
 ### 既知の制限
 

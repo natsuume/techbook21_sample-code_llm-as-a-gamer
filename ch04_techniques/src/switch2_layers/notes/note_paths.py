@@ -8,6 +8,7 @@
     scenes/<場面ID>/controls.md     場面の操作説明
     scenes/<場面ID>/tips.md         場面の攻略情報
     scenes/<場面ID>/tasks.md        場面の短期タスクリスト (共通の文書は無い)
+    scenes/<場面ID>/tasks.json      場面の短期タスクのキューの状態 (tasks.task_files)
     scenes/<場面ID>/box_targets.md  場面の「box で取るもの」(`- 名前: 説明` の行。場面の攻略情報の deep のジョブが書く)
     scene_labels.json              場面ラベルの一覧 (notes.scene_labels)
     map/                           マップの文書を置くディレクトリー
@@ -39,6 +40,8 @@ MAP_JSON_NOTE = f"{MAP_DIR}/map.json"
 MAP_PLACES_NOTE = f"{MAP_DIR}/places.md"
 SCENE_LABELS_FILE = "scene_labels.json"
 BOX_TARGETS_FILE = "box_targets.md"
+# 場面の短期タスクのキューの状態 (tasks.task_files)
+TASKS_JSON_FILE = "tasks.json"
 
 # 場面の文書の名前 (拡張子を除く)
 SceneNoteName = Literal["controls", "tips", "tasks"]
@@ -71,6 +74,16 @@ def box_targets_note(scene_id: str) -> str:
     if not is_scene_id(scene_id):
         raise ValueError(f"invalid scene id: {scene_id!r}")
     return f"{SCENES_DIR}/{scene_id}/{BOX_TARGETS_FILE}"
+
+
+def tasks_json_note(scene_id: str) -> str:
+    """場面の短期タスクのキューの状態の相対パス scenes/<scene_id>/tasks.json を返す。
+
+    scene_id が場面 ID の形でなければ ValueError。
+    """
+    if not is_scene_id(scene_id):
+        raise ValueError(f"invalid scene id: {scene_id!r}")
+    return f"{SCENES_DIR}/{scene_id}/{TASKS_JSON_FILE}"
 
 
 def document_key(kind: DocumentKind, scene_id: str | None) -> DocumentKey:

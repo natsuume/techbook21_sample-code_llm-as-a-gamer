@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
+from switch2_harness.action_history import FramesChanged, frames_changed_on_disk
 from switch2_harness.agent_launcher import (
     DEFAULT_MODEL,
     LaunchOptions,
@@ -40,8 +41,13 @@ from switch2_harness.commands import (
     handle_status,
 )
 from switch2_harness.daemon_client import SendCommand, send_command
-from switch2_harness.features import BASE_AGENT_COMMANDS, FEATURES, Feature
-from switch2_harness.harness_config import DEFAULT_GOAL
+from switch2_harness.features import (
+    ACTION_HISTORY_FEATURE,
+    BASE_AGENT_COMMANDS,
+    FEATURES,
+    Feature,
+)
+from switch2_harness.harness_config import DEFAULT_GOAL, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
 from switch2_harness.workspace import (
     NotAWorkspaceError,
@@ -59,18 +65,18 @@ class CliDependencies:
 
     send: デーモンへの送信 (本番は daemon_client.send_command)
     clock: 現在の epoch 秒。記録の時刻に使う (本番は time.time)
-    monotonic: run の期限と経過時間を計る単調時計 (本番は time.monotonic)
+    deadline_clock: run の期限と経過時間を計る時計 (本番は time.time。WSL2 では time.monotonic が実時間より遅く進むため使わない)
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
     environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
-    read_template: CLAUDE.md のテンプレートの読み込み (本番は instructions.read_package_template)
+    read_template: CLAUDE.md と、要素が置くファイルの最初の内容のテンプレートの読み込み (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     """
 
     send: SendCommand
     clock: Callable[[], float]
-    monotonic: Callable[[], float]
+    deadline_clock: Callable[[], float]
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     start_process: StartProcess
@@ -89,7 +95,7 @@ def production_dependencies() -> CliDependencies:
     return CliDependencies(
         send=send_command,
         clock=time.time,
-        monotonic=time.monotonic,
+        deadline_clock=time.time,
         now=_local_now,
         sleep=time.sleep,
         start_process=start_claude_process,
@@ -194,13 +200,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _look_frames_changed(
+    paths: WorkspacePaths, available: tuple[Feature, ...]
+) -> FramesChanged | None:
+    """look に渡す frames_changed を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に行動履歴の要素
+    (features.ACTION_HISTORY_FEATURE) があれば action_history.frames_changed_on_disk(paths.root)、無ければ None。
+    """
+    config = read_config(paths.harness_file, available)
+    if ACTION_HISTORY_FEATURE in config.features:
+        return frames_changed_on_disk(paths.root)
+    return None
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
     """init 以外のサブコマンドを commands の処理に振り分ける。"""
     command: str = args.command
     if command == "look":
-        return handle_look(paths, send=deps.send, clock=deps.clock)
+        return handle_look(
+            paths,
+            send=deps.send,
+            clock=deps.clock,
+            frames_changed=_look_frames_changed(paths, deps.available),
+        )
     if command == "press":
         return handle_press(
             paths, args.action, args.args, send=deps.send, clock=deps.clock
@@ -221,7 +246,7 @@ def _dispatch(
             options,
             start_process=deps.start_process,
             clock=deps.clock,
-            monotonic=deps.monotonic,
+            deadline_clock=deps.deadline_clock,
             sleep=deps.sleep,
             send=deps.send,
             base_env=deps.environ,
@@ -241,6 +266,9 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
         - 人用のサブコマンド (report / run) は、固定の環境変数を見ずに --workspace (省けば ".") を使う
     続けて workspace.require_workspace で作業ディレクトリーを確かめる。
     NotAWorkspaceError なら `error <メッセージ>` を stderr に出して 1 を返す (デーモンには送らない)。
+    look は、harness.json (read_config(..., deps.available)) で行動履歴の要素 (features.ACTION_HISTORY_FEATURE) が
+    有効なら、action_history.frames_changed_on_disk(<作業ディレクトリー>) を frames_changed として commands.handle_look に渡す
+    (look の応答の後に直近の行動を表示する)。無効なら渡さない。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)

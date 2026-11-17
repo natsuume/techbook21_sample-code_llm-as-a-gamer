@@ -5,7 +5,7 @@ import math
 import os
 import signal
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +61,7 @@ from switch2_harness.agent_launcher import (
     start_claude_process,
     stop_process,
     stop_reason_after_exit,
+    tool_names,
     validate_max_budget_usd,
     validate_minutes,
 )
@@ -156,6 +157,22 @@ def test_allowed_tools_lists_only_harness_commands():
         "Bash(uv run switch2-harness look *)",
         "Bash(uv run switch2-harness press *)",
     ]
+
+
+def test_allowed_tools_adds_edit_rules_for_writable_files():
+    assert allowed_tools(("look",), ("notes.md", "map.md")) == [
+        "Bash(uv run switch2-harness look *)",
+        "Edit(./notes.md)",
+        "Edit(./map.md)",
+    ]
+
+
+def test_tool_names_without_writable_files():
+    assert tool_names(()) == "Bash,Read"
+
+
+def test_tool_names_with_writable_files_adds_write_and_edit():
+    assert tool_names(("notes.md",)) == "Bash,Read,Write,Edit"
 
 
 @pytest.mark.parametrize(
@@ -263,6 +280,27 @@ def test_build_claude_args_puts_feature_commands_in_allowed_tools():
         "Bash(uv run switch2-harness finish *)",
         "Bash(uv run switch2-harness history *)",
     ]
+
+
+def test_build_claude_args_with_writable_files_allows_write_and_edit():
+    args = build_claude_args(
+        "P",
+        BASE_AGENT_COMMANDS,
+        Path("/w/CLAUDE.md"),
+        LaunchOptions(),
+        writable_files=("notes.md",),
+    )
+    assert args[args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+    start = args.index("--allowedTools") + 1
+    end = args.index("--disallowedTools")
+    assert args[start:end] == [
+        "Bash(uv run switch2-harness look *)",
+        "Bash(uv run switch2-harness press *)",
+        "Bash(uv run switch2-harness status *)",
+        "Bash(uv run switch2-harness finish *)",
+        "Edit(./notes.md)",
+    ]
+    assert "Read" not in args
 
 
 def test_claude_env_overrides():
@@ -877,6 +915,7 @@ def run_scenario(
     sleep: Callable[[float], None] | None = None,
     shield: Callable[[], AbstractContextManager[None]] = ignore_interrupts,
     defer: Callable[[], AbstractContextManager[None]] = defer_interrupts,
+    writable_files: Sequence[str] = (),
 ) -> RunOutcome:
     """scenario の fake で run_agent_until を呼ぶ。send と sleep は渡したときだけ置き換える。"""
     return run_agent_until(
@@ -887,11 +926,12 @@ def run_scenario(
         options if options is not None else LaunchOptions(),
         start_process=scenario.starter,
         clock=scenario.clock,
-        monotonic=scenario.clock,
+        deadline_clock=scenario.clock,
         sleep=sleep if sleep is not None else scenario.sleep,
         send=send if send is not None else scenario.daemon,
         record=scenario.events.append,
         base_env={"PATH": "/usr/bin"},
+        writable_files=writable_files,
         shield=shield,
         defer=defer,
     )
@@ -1009,6 +1049,34 @@ def test_run_resumes_with_the_last_session_id(tmp_path):
     assert resume.args == ("resume", "abc")
     assert resume.reply == "launched claude launch=2 resume=abc"
     assert scenario.daemon.sent == [["up", "ALL"]]
+
+
+def test_run_passes_writable_files_on_launch_and_resume(tmp_path):
+    first = ProcessPlan(
+        runs_for_s=10.0, output_lines=(session_line("old"), result_line("abc"))
+    )
+    scenario = make_scenario(tmp_path, [first, ProcessPlan(runs_for_s=None)])
+    outcome = run_scenario(scenario, minutes=1.0, writable_files=("notes.md",))
+    assert outcome == RunOutcome(reason="deadline", launches=2)
+    first_launch, second_launch = scenario.starter.launches
+    assert first_launch.args == build_claude_args(
+        first_prompt(GAME),
+        BASE_AGENT_COMMANDS,
+        scenario.paths.instructions_file,
+        LaunchOptions(),
+        writable_files=("notes.md",),
+    )
+    assert second_launch.args == build_claude_args(
+        RESUME_PROMPT,
+        BASE_AGENT_COMMANDS,
+        scenario.paths.instructions_file,
+        LaunchOptions(),
+        resume_session_id="abc",
+        writable_files=("notes.md",),
+    )
+    for launch in (first_launch, second_launch):
+        assert launch.args[launch.args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+        assert "Edit(./notes.md)" in launch.args
 
 
 def test_run_resumes_when_exactly_min_remaining_is_left(tmp_path):
@@ -1292,7 +1360,7 @@ def test_run_releases_buttons_even_if_stopping_fails(tmp_path):
             LaunchOptions(),
             start_process=start_with_failing_signal,
             clock=scenario.clock,
-            monotonic=scenario.clock,
+            deadline_clock=scenario.clock,
             sleep=scenario.sleep,
             send=scenario.daemon,
             record=scenario.events.append,
@@ -1319,7 +1387,7 @@ def test_run_releases_buttons_when_the_first_launch_fails(tmp_path):
             LaunchOptions(),
             start_process=failing_start,
             clock=scenario.clock,
-            monotonic=scenario.clock,
+            deadline_clock=scenario.clock,
             sleep=scenario.sleep,
             send=scenario.daemon,
             record=scenario.events.append,
@@ -1597,7 +1665,7 @@ def test_stop_process_sends_sigkill_even_if_snapshotting_fails(error):
     assert stopped_sessions == [{process.pid}]
 
 
-# --- 期限は単調時計で計る ---
+# --- 期限は deadline_clock で計り、記録の時刻は clock で取る ---
 
 
 @dataclass
@@ -1611,9 +1679,9 @@ class TwoClockRun:
 
 
 def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoClockRun:
-    """壁時計 (clock) と単調時計 (monotonic) を分けて run を動かす。
+    """記録の時計 (clock、wall) と期限の時計 (deadline_clock、mono) を分けて run を動かす。
 
-    sleep は単調時計だけを進める。jump_wall_at_sleep を渡すと、その回の sleep で壁時計を 1 時間進める。
+    sleep は期限の時計だけを進める。jump_wall_at_sleep を渡すと、その回の sleep で記録の時計を 1 時間進める。
     """
     wall = FakeClock(START_TIME)
     mono = FakeClock(50.0)
@@ -1637,7 +1705,7 @@ def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoCl
         LaunchOptions(),
         start_process=starter,
         clock=wall,
-        monotonic=mono,
+        deadline_clock=mono,
         sleep=sleep,
         send=FakeDaemon(mono),
         record=events.append,
@@ -1646,21 +1714,21 @@ def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoCl
     return TwoClockRun(wall, mono, starter, sleep_calls, events, outcome)
 
 
-def test_run_does_not_stop_early_when_the_wall_clock_jumps(tmp_path):
+def test_run_does_not_stop_early_when_the_record_clock_jumps(tmp_path):
     run = run_with_two_clocks(tmp_path, jump_wall_at_sleep=10)
     assert run.outcome == RunOutcome(reason="deadline", launches=1)
-    # 単調時計で 60 秒 (POLL_INTERVAL_S ごとに 60 回) たってから止まる
+    # 期限の時計で 60 秒 (POLL_INTERVAL_S ごとに 60 回) たってから止まる
     assert len(run.sleep_calls) == 60
     start, stop, release = run.events
-    # 記録の時刻は壁時計
+    # 記録の時刻は記録の時計
     assert start.time == START_TIME
     assert stop.time == START_TIME + 3600.0
     assert release.time == START_TIME + 3600.0
-    # up ALL にかかった時間は単調時計で計る (FakeDaemon が単調時計を 0.5 秒進める)
+    # up ALL にかかった時間は期限の時計で計る (FakeDaemon が期限の時計を 0.5 秒進める)
     assert release.elapsed_s == pytest.approx(0.5)
 
 
-def test_run_stops_at_the_monotonic_deadline_without_the_wall_clock(tmp_path):
+def test_run_stops_at_the_deadline_clock_without_the_record_clock(tmp_path):
     run = run_with_two_clocks(tmp_path, jump_wall_at_sleep=None)
     assert run.outcome == RunOutcome(reason="deadline", launches=1)
     assert len(run.sleep_calls) == 60

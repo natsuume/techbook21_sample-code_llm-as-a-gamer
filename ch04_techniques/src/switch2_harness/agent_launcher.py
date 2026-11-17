@@ -27,9 +27,12 @@ CLAUDE.md (~/.claude/CLAUDE.md を含む)、自動メモリー、親ディレク
     - --restricted: 設定ファイルはユーザー・プロジェクト・ローカルのものを読まず、managed settings と --settings だけを読む。
       コマンドを実行するツールは --tools で名前を挙げたものだけが残り、ファイルのツールは作業ディレクトリーの中に閉じ込められる
     - --settings CLAUDE_SETTINGS_JSON: 作業ディレクトリーの外の読み取りを、Read と読み取り専用の Bash の両方で止める
-    - --tools Bash,Read: --restricted では Bash も名前を挙げないと使えないため、Bash と Read を挙げる
+    - --tools Bash,Read: --restricted では Bash も名前を挙げないと使えないため、Bash と Read を挙げる。
+      有効な要素に書き換えられるファイル (features.WritableFile) があるときは、Write と Edit も挙げる (tool_names)
     - --allowedTools: 承認なしで通す Bash を switch2-harness のエージェント用サブコマンドだけにする
-      (作業ディレクトリーの中の Read は承認なしで通るため、Read は挙げない)
+      (作業ディレクトリーの中の Read は承認なしで通るため、Read は挙げない)。
+      有効な要素に書き換えられるファイルがあるときは、そのファイルの Edit の規則 (Edit(./<ファイル名>)) を足し、
+      Write・Edit で書けるファイルをそれだけにする (Edit の規則は Write にもかかる。allowed_tools)
     - --strict-mcp-config: --mcp-config で渡したもの以外の MCP を使わない (何も渡さない)
     - --disallowedTools Skill・--disable-slash-commands: Skill とスラッシュコマンドを使わせない
     - 環境変数 CLAUDE_CODE_DISABLE_CLAUDE_MDS・CLAUDE_CODE_DISABLE_AUTO_MEMORY を 1 にし、
@@ -78,6 +81,11 @@ DEFAULT_MODEL = "claude-opus-5-5"
 
 # エージェント用のサブコマンドを Bash で許可するときのコマンドの書き出し
 HARNESS_COMMAND_PREFIX = "uv run switch2-harness"
+
+# --tools に必ず挙げるツール (--restricted では Bash も名前を挙げないと使えない)
+BASE_TOOL_NAMES: tuple[str, ...] = ("Bash", "Read")
+# 書き換えられるファイルがあるときに --tools に足すツール
+FILE_WRITE_TOOL_NAMES: tuple[str, ...] = ("Write", "Edit")
 
 # 期限より前に終わったプロセスを --resume で起動し直すときのプロンプト
 RESUME_PROMPT = "プレイを続けてください。"
@@ -247,14 +255,33 @@ def first_prompt(game: str) -> str:
     return f"指示に従って、ゲーム「{game}」のプレイを始めてください。"
 
 
-def allowed_tools(agent_commands: Sequence[str]) -> list[str]:
+def tool_names(writable_files: Sequence[str]) -> str:
+    """--tools に渡す値を返す。
+
+    writable_files (書き換えられるファイルの名前) が空なら "Bash,Read"、空でなければ "Bash,Read,Write,Edit"。
+    """
+    names = BASE_TOOL_NAMES + (FILE_WRITE_TOOL_NAMES if writable_files else ())
+    return ",".join(names)
+
+
+def allowed_tools(
+    agent_commands: Sequence[str], writable_files: Sequence[str] = ()
+) -> list[str]:
     """--allowedTools に渡す値の列を返す。
 
-    agent_commands の順に `Bash(uv run switch2-harness <サブコマンド> *)` を並べたものだけを返す
-    (Read は作業ディレクトリーの中なら承認なしで通るため、挙げない)。
-    例: ("look",) なら ["Bash(uv run switch2-harness look *)"]。
+    agent_commands の順の `Bash(uv run switch2-harness <サブコマンド> *)` に続けて、
+    writable_files の順に `Edit(./<ファイル名>)` を並べる。`./` は claude を起動したディレクトリー
+    (作業ディレクトリー) からの相対パス。Edit の規則は Write にもかかり、名前を挙げたファイルだけが
+    Write・Edit で書け、作業ディレクトリーのほかのファイル (CLAUDE.md・harness.json・records/ の中など) は
+    dontAsk で拒否される (Claude Code 2.1.325 で 2026-11-17 に確かめた)。
+    Read は作業ディレクトリーの中なら承認なしで通るため挙げない。
+    例: (("look",), ("notes.md",)) なら ["Bash(uv run switch2-harness look *)", "Edit(./notes.md)"]。
     """
-    return [f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands]
+    bash_rules = [
+        f"Bash({HARNESS_COMMAND_PREFIX} {command} *)" for command in agent_commands
+    ]
+    edit_rules = [f"Edit(./{file_name})" for file_name in writable_files]
+    return bash_rules + edit_rules
 
 
 def format_budget_usd(budget_usd: float) -> str:
@@ -268,14 +295,16 @@ def build_claude_args(
     instructions_path: Path,
     options: LaunchOptions,
     resume_session_id: str | None = None,
+    *,
+    writable_files: Sequence[str] = (),
 ) -> list[str]:
     """claude -p の起動引数を返す。順序は次のとおり:
 
         claude -p <prompt>
           --output-format stream-json --verbose
           --permission-mode dontAsk
-          --tools Bash,Read
-          --allowedTools <allowed_tools(agent_commands) の各値>
+          --tools <tool_names(writable_files)>
+          --allowedTools <allowed_tools(agent_commands, writable_files) の各値>
           --disallowedTools Skill
           --disable-slash-commands
           --strict-mcp-config
@@ -299,9 +328,9 @@ def build_claude_args(
         "--permission-mode",
         "dontAsk",
         "--tools",
-        "Bash,Read",
+        tool_names(writable_files),
         "--allowedTools",
-        *allowed_tools(agent_commands),
+        *allowed_tools(agent_commands, writable_files),
         "--disallowedTools",
         "Skill",
         "--disable-slash-commands",
@@ -611,7 +640,7 @@ def stop_reason_after_exit(
 def _send_release(
     send: SendCommand,
     sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
 ) -> str:
     """後片付けの up ALL を送り、デーモンの応答を返す。
 
@@ -622,13 +651,13 @@ def _send_release(
     各送信の待ち時間の上限は、RELEASE_TIMEOUT_S の残り (0.1 秒より短くはしない)。
     接続の拒否以外の応答 (成功、上限の超過、接続後の切断など) は、送り直さずにそのまま返す。
     """
-    started = monotonic()
+    started = deadline_clock()
     while True:
-        remaining = RELEASE_TIMEOUT_S - (monotonic() - started)
+        remaining = RELEASE_TIMEOUT_S - (deadline_clock() - started)
         reply = send(["up", "ALL"], timeout_s=max(remaining, 0.1))
         if not reply.startswith(CANNOT_CONNECT_PREFIX):
             return reply
-        if monotonic() - started + RELEASE_RETRY_INTERVAL_S >= RELEASE_TIMEOUT_S:
+        if deadline_clock() - started + RELEASE_RETRY_INTERVAL_S >= RELEASE_TIMEOUT_S:
             return reply
         sleep(RELEASE_RETRY_INTERVAL_S)
 
@@ -687,19 +716,22 @@ def run_agent_until(
     *,
     start_process: StartProcess,
     clock: Callable[[], float],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
     sleep: Callable[[float], None],
     send: SendCommand,
     record: Callable[[CommandEvent], None],
     base_env: Mapping[str, str],
+    writable_files: Sequence[str] = (),
     shield: Shield = ignore_interrupts,
     defer: Shield = defer_interrupts,
 ) -> RunOutcome:
     """claude -p を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
 
-    時計は 2 つ受け取る。monotonic (本番は time.monotonic) は期限・残り時間・経過時間 (elapsed_s) を計る単調時計で、
-    clock (本番は time.time) は記録の時刻 (CommandEvent.time) に使う壁時計。壁時計は NTP などで進んだり戻ったりするため、
-    期限の計算には使わない。期限は、最初の起動の前の monotonic() + minutes * 60。
+    時計は 2 つ受け取る。deadline_clock は期限・残り時間・経過時間 (elapsed_s) を計る時計で、
+    clock は記録の時刻 (CommandEvent.time) に使う時計。本番はどちらも壁時計 (time.time) で、第3章の試行
+    (撮影のたびに date で時刻を取った) と同じく実時間で期限を決める。WSL2 では time.monotonic が実時間より約 8% 遅く
+    進んだ (2026-11-17 に確かめた) ため、期限には使わない。壁時計が NTP などで進んだり戻ったりすると、期限もその分ずれる。
+    期限は、最初の起動の前の deadline_clock() + minutes * 60。
 
     最初の起動の前に offset = agent_log_size(paths.agent_log_file) を覚える。以下の read_last_* と
     read_max_total_cost_usd には (paths.agent_log_file, offset) を渡し、今回の run の出力だけを読む。
@@ -709,10 +741,11 @@ def run_agent_until(
     (本番の defer は signal_guard.defer_interrupts。起動の直後に届いた Ctrl-C・SIGTERM・SIGHUP で、
     起動した claude を見失って止め損ねないように、シグナルを変数に入れた後まで遅らせる)。
     最初の起動のプロンプトは first_prompt(game) で、--resume は付けず、--max-budget-usd には options.max_budget_usd を渡す。
+    最初の起動と起動し直しの両方で、build_claude_args に writable_files (エージェントが書き換えられるファイルの名前) を渡す。
 
     POLL_INTERVAL_S ごとに (sleep(POLL_INTERVAL_S)) 次を確かめる:
-        - プロセスが動いていて、monotonic() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)
-        - プロセスが終わっていたら、stop_reason_after_exit で判定する。渡す値は、期限までの残りの秒数 (期限 − monotonic())、
+        - プロセスが動いていて、deadline_clock() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)
+        - プロセスが終わっていたら、stop_reason_after_exit で判定する。渡す値は、期限までの残りの秒数 (期限 − deadline_clock())、
           read_last_result_subtype、残りの予算 (options.max_budget_usd が None でなければ
           options.max_budget_usd − read_max_total_cost_usd。read_max_total_cost_usd が None なら
           options.max_budget_usd のまま。上限が無ければ None)、起動し直した回数、read_last_session_id。
@@ -747,13 +780,13 @@ def run_agent_until(
         - 停止: args=("stop", <理由>)、reply="stopped reason=<理由> launches=<起動した回数>"、ok=True、elapsed_s=0.0
           (プロセスを止めた後に記録する。例外で抜けるときは記録しない)
         - up ALL: args=("release",)、reply=<デーモンの応答>、ok=<応答が error で始まらない>、
-          elapsed_s=<送信にかかった秒数 (monotonic() の差)> (例外で抜けるときも記録する)
+          elapsed_s=<送信にかかった秒数 (deadline_clock() の差)> (例外で抜けるときも記録する)
     各イベントの time はそのときの clock() (壁時計)。
     """
     log_path = paths.agent_log_file
     offset = agent_log_size(log_path)
     env = build_claude_env(base_env, paths.root)
-    deadline = monotonic() + minutes * 60.0
+    deadline = deadline_clock() + minutes * 60.0
     launches = 0
     resumes = 0
     process: AgentProcess | None = None
@@ -764,7 +797,12 @@ def run_agent_until(
         launch_options: LaunchOptions, prompt: str, session_id: str | None
     ) -> AgentProcess:
         args = build_claude_args(
-            prompt, agent_commands, paths.instructions_file, launch_options, session_id
+            prompt,
+            agent_commands,
+            paths.instructions_file,
+            launch_options,
+            session_id,
+            writable_files=writable_files,
         )
         return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
 
@@ -784,8 +822,8 @@ def run_agent_until(
         finally:
             nonlocal release_reply
             sent_at = clock()
-            started = monotonic()
-            reply = _send_release(send, sleep, monotonic)
+            started = deadline_clock()
+            reply = _send_release(send, sleep, deadline_clock)
             release_reply = reply
             record(
                 _run_event(
@@ -793,7 +831,7 @@ def run_agent_until(
                     ("release",),
                     reply,
                     ok=not reply.startswith("error"),
-                    elapsed_s=monotonic() - started,
+                    elapsed_s=deadline_clock() - started,
                 )
             )
 
@@ -803,7 +841,7 @@ def run_agent_until(
         launches = 1
         record(_run_event(clock(), ("start",), "launched claude launch=1"))
         while True:
-            now = monotonic()
+            now = deadline_clock()
             if process.poll() is None:
                 if now >= deadline:
                     reason = "deadline"

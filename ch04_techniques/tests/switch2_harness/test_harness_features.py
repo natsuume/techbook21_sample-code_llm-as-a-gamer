@@ -2,16 +2,54 @@ import pytest
 from harness_fakes import FAKE_FEATURES
 
 from switch2_harness.features import (
+    ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    NOTES_FEATURE,
+    NOTES_FILE_NAME,
+    Feature,
+    WritableFile,
     agent_commands,
+    agent_writable_files,
     available_names_text,
     validate_feature_names,
 )
 
 
-def test_features_is_empty_in_the_base_condition():
-    assert FEATURES == ()
+def test_features_has_action_history_and_notes():
+    assert ACTION_HISTORY_FEATURE == "action-history"
+    assert NOTES_FEATURE == "notes"
+    assert NOTES_FILE_NAME == "notes.md"
+    assert FEATURES == (
+        Feature(
+            name="action-history",
+            title="行動履歴",
+            instruction_file="action-history.md",
+            commands=(),
+        ),
+        Feature(
+            name="notes",
+            title="メモファイル",
+            instruction_file="notes.md",
+            commands=(),
+            writable_files=(
+                WritableFile(name="notes.md", template_file="notes-initial.md"),
+            ),
+        ),
+    )
+
+
+def test_feature_has_no_writable_files_by_default():
+    feature = Feature(name="x", title="X", instruction_file="x.md", commands=())
+    assert feature.writable_files == ()
+
+
+def test_action_history_adds_no_agent_command():
+    assert agent_commands(("action-history",)) == BASE_AGENT_COMMANDS
+
+
+def test_notes_adds_no_agent_command():
+    assert agent_commands(("notes",)) == BASE_AGENT_COMMANDS
 
 
 def test_base_agent_commands():
@@ -59,9 +97,12 @@ def test_validate_feature_names_lists_all_unknown_names():
 
 
 def test_validate_feature_names_uses_features_by_default():
+    assert validate_feature_names(["action-history"]) == ("action-history",)
     with pytest.raises(ValueError) as error:
-        validate_feature_names(["action-history"])
-    assert "(available: none)" in str(error.value)
+        validate_feature_names(["memo-files"])
+    assert str(error.value) == (
+        "unknown feature: memo-files (available: action-history, notes)"
+    )
 
 
 def test_agent_commands_without_enabled_features():
@@ -89,4 +130,21 @@ def test_agent_commands_skips_disabled_features():
         "finish",
         "note",
         "notes",
+    )
+
+
+def test_agent_writable_files_without_enabled_features():
+    assert agent_writable_files((), FAKE_FEATURES) == ()
+
+
+def test_agent_writable_files_lists_files_of_enabled_features():
+    enabled = ("memo-files", "action-history")
+    assert agent_writable_files(enabled, FAKE_FEATURES) == (
+        WritableFile("memo.md", "memo-initial.md"),
+    )
+
+
+def test_agent_writable_files_uses_features_by_default():
+    assert agent_writable_files(("notes",)) == (
+        WritableFile("notes.md", "notes-initial.md"),
     )
