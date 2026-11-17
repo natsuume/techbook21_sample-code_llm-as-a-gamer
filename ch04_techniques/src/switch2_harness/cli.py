@@ -51,6 +51,7 @@ from switch2_harness.features import (
 )
 from switch2_harness.harness_config import DEFAULT_GOAL, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
+from switch2_harness.reflection_critic import StartCritic, start_critic_process
 from switch2_harness.screen_recorder import read_latest_last_new_screen_time
 from switch2_harness.workspace import (
     NotAWorkspaceError,
@@ -72,8 +73,10 @@ class CliDependencies:
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
+    start_critic: 振り返りの要素の批評役 (claude -p) の起動 (本番は reflection_critic.start_critic_process)
     environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
-    read_template: CLAUDE.md と、要素が置くファイルの最初の内容のテンプレートの読み込み (本番は instructions.read_package_template)
+    read_template: CLAUDE.md と、要素が置くファイルの最初の内容と、批評役への指示のテンプレートの読み込み
+        (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     """
 
@@ -83,6 +86,7 @@ class CliDependencies:
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     start_process: StartProcess
+    start_critic: StartCritic
     environ: Mapping[str, str]
     read_template: ReadTemplate
     available: tuple[Feature, ...]
@@ -102,6 +106,7 @@ def production_dependencies() -> CliDependencies:
         now=_local_now,
         sleep=time.sleep,
         start_process=start_claude_process,
+        start_critic=start_critic_process,
         environ=os.environ,
         read_template=read_package_template,
         available=FEATURES,
@@ -270,6 +275,8 @@ def _dispatch(
             send=deps.send,
             base_env=deps.environ,
             available=deps.available,
+            start_critic=deps.start_critic,
+            read_template=deps.read_template,
         )
     raise ValueError(f"unknown command: {command}")
 
@@ -292,6 +299,8 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     screen_recorder.read_latest_last_new_screen_time(<作業ディレクトリー>) を呼ぶ関数を last_new_screen_time として渡す
     (最後の新しい画面から stagnation_alert.STAGNATION_SECONDS 秒以上たっていたら、look の応答の直後に知らせの行を表示する)。
     無効なら渡さない。
+    さらに look は、振り返りの要素 (features.REFLECTION_FEATURE) が有効なら reflection_notice=True を渡す
+    (批評を notes.md に書いた後の最初の look で、振り返りの知らせの行を表示する)。無効なら False。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)

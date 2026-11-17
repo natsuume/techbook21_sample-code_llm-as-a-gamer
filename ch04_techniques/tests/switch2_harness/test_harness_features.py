@@ -1,5 +1,5 @@
 import pytest
-from harness_fakes import FAKE_FEATURES
+from harness_fakes import FAKE_FEATURES, FAKE_REFLECTION
 
 from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
@@ -7,10 +7,13 @@ from switch2_harness.features import (
     FEATURES,
     NOTES_FEATURE,
     NOTES_FILE_NAME,
+    REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
+    FileAppend,
     WritableFile,
     agent_commands,
+    agent_file_appends,
     agent_writable_files,
     available_names_text,
     validate_feature_names,
@@ -40,13 +43,17 @@ def test_features_has_action_history_and_notes():
     )
 
 
-def test_features_has_stagnation_alert_last():
-    assert STAGNATION_ALERT_FEATURE == "stagnation-alert"
+def test_features_lists_every_feature_in_order():
     assert tuple(feature.name for feature in FEATURES) == (
         "action-history",
         "notes",
         "stagnation-alert",
+        "reflection",
     )
+
+
+def test_features_has_stagnation_alert_third():
+    assert STAGNATION_ALERT_FEATURE == "stagnation-alert"
     # CLAUDE.md に節を足し、サブコマンドも書き換えられるファイルも増やさない
     assert FEATURES[2] == Feature(
         name="stagnation-alert",
@@ -55,6 +62,21 @@ def test_features_has_stagnation_alert_last():
         commands=(),
     )
     assert FEATURES[2].writable_files == ()
+
+
+def test_features_has_reflection_last_requiring_notes():
+    assert REFLECTION_FEATURE == "reflection"
+    # CLAUDE.md に節を足し、notes.md の末尾に「振り返り」の見出しを足す。サブコマンドも書き換えられるファイルも増やさない
+    assert FEATURES[3] == Feature(
+        name="reflection",
+        title="振り返り",
+        instruction_file="reflection.md",
+        commands=(),
+        requires=("notes",),
+        file_appends=(
+            FileAppend(name="notes.md", template_file="reflection-notes-section.md"),
+        ),
+    )
 
 
 def test_feature_has_no_writable_files_by_default():
@@ -123,6 +145,41 @@ def test_validate_feature_names_uses_features_by_default():
     )
 
 
+# 併用する要素 (requires) のある要素を含む、テスト用の要素
+FEATURES_WITH_REFLECTION = (*FAKE_FEATURES, FAKE_REFLECTION)
+
+
+def test_validate_feature_names_rejects_a_feature_without_its_required_feature():
+    with pytest.raises(ValueError) as error:
+        validate_feature_names(
+            ["reflection", "action-history"], FEATURES_WITH_REFLECTION
+        )
+    assert str(error.value) == "feature reflection requires memo-files"
+
+
+def test_validate_feature_names_accepts_a_feature_with_its_required_feature():
+    names = ["reflection", "memo-files"]
+    assert validate_feature_names(names, FEATURES_WITH_REFLECTION) == (
+        "memo-files",
+        "reflection",
+    )
+
+
+def test_validate_feature_names_checks_unknown_names_before_requires():
+    with pytest.raises(ValueError) as error:
+        validate_feature_names(["reflection", "zoom"], FEATURES_WITH_REFLECTION)
+    assert str(error.value) == (
+        "unknown feature: zoom (available: action-history, memo-files, reflection)"
+    )
+
+
+def test_validate_feature_names_requires_notes_for_reflection_by_default():
+    with pytest.raises(ValueError) as error:
+        validate_feature_names(["reflection"])
+    assert str(error.value) == "feature reflection requires notes"
+    assert validate_feature_names(["reflection", "notes"]) == ("notes", "reflection")
+
+
 def test_agent_commands_without_enabled_features():
     assert agent_commands((), FAKE_FEATURES) == ("look", "press", "status", "finish")
 
@@ -165,4 +222,47 @@ def test_agent_writable_files_lists_files_of_enabled_features():
 def test_agent_writable_files_uses_features_by_default():
     assert agent_writable_files(("notes",)) == (
         WritableFile("notes.md", "notes-initial.md"),
+    )
+
+
+def test_agent_file_appends_lists_appends_of_enabled_features():
+    enabled = ("memo-files", "reflection")
+    assert agent_file_appends(enabled, FEATURES_WITH_REFLECTION) == (
+        FileAppend("memo.md", "memo-reflection.md"),
+    )
+
+
+def test_agent_file_appends_skips_disabled_features():
+    assert agent_file_appends(("memo-files",), FEATURES_WITH_REFLECTION) == ()
+    assert agent_file_appends((), FEATURES_WITH_REFLECTION) == ()
+
+
+def test_agent_file_appends_follows_the_available_order():
+    first = Feature(
+        name="first",
+        title="1",
+        instruction_file=None,
+        commands=(),
+        file_appends=(FileAppend("memo.md", "first.md"),),
+    )
+    second = Feature(
+        name="second",
+        title="2",
+        instruction_file=None,
+        commands=(),
+        file_appends=(
+            FileAppend("memo.md", "second-a.md"),
+            FileAppend("todo.md", "second-b.md"),
+        ),
+    )
+    assert agent_file_appends(("second", "first"), (first, second)) == (
+        FileAppend("memo.md", "first.md"),
+        FileAppend("memo.md", "second-a.md"),
+        FileAppend("todo.md", "second-b.md"),
+    )
+
+
+def test_agent_file_appends_uses_features_by_default():
+    assert agent_file_appends(("notes", "reflection")) == (
+        FileAppend("notes.md", "reflection-notes-section.md"),
     )

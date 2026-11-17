@@ -17,8 +17,10 @@ import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
+    FAKE_REFLECTION,
     FAKE_STAGNATION_ALERT,
     FakeClock,
+    FakeCriticStarter,
     FakeDaemon,
     FakeProcessStarter,
     FakeSleep,
@@ -37,8 +39,14 @@ from switch2_harness.cli import (
     run_cli,
 )
 from switch2_harness.daemon_client import send_command
-from switch2_harness.features import FEATURES, STAGNATION_ALERT_FEATURE
+from switch2_harness.event_log import CommandEvent, append_event
+from switch2_harness.features import (
+    FEATURES,
+    REFLECTION_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+)
 from switch2_harness.instructions import read_package_template
+from switch2_harness.reflection_critic import start_critic_process
 from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
 JST = timezone(timedelta(hours=9))
@@ -54,6 +62,9 @@ class Harness:
         self.clock = FakeClock(1000.0)
         self.daemon = FakeDaemon(self.clock)
         self.starter = FakeProcessStarter(self.clock, [ProcessPlan(runs_for_s=None)])
+        self.critic_starter = FakeCriticStarter(
+            self.clock, [ProcessPlan(runs_for_s=None)]
+        )
         self.deps = CliDependencies(
             send=self.daemon,
             clock=self.clock,
@@ -61,6 +72,7 @@ class Harness:
             now=lambda: datetime(2026, 11, 16, 21, 0, 5, tzinfo=JST),
             sleep=FakeSleep(self.clock),
             start_process=self.starter,
+            start_critic=self.critic_starter,
             environ={"PATH": "/usr/bin"},
             read_template=read_fake_template,
             available=FAKE_FEATURES,
@@ -398,6 +410,67 @@ def test_init_with_notes_writes_the_initial_notes(tmp_path, harness):
     )
 
 
+# --- 振り返り (reflection) ---
+
+# 振り返りの要素を含む、cli のテスト用の要素
+FEATURES_WITH_REFLECTION = (*FAKE_FEATURES, FAKE_REFLECTION)
+
+REFLECTION_NOTICE_LINE = "振り返り: notes.md の「振り返り」の節を書き換えました"
+
+
+def record_reflection(workspace: Path) -> None:
+    """events.jsonl に、批評を notes.md に書いたことの記録 (command が reflection の行) を足す。"""
+    append_event(
+        events_file(workspace),
+        CommandEvent(990.0, "reflection", ("1",), "ok notes.md", True, 11.0),
+    )
+
+
+def test_look_prints_the_reflection_notice_when_enabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play", ["memo-files", REFLECTION_FEATURE])
+    harness.deps = replace(harness.deps, available=FEATURES_WITH_REFLECTION)
+    record_reflection(workspace)
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {frame_path}\n{REFLECTION_NOTICE_LINE}\n"
+
+
+def test_look_prints_no_reflection_notice_when_disabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play", ["memo-files"])
+    harness.deps = replace(harness.deps, available=FEATURES_WITH_REFLECTION)
+    record_reflection(workspace)
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {frame_path}\n"
+
+
+def test_init_with_notes_and_reflection_adds_the_reflection_section(tmp_path, harness):
+    # 本物の要素の一覧とテンプレートで init する
+    harness.deps = replace(
+        harness.deps, read_template=read_package_template, available=FEATURES
+    )
+    directory = tmp_path / "play"
+    argv = ["init", str(directory), "--game", "G", "--enable", "notes", "reflection"]
+    assert harness.run(*argv) == 0
+    notes = (directory / "notes.md").read_text(encoding="utf-8")
+    assert notes == read_package_template("notes-initial.md") + "\n## 振り返り\n"
+    instructions = (directory / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "\n\n## 振り返り\n\n" in instructions
+
+
+def test_init_with_reflection_without_notes_fails(tmp_path, harness, capsys):
+    harness.deps = replace(
+        harness.deps, read_template=read_package_template, available=FEATURES
+    )
+    directory = tmp_path / "play"
+    argv = ["init", str(directory), "--game", "G", "--enable", "reflection"]
+    assert harness.run(*argv) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error feature reflection requires notes\n"
+    assert not directory.exists()
+
+
 # --- report ---
 
 
@@ -493,6 +566,7 @@ def test_production_dependencies():
     assert deps.deadline_clock is time.time
     assert deps.sleep is time.sleep
     assert deps.start_process is start_claude_process
+    assert deps.start_critic is start_critic_process
     assert deps.environ is os.environ
     assert deps.read_template is read_package_template
     assert deps.available is FEATURES

@@ -5,6 +5,10 @@
 記録は要素の有効/無効によらず常に取り、session_report の集計に使う。
 ただし command が "stagnation-alert" の行は、停滞の知らせの要素 (stagnation-alert) が知らせを出した look の行の直後に足す
 (args は秒数の文字列 1 つ、reply は知らせの文、frame はその look の frame)。
+振り返りの要素 (reflection) は、run の間に批評を notes.md に書くたびに command が "reflection" の行を足し
+(args は批評の通し番号の文字列 1 つ、reply は "ok notes.md"、frame は null)、その後の最初の look が知らせを出すと、
+その look の行 (停滞の知らせの行があればその後) に command が "reflection-notice" の行を足す
+(args は空、reply は知らせの文、frame はその look の frame)。
 """
 
 import json
@@ -20,6 +24,8 @@ EVENT_COMMANDS: tuple[str, ...] = (
     "finish",
     "run",
     "stagnation-alert",
+    "reflection",
+    "reflection-notice",
 )
 
 
@@ -28,8 +34,9 @@ class CommandEvent:
     """1 つのコマンドの記録。
 
     time: コマンドを始めた時刻 (epoch 秒)
-    command: "look" / "press" / "status" / "finish" / "run" / "stagnation-alert" のいずれか。
-        "stagnation-alert" は、停滞の知らせを出した look の直後に足す行 (time はその look の time)
+    command: "look" / "press" / "status" / "finish" / "run" / "stagnation-alert" / "reflection" / "reflection-notice"
+        のいずれか。"stagnation-alert" は、停滞の知らせを出した look の直後に足す行 (time はその look の time)。
+        "reflection" は批評を notes.md に書いた行、"reflection-notice" は振り返りの知らせを出した look の後に足す行
     args: コマンドの引数 (commands の各処理の説明を参照。"stagnation-alert" は秒数の文字列 1 つ)
     reply: デーモンの応答、または拒否・説明のメッセージ ("stagnation-alert" は知らせの文)
     ok: 成功したか (reply が error で始まらなければ True)

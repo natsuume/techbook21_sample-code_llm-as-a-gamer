@@ -1281,6 +1281,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
 | `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
 | `records/screen-samples/run-<NNN>/` | 停滞の知らせ (`stagnation-alert`) を有効にしたときだけ作られる。`run` の間に裏で撮った画面の記録と、最後の新しい画面の記録 (「停滞の知らせ」の節) |
+| `records/reflections/` | 振り返り (`reflection`) を有効にしたときだけ作られる。批評役の入力と出力の記録 (「振り返り」の節) |
 
 ### サブコマンド
 
@@ -1288,7 +1289,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 
 | サブコマンド | 使う人 | 動作 |
 |---|---|---|
-| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します。停滞の知らせ (`stagnation-alert`) を有効にすると、新しい画面が 120 秒出ていないときに知らせの行も表示します。行動履歴 (`action-history`) を有効にすると、続けて直近の行動も表示します |
+| `look` | エージェント | 画面を撮影して `frames/` に保存し、保存した PNG の絶対パスを表示します。停滞の知らせ (`stagnation-alert`) を有効にすると、新しい画面が 120 秒出ていないときに知らせの行も表示します。振り返り (`reflection`) を有効にすると、批評を `notes.md` に書いた後の最初の `look` で知らせの行を表示します。行動履歴 (`action-history`) を有効にすると、続けて直近の行動も表示します |
 | `press ACTION ARGS...` | エージェント | `tap` / `hold` / `down` / `up` を、第2章のクライアントと同じ書き方でデーモンに送ります。HOME を含む入力と、11 個以上を並べた `tap` は送らずにエラーにします |
 | `status` | エージェント | デーモンの動作状況を表示します |
 | `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
@@ -1397,6 +1398,7 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 | `action-history` | 行動履歴。`look` の出力に、直近の行動と、`press` の前後の画面の変化を付けます |
 | `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
 | `stagnation-alert` | 停滞の知らせ。`run` の間に裏で画面を撮り、新しい画面が 120 秒出ていないと、`look` の出力に知らせの行を付けます |
+| `reflection` | 振り返り。`notes` と一緒に有効にします。`run` の間に 5 分ごとに別の Claude (批評役) に進め方を批評させ、`notes.md` の「振り返り」の節に書きます |
 
 #### 行動履歴 (`action-history`)
 
@@ -1470,6 +1472,55 @@ ok /home/user/ch04_techniques/plays/honogurashi/frames/000044.png
 - 1 枚の判定にかかる時間は、2026-11-17 にこの WSL2 で、記録済みの 0.1 秒おきの撮影 18838 枚を順に流して 2 回測ると、中央値 12〜16 ms、99% 点 30〜53 ms でした。判定は撮影の間隔の中で行うため、撮影と判定を合わせて 0.1 秒を超えた撮影の後は、待たずに次を撮ります
 - 新しい画面で見つけられるのは、画面がほとんど変わらない停滞です。画面が変わりながら同じ場所を行き来する停滞では、新しい画面が出続けるため知らせは出ません
 - `look` は `run` の外でも、最後の `run` の `last-new-screen.json` を読みます。`run` を終えた後に人が `look` を実行すると、その `run` の最後の新しい画面からの秒数で知らせが出ます
+
+#### 振り返り (`reflection`)
+
+`run` の間、ハーネスが 5 分ごとに別の Claude (批評役) を起動し、プレイ中のエージェントの進め方を批評させます。批評は、ハーネスが `notes.md` の「振り返り」の節に、前の批評と置き換えて書きます。メモファイル (`notes`) と一緒に有効にする要素で、`notes` を有効にせずに `--enable reflection` を指定すると、`init` は `error feature reflection requires notes` を表示して終了コード 1 で終わります。
+
+```bash
+uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --enable notes --enable reflection
+```
+
+`init` は、`notes.md` の最初の内容の末尾に「## 振り返り」の見出しを足します。`CLAUDE.md` の節 (`src/switch2_harness/instructions/reflection.md`) では、知らせが出たら `notes.md` を読み直すこと、批評から分かったことを「試して効かなかったこと」と「今の状況と次にやること」の節に書くこと、「振り返り」の節は書き換えないことを指示します。
+
+批評役の起動と渡すものは次のとおりです。
+
+- `run` の開始から壁時計で 5 分ごとに起動します。`run` ごとに数え直します。前の批評が終わる前に次の起動の時刻を過ぎた回は、起動しません
+- 渡すもの
+  - 直近 5 分に成功した `look` の撮影から、時刻がほぼ等間隔になるように選んだ最大 8 枚 (最後の撮影は必ず入れる)
+  - 同じ 5 分の行動 (`look` と `press` の時刻・入力・応答)
+  - 前回の批評役を起動した後 (`run` の最初の批評では `run` の開始の後) に `records/agent.jsonl` に書かれた、プレイ中のエージェントの発言
+  - その時点の `notes.md`
+- 指示は `src/switch2_harness/instructions/reflection-critic.md` です。先へ進んだか、まだ試していない方法、`notes.md` と画面の食い違いの 3 点を、400 字以内の箇条書きで書かせます
+- モデルは claude-opus-5-5、effort は medium です。ツールは渡さず (`--tools ""`)、プレイ中のエージェントと同じく、起動した人の設定・`CLAUDE.md`・MCP・Skill を読ませません。撮影は、標準入力の stream-json のメッセージに PNG のまま base64 で入れます。会話はディスクに残しません (`--no-session-persistence`)
+- 起動から 240 秒たっても終わらない批評役は止めます。`run` が止まるときも、動いている批評役を止めます
+
+批評役が返した批評は、次の形で `notes.md` の「振り返り」の節に書きます。節が無ければ末尾に足します。ハーネスは別のファイルに書いてから置き換えるため、プレイ中のエージェントが書きかけの `notes.md` を読むことはありません。ただし、エージェントが読んだ後にハーネスが書き換えると、エージェントの Edit は失敗します。
+
+```markdown
+## 振り返り
+
+(run の開始から 10 分の時点の批評)
+
+- この 5 分は、苔の段差と石壁の同じ一画を回っていて、先へ進んでいない
+- ...
+```
+
+書いた後の最初の `look` は、保存した PNG のパスの行の後 (停滞の知らせがあればその後) に、次の行を表示します。
+
+```text
+振り返り: notes.md の「振り返り」の節を書き換えました
+```
+
+`records/events.jsonl` には、批評を書くたびに `command` が `reflection` の行 (`args` は批評の通し番号) を、知らせを出した `look` の後に `command` が `reflection-notice` の行を足します。`report` のコマンドの回数には、それぞれの回数が出ます。批評役の費用は `report` の集計に入りません。費用は `records/reflections/critic-<NNN>.jsonl` の result の `total_cost_usd` にあります。
+
+| パス (`records/reflections/` の中) | 内容 |
+|---|---|
+| `reflections.jsonl` | 回ごとに 1 行の JSON。起動した回は、通し番号・`run` の中の回の番号・時刻・渡した撮影・発言を読んだ範囲 (`agent.jsonl` のバイト位置)・結果 (`written` / `failed` / `timeout` / `stopped`)・批評の本文・かかった秒数。起動しなかった回は `skipped` |
+| `critic-<NNN>.jsonl` | 批評役の標準出力 (stream-json)。`NNN` は作業ディレクトリーの中での通し番号です |
+| `critic-stderr.log` | 批評役の標準エラー出力 |
+
+2026-11-17 に Claude Code 2.1.326 で、批評役と同じ起動引数に、1280x720 の PNG の撮影 8 枚 (入力の 1 行で約 10.9 MB) を渡したところ、約 11 秒で批評が返り、費用は 0.10 USD でした (Claude Code が計算した推定値)。
 
 ### 既知の制限
 

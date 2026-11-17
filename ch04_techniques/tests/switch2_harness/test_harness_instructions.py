@@ -1,12 +1,13 @@
 from harness_fakes import FAKE_FEATURES, FAKE_STAGNATION_ALERT, read_fake_template
 
-from switch2_harness.features import STAGNATION_ALERT_FEATURE
+from switch2_harness.features import REFLECTION_FEATURE, STAGNATION_ALERT_FEATURE
 from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.instructions import (
     BASE_TEMPLATE_FILE,
     read_package_template,
     render_instructions,
 )
+from switch2_harness.reflection import NOTICE_LINE, REFLECTION_SECTION_HEADING
 
 
 def make_config(features: tuple[str, ...]) -> HarnessConfig:
@@ -135,6 +136,40 @@ def test_render_instructions_with_stagnation_alert_adds_its_section():
     # 節のテンプレートには置換する $game・$goal が無いため、本文はテンプレートのまま最後に続く
     section = read_package_template("stagnation-alert.md").rstrip("\n")
     assert text.endswith("\n\n" + section + "\n")
+
+
+def test_read_package_template_reads_reflection_md():
+    text = read_package_template("reflection.md")
+    assert text.startswith("## 振り返り\n")
+    # look が出す知らせの行を、そのまま示す
+    assert f"\n{NOTICE_LINE}\n" in text
+
+
+def test_render_instructions_with_notes_and_reflection_adds_both_sections():
+    config = make_config(("notes", REFLECTION_FEATURE))
+    text = render_instructions(config, read_package_template)
+    assert "\n\n## メモファイル\n\n" in text
+    assert "\n\n## 振り返り\n\n" in text
+    assert (
+        text.index("## 守ること")
+        < text.index("## メモファイル")
+        < text.index("\n## 振り返り\n")
+    )
+    # 節のテンプレートには置換する $game・$goal が無いため、本文はテンプレートのまま最後に続く
+    section = read_package_template("reflection.md").rstrip("\n")
+    assert text.endswith("\n\n" + section + "\n")
+
+
+def test_read_package_template_reads_reflection_notes_section_md():
+    # init で notes.md の末尾に足す内容は、振り返りの節の見出しだけ
+    text = read_package_template("reflection-notes-section.md")
+    assert text == REFLECTION_SECTION_HEADING + "\n"
+
+
+def test_read_package_template_reads_reflection_critic_md():
+    text = read_package_template("reflection-critic.md")
+    assert "- ゲーム名: $game\n" in text
+    assert "- 目標: $goal\n" in text
 
 
 def test_read_package_template_reads_notes_initial_md():

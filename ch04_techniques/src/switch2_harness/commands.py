@@ -11,8 +11,9 @@
     - 終了コードは成功 0、失敗 1
 
 look / press / status / finish は、成否によらず records/events.jsonl にイベントを 1 つずつ (finish は 2 つ) 記録する。
-ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録する
-(time は look のイベントと同じ、elapsed_s は 0.0)。
+ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録し、
+振り返りの知らせを出した look は、さらにその後に command が reflection-notice のイベントも記録する
+(どちらも time は look のイベントと同じ、elapsed_s は 0.0)。
 イベントの time は送信の直前の clock()、elapsed_s は送信の直後の clock() との差、ok は応答が error で始まらないこと。
 これらの送信には待ち時間の上限を付けない (send に timeout_s を渡さない。長い tap はデーモンの応答まで時間がかかるため)。
 """
@@ -50,8 +51,17 @@ from switch2_harness.harness_config import (
     format_created_at,
     read_config,
 )
-from switch2_harness.instructions import ReadTemplate, render_instructions
+from switch2_harness.instructions import (
+    ReadTemplate,
+    read_package_template,
+    render_instructions,
+)
 from switch2_harness.press_args import press_args_error, split_press_args
+from switch2_harness.reflection_critic import (
+    Reflecting,
+    StartCritic,
+    start_critic_process,
+)
 from switch2_harness.screen_change import load_sample
 from switch2_harness.screen_recorder import ScreenRecording, recording_screens
 from switch2_harness.session_report import (
@@ -190,7 +200,10 @@ def handle_init(
     2. HarnessConfig(game, goal, 検証した名前, format_created_at(now())) を作る
     3. instructions.render_instructions(config, read_template, available) で CLAUDE.md の本文を作る
     4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
-       (置換はしない)、{<name>: <本文>} を作る
+       (置換はしない)、{<name>: <本文>} を作る。続けて、features.agent_file_appends(検証した名前, available) の順に、
+       各 FileAppend について read_template(<template_file>) を読み (置換はしない)、辞書の <name> の本文を
+       `<本文の末尾の改行を除いたもの>\\n\\n<足す内容の末尾の改行を除いたもの>\\n` にする
+       (例: "# メモ\\n" に "## 振り返り\\n" を足すと "# メモ\\n\\n## 振り返り\\n")
     5. workspace.create_workspace で作る。4. の辞書を initial_files に渡す。
        WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
     6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
@@ -226,6 +239,7 @@ def handle_look(
     clock: Callable[[], float],
     frames_changed: FramesChanged | None = None,
     last_new_screen_time: Callable[[], float | None] | None = None,
+    reflection_notice: bool = False,
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
 
@@ -254,8 +268,14 @@ def handle_look(
     最後のイベントを今回の look とはみなさない)。previous は今回の look より前のイベントだけなので、今回の知らせの行は入らない。
     応答が error なら履歴は出さない。
 
-    stdout の行の順は、応答、知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。
-    どの場合も終了コードは上と同じ。
+    reflection_notice は振り返りの要素 (reflection) が有効なときに True にする。False なら振り返りの知らせを出さない。
+    True で応答が error でなければ、停滞の知らせを記録した後に event_log.read_events(paths.events_file) を読み、
+    reflection.notice_pending(<イベント>) が True なら、event_log.append_event(paths.events_file,
+    reflection.build_notice_event(<今回の look のイベントの time>, <今回の frame>)) で記録し、
+    reflection.NOTICE_LINE の行を出す。応答が error なら知らせを出さず、記録もしない (次の成功した look で出す)。
+
+    stdout の行の順は、応答、停滞の知らせの行 (出すときだけ)、振り返りの知らせの行 (出すときだけ)、
+    行動履歴の行 (frames_changed を渡したときだけ)。どの場合も終了コードは上と同じ。
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()
@@ -392,6 +412,9 @@ def handle_run(
     base_env: Mapping[str, str],
     available: tuple[Feature, ...] = FEATURES,
     screen_recording: ScreenRecording | None = None,
+    reflecting: Reflecting | None = None,
+    start_critic: StartCritic = start_critic_process,
+    read_template: ReadTemplate = read_package_template,
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
 
@@ -418,6 +441,13 @@ def handle_run(
        撮影ごとに新しい画面かを判定して状態ファイルを書く (look がそれを読んで停滞の知らせを出す)。
        記録は最初の起動の前に始まり、run_agent_until が返った後
        (後片付けの up ALL の後) か、例外で抜けるときに止まる。
+       設定の features に features.REFLECTION_FEATURE があれば、画面の記録の with の内側で、
+       振り返り (reflecting(paths, config)。None なら reflection_critic.reflecting_with_critic(paths, config, clock=clock,
+       base_env=base_env, start_critic=start_critic, read_template=read_template)) の with にも入り、その中で
+       run_agent_until を呼ぶ。無ければ contextlib.nullcontext() に入る。
+       start_critic と read_template は reflecting が None のときだけ使う (本番は cli が CliDependencies の値を渡す)。
+       振り返りは、run の開始から 5 分ごとに批評役を起動して notes.md の「振り返り」の節を書き換え、
+       画面の記録と同じく、最初の起動の前に始まり、後片付けの up ALL の後か、例外で抜けるときに止まる。
        後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら
        RUN_INTERRUPTED_MESSAGE を stderr に出し、終了コード 1 (例外は外に出さない)
