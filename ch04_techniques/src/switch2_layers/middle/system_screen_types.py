@@ -106,6 +106,9 @@ class SystemScreenInput:
     judged_frame_t   照合したフレームの時刻。照合の結果がまだ無ければ None
     history          この段階でのこれまでの呼び出しの履歴 (古い順)。要求の履歴の節には新しい方から MAX_HISTORY_ENTRIES 件を
                      入れ、送った A・B・X の節には履歴のすべてを使う
+    deep_advice      deep の助言: 助言の文書 notes/advice.md の「本体の画面」の節の本文 (前後の空白を除いたもの。
+                     notes.system_screen_advice.read_system_screen_advice で読む)。文書が無い・読めない・節が無い・
+                     本文が空なら空文字列
     """
 
     t: float
@@ -117,6 +120,7 @@ class SystemScreenInput:
     judged_screen: str | None
     judged_frame_t: float | None
     history: tuple[SystemStepRecord, ...]
+    deep_advice: str = ""
 
 
 @dataclass(frozen=True)

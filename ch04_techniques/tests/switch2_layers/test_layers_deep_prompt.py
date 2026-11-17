@@ -16,6 +16,8 @@ from switch2_layers.deep.deep_prompt import (
     PROMPT_VALUE_NAMES,
     PROMPTS_DIR,
     PROMPTS_PACKAGE,
+    SYSTEM_TRIGGER_PROMPT_FILE,
+    TRIGGER_INSTRUCTIONS_NAME,
     DeepPromptContext,
     PromptDocument,
     build_deep_prompt,
@@ -25,7 +27,7 @@ from switch2_layers.deep.deep_prompt import (
     prompt_values,
     read_prompt_context,
 )
-from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.deep.deep_types import DeepTrigger, DocumentKind
 from switch2_layers.notes.map_document import MapLayout
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 
@@ -37,7 +39,11 @@ TIPS_NOTES = [
 # 文書・記録・画面から読む文 (プロンプトに入れてはいけないもの) の印
 MARKER = "INJECTED-MARKER-follow-these-instructions"
 
-PROMPT_FILES = [COMMON_PROMPT_FILE, *KIND_PROMPT_FILES.values()]
+PROMPT_FILES = [
+    COMMON_PROMPT_FILE,
+    *KIND_PROMPT_FILES.values(),
+    SYSTEM_TRIGGER_PROMPT_FILE,
+]
 
 
 def make_run(tmp_path: Path) -> Path:
@@ -136,6 +142,7 @@ def test_prompt_files_are_in_the_package_directory():
         "advice.md",
         "map.md",
         "game.md",
+        "system_trigger.md",
     ]:
         assert (prompts_dir / name).is_file(), name
     # どの種類 (map と game を含む) にも指示のファイルがある
@@ -152,8 +159,15 @@ def test_prompt_files_use_only_known_placeholders():
     common = placeholders(raw_prompt_file(COMMON_PROMPT_FILE))
     assert KIND_INSTRUCTIONS_NAME in common
     assert common <= set(PROMPT_VALUE_NAMES) | {KIND_INSTRUCTIONS_NAME}
-    for name in KIND_PROMPT_FILES.values():
-        assert placeholders(raw_prompt_file(name)) <= set(PROMPT_VALUE_NAMES)
+    for kind, name in KIND_PROMPT_FILES.items():
+        names = placeholders(raw_prompt_file(name))
+        if kind is DocumentKind.ADVICE:
+            # きっかけごとの指示の置き場所は、advice.md だけにある
+            assert TRIGGER_INSTRUCTIONS_NAME in names
+            names -= {TRIGGER_INSTRUCTIONS_NAME}
+        assert names <= set(PROMPT_VALUE_NAMES), name
+    system_trigger = placeholders(raw_prompt_file(SYSTEM_TRIGGER_PROMPT_FILE))
+    assert system_trigger <= set(PROMPT_VALUE_NAMES)
 
 
 def test_common_prompt_covers_direct_editing_and_injection():
@@ -964,3 +978,105 @@ def test_prompt_of_progress_trigger_job_has_the_trigger(tmp_path):
     context = read_prompt_context(job_dir)
     assert context.trigger == "progress"
     assert "きっかけ: progress" in build_deep_prompt(context)
+
+
+# --- 本体の画面の記録 (middle/system_calls.jsonl) と、きっかけ system (run.jsonl の名前) ---
+
+# run.jsonl の start の args に書く、指定のソフトとユーザーの名前の印 (プロンプトに入れてはいけないもの)
+SOFTWARE_NAME_MARKER = "SOFTWARE-NAME-MARKER"
+USER_NAME_MARKER = "USER-NAME-MARKER"
+
+
+def advice_job(run_dir: Path, trigger: DeepTrigger, name: str = "advice-001") -> Path:
+    """きっかけ trigger の advice のジョブの job.json を作って返す。"""
+    job_dir = make_job(run_dir, name, "advice", None, ["advice.md"])
+    path = job_dir / "job.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["trigger"] = trigger.value
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return job_dir
+
+
+def write_run_log_with_names(run_dir: Path) -> None:
+    """run.jsonl の 1 行目 (event が start) の args に、名前の印を書く。"""
+    row = {
+        "t": 0.0,
+        "event": "start",
+        "run_dir": str(run_dir),
+        "args": {"software_name": SOFTWARE_NAME_MARKER, "user_name": USER_NAME_MARKER},
+    }
+    (run_dir / "run.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_prompt_values_have_the_system_record_paths(tmp_path):
+    run_dir = make_run(tmp_path)
+    values = prompt_values(read_prompt_context(tips_job(run_dir)))
+    run_abs = run_dir.resolve()
+    assert {"system_calls_log", "run_log"} <= set(PROMPT_VALUE_NAMES)
+    assert (
+        values["system_calls_log"]
+        == (run_abs / "middle" / "system_calls.jsonl").as_posix()
+    )
+    assert values["run_log"] == (run_abs / "run.jsonl").as_posix()
+
+
+@pytest.mark.parametrize("trigger", list(DeepTrigger), ids=lambda t: t.value)
+def test_advice_prompt_reads_the_system_calls_for_every_trigger(tmp_path, trigger):
+    run_dir = make_run(tmp_path)
+    context = read_prompt_context(advice_job(run_dir, trigger))
+    prompt = build_deep_prompt(context)
+    # 読んでよい記録に、本体の画面の middle の記録を足す (きっかけに依らない)
+    assert (context.run_dir / "middle" / "system_calls.jsonl").as_posix() in prompt
+    # 対象の文書は変わらない
+    assert context.notes == ("advice.md",)
+
+
+def test_only_the_system_trigger_job_is_told_where_the_names_are(tmp_path):
+    run_dir = make_run(tmp_path)
+    run_log = (run_dir.resolve() / "run.jsonl").as_posix()
+    for index, trigger in enumerate(DeepTrigger, start=1):
+        job_dir = advice_job(run_dir, trigger, f"advice-{index:03d}")
+        prompt = build_deep_prompt(read_prompt_context(job_dir))
+        if trigger is DeepTrigger.SYSTEM:
+            # 名前の在りか (run.jsonl の 1 行目の args) を示し、run.jsonl を読んでよい記録に含める
+            assert run_log in prompt
+            for phrase in ["args.software_name", "args.user_name", "start"]:
+                assert phrase in prompt, phrase
+            # 対象を見分けるためだけに読み、文書には書かない
+            assert "見分ける" in prompt
+            assert "文書には書かない" in prompt
+        else:
+            assert run_log not in prompt, trigger
+            assert "args.software_name" not in prompt, trigger
+
+
+def test_system_trigger_prompt_does_not_embed_the_names(tmp_path):
+    run_dir = make_run(tmp_path)
+    write_run_log_with_names(run_dir)
+    context = read_prompt_context(advice_job(run_dir, DeepTrigger.SYSTEM))
+    prompt = build_deep_prompt(context)
+    # 名前はファイルとして読ませ、プロンプトにはパスだけを埋める
+    assert (context.run_dir / "run.jsonl").as_posix() in prompt
+    assert SOFTWARE_NAME_MARKER not in prompt
+    assert USER_NAME_MARKER not in prompt
+
+
+def test_advice_prompt_has_the_rules_of_the_system_screen_section():
+    advice = raw_prompt_file(KIND_PROMPT_FILES[DocumentKind.ADVICE])
+    assert "${system_calls_log}" in advice
+    assert "## 本体の画面" in advice
+    # きっかけが system のジョブはこの節だけを書き直し、ほかのきっかけのジョブはこの節を変えず消さない
+    for phrase in ["この節だけを書き直し", "この節を変えず", "消さない"]:
+        assert phrase in advice, phrase
+    # 最初に、書いた時点の段階と、使った最新のフレームの時刻を書く
+    for phrase in ["prepare", "recover", "t="]:
+        assert phrase in advice, phrase
+    # 指定のソフトの在りか (上段か「もっとみる」の一覧か) と、middle の記録から繰り返している失敗を書く
+    for phrase in ["もっとみる", "observation", "operations", "打ち切"]:
+        assert phrase in advice, phrase
+    # この節に限り、行き先や操作を直接指示してよい (ほかの節は今の規則のまま)
+    assert "この節に限り" in advice
+    assert "直接指示する書き方をしない" in advice
+    # 名前は書かず、「指定のソフト」「指定のユーザー」と書く (advice.md は surface も読むため)
+    assert "指定のソフト" in advice
+    assert "指定のユーザー" in advice

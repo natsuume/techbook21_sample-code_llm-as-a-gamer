@@ -7,7 +7,12 @@
     controls.md    操作説明の指示
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)
     strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
-    advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json を使うことを含む)
+    advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json と、本体の画面の
+                   middle の記録 middle/system_calls.jsonl を使うこと、「## 本体の画面」の節の書き方を含む)。
+                   ${trigger_instructions} の位置にきっかけごとの指示を入れる
+    system_trigger.md
+                   きっかけが system のジョブだけに入れる指示 (指定のソフトとユーザーの名前の在りか run.jsonl の 1 行目の
+                   args と、名前を見分けるためだけに読み、文書に書かないこと)
     map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く。
                    書くマップの型は、コードが決めて job.json の map_layout で渡す ${map_layout})
     game.md        ゲームの性質の指示 (6 つの節の見出しと順、マップの形式の型の行、確かめたことと推測の分け方、
@@ -91,6 +96,11 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
+# きっかけが system のジョブだけに入れる指示のファイル (prompt_values で埋めてから ${trigger_instructions} に入れる)
+SYSTEM_TRIGGER_PROMPT_FILE = "system_trigger.md"
+# きっかけごとの指示を入れる置き場所の名前 (advice.md だけにある)。きっかけが system のジョブでは
+# SYSTEM_TRIGGER_PROMPT_FILE の指示、ほかのきっかけのジョブでは空文字列を入れる
+TRIGGER_INSTRUCTIONS_NAME = "trigger_instructions"
 
 
 @dataclass(frozen=True)

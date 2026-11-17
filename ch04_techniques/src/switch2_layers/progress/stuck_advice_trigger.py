@@ -10,12 +10,16 @@
       状態に戻す
     - 実行中の advice のジョブがある間 (きっかけに依らない) は要求しない。ジョブが終わった後の判定で、上の規則で要求する
 時刻は deep のスケジューラーの時計 (実行の経過秒) の値を渡す。
+deep のスケジューラーは、同じ規則を、本体の画面の段階 (prepare・recover) が続いた秒数とそのしきい値
+(--system-advice-seconds) にも当てる (きっかけ system。別のインスタンスで判定する)。
 """
 
 import math
 
 # --stuck-advice-seconds の既定値 (秒)
 DEFAULT_STUCK_ADVICE_SECONDS = 60.0
+# --system-advice-seconds の既定値 (秒)。本体の画面の段階 (prepare・recover) が続いた秒数のしきい値
+DEFAULT_SYSTEM_ADVICE_SECONDS = 90.0
 
 
 class StuckAdviceTrigger:

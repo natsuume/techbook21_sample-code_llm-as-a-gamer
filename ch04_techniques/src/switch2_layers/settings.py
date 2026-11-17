@@ -23,7 +23,10 @@ from pathlib import Path
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
-from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
+)
 from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
 
 
@@ -149,6 +152,9 @@ class RunSettings:
     stuck_advice_seconds        新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で求める。
                                 超えたまま続く間は、この秒数ごとに求める (--stuck-advice-seconds、既定 60。
                                 0 より大きい有限の値)
+    system_advice_seconds       本体の画面の段階 (prepare・recover) がこの秒数を超えて続いたら、advice の deep を
+                                きっかけ system で求める。超えたまま続く間は、この秒数ごとに求める
+                                (--system-advice-seconds、既定 90。0 より大きい有限の値)
     """
 
     software_name: str = ""
@@ -175,6 +181,7 @@ class RunSettings:
     max_safety_errors: int = DEFAULT_MAX_SAFETY_ERRORS
     progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
     stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
+    system_advice_seconds: float = DEFAULT_SYSTEM_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -219,7 +226,7 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
-    --progress-window と --stuck-advice-seconds は 0 より大きい有限の値。
+    --progress-window と --stuck-advice-seconds と --system-advice-seconds は 0 より大きい有限の値。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:

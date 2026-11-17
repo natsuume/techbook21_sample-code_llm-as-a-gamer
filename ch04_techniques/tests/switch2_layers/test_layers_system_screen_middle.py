@@ -515,6 +515,39 @@ def test_sent_decisions_section_includes_a_whose_send_failed():
     assert section == "t=61.000 user_select で A"
 
 
+# deep の助言の節の見出し
+DEEP_ADVICE_TITLE = "deep の助言"
+IMAGE_TITLE = "今の画像"
+
+
+def test_deep_advice_section_follows_the_sent_buttons_and_precedes_the_image():
+    titles = [
+        text.split("\n", 1)[0]
+        for text in user_texts(sent_payload())
+        if text.startswith("## ")
+    ]
+    # 節は 9 つ。「この段階で送った A・B・X」の後、「今の画像」(と画像) の前に置く
+    assert len(titles) == 9
+    index = titles.index(f"## {DEEP_ADVICE_TITLE}")
+    assert titles[index - 1] == f"## {SENT_BUTTONS_TITLE}"
+    assert titles[index + 1] == f"## {IMAGE_TITLE}"
+    assert titles[-1] == f"## {IMAGE_TITLE}"
+
+
+def test_deep_advice_section_has_the_advice_text():
+    advice = (
+        "- 段階: prepare (t=100.000)\n- 指定のソフトは「もっとみる」の一覧にありそう"
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, deep_advice=advice)
+    assert user_section(sent_payload(screen_input), DEEP_ADVICE_TITLE) == advice
+
+
+def test_deep_advice_section_without_advice_is_none():
+    # 文書が無い・読めない・節が無い・空なら、入力の deep_advice は空文字列で、節の中身は「(無い)」
+    assert SCREEN_INPUT.deep_advice == ""
+    assert user_section(sent_payload(), DEEP_ADVICE_TITLE) == "(無い)"
+
+
 def test_developer_message_describes_the_sent_decisions_section():
     assert SENT_BUTTONS_TITLE in developer_text(sent_payload())
 

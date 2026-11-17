@@ -36,7 +36,10 @@ def test_triggers_follow_the_issue():
         "auto",
         "manual",
         "progress",
+        "system",
     }
+    # 本体の画面の段階 (prepare・recover) が続いたきっかけ
+    assert DeepTrigger("system") is DeepTrigger.SYSTEM
 
 
 def test_job_key():

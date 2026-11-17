@@ -1,5 +1,8 @@
+import dataclasses
+
 import pytest
 
+import switch2_layers.system_screen.run_phase as run_phase_module
 from switch2_layers.system_screen.run_phase import (
     CLEAN_UP_DONE_SCREEN,
     CLEAN_UP_TIMEOUT_S,
@@ -12,10 +15,6 @@ from switch2_layers.system_screen.run_phase import (
     PHASE_REASON_RECOVERED,
     PHASE_REASON_START_CHECK_PASSED,
     PHASE_REASON_SYSTEM_SCREEN,
-    PREPARE_TIMEOUT_S,
-    REASON_PREPARATION_TIMED_OUT,
-    REASON_RECOVERY_TIMED_OUT,
-    RECOVER_TIMEOUT_S,
     CleanUpResult,
     PhaseChange,
     PhaseEvent,
@@ -26,6 +25,8 @@ from switch2_layers.system_screen.run_phase import (
 
 START_T = 10.0
 STOP_REASON = "interrupted"
+# 準備・復帰に長くいる時刻 (段階に入ってからの秒数)。準備・復帰には時間切れが無い
+LONG_STAY_S = [180.0, 10_000.0]
 
 
 def changed_to(phase: RunPhase, reason: str) -> PhaseEvent:
@@ -75,13 +76,20 @@ def cleaning_tracker() -> PhaseTracker:
 def test_constants_follow_the_issue():
     assert ENTER_STREAK == 2
     assert EXIT_STREAK == 3
-    assert PREPARE_TIMEOUT_S == 180.0
-    assert RECOVER_TIMEOUT_S == 180.0
     assert CLEAN_UP_TIMEOUT_S == 45.0
-    assert REASON_PREPARATION_TIMED_OUT == "preparation timed out"
-    assert REASON_RECOVERY_TIMED_OUT == "recovery timed out"
     assert CLEAN_UP_DONE_SCREEN == "home_menu"
     assert PHASE_REASON_START_CHECK_PASSED == "start check passed"
+
+
+def test_prepare_and_recover_have_no_timeout_constants():
+    # 時間切れは片付けだけにあり、準備と復帰の秒数と止める理由は持たない
+    for name in [
+        "PREPARE_TIMEOUT_S",
+        "RECOVER_TIMEOUT_S",
+        "REASON_PREPARATION_TIMED_OUT",
+        "REASON_RECOVERY_TIMED_OUT",
+    ]:
+        assert not hasattr(run_phase_module, name), name
 
 
 def test_phase_and_clean_up_values():
@@ -102,11 +110,15 @@ def test_phase_and_clean_up_values():
 
 
 def test_timings_default_to_the_constants():
+    # 秒数は片付けの時間切れだけを持つ
+    assert [field.name for field in dataclasses.fields(PhaseTimings)] == [
+        "enter_streak",
+        "exit_streak",
+        "clean_up_timeout_s",
+    ]
     assert PhaseTimings() == PhaseTimings(
         enter_streak=ENTER_STREAK,
         exit_streak=EXIT_STREAK,
-        prepare_timeout_s=PREPARE_TIMEOUT_S,
-        recover_timeout_s=RECOVER_TIMEOUT_S,
         clean_up_timeout_s=CLEAN_UP_TIMEOUT_S,
     )
     assert DEFAULT_PHASE_TIMINGS == PhaseTimings()
@@ -186,20 +198,23 @@ def test_custom_exit_streak_moves_to_play_sooner():
     )
 
 
-def test_prepare_times_out():
+def test_prepare_has_no_timeout():
+    # 準備にどれだけいても、check_time は止める理由を返さない
     tracker = PhaseTracker(START_T)
-    assert tracker.check_time(START_T + PREPARE_TIMEOUT_S - 0.1) == NO_EVENT
-    assert tracker.check_time(START_T + PREPARE_TIMEOUT_S) == PhaseEvent(
-        stop_reason=REASON_PREPARATION_TIMED_OUT
-    )
+    for stay_s in LONG_STAY_S:
+        assert tracker.check_time(START_T + stay_s) == NO_EVENT
+    assert tracker.phase is RunPhase.PREPARE
+    assert tracker.wants_system_middle is True
 
 
-def test_prepare_times_out_while_waiting_after_done():
-    tracker = PhaseTracker(START_T, PhaseTimings(prepare_timeout_s=5.0))
+def test_prepare_has_no_timeout_while_waiting_after_done():
+    tracker = PhaseTracker(START_T)
     tracker.on_system_output(11.0, done=True)
-    assert tracker.check_time(START_T + 5.0) == PhaseEvent(
-        stop_reason=REASON_PREPARATION_TIMED_OUT
-    )
+    for stay_s in LONG_STAY_S:
+        assert tracker.check_time(START_T + stay_s) == NO_EVENT
+    assert tracker.phase is RunPhase.PREPARE
+    # done の後の待ちは続く
+    assert tracker.wants_system_middle is False
 
 
 # --- play ---
@@ -208,7 +223,7 @@ def test_prepare_times_out_while_waiting_after_done():
 def test_play_does_not_want_the_system_middle_and_has_no_timeout():
     tracker = prepared_tracker()
     assert tracker.wants_system_middle is False
-    assert tracker.check_time(13.0 + PREPARE_TIMEOUT_S + RECOVER_TIMEOUT_S) == NO_EVENT
+    assert tracker.check_time(13.0 + 10_000.0) == NO_EVENT
 
 
 def test_system_screens_in_a_row_move_to_recover():
@@ -301,20 +316,14 @@ def test_system_screens_before_recover_do_not_count_in_recover():
     assert tracker.phase is RunPhase.RECOVER
 
 
-def test_recover_times_out_from_its_own_start():
+def test_recover_has_no_timeout():
+    # 復帰にどれだけいても、check_time は止める理由を返さない
     tracker = recovering_tracker()
     started = tracker.phase_started_t
-    assert tracker.check_time(started + RECOVER_TIMEOUT_S - 0.1) == NO_EVENT
-    assert tracker.check_time(started + RECOVER_TIMEOUT_S) == PhaseEvent(
-        stop_reason=REASON_RECOVERY_TIMED_OUT
-    )
-
-
-def test_recover_timeout_counts_again_after_returning_to_play():
-    tracker = recovering_tracker()
-    judge_many(tracker, [None] * EXIT_STREAK, 25.0)
-    tracker.on_press_home(100.0)
-    assert tracker.check_time(100.0 + RECOVER_TIMEOUT_S - 0.1) == NO_EVENT
+    for stay_s in LONG_STAY_S:
+        assert tracker.check_time(started + stay_s) == NO_EVENT
+    assert tracker.phase is RunPhase.RECOVER
+    assert tracker.wants_system_middle is True
 
 
 # --- clean_up ---
