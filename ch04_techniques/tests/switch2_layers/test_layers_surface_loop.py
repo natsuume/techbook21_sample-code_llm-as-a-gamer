@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from switch2_remote.controller_state import NEUTRAL_REPORT
 
+import switch2_layers.surface.surface_loop as surface_loop_module
 from switch2_layers.buttons import ALL_BUTTONS
 from switch2_layers.deep.deep_scheduler import (
     DeepDocumentStatus,
@@ -26,6 +27,7 @@ from switch2_layers.frames.frame_store import FrameStore
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
 from switch2_layers.frames.surface_frames import BoxDrawingPlan, build_surface_image
 from switch2_layers.hardware.pad_output import PadOutput
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.records.run_log import RunLog
@@ -59,6 +61,8 @@ from switch2_layers.surface.surface_types import (
     SurfaceOutput,
     SurfaceRequest,
 )
+from switch2_layers.tasks.task_board import TaskBoard
+from switch2_layers.tasks.task_queue import NewTask
 
 ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
 NOW = 10.0  # step を呼ぶときの t
@@ -194,6 +198,9 @@ def make_harness(
     decider: ScriptedDecider,
     max_errors: int = 5,
     boxes_at: Callable[[float], Sequence[Box]] | None = None,
+    board: TaskBoard | None = None,
+    trigger_notify: Callable[[MiddleCallReason], None] | None = None,
+    threshold_task: float = 0.5,
 ) -> Harness:
     """surface のループと偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = NOW にしておく。
 
@@ -224,9 +231,14 @@ def make_harness(
         bridge_state=lambda: bridge["state"],
         on_stop=stops.append,
         boxes_at=boxes_at,
+        board=board,
+        trigger_notify=trigger_notify,
     )
     loop = SurfaceLoop(
-        parts, SurfaceLoopSettings(max_errors=max_errors, image_width=320)
+        parts,
+        SurfaceLoopSettings(
+            max_errors=max_errors, threshold_task=threshold_task, image_width=320
+        ),
     )
     return Harness(
         root, monotonic, loop, sender, deep_sink, buffer, store, stops, bridge, phase
@@ -262,6 +274,26 @@ def write_state(root: Path, **values: object) -> None:
 
 def neutral_output() -> SurfaceOutput:
     return SurfaceOutput(action=NEUTRAL_ACTION)
+
+
+def write_tasks_json(root: Path, scene_id: str, texts: list[str]) -> None:
+    """場面 scene_id のキューの状態 tasks.json に、texts のタスク (task-001 から) を書く。"""
+    scene_dir = root / "notes" / "scenes" / scene_id
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    items = [
+        {
+            "id": f"task-{number:03d}",
+            "text": text,
+            "added_t": 1.0,
+            "active_s": 0.0,
+            "cancel_requested_t": None,
+            "destination": None,
+        }
+        for number, text in enumerate(texts, start=1)
+    ]
+    (scene_dir / "tasks.json").write_text(
+        json.dumps({"t": 1.0, "tasks": items}, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def test_constants_follow_the_issue():
@@ -315,6 +347,8 @@ def test_successful_step_sends_filtered_action_and_writes_row(tmp_path):
     assert all(frame.jpeg.startswith(b"\xff\xd8") for frame in surface_input.frames)
     assert surface_input.documents.controls == COMMON_CONTROLS
     assert surface_input.documents.uses_common_controls is True
+    assert surface_input.documents.tasks == ""
+    assert surface_input.documents.task_id is None
     assert surface_input.timeline == ""
     assert surface_input.timeline_generated_t is None
     assert surface_input.recent_actions == ()
@@ -332,6 +366,7 @@ def test_successful_step_sends_filtered_action_and_writes_row(tmp_path):
     assert [frame["t"] for frame in row["frames"]] == [8.0, 8.5, 9.0, 9.5, 10.0]
     assert row["frames"][-1]["file"] == "frames/surface/000010000.jpg"
     assert row["scene_id"] is None
+    assert row["task_id"] is None
     assert row["uses_common"] == {"controls": True, "tips": True}
     assert row["middle_generated_t"] is None
     assert row["action"]["held"] == ["A"]
@@ -406,7 +441,9 @@ def test_scene_documents_timeline_and_wait_come_from_middle_state(tmp_path):
     scene_dir = harness.root / "notes" / "scenes" / "scene-001"
     scene_dir.mkdir(parents=True)
     (scene_dir / "controls.md").write_text("# 町の操作\n", encoding="utf-8")
-    (scene_dir / "tasks.md").write_text("- 宿屋に入る\n", encoding="utf-8")
+    write_tasks_json(
+        harness.root, "scene-001", ["宿屋に入っている", "主人と話している"]
+    )
     add_frames(harness, [9.9])
     result = harness.loop.step()
     assert result.wait_s == 1.5
@@ -415,10 +452,13 @@ def test_scene_documents_timeline_and_wait_come_from_middle_state(tmp_path):
     assert surface_input.timeline_generated_t == 8.5
     assert surface_input.documents.scene_id == "scene-001"
     assert surface_input.documents.controls == "# 町の操作\n"
-    assert surface_input.documents.tasks == "- 宿屋に入る\n"
+    # 場面のキューの先頭のタスクの文と ID
+    assert surface_input.documents.tasks == "宿屋に入っている"
+    assert surface_input.documents.task_id == "task-001"
     assert surface_input.documents.tips == COMMON_TIPS
     assert result.row is not None
     assert result.row["scene_id"] == "scene-001"
+    assert result.row["task_id"] == "task-001"
     assert result.row["uses_common"] == {"controls": False, "tips": True}
     assert result.row["middle_generated_t"] == 8.5
     assert result.row["wait_s"] == 1.5
@@ -1389,3 +1429,221 @@ def test_request_log_write_failure_is_not_a_decide_failure(tmp_path, swallow):
     assert read_rows(harness.root / "surface.jsonl") == []
     assert read_rows(harness.root / "run.jsonl") == []
     assert harness.stops == []
+
+
+# --- 先頭のタスクの完了と取り消しの要求 ---
+
+SCENE = "scene-001"
+
+
+class NotifyRecorder:
+    """trigger_notify の偽物。知らされた理由を順に記録する。"""
+
+    def __init__(self) -> None:
+        self.reasons: list[MiddleCallReason] = []
+
+    def __call__(self, reason: MiddleCallReason) -> None:
+        self.reasons.append(reason)
+
+
+class AdvancingDecider(ScriptedDecider):
+    """decide の間に偽の時計を elapsed 秒進める ScriptedDecider (t_sent と t_received を違う値にする)。"""
+
+    def __init__(self, monotonic: FakeMonotonic, *results, elapsed: float = 0.4):
+        super().__init__(*results)
+        self.monotonic = monotonic
+        self.elapsed = elapsed
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        self.monotonic.now += self.elapsed
+        return super().decide(surface_input)
+
+
+def task_output(
+    done_p: float | None = 0.0,
+    cancel_p: float | None = 0.0,
+    scene_changed: bool = False,
+) -> SurfaceOutput:
+    return SurfaceOutput(
+        action=NEUTRAL_ACTION,
+        scene_changed=scene_changed,
+        task_done_p=done_p,
+        task_cancel_p=cancel_p,
+    )
+
+
+@dataclass
+class TaskHarness:
+    harness: Harness
+    board: TaskBoard
+    notify: NotifyRecorder
+
+
+def task_harness(
+    tmp_path: Path,
+    *results: SurfaceOutput | Exception,
+    texts: tuple[str, ...] = ("宿屋に入っている", "主人と話している"),
+    with_board: bool = True,
+    with_notify: bool = True,
+    advancing: bool = False,
+) -> TaskHarness:
+    """場面 scene-001 のキューに texts のタスクがあり、middle/state.json の場面が scene-001 のループを組み立てる。"""
+    board = TaskBoard(RunPaths(tmp_path / "run"))
+    notify = NotifyRecorder()
+    decider: ScriptedDecider = ScriptedDecider(*results)
+    harness = make_harness(
+        tmp_path,
+        decider,
+        board=board if with_board else None,
+        trigger_notify=notify if with_notify else None,
+    )
+    if advancing:
+        harness.loop.parts = dataclasses.replace(
+            harness.loop.parts,
+            decider=AdvancingDecider(harness.monotonic, *results),
+        )
+    write_state(harness.root, scene_id=SCENE, scene_name="町")
+    board.set_current_scene(SCENE, 0.0)
+    board.add(SCENE, [NewTask(text=text) for text in texts], 1.0)
+    add_frames(harness, [9.9])
+    return TaskHarness(harness, board, notify)
+
+
+def head_ids(setup: TaskHarness) -> list[str]:
+    return [task.id for task in setup.board.tasks(SCENE, 20.0)]
+
+
+def test_done_twice_in_a_row_completes_the_head_task_at_the_row_time(tmp_path):
+    setup = task_harness(tmp_path, task_output(done_p=0.9), advancing=True)
+    first = setup.harness.loop.step()
+    assert head_ids(setup) == ["task-001", "task-002"]
+    second = setup.harness.loop.step()
+    assert first.row is not None and second.row is not None
+    # 先頭のタスクの ID を行に書く
+    assert first.row["task_id"] == "task-001"
+    assert second.row["task_id"] == "task-001"
+    assert head_ids(setup) == ["task-002"]
+    # 完了の時刻は、その回の行の t_received
+    done = read_rows(setup.harness.root / "tasks.jsonl")[-1]
+    assert (done["event"], done["id"]) == ("done", "task-001")
+    assert done["t"] == second.row["t_received"]
+    assert second.row["t_received"] != second.row["t_sent"]
+    # キューは空になっていないので知らせない
+    assert setup.notify.reasons == []
+
+
+def test_completing_the_last_task_notifies_queue_empty(tmp_path):
+    setup = task_harness(tmp_path, task_output(done_p=0.9), texts=("宿屋に入っている",))
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    assert head_ids(setup) == []
+    assert setup.notify.reasons == ["queue_empty"]
+
+
+def test_cancel_twice_in_a_row_requests_cancel_once(tmp_path):
+    setup = task_harness(tmp_path, task_output(cancel_p=0.8))
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    [head, _] = setup.board.tasks(SCENE, 20.0)
+    assert head.id == "task-001"
+    assert head.cancel_requested_t == NOW
+    assert setup.notify.reasons == ["cancel_requested"]
+    # 同じタスクに 2 回目の要求は付けず、知らせない
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    assert setup.notify.reasons == ["cancel_requested"]
+    # 取り消しは middle が判断する (surface は外さない)
+    assert head_ids(setup) == ["task-001", "task-002"]
+
+
+def test_only_done_when_both_are_established(tmp_path):
+    setup = task_harness(tmp_path, task_output(done_p=0.9, cancel_p=0.9))
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    assert head_ids(setup) == ["task-002"]
+    events = [row["event"] for row in read_rows(setup.harness.root / "tasks.jsonl")]
+    assert "cancel_requested" not in events
+    assert setup.notify.reasons == []
+
+
+def test_failed_request_does_not_reset_the_count(tmp_path):
+    setup = task_harness(
+        tmp_path,
+        task_output(done_p=0.9),
+        RuntimeError("model failed"),
+        task_output(done_p=0.9),
+    )
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    assert head_ids(setup) == ["task-001", "task-002"]
+    setup.harness.loop.step()
+    assert head_ids(setup) == ["task-002"]
+
+
+def test_threshold_task_is_used(tmp_path):
+    setup = task_harness(tmp_path, task_output(done_p=0.6))
+    setup.harness.loop.settings = dataclasses.replace(
+        setup.harness.loop.settings, threshold_task=0.6
+    )
+    for _ in range(3):
+        setup.harness.loop.step()
+    # ちょうど同じ値は超えない
+    assert head_ids(setup) == ["task-001", "task-002"]
+
+
+def test_scene_change_is_notified(tmp_path):
+    setup = task_harness(tmp_path, task_output(scene_changed=True))
+    setup.harness.loop.step()
+    assert setup.notify.reasons == ["scene_change"]
+
+
+def test_scene_change_is_notified_without_board(tmp_path):
+    setup = task_harness(tmp_path, task_output(scene_changed=True), with_board=False)
+    setup.harness.loop.step()
+    assert setup.notify.reasons == ["scene_change"]
+
+
+def test_without_board_the_task_is_not_completed(tmp_path):
+    setup = task_harness(tmp_path, task_output(done_p=0.9), with_board=False)
+    setup.harness.loop.step()
+    setup.harness.loop.step()
+    assert head_ids(setup) == ["task-001", "task-002"]
+    assert setup.notify.reasons == []
+
+
+def test_without_trigger_notify_the_task_is_still_completed(tmp_path):
+    setup = task_harness(
+        tmp_path,
+        task_output(done_p=0.9),
+        texts=("宿屋に入っている",),
+        with_notify=False,
+    )
+    setup.harness.loop.step()
+    result = setup.harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert head_ids(setup) == []
+    assert setup.notify.reasons == []
+
+
+def test_stop_after_writing_the_row_skips_the_task_answers(tmp_path, monkeypatch):
+    setup = task_harness(
+        tmp_path,
+        task_output(done_p=0.9, scene_changed=True),
+        texts=("宿屋に入っている",),
+    )
+    setup.harness.loop.step()
+    assert setup.notify.reasons == ["scene_change"]
+    stop = threading.Event()
+    original = surface_loop_module.append_json_line
+
+    def append_then_stop(path: Path, row: object) -> None:
+        original(path, row)
+        if path == setup.harness.root / "surface.jsonl":
+            stop.set()
+
+    monkeypatch.setattr(surface_loop_module, "append_json_line", append_then_stop)
+    setup.harness.loop.step(stop)
+    # 行は書いたが、完了にも知らせにも進まない
+    assert len(read_rows(setup.harness.root / "surface.jsonl")) == 2
+    assert head_ids(setup) == ["task-001"]
+    assert setup.notify.reasons == ["scene_change"]

@@ -35,7 +35,9 @@ class SurfaceFrame:
 class SurfaceDocuments:
     """surface が読む文書 (notes.surface_documents.read_surface_documents が作る)。
 
-    tasks                  現在の場面の短期タスクリスト。場面が無いか、場面の文書が無ければ空文字列
+    tasks                  現在の場面のキューの先頭のタスク (今実行中のタスク) の文。場面が無いか、キューが空なら
+                           空文字列
+    task_id                先頭のタスクの ID。場面が無いか、キューが空なら None (先頭のタスクが無い)
     tips                   攻略情報 (場面の文書、無いか空なら共通の文書)
     controls               操作説明 (場面の文書、無いか空なら共通の文書)
     advice                 詰まったときの助言 (notes/advice.md)
@@ -47,6 +49,7 @@ class SurfaceDocuments:
     """
 
     tasks: str
+    task_id: str | None
     tips: str
     controls: str
     advice: str
@@ -185,6 +188,9 @@ class SurfaceOutput:
     boxes           要求の最新のフレーム (SurfaceInput.frames の最後) での box
     scene_changed   場面転換を検知したら True (次の middle の入力に伝わる)
     exchange        記録のための情報 (送った要求と受け取った答え)。Jev を呼ばない実装 (フェイク) では None
+    task_done_p     先頭のタスクを達成したかの問い (task_done) の確率。問いを送らなかったら None
+    task_cancel_p   先頭のタスクが達成できないか状況に合わないかの問い (task_cancel) の確率。問いを送らなかったら None
+    task_done_p・task_cancel_p の既定値は、問いを送らない出力 (フェイクやテストなど) のため。
     """
 
     action: PadAction
@@ -193,6 +199,8 @@ class SurfaceOutput:
     boxes: tuple[Box, ...] = ()
     scene_changed: bool = False
     exchange: SurfaceExchange | None = None
+    task_done_p: float | None = None
+    task_cancel_p: float | None = None
 
 
 class DeepStatusReader(Protocol):

@@ -2,13 +2,16 @@ from typing import get_args
 
 import pytest
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.tasks.task_queue import (
     MAX_ADDED_PER_CALL,
     MAX_OPEN_TASKS_PER_SCENE,
     AddResult,
     DroppedText,
     DropReason,
+    NewTask,
     SceneTaskQueues,
+    TaskDestination,
     TaskView,
     is_same_task_text,
     normalize_task_text,
@@ -48,6 +51,15 @@ RESTORED = (
 )
 
 
+INN = TaskDestination(place="町", tile=TilePosition(x=3, y=4))
+SHOP = TaskDestination(place="町", tile=None)
+
+
+def new_tasks(*texts: str) -> list[NewTask]:
+    """行き先の無い、文だけの追加の組を返す。"""
+    return [NewTask(text=text) for text in texts]
+
+
 def ids_of(views: tuple[TaskView, ...]) -> list[str]:
     return [view.id for view in views]
 
@@ -59,8 +71,8 @@ def texts_of(views: tuple[TaskView, ...]) -> list[str]:
 def full_queues() -> SceneTaskQueues:
     """場面 SCENE に未完了のタスクを 5 個 (A〜E。task-001〜task-005) 足したキューを返す。現在の場面は場面なし。"""
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B", "C"], 1.0)
-    queues.add(SCENE, ["D", "E"], 2.0)
+    queues.add(SCENE, new_tasks("A", "B", "C"), 1.0)
+    queues.add(SCENE, new_tasks("D", "E"), 2.0)
     return queues
 
 
@@ -168,7 +180,7 @@ def test_texts_with_different_characters_are_not_the_same(a, b):
 
 def test_add_appends_tasks_to_the_end_in_input_order():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    result = queues.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     assert result == AddResult(
         outcomes=(
             TaskView(
@@ -189,43 +201,93 @@ def test_add_appends_tasks_to_the_end_in_input_order():
             ),
         )
     )
-    queues.add(SCENE, ["部屋に泊まる"], 2.0)
+    queues.add(SCENE, new_tasks("部屋に泊まる"), 2.0)
     views = queues.tasks(SCENE, 2.0)
     assert texts_of(views) == ["宿屋に入る", "主人に話しかける", "部屋に泊まる"]
     assert ids_of(views) == ["task-001", "task-002", "task-003"]
 
 
+def test_add_keeps_the_destination_as_given():
+    queues = SceneTaskQueues()
+    queues.set_current_scene(SCENE, 0.0)
+    # 部品は行き先の中身を確かめず、受け取ったまま持つ (マップに無い場所でもそのまま)
+    unknown = TaskDestination(
+        place="  どこにも無い場所 ", tile=TilePosition(x=-5, y=99)
+    )
+    result = queues.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に入っている", destination=INN),
+            NewTask(text="店の前にいる", destination=unknown),
+            NewTask(text="会話の枠が閉じている"),
+        ],
+        1.0,
+    )
+    assert [view.destination for view in result.added] == [INN, unknown, None]
+    views = queues.tasks(SCENE, 3.0)
+    assert [view.destination for view in views] == [INN, unknown, None]
+    assert views[0] == TaskView(
+        id="task-001",
+        text="宿屋に入っている",
+        scene_id=SCENE,
+        added_t=1.0,
+        active_s=2.0,
+        cancel_requested_t=None,
+        destination=INN,
+    )
+
+
+def test_same_text_with_another_destination_is_duplicate():
+    # 同じ文かどうかは文だけで比べ、行き先は比べない
+    queues = SceneTaskQueues()
+    queues.add(SCENE, [NewTask(text="宿屋に入っている", destination=INN)], 1.0)
+    result = queues.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に 入っている", destination=SHOP),
+            NewTask(text="宿屋に入っている"),
+        ],
+        2.0,
+    )
+    assert result.added == ()
+    assert result.dropped == (
+        DroppedText(text="宿屋に 入っている", reason="duplicate"),
+        DroppedText(text="宿屋に入っている", reason="duplicate"),
+    )
+    assert [view.destination for view in queues.tasks(SCENE, 2.0)] == [INN]
+
+
 def test_add_keeps_normalized_text():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["  宿屋に\r\n入る "], 1.0)
+    result = queues.add(SCENE, new_tasks("  宿屋に\r\n入る "), 1.0)
     assert texts_of(result.added) == ["宿屋に 入る"]
     assert texts_of(queues.tasks(SCENE, 1.0)) == ["宿屋に 入る"]
 
 
 def test_ids_are_serial_across_scenes():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A"], 1.0)
-    queues.add(OTHER, ["B", "C"], 2.0)
-    queues.add(SCENE, ["D"], 3.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
+    queues.add(OTHER, new_tasks("B", "C"), 2.0)
+    queues.add(SCENE, new_tasks("D"), 3.0)
     assert ids_of(queues.tasks(SCENE, 3.0)) == ["task-001", "task-004"]
     assert ids_of(queues.tasks(OTHER, 3.0)) == ["task-002", "task-003"]
 
 
 def test_dropped_texts_do_not_use_ids():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["A", " ", "A", "B"], 1.0)
+    result = queues.add(SCENE, new_tasks("A", " ", "A", "B"), 1.0)
     assert ids_of(result.added) == ["task-001", "task-002"]
     assert texts_of(result.added) == ["A", "B"]
     assert result.dropped == (
         DroppedText(text="", reason="empty"),
         DroppedText(text="A", reason="duplicate"),
     )
-    assert ids_of(queues.add(OTHER, ["C"], 2.0).added) == ["task-003"]
+    assert ids_of(queues.add(OTHER, new_tasks("C"), 2.0).added) == ["task-003"]
 
 
 def test_add_result_keeps_the_input_order():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["A", " ", "B", "A"], 1.0)
+    result = queues.add(SCENE, new_tasks("A", " ", "B", "A"), 1.0)
     assert [
         item.id if isinstance(item, TaskView) else item.reason
         for item in result.outcomes
@@ -235,15 +297,15 @@ def test_add_result_keeps_the_input_order():
 @pytest.mark.parametrize("text", ["", "   ", "\n", "　\t\r\n"])
 def test_empty_text_is_dropped(text):
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, [text], 1.0)
+    result = queues.add(SCENE, new_tasks(text), 1.0)
     assert result == AddResult(outcomes=(DroppedText(text="", reason="empty"),))
     assert queues.tasks(SCENE, 1.0) == ()
 
 
 def test_text_differing_only_in_whitespace_is_duplicate():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A で話しかける"], 1.0)
-    result = queues.add(SCENE, ["Aで 話しかける"], 2.0)
+    queues.add(SCENE, new_tasks("A で話しかける"), 1.0)
+    result = queues.add(SCENE, new_tasks("Aで 話しかける"), 2.0)
     assert result == AddResult(
         outcomes=(DroppedText(text="Aで 話しかける", reason="duplicate"),)
     )
@@ -252,15 +314,15 @@ def test_text_differing_only_in_whitespace_is_duplicate():
 
 def test_text_same_as_one_added_earlier_in_the_call_is_duplicate():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["宿屋に入る", "宿屋に 入る"], 1.0)
+    result = queues.add(SCENE, new_tasks("宿屋に入る", "宿屋に 入る"), 1.0)
     assert texts_of(result.added) == ["宿屋に入る"]
     assert result.dropped == (DroppedText(text="宿屋に 入る", reason="duplicate"),)
 
 
 def test_same_text_in_another_scene_is_not_duplicate():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["宿屋に入る"], 1.0)
-    result = queues.add(OTHER, ["宿屋に入る"], 2.0)
+    queues.add(SCENE, new_tasks("宿屋に入る"), 1.0)
+    result = queues.add(OTHER, new_tasks("宿屋に入る"), 2.0)
     assert ids_of(result.added) == ["task-002"]
     assert result.dropped == ()
 
@@ -268,17 +330,17 @@ def test_same_text_in_another_scene_is_not_duplicate():
 def test_text_of_a_finished_task_can_be_added_again():
     # 重複は未完了のタスクとだけ比べる
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    queues.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     queues.complete(SCENE, "task-001", 2.0)
     queues.cancel(["task-002"], 3.0)
-    result = queues.add(SCENE, ["宿屋に入る", "主人に話しかける"], 4.0)
+    result = queues.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 4.0)
     assert ids_of(result.added) == ["task-003", "task-004"]
     assert result.dropped == ()
 
 
 def test_fourth_text_in_one_call_is_limit():
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["A", "B", "C", "D"], 1.0)
+    result = queues.add(SCENE, new_tasks("A", "B", "C", "D"), 1.0)
     assert texts_of(result.added) == ["A", "B", "C"]
     assert result.dropped == (DroppedText(text="D", reason="limit"),)
 
@@ -286,7 +348,7 @@ def test_fourth_text_in_one_call_is_limit():
 def test_per_call_limit_counts_only_added_texts():
     # 足せなかった文は、1 回で足した数に数えない
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["", "A", "A", "B", "C", "D"], 1.0)
+    result = queues.add(SCENE, new_tasks("", "A", "A", "B", "C", "D"), 1.0)
     assert texts_of(result.added) == ["A", "B", "C"]
     assert result.dropped == (
         DroppedText(text="", reason="empty"),
@@ -297,11 +359,11 @@ def test_per_call_limit_counts_only_added_texts():
 
 def test_texts_after_five_open_tasks_are_limit():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B", "C"], 1.0)
-    result = queues.add(SCENE, ["D", "E", "F"], 2.0)
+    queues.add(SCENE, new_tasks("A", "B", "C"), 1.0)
+    result = queues.add(SCENE, new_tasks("D", "E", "F"), 2.0)
     assert texts_of(result.added) == ["D", "E"]
     assert result.dropped == (DroppedText(text="F", reason="limit"),)
-    assert queues.add(SCENE, ["G"], 3.0) == AddResult(
+    assert queues.add(SCENE, new_tasks("G"), 3.0) == AddResult(
         outcomes=(DroppedText(text="G", reason="limit"),)
     )
     assert texts_of(queues.tasks(SCENE, 3.0)) == ["A", "B", "C", "D", "E"]
@@ -309,7 +371,7 @@ def test_texts_after_five_open_tasks_are_limit():
 
 def test_open_task_limit_is_per_scene():
     queues = full_queues()
-    result = queues.add(OTHER, ["A"], 3.0)
+    result = queues.add(OTHER, new_tasks("A"), 3.0)
     assert ids_of(result.added) == ["task-006"]
     assert result.dropped == ()
 
@@ -317,9 +379,9 @@ def test_open_task_limit_is_per_scene():
 def test_completing_or_canceling_makes_room_again():
     queues = full_queues()
     queues.complete(SCENE, "task-001", 3.0)
-    assert texts_of(queues.add(SCENE, ["F"], 4.0).added) == ["F"]
+    assert texts_of(queues.add(SCENE, new_tasks("F"), 4.0).added) == ["F"]
     queues.cancel(["task-003"], 5.0)
-    result = queues.add(SCENE, ["G", "H"], 6.0)
+    result = queues.add(SCENE, new_tasks("G", "H"), 6.0)
     assert texts_of(result.added) == ["G"]
     assert result.dropped == (DroppedText(text="H", reason="limit"),)
     assert texts_of(queues.tasks(SCENE, 6.0)) == ["B", "D", "E", "F", "G"]
@@ -328,7 +390,7 @@ def test_completing_or_canceling_makes_room_again():
 def test_overlapping_reasons_use_the_first_one():
     # 満杯の場面に、空の文・重複の文・新しい文 (理由は empty → duplicate → limit の順で決める)
     queues = full_queues()
-    result = queues.add(SCENE, ["  ", "A", "F"], 3.0)
+    result = queues.add(SCENE, new_tasks("  ", "A", "F"), 3.0)
     assert result.added == ()
     assert result.dropped == (
         DroppedText(text="", reason="empty"),
@@ -337,7 +399,7 @@ def test_overlapping_reasons_use_the_first_one():
     )
     # 1 回で 3 個足した後の、空の文と重複の文
     queues = SceneTaskQueues()
-    result = queues.add(SCENE, ["A", "B", "C", "", "A"], 1.0)
+    result = queues.add(SCENE, new_tasks("A", "B", "C", "", "A"), 1.0)
     assert result.dropped == (
         DroppedText(text="", reason="empty"),
         DroppedText(text="A", reason="duplicate"),
@@ -350,7 +412,7 @@ def test_overlapping_reasons_use_the_first_one():
 def test_complete_removes_the_head():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     assert queues.complete(SCENE, "task-001", 4.0) == TaskView(
         id="task-001",
         text="A",
@@ -384,8 +446,8 @@ def test_complete_removes_the_head():
 )
 def test_complete_does_nothing_unless_the_head_of_the_scene(scene_id, target):
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
-    queues.add(OTHER, ["C"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
+    queues.add(OTHER, new_tasks("C"), 1.0)
     assert queues.complete(scene_id, target, 2.0) is None
     assert ids_of(queues.tasks(SCENE, 2.0)) == ["task-001", "task-002"]
     assert ids_of(queues.tasks(OTHER, 2.0)) == ["task-003"]
@@ -397,7 +459,7 @@ def test_complete_does_nothing_unless_the_head_of_the_scene(scene_id, target):
 def test_request_cancel_marks_the_head():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     assert queues.request_cancel(SCENE, "task-001", 3.0) == TaskView(
         id="task-001",
         text="A",
@@ -412,7 +474,7 @@ def test_request_cancel_marks_the_head():
 
 def test_second_request_does_nothing():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     queues.request_cancel(SCENE, "task-001", 3.0)
     assert queues.request_cancel(SCENE, "task-001", 5.0) is None
     assert queues.tasks(SCENE, 5.0)[0].cancel_requested_t == 3.0
@@ -429,8 +491,8 @@ def test_second_request_does_nothing():
 )
 def test_request_cancel_does_nothing_unless_the_head_of_the_scene(scene_id, target):
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
-    queues.add(OTHER, ["C"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
+    queues.add(OTHER, new_tasks("C"), 1.0)
     assert queues.request_cancel(scene_id, target, 2.0) is None
     views = queues.tasks(SCENE, 2.0) + queues.tasks(OTHER, 2.0)
     assert [view.cancel_requested_t for view in views] == [None, None, None]
@@ -438,9 +500,9 @@ def test_request_cancel_does_nothing_unless_the_head_of_the_scene(scene_id, targ
 
 def test_request_stays_until_the_task_is_completed():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     queues.request_cancel(SCENE, "task-001", 2.0)
-    queues.add(SCENE, ["C"], 3.0)
+    queues.add(SCENE, new_tasks("C"), 3.0)
     assert queues.tasks(SCENE, 4.0)[0].cancel_requested_t == 2.0
     # 要求が付いたままでも完了にできる
     done = queues.complete(SCENE, "task-001", 5.0)
@@ -455,7 +517,7 @@ def test_request_stays_until_the_task_is_completed():
 
 def test_requested_task_can_be_canceled():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     queues.request_cancel(SCENE, "task-001", 2.0)
     canceled = queues.cancel(["task-001"], 3.0)
     assert ids_of(canceled) == ["task-001"]
@@ -469,8 +531,8 @@ def test_requested_task_can_be_canceled():
 def test_cancel_removes_tasks_of_any_scene_and_position():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A", "B", "C"], 1.0)
-    queues.add(OTHER, ["D"], 2.0)
+    queues.add(SCENE, new_tasks("A", "B", "C"), 1.0)
+    queues.add(OTHER, new_tasks("D"), 2.0)
     # 戻り値は外した順 (task_ids の順)。先頭でないタスクも外せる
     assert queues.cancel(["task-004", "task-002"], 5.0) == (
         TaskView(
@@ -496,7 +558,7 @@ def test_cancel_removes_tasks_of_any_scene_and_position():
 
 def test_cancel_ignores_ids_not_in_open_tasks():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A", "B"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B"), 1.0)
     queues.complete(SCENE, "task-001", 2.0)
     # 未知の ID、完了にしたタスクの ID、同じ ID の 2 回目は無視する
     canceled = queues.cancel(["task-099", "task-001", "task-002", "task-002"], 3.0)
@@ -520,7 +582,7 @@ def test_current_scene_starts_without_scene():
 def test_active_seconds_grow_only_while_the_scene_is_current():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 1.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
     assert queues.tasks(SCENE, 5.0)[0].active_s == 4.0
     # 別の場面にいる間は止まる
     queues.set_current_scene(OTHER, 5.0)
@@ -533,7 +595,7 @@ def test_active_seconds_grow_only_while_the_scene_is_current():
 def test_active_seconds_stop_without_scene():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 0.0)
+    queues.add(SCENE, new_tasks("A"), 0.0)
     queues.set_current_scene(None, 3.0)
     assert queues.tasks(SCENE, 10.0)[0].active_s == 3.0
     queues.set_current_scene(SCENE, 10.0)
@@ -543,7 +605,7 @@ def test_active_seconds_stop_without_scene():
 def test_task_added_outside_the_current_scene_stays_at_zero():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(OTHER, ["A"], 2.0)
+    queues.add(OTHER, new_tasks("A"), 2.0)
     assert queues.tasks(OTHER, 8.0)[0].active_s == 0.0
     queues.set_current_scene(OTHER, 8.0)
     assert queues.tasks(OTHER, 10.0)[0].active_s == 2.0
@@ -551,22 +613,22 @@ def test_task_added_outside_the_current_scene_stays_at_zero():
 
 def test_task_added_without_scene_stays_at_zero():
     queues = SceneTaskQueues()
-    queues.add(SCENE, ["A"], 1.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
     assert queues.tasks(SCENE, 5.0)[0].active_s == 0.0
 
 
 def test_each_task_counts_from_its_own_added_time():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 1.0)
-    queues.add(SCENE, ["B"], 3.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
+    queues.add(SCENE, new_tasks("B"), 3.0)
     assert [view.active_s for view in queues.tasks(SCENE, 6.0)] == [5.0, 3.0]
 
 
 def test_setting_the_same_scene_again_does_not_reset():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 0.0)
+    queues.add(SCENE, new_tasks("A"), 0.0)
     queues.set_current_scene(SCENE, 5.0)
     assert queues.tasks(SCENE, 10.0)[0].active_s == 10.0
 
@@ -574,7 +636,7 @@ def test_setting_the_same_scene_again_does_not_reset():
 def test_active_seconds_are_rounded_to_milliseconds():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 0.1)
+    queues.add(SCENE, new_tasks("A"), 0.1)
     # 0.3 - 0.1 は浮動小数点で 0.19999999999999998 になる
     assert queues.tasks(SCENE, 0.3)[0].active_s == 0.2
     queues.set_current_scene(OTHER, 0.3)
@@ -588,7 +650,7 @@ def test_active_seconds_are_rounded_to_milliseconds():
 def test_oldest_active_s_without_open_tasks_is_none():
     queues = SceneTaskQueues()
     assert queues.oldest_active_s(SCENE, 1.0) is None
-    queues.add(SCENE, ["A"], 1.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
     queues.complete(SCENE, "task-001", 2.0)
     assert queues.oldest_active_s(SCENE, 3.0) is None
 
@@ -596,8 +658,8 @@ def test_oldest_active_s_without_open_tasks_is_none():
 def test_oldest_active_s_is_of_the_earliest_added_task():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A"], 1.0)
-    queues.add(SCENE, ["B"], 3.0)
+    queues.add(SCENE, new_tasks("A"), 1.0)
+    queues.add(SCENE, new_tasks("B"), 3.0)
     assert queues.oldest_active_s(SCENE, 6.0) == 5.0
     queues.complete(SCENE, "task-001", 6.0)
     assert queues.oldest_active_s(SCENE, 8.0) == 5.0
@@ -658,7 +720,7 @@ def test_oldest_active_s_with_the_same_added_t_uses_the_front_task():
 def test_tasks_lists_open_tasks_in_queue_order():
     queues = SceneTaskQueues()
     queues.set_current_scene(SCENE, 0.0)
-    queues.add(SCENE, ["A", "B", "C"], 1.0)
+    queues.add(SCENE, new_tasks("A", "B", "C"), 1.0)
     queues.request_cancel(SCENE, "task-001", 2.0)
     assert queues.tasks(SCENE, 4.0) == (
         TaskView(
@@ -714,13 +776,34 @@ def test_restored_tasks_grow_from_the_saved_active_seconds():
     assert queues.tasks(OTHER, 103.0)[0].active_s == 2.0
 
 
+def test_restored_tasks_keep_the_destination():
+    restored = (
+        TaskView(
+            id="task-001",
+            text="宿屋に入っている",
+            scene_id=SCENE,
+            added_t=10.0,
+            active_s=2.0,
+            cancel_requested_t=None,
+            destination=INN,
+        ),
+    )
+    queues = SceneTaskQueues(restored, next_number=2)
+    assert queues.tasks(SCENE, 20.0) == restored
+    done = queues.complete(SCENE, "task-001", 20.0)
+    assert done is not None
+    assert done.destination == INN
+
+
 def test_restored_queue_uses_next_number_and_the_saved_order():
     queues = SceneTaskQueues(RESTORED, next_number=6)
-    assert ids_of(queues.add(OTHER, ["宿屋に戻る"], 100.0).added) == ["task-006"]
+    assert ids_of(queues.add(OTHER, new_tasks("宿屋に戻る"), 100.0).added) == [
+        "task-006"
+    ]
     # restored の順がキューの順 (SCENE の先頭は task-003)
     assert queues.complete(SCENE, "task-005", 100.0) is None
     assert queues.complete(SCENE, "task-003", 100.0) is not None
     # 作り直したタスクも、重複の判定に入る
-    assert queues.add(SCENE, ["主人に 話しかける"], 101.0).dropped == (
+    assert queues.add(SCENE, new_tasks("主人に 話しかける"), 101.0).dropped == (
         DroppedText(text="主人に 話しかける", reason="duplicate"),
     )

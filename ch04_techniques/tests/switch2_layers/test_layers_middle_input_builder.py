@@ -11,7 +11,8 @@ from switch2_layers.middle.middle_input_builder import (
     read_middle_state,
     select_interval_frames,
 )
-from switch2_layers.middle.middle_types import MiddleState
+from switch2_layers.middle.middle_trigger import MiddleCallReason
+from switch2_layers.middle.middle_types import MiddleInput, MiddleState
 from switch2_layers.notes.map_document import (
     GridMapDocument,
     GridMapPlace,
@@ -24,6 +25,8 @@ from switch2_layers.notes.map_document import (
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.tasks.task_board import TaskBoard
+from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 STATE = {
     "generated_t": 5.5,
@@ -36,7 +39,26 @@ STATE = {
     "timeline": "## 直近",
     "surface_rows_offset": 0,
     "operations_rows_offset": 0,
+    "tasks_rows_offset": 0,
 }
+
+
+def build(
+    root: Path,
+    now_t: float,
+    window_s: float = 10.0,
+    board: TaskBoard | None = None,
+    reasons: tuple[MiddleCallReason, ...] = ("interval",),
+) -> MiddleInput:
+    """root の実行ディレクトリーで build_middle_input を呼ぶ。board が None なら空のキューの部品を渡す。"""
+    paths = RunPaths(root)
+    return build_middle_input(
+        paths,
+        now_t=now_t,
+        window_s=window_s,
+        board=TaskBoard(paths) if board is None else board,
+        reasons=reasons,
+    )
 
 
 def make_run(tmp_path: Path) -> Path:
@@ -181,7 +203,7 @@ def write_state(root: Path, **changes: object) -> None:
 
 def test_empty_run_gives_empty_input(tmp_path):
     root = make_run(tmp_path)
-    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    middle_input = build(root, now_t=3.0, window_s=10.0)
     assert middle_input.t == 3.0
     assert middle_input.frames == ()
     assert middle_input.surface_rows == ()
@@ -190,15 +212,18 @@ def test_empty_run_gives_empty_input(tmp_path):
     assert middle_input.scene_labels == ()
     assert middle_input.previous_state is None
     assert middle_input.strategy == ""
-    assert middle_input.current_tasks == ""
+    assert middle_input.task_queue == ()
+    assert middle_input.task_events == ()
     assert middle_input.surface_rows_offset == 0
     assert middle_input.operations_rows_offset == 0
+    assert middle_input.tasks_rows_offset == 0
+    assert middle_input.reasons == ("interval",)
 
 
 def test_frames_are_read_from_saved_interval_images(tmp_path):
     root = make_run(tmp_path)
     write_frames(root, [float(t) for t in range(22)], surface_times=[19.5])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert [frame.t for frame in middle_input.frames] == [10.0, 13.0, 17.0, 20.0]
     assert middle_input.frames[-1].file == "frames/interval/000020000.jpg"
     assert middle_input.frames[-1].jpeg == b"jpeg-20.0"
@@ -208,7 +233,7 @@ def test_frames_with_missing_files_are_skipped(tmp_path):
     root = make_run(tmp_path)
     write_frames(root, [18.0, 19.0, 20.0])
     (root / "frames" / "interval" / "000019000.jpg").unlink()
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert [frame.t for frame in middle_input.frames] == [18.0, 20.0]
 
 
@@ -236,7 +261,7 @@ def test_frames_outside_interval_directory_are_skipped(tmp_path):
         {"t": 20.0, "kind": "interval", "file": str(secret), "width": 64, "height": 36},
     ]
     write_jsonl(root / "frames.jsonl", rows)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.frames == ()
 
 
@@ -256,7 +281,7 @@ def test_rows_are_read_from_previous_offsets(tmp_path):
         surface_rows_offset=byte_length(surface[:2]),
         operations_rows_offset=byte_length(operations[:1]),
     )
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     # 前回の位置から、ファイルにある完全な行をすべて読む (今回の t より新しい 30.0 の行も読む)
     assert [row["t_received"] for row in middle_input.surface_rows] == [6.0, 30.0]
     assert [row["t"] for row in middle_input.operation_rows] == [5.1, 7.5]
@@ -270,7 +295,7 @@ def test_row_with_same_time_after_offset_is_read(tmp_path):
     first = [{"t": 13.0, "source": "apply"}]
     write_jsonl(root / "operations.jsonl", first + [{"t": 13.0, "source": "neutral"}])
     write_state(root, operations_rows_offset=byte_length(first))
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     # 前回読んだ行と同じ t の行でも、前回の位置より後に書かれていれば読む
     assert [row["source"] for row in middle_input.operation_rows] == ["neutral"]
 
@@ -280,7 +305,7 @@ def test_row_with_earlier_time_after_offset_is_read(tmp_path):
     first = [surface_row(8.0)]
     write_jsonl(root / "surface.jsonl", first + [surface_row(7.0, scene_changed=True)])
     write_state(root, based_on_t=10.0, surface_rows_offset=byte_length(first))
-    middle_input = build_middle_input(RunPaths(root), now_t=15.0, window_s=10.0)
+    middle_input = build(root, now_t=15.0, window_s=10.0)
     # 前回の入力の時刻 (10.0) より前の t_received を持つ行でも、前回の位置より後なら読む
     assert [row["t_received"] for row in middle_input.surface_rows] == [7.0]
     assert middle_input.scene_change_reported is True
@@ -290,7 +315,7 @@ def test_partial_last_line_is_not_read_nor_counted(tmp_path):
     root = make_run(tmp_path)
     complete = [surface_row(1.0)]
     write_jsonl(root / "surface.jsonl", complete, partial_line='{"t_received": 2.0')
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert [row["t_received"] for row in middle_input.surface_rows] == [1.0]
     assert middle_input.surface_rows_offset == byte_length(complete)
 
@@ -300,7 +325,7 @@ def test_offset_beyond_file_size_reads_from_start(tmp_path):
     rows = [surface_row(1.0), surface_row(2.0)]
     write_jsonl(root / "surface.jsonl", rows)
     write_state(root, surface_rows_offset=100_000)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert [row["t_received"] for row in middle_input.surface_rows] == [1.0, 2.0]
     assert middle_input.surface_rows_offset == byte_length(rows)
 
@@ -310,7 +335,7 @@ def test_offsets_stay_without_new_rows(tmp_path):
     rows = [surface_row(1.0)]
     write_jsonl(root / "surface.jsonl", rows)
     write_state(root, surface_rows_offset=byte_length(rows), operations_rows_offset=0)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.surface_rows == ()
     assert middle_input.operation_rows == ()
     assert middle_input.surface_rows_offset == byte_length(rows)
@@ -322,7 +347,7 @@ def test_all_rows_without_previous_state(tmp_path):
     complete = [surface_row(1.0), surface_row(2.0), {"t_received": "bad"}]
     write_jsonl(root / "surface.jsonl", complete, partial_line='{"t_received": 3.0')
     write_jsonl(root / "operations.jsonl", [{"t": 0.5}, {"t": 25.0}])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     # 先頭から、完全な行をすべて読む (行の時刻では選ばない)
     assert [row["t_received"] for row in middle_input.surface_rows] == [
         1.0,
@@ -337,7 +362,7 @@ def test_broken_previous_state_is_treated_as_missing(tmp_path):
     root = make_run(tmp_path)
     (root / "middle" / "state.json").write_text("{broken", encoding="utf-8")
     write_jsonl(root / "surface.jsonl", [surface_row(1.0)])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.previous_state is None
     assert len(middle_input.surface_rows) == 1
 
@@ -348,12 +373,12 @@ def test_scene_change_mark_is_reported(tmp_path):
         root / "surface.jsonl",
         [surface_row(1.0), surface_row(2.0, scene_changed=True), surface_row(3.0)],
     )
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.scene_change_reported is True
     assert middle_input.surface_rows[1]["scene_changed"] is True
 
 
-def test_labels_strategy_and_current_tasks(tmp_path):
+def test_labels_and_strategy(tmp_path):
     root = make_run(tmp_path)
     (root / "middle" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")
     (root / "notes" / "scene_labels.json").write_text(
@@ -365,25 +390,9 @@ def test_labels_strategy_and_current_tasks(tmp_path):
     (root / "notes" / "strategy.md").write_text(
         "# 大方針\n\n町を出る\n", encoding="utf-8"
     )
-    scene_dir = root / "notes" / "scenes" / "scene-001"
-    scene_dir.mkdir(parents=True)
-    (scene_dir / "tasks.md").write_text("- 宿屋に入る\n", encoding="utf-8")
-    other_dir = root / "notes" / "scenes" / "scene-002"
-    other_dir.mkdir(parents=True)
-    (other_dir / "tasks.md").write_text("- 別の場面\n", encoding="utf-8")
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.scene_labels == (SceneLabel("scene-001", "町", 2.0),)
     assert middle_input.strategy == "# 大方針\n\n町を出る\n"
-    assert middle_input.current_tasks == "- 宿屋に入る\n"
-
-
-def test_current_tasks_without_scene_is_empty(tmp_path):
-    root = make_run(tmp_path)
-    (root / "middle" / "state.json").write_text(
-        json.dumps({**STATE, "scene_id": None, "scene_name": None}), encoding="utf-8"
-    )
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
-    assert middle_input.current_tasks == ""
 
 
 def test_documents_symlinked_to_outside_of_notes_are_empty(tmp_path):
@@ -392,12 +401,124 @@ def test_documents_symlinked_to_outside_of_notes_are_empty(tmp_path):
     secret.write_text("text outside of notes\n", encoding="utf-8")
     (root / "middle" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")
     (root / "notes" / "strategy.md").symlink_to(secret)
-    scene_dir = root / "notes" / "scenes" / "scene-001"
-    scene_dir.mkdir(parents=True)
-    (scene_dir / "tasks.md").symlink_to(secret)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.strategy == ""
-    assert middle_input.current_tasks == ""
+
+
+# --- タスクのキューと出来事・呼ばれた理由 ---
+
+SCENE = "scene-001"
+OTHER = "scene-002"
+INN = TaskDestination(place="町", tile=None)
+
+
+def task_board_with_tasks(root: Path) -> TaskBoard:
+    """SCENE に 2 つ、OTHER に 1 つのタスクがあるキューの部品を返す (現在の場面は SCENE、t=1.0 から)。"""
+    board = TaskBoard(RunPaths(root))
+    board.set_current_scene(SCENE, 1.0)
+    board.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に入っている", destination=INN),
+            NewTask(text="会話の枠が閉じている"),
+        ],
+        2.0,
+    )
+    board.add(OTHER, [NewTask(text="町の北の出口にいる")], 3.0)
+    return board
+
+
+def task_row(t: float, event: str, scene_id: str, task_id: str | None) -> dict:
+    """tasks.jsonl の 1 行を返す。"""
+    return {
+        "t": t,
+        "event": event,
+        "scene_id": scene_id,
+        "id": task_id,
+        "text": "宿屋に入っている",
+        "reason": "duplicate" if event == "dropped" else None,
+        "active_s": None if event in ("added", "dropped") else 1.5,
+        "destination": None,
+    }
+
+
+def test_task_queue_is_of_the_input_scene_at_the_input_time(tmp_path):
+    root = make_run(tmp_path)
+    write_state(root)
+    board = task_board_with_tasks(root)
+    middle_input = build(root, now_t=20.0, board=board)
+    # 入力の場面 (前回の middle/state.json の scene_id) のキューの、入力の時刻での状態
+    assert middle_input.task_queue == board.tasks(SCENE, 20.0)
+    assert [task.id for task in middle_input.task_queue] == ["task-001", "task-002"]
+    assert [task.active_s for task in middle_input.task_queue] == [18.0, 18.0]
+
+
+def test_task_queue_and_events_without_scene_are_empty(tmp_path):
+    root = make_run(tmp_path)
+    board = task_board_with_tasks(root)
+    rows = [task_row(4.0, "done", SCENE, "task-001")]
+    (root / "tasks.jsonl").write_text(jsonl_text(rows), encoding="utf-8")
+    end = (root / "tasks.jsonl").stat().st_size
+    # 前回の middle/state.json が無い
+    middle_input = build(root, now_t=20.0, board=board)
+    assert middle_input.task_queue == ()
+    assert middle_input.task_events == ()
+    # 読み終えた位置は、場面に依らず進める
+    assert middle_input.tasks_rows_offset == end
+    # 前回の場面が決まっていない
+    write_state(root, scene_id=None, scene_name=None)
+    middle_input = build(root, now_t=20.0, board=board)
+    assert middle_input.task_queue == ()
+    assert middle_input.task_events == ()
+    assert middle_input.tasks_rows_offset == end
+
+
+def test_task_events_are_rows_of_the_scene_after_the_offset_except_added(tmp_path):
+    root = make_run(tmp_path)
+    before = [task_row(1.0, "done", SCENE, "task-001")]
+    after = [
+        task_row(2.0, "added", SCENE, "task-002"),
+        task_row(2.0, "dropped", SCENE, None),
+        task_row(3.0, "cancel_requested", SCENE, "task-002"),
+        task_row(3.5, "done", OTHER, "task-003"),
+        task_row(4.0, "canceled", SCENE, "task-002"),
+        task_row(5.0, "done", SCENE, "task-004"),
+    ]
+    (root / "tasks.jsonl").write_text(
+        jsonl_text(before + after) + '{"t": 6.0, "event": "done"', encoding="utf-8"
+    )
+    write_state(root, tasks_rows_offset=byte_length(before))
+    middle_input = build(root, now_t=20.0)
+    # 前回の位置より後の、入力の場面の added でない行を、書かれた順に
+    assert middle_input.task_events == (after[1], after[2], after[4], after[5])
+    # 書いている途中の最後の行は読まず、位置にも含めない
+    assert middle_input.tasks_rows_offset == byte_length(before + after)
+
+
+def test_tasks_rows_offset_stays_without_new_rows(tmp_path):
+    root = make_run(tmp_path)
+    rows = [task_row(1.0, "done", SCENE, "task-001")]
+    (root / "tasks.jsonl").write_text(jsonl_text(rows), encoding="utf-8")
+    write_state(root, tasks_rows_offset=byte_length(rows))
+    middle_input = build(root, now_t=20.0)
+    assert middle_input.task_events == ()
+    assert middle_input.tasks_rows_offset == byte_length(rows)
+
+
+def test_tasks_rows_offset_beyond_file_size_reads_from_start(tmp_path):
+    root = make_run(tmp_path)
+    rows = [task_row(1.0, "done", SCENE, "task-001")]
+    (root / "tasks.jsonl").write_text(jsonl_text(rows), encoding="utf-8")
+    write_state(root, tasks_rows_offset=10_000)
+    middle_input = build(root, now_t=20.0)
+    assert middle_input.task_events == (rows[0],)
+    assert middle_input.tasks_rows_offset == byte_length(rows)
+
+
+def test_reasons_are_given_to_the_input(tmp_path):
+    root = make_run(tmp_path)
+    middle_input = build(root, now_t=20.0, reasons=("queue_empty", "stuck"))
+    assert middle_input.reasons == ("queue_empty", "stuck")
 
 
 # --- ゲームの性質 (notes/game.md。場面に依らない) ---
@@ -409,7 +530,7 @@ def test_game_document_is_read_as_it_is(tmp_path):
     root = make_run(tmp_path)
     write_state(root)
     (root / "notes" / "game.md").write_text(GAME, encoding="utf-8")
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     # 前後の空白も除かずに渡す (除くのは要求の節を作るとき)
     assert middle_input.game == GAME
 
@@ -425,20 +546,20 @@ def test_game_document_does_not_depend_on_the_scene(tmp_path, state_changes):
     scene_dir = root / "notes" / "scenes" / "scene-001"
     scene_dir.mkdir(parents=True)
     (scene_dir / "game.md").write_text("# 場面の文書ではない\n", encoding="utf-8")
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.game == GAME
 
 
 def test_missing_game_document_is_empty(tmp_path):
     root = make_run(tmp_path)
-    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    middle_input = build(root, now_t=3.0, window_s=10.0)
     assert middle_input.game == ""
 
 
 def test_unreadable_game_document_is_empty(tmp_path):
     root = make_run(tmp_path)
     (root / "notes" / "game.md").write_bytes(b"\xff\xfe not utf-8")
-    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    middle_input = build(root, now_t=3.0, window_s=10.0)
     assert middle_input.game == ""
 
 
@@ -447,7 +568,7 @@ def test_game_document_symlinked_to_outside_of_notes_is_empty(tmp_path):
     secret = tmp_path / "secret.env"
     secret.write_text("text outside of notes\n", encoding="utf-8")
     (root / "notes" / "game.md").symlink_to(secret)
-    middle_input = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    middle_input = build(root, now_t=3.0, window_s=10.0)
     assert middle_input.game == ""
 
 
@@ -475,7 +596,7 @@ def test_current_controls_of_the_scene(tmp_path):
     other_dir = root / "notes" / "scenes" / "scene-002"
     other_dir.mkdir(parents=True)
     (other_dir / "controls.md").write_text("- X: 別の場面\n", encoding="utf-8")
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == SCENE_CONTROLS
 
 
@@ -483,7 +604,7 @@ def test_current_controls_falls_back_to_common_when_scene_note_is_missing(tmp_pa
     root = make_run(tmp_path)
     write_state(root)
     write_controls(root, COMMON_CONTROLS, None)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == COMMON_CONTROLS
 
 
@@ -491,7 +612,7 @@ def test_current_controls_falls_back_to_common_when_scene_note_is_blank(tmp_path
     root = make_run(tmp_path)
     write_state(root)
     write_controls(root, COMMON_CONTROLS, " \n\n")
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == COMMON_CONTROLS
 
 
@@ -499,14 +620,14 @@ def test_current_controls_without_scene_is_common(tmp_path):
     root = make_run(tmp_path)
     write_state(root, scene_id=None, scene_name=None)
     write_controls(root, COMMON_CONTROLS, SCENE_CONTROLS)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == COMMON_CONTROLS
 
 
 def test_current_controls_without_previous_state_is_common(tmp_path):
     root = make_run(tmp_path)
     write_controls(root, COMMON_CONTROLS, SCENE_CONTROLS)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.previous_state is None
     assert middle_input.current_controls == COMMON_CONTROLS
 
@@ -514,7 +635,7 @@ def test_current_controls_without_previous_state_is_common(tmp_path):
 def test_current_controls_without_any_note_is_empty(tmp_path):
     root = make_run(tmp_path)
     write_state(root)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.current_controls == ""
 
 
@@ -597,14 +718,14 @@ def write_map_records(root: Path, place_names: list[object]) -> None:
 def test_map_and_place_names_are_read(tmp_path):
     root = make_run(tmp_path)
     # マップも記録も無ければ、マップなしで場所の名前も無い
-    before = build_middle_input(RunPaths(root), now_t=3.0, window_s=10.0)
+    before = build(root, now_t=3.0, window_s=10.0)
     assert before.map_document is None
     assert before.place_names == ()
     write_map(root, MAP_JSON)
     write_map_records(
         root, ["自分の部屋 (2 階)", "家の 1 階", None, "1 階の部屋", "庭"]
     )
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     # マップの全体を渡す
     assert middle_input.map_document == MAP_DOCUMENT
     # map.json の name と aliases、記録の place_name を合わせ、重複を除いて最初に現れた順
@@ -632,7 +753,7 @@ def test_map_that_does_not_match_is_passed_as_no_map(tmp_path, value):
     write_map(root, value)
     write_map_records(root, ["家の 1 階", "庭"])
     # middle の実行を失敗にしない
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.map_document is None
     # 場所の名前の一覧は、記録の place_name だけから作る
     assert middle_input.place_names == ("家の 1 階", "庭")
@@ -643,7 +764,7 @@ def test_broken_map_json_is_passed_as_no_map(tmp_path):
     (root / "notes" / "map").mkdir()
     (root / "notes" / "map" / "map.json").write_text("{broken", encoding="utf-8")
     write_map_records(root, ["庭"])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.map_document is None
     assert middle_input.place_names == ("庭",)
 
@@ -655,7 +776,7 @@ def test_map_symlinked_to_outside_of_notes_is_passed_as_no_map(tmp_path):
     (root / "notes" / "map").mkdir()
     (root / "notes" / "map" / "map.json").symlink_to(outside)
     write_map_records(root, ["庭"])
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.map_document is None
     assert middle_input.place_names == ("庭",)
 
@@ -716,7 +837,7 @@ GRID_MAP_DOCUMENT = GridMapDocument(
 def test_grid_map_is_read(tmp_path):
     root = make_run(tmp_path)
     write_map(root, GRID_MAP_JSON)
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.map_document == GRID_MAP_DOCUMENT
     # grid の場所の name と aliases も、場所の名前の一覧に入れる
     assert middle_input.place_names == ("家の 1 階", "1 階の部屋")
@@ -728,20 +849,16 @@ def test_grid_map_is_read(tmp_path):
 def test_progress_is_read_from_progress_state_file(tmp_path):
     root = make_run(tmp_path)
     # まだ値が無い
-    assert (
-        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
-    )
+    assert build(root, now_t=20.0, window_s=10.0).progress is None
     (root / "progress").mkdir()
     (root / "progress" / "state.json").write_text(
         json.dumps({"t": 19.8, "static_s": 4.0, "no_novel_s": 75.5, "window_s": 300.0}),
         encoding="utf-8",
     )
-    middle_input = build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0)
+    middle_input = build(root, now_t=20.0, window_s=10.0)
     assert middle_input.progress == ProgressState(
         t=19.8, static_s=4.0, no_novel_s=75.5, window_s=300.0
     )
     # 壊れていれば値が無いものとして扱い、middle の実行は失敗にしない
     (root / "progress" / "state.json").write_text("{broken", encoding="utf-8")
-    assert (
-        build_middle_input(RunPaths(root), now_t=20.0, window_s=10.0).progress is None
-    )
+    assert build(root, now_t=20.0, window_s=10.0).progress is None

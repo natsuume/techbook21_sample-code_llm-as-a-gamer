@@ -12,7 +12,10 @@ from switch2_layers.middle.middle_call_record import (
 )
 from switch2_layers.middle.middle_output_writer import MiddleWriteResult
 from switch2_layers.middle.middle_types import MiddleFrame, MiddleInput, MiddleState
+from switch2_layers.middle.task_destination_fix import DestinationFix
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.scene_labels import SceneLabel
+from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 CALL_KEYS = [
     "t_sent",
@@ -30,6 +33,12 @@ CALL_KEYS = [
     "deep_requests",
     "deep_requests_sent",
     "error",
+    "reasons",
+    "new_tasks",
+    "destination_fixes",
+    "cancel_task_ids",
+    "cancel_used",
+    "new_tasks_used",
 ]
 INPUT = MiddleInput(
     t=10.0,
@@ -43,9 +52,12 @@ INPUT = MiddleInput(
     scene_labels=(),
     previous_state=None,
     strategy="",
-    current_tasks="",
+    task_queue=(),
+    task_events=(),
     surface_rows_offset=120,
     operations_rows_offset=40,
+    tasks_rows_offset=60,
+    reasons=("queue_empty", "stuck"),
 )
 STATE = MiddleState(
     generated_t=10.6,
@@ -58,7 +70,28 @@ STATE = MiddleState(
     timeline="",
     surface_rows_offset=120,
     operations_rows_offset=40,
+    tasks_rows_offset=60,
 )
+
+
+def write_result(
+    state: MiddleState = STATE,
+    new_scene: SceneLabel | None = None,
+    new_tasks: tuple[NewTask, ...] = (),
+    destination_fixes: tuple[DestinationFix, ...] = (),
+    cancel_task_ids: tuple[str, ...] = (),
+    cancel_used: bool = False,
+    new_tasks_used: bool = False,
+) -> MiddleWriteResult:
+    return MiddleWriteResult(
+        state=state,
+        new_scene=new_scene,
+        new_tasks=new_tasks,
+        destination_fixes=destination_fixes,
+        cancel_task_ids=cancel_task_ids,
+        cancel_used=cancel_used,
+        new_tasks_used=new_tasks_used,
+    )
 
 
 def test_row_of_successful_call_with_new_scene():
@@ -66,10 +99,15 @@ def test_row_of_successful_call_with_new_scene():
         t_sent=10.1,
         t_received=10.6,
         middle_input=INPUT,
-        write_result=MiddleWriteResult(STATE, SceneLabel("scene-001", "町", 10.0)),
+        write_result=write_result(
+            new_scene=SceneLabel("scene-001", "町", 10.0),
+            cancel_task_ids=("task-003",),
+            new_tasks_used=True,
+        ),
         deep_requests=[DocumentKind.CONTROLS, DocumentKind.TIPS],
         deep_requests_sent=True,
         error=None,
+        reasons=("queue_empty", "stuck"),
     )
     row = middle_call_row(record)
     assert list(row) == CALL_KEYS
@@ -92,8 +130,78 @@ def test_row_of_successful_call_with_new_scene():
         "deep_requests": ["controls", "tips"],
         "deep_requests_sent": True,
         "error": None,
+        "reasons": ["queue_empty", "stuck"],
+        "new_tasks": [],
+        "destination_fixes": [],
+        "cancel_task_ids": ["task-003"],
+        "cancel_used": False,
+        "new_tasks_used": True,
     }
     assert json.loads(json.dumps(row)) == row
+
+
+def test_row_has_fixed_new_tasks_and_destination_fixes():
+    inn = TaskDestination(place="町", tile=TilePosition(3, 4))
+    record = MiddleCallRecord(
+        t_sent=10.1,
+        t_received=10.6,
+        middle_input=INPUT,
+        write_result=write_result(
+            new_tasks=(
+                NewTask(text="宿屋に入っている", destination=inn),
+                NewTask(text="会話の枠が閉じている", destination=None),
+            ),
+            destination_fixes=(
+                DestinationFix(
+                    index=0,
+                    before=TaskDestination(place="町の中", tile=TilePosition(3, 4)),
+                    after=inn,
+                    reason="alias_place",
+                ),
+                DestinationFix(
+                    index=1,
+                    before=TaskDestination(place="草原", tile=None),
+                    after=None,
+                    reason="unknown_place",
+                ),
+            ),
+            cancel_task_ids=("task-001", "task-9"),
+            cancel_used=True,
+            new_tasks_used=True,
+        ),
+        deep_requests=[],
+        deep_requests_sent=True,
+        error=None,
+        reasons=("cancel_requested",),
+    )
+    row = middle_call_row(record)
+    assert list(row) == CALL_KEYS
+    assert row["reasons"] == ["cancel_requested"]
+    assert row["new_tasks"] == [
+        {
+            "text": "宿屋に入っている",
+            "destination": {"place": "町", "tile": {"x": 3, "y": 4}},
+        },
+        {"text": "会話の枠が閉じている", "destination": None},
+    ]
+    assert row["destination_fixes"] == [
+        {
+            "index": 0,
+            "before": {"place": "町の中", "tile": {"x": 3, "y": 4}},
+            "after": {"place": "町", "tile": {"x": 3, "y": 4}},
+            "reason": "alias_place",
+        },
+        {
+            "index": 1,
+            "before": {"place": "草原", "tile": None},
+            "after": None,
+            "reason": "unknown_place",
+        },
+    ]
+    assert row["cancel_task_ids"] == ["task-001", "task-9"]
+    assert row["cancel_used"] is True
+    assert row["new_tasks_used"] is True
+    assert json.loads(json.dumps(row, ensure_ascii=False)) == row
 
 
 def test_row_has_press_home_of_the_state():
@@ -101,12 +209,11 @@ def test_row_has_press_home_of_the_state():
         t_sent=10.1,
         t_received=10.6,
         middle_input=INPUT,
-        write_result=MiddleWriteResult(
-            dataclasses.replace(STATE, press_home=True), None
-        ),
+        write_result=write_result(state=dataclasses.replace(STATE, press_home=True)),
         deep_requests=[],
         deep_requests_sent=True,
         error=None,
+        reasons=("interval",),
     )
     assert middle_call_row(record)["press_home"] is True
 
@@ -120,8 +227,10 @@ def test_row_of_failed_call():
         deep_requests=[],
         deep_requests_sent=False,
         error="RuntimeError: luna failed",
+        reasons=("cancel_requested", "interval"),
     )
     row = middle_call_row(record)
+    assert list(row) == CALL_KEYS
     assert row["scene_id"] is None
     assert row["scene_name"] is None
     assert row["surface_wait_s"] is None
@@ -130,6 +239,16 @@ def test_row_of_failed_call():
     assert row["deep_requests"] == []
     assert row["error"] == "RuntimeError: luna failed"
     assert row["based_on_t"] == 10.0
+    # 呼ばれた理由は失敗した回にも書き、出力から決まる値は null
+    assert row["reasons"] == ["cancel_requested", "interval"]
+    for key in [
+        "new_tasks",
+        "destination_fixes",
+        "cancel_task_ids",
+        "cancel_used",
+        "new_tasks_used",
+    ]:
+        assert row[key] is None, key
 
 
 def test_row_when_input_could_not_be_built():
@@ -141,8 +260,10 @@ def test_row_when_input_could_not_be_built():
         deep_requests=[],
         deep_requests_sent=False,
         error="OSError: disk",
+        reasons=("interval",),
     )
     row = middle_call_row(record)
+    assert row["reasons"] == ["interval"]
     assert row["based_on_t"] is None
     assert row["frames"] == []
     assert row["surface_rows"] == 0
@@ -160,6 +281,7 @@ FAILED_RECORD = MiddleCallRecord(
     deep_requests=[],
     deep_requests_sent=False,
     error="LunaCallError: HTTP 500",
+    reasons=("interval",),
 )
 DETAILS = {
     "usage": {

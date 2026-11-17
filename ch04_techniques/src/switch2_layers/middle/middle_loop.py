@@ -1,9 +1,9 @@
 """middle の 1 回分の処理 (run_middle_step) と、run のループ (MiddleLoop)、middle-once (run_middle_once)。
 
 1 回分の流れ (run_middle_step):
-    1. 実行ディレクトリーのファイルだけから入力を作る (middle_input_builder.build_middle_input)
+    1. 実行ディレクトリーのファイルとタスクのキューの部品から入力を作る (middle_input_builder.build_middle_input)
     2. MiddleAnalyzer.analyze を呼ぶ
-    3. 出力を書く (middle_output_writer.write_middle_output)
+    3. 出力を書く (middle_output_writer.write_middle_output。キューの部品の操作を含む)
     4. マップの記録の行 (middle.map_records.build_map_record) があれば、middle/map_records.jsonl に追記する。
        追記の失敗は middle の失敗として数えず、logging で警告を書いて続ける (run.jsonl には書かない)
     5. 初めての場面に名前が付いたら、その場面の操作説明と攻略情報と、ゲームの性質 (場面に依らない) の deep を、
@@ -13,18 +13,22 @@
        (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を行に足す (失敗した回も同じ)
 成功した回の出力の press_home が真なら、MiddleLoop.run_once が部品の on_press_home で app に知らせる (app は段階が
 play のときだけ HOME を短押しし、復帰の段階に移る)。
-ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから最初の実行を始め、
-前回の応答 (失敗を含む) から interval_s 秒待って次を始める。analyze が例外を出したら、前回の出力を残したまま
-次の間隔で再び呼ぶ。max_errors 回続けたら on_stop で全体を止める。
-止める合図は、analyze が戻ったとき (例外を含む)、出力のファイル (tasks.md・middle/state.json・notes/scene_labels.json)・
-middle/map_records.jsonl・middle/calls.jsonl のそれぞれを書く直前、deep を要求する直前 (種類ごと) に確かめる。
+ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから、理由 interval で最初の実行を始め
+(middle.middle_trigger.MiddleTrigger.first_reasons)、その後は MiddleTrigger.wait_next で、前回の応答 (失敗を含む) の
+後のきっかけ (キューが空になった・取り消しの要求・詰まり・場面転換・一定の間隔) を待って次を始める。analyze が例外を
+出したら、前回の出力を残したまま、その回の理由を次の回に持ち越して (MiddleTrigger.carry_over)、前回の応答から
+interval_s 秒たってから再び呼ぶ (持ち越した理由やほかのきっかけがあっても、失敗の後の間隔は縮めない)。max_errors 回
+続けたら on_stop で全体を止める。
+止める合図は、analyze が戻ったとき (例外を含む)、出力の書き込み (キューの部品の操作の前・middle/state.json・
+notes/scene_labels.json)・middle/map_records.jsonl・middle/calls.jsonl のそれぞれの直前、deep を要求する直前 (種類ごと)
+に確かめる。
 立っていたら、残りのファイル・middle/map_records.jsonl・middle/calls.jsonl・run.jsonl に書かず、deep も呼ばずにループを
 抜ける (止めた後に記録を増やさない。書く順は変えず、それまでに書いたファイルは戻さない)。
 """
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +50,7 @@ from switch2_layers.middle.middle_output_writer import (
     NEW_SCENE_DEEP_KINDS,
     write_middle_output,
 )
+from switch2_layers.middle.middle_trigger import MiddleCallReason, MiddleTrigger
 from switch2_layers.middle.middle_types import (
     MiddleAnalyzer,
     MiddleInput,
@@ -60,6 +65,7 @@ from switch2_layers.records.run_log import (
 )
 from switch2_layers.run_clock import RunClock, frozen_clock
 from switch2_layers.run_directory import RunPaths, open_run_directory
+from switch2_layers.tasks.task_board import TaskBoard, restore_task_board
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -103,17 +109,23 @@ def run_middle_step(
     clock: RunClock,
     window_s: float,
     deep_requests: DeepRequestSink | None,
+    board: TaskBoard,
+    reasons: Sequence[MiddleCallReason],
+    trigger_notify: Callable[[MiddleCallReason], None] | None,
     stop: threading.Event | None = None,
 ) -> MiddleStepResult:
     """middle の 1 回分を処理する (モジュールの docstring の 1〜6)。
 
-    stop は止める合図 (MiddleLoop.run が渡す)。None なら合図を確かめない。
+    board はタスクのキューの部品、reasons はこの回に middle を呼んだ理由、trigger_notify は middle を呼ぶきっかけを
+    知らせる関数 (MiddleTrigger.notify。None なら知らせない)。stop は止める合図 (MiddleLoop が渡す)。None なら合図を
+    確かめない。
 
-    1. now_t = clock.now() で build_middle_input(paths, now_t, window_s)
+    1. now_t = clock.now() で build_middle_input(paths, now_t, window_s, board, reasons)
     2. t_sent = clock.now() で analyze を呼び、戻ったら (例外でも) t_received = clock.now()。ここで stop を確かめる
-    3. write_middle_output(paths, 入力, 出力, generated_t=t_received, stop) で出力を書く:
-       notes/scenes/<場面ID>/tasks.md → middle/state.json → notes/scene_labels.json (新しい場面のときだけ)。
-       それぞれのファイルを書く直前に stop を確かめる (立っていたら write_middle_output が None を返す)
+    3. write_middle_output(paths, 入力, 出力, generated_t=t_received, board, reasons, trigger_notify, stop) で出力を書く:
+       キューの部品の操作 → middle/state.json → notes/scene_labels.json (新しい場面のときだけ)。
+       キューの部品の操作の前と、それぞれのファイルを書く直前に stop を確かめる (立っていたら write_middle_output が
+       None を返す)
     4. middle.map_records.build_map_record(入力, 書いた middle/state.json の scene_id, 出力) が None でなければ、
        追記の直前に stop を確かめてから、file_io.append_json_line で middle/map_records.jsonl に追記する。
        追記が例外 (Exception) を出したら、外に出さずに logging で警告を書いて続ける (middle の失敗に数えず、
@@ -122,16 +134,19 @@ def run_middle_step(
        deep_requests.request(種類, DeepTrigger.NEW_SCENE, new_scene.id) を呼ぶ。request が例外 (Exception) を出したら、
        外に出さずに (種類, 説明) を deep_request_errors に足し、残りの種類の要求を続ける
     6. middle/calls.jsonl に middle_call_record.middle_call_row_with_details(記録, analyze の記録) の行を書く
-       (書く直前に stop を確かめる。deep_requests_sent は deep_requests が None でなく、要求を渡したら True。
-       要求が例外を出した場合も True)
+       (書く直前に stop を確かめる。記録の reasons は reasons。deep_requests_sent は deep_requests が None でなく、要求を
+       渡したら True。要求が例外を出した場合も True)
     analyze の記録は、analyze が戻った直後 (例外を含む) に middle_call_record.take_analyzer_call_details(analyzer) で
     受け取る (analyzer が MiddleCallDetailsSource でなければ空。空なら行は middle_call_row と同じ)。
-    1〜3 の例外 (Exception) は外に出さず、error の行を calls.jsonl に書いて (書く直前に stop を確かめる)
-    ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。error の行にも analyze の記録を
-    足す (analyze の失敗と、analyze の後の 3 の失敗。1 で失敗して analyze を呼ばなかった回は、記録を受け取らずに空とする)。
-    stop を確かめたときに立っていたら、そこで STOPPED_STEP_RESULT を返し、残りのファイル (tasks.md・middle/state.json・
-    notes/scene_labels.json のうちまだ書いていないもの)・マップの記録の行・deep の要求・calls.jsonl の行を書かない。
-    書く順は変えず、それまでに書いたファイルは戻さない。analyze が戻ったときに立っていたら、何も書かず deep も呼ばない。
+    1〜3 の例外 (Exception。キューの部品の操作の例外を含む) は外に出さず、error の行 (reasons は書き、
+    new_tasks・destination_fixes・cancel_task_ids・cancel_used・new_tasks_used は null) を calls.jsonl に書いて
+    (書く直前に stop を確かめる) ok=False の結果を返す (middle/state.json は、書く前に失敗したなら前回の出力のまま)。
+    error の行にも analyze の記録を足す (analyze の失敗と、analyze の後の 3 の失敗。1 で失敗して analyze を
+    呼ばなかった回は、記録を受け取らずに空とする)。
+    stop を確かめたときに立っていたら、そこで STOPPED_STEP_RESULT を返し、残りの書き込み (キューの部品の操作・
+    middle/state.json・notes/scene_labels.json のうちまだ行っていないもの)・マップの記録の行・deep の要求・calls.jsonl の
+    行を書かない。書く順は変えず、それまでに書いたものは戻さない。analyze が戻ったときに立っていたら、何も書かず
+    deep も呼ばない。
     """
     now_t = clock.now()
     t_sent = now_t
@@ -139,7 +154,7 @@ def run_middle_step(
     # analyze の 1 回の記録 (usage など)。入力を作れずに analyze を呼ばなかった回は空のまま
     call_details: dict[str, object] = {}
     try:
-        middle_input = build_middle_input(paths, now_t, window_s)
+        middle_input = build_middle_input(paths, now_t, window_s, board, reasons)
         t_sent = clock.now()
         try:
             output = analyzer.analyze(middle_input)
@@ -152,20 +167,27 @@ def run_middle_step(
             return STOPPED_STEP_RESULT
         logger.debug("middle analyze failed", exc_info=True)
         return _record_failure(
-            paths, t_sent, t_received, middle_input, error, stop, call_details
+            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
         )
     t_received = clock.now()
     if _is_stopped(stop):
         return STOPPED_STEP_RESULT
     try:
-        # tasks.md・middle/state.json・notes/scene_labels.json のそれぞれを書く直前に stop を確かめる
+        # キューの部品の操作の前と、middle/state.json・notes/scene_labels.json のそれぞれを書く直前に stop を確かめる
         write_result = write_middle_output(
-            paths, middle_input, output, generated_t=t_received, stop=stop
+            paths,
+            middle_input,
+            output,
+            generated_t=t_received,
+            board=board,
+            reasons=reasons,
+            trigger_notify=trigger_notify,
+            stop=stop,
         )
     except Exception as error:
         logger.debug("writing the middle output failed", exc_info=True)
         return _record_failure(
-            paths, t_sent, t_received, middle_input, error, stop, call_details
+            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
         )
     if write_result is None:
         return STOPPED_STEP_RESULT
@@ -195,6 +217,7 @@ def run_middle_step(
         deep_requests=deep_kinds,
         deep_requests_sent=requests_sent,
         error=None,
+        reasons=reasons,
     )
     if _is_stopped(stop):
         return STOPPED_STEP_RESULT
@@ -246,8 +269,10 @@ def _record_failure(
     error: Exception,
     stop: threading.Event | None,
     call_details: Mapping[str, object],
+    reasons: Sequence[MiddleCallReason],
 ) -> MiddleStepResult:
-    """失敗した回の行 (analyze の記録 call_details を足したもの) を calls.jsonl に書き、ok=False の結果を返す。
+    """失敗した回の行 (理由 reasons と、analyze の記録 call_details を足したもの) を calls.jsonl に書き、ok=False の
+    結果を返す。
 
     書く直前に stop を確かめ、立っていれば書かずに STOPPED_STEP_RESULT を返す。
     """
@@ -262,6 +287,7 @@ def _record_failure(
         deep_requests=(),
         deep_requests_sent=False,
         error=description,
+        reasons=reasons,
     )
     append_json_line(
         paths.middle_calls, middle_call_row_with_details(record, call_details)
@@ -280,7 +306,8 @@ def _is_stopped(stop: threading.Event | None) -> bool:
 class MiddleLoopSettings:
     """middle のループの設定。
 
-    interval_s   前回の応答から次を始めるまでの秒数 (--middle-interval)
+    interval_s   前回の応答から次を始めるまでの秒数 (--middle-interval)。待ちは parts.trigger が行う (この値は
+                 MiddleTrigger を作るときの interval_s と同じ値にする)
     window_s     入力に使う一定間隔のフレームの範囲 (--middle-window)
     max_errors   続けて失敗したら止める回数 (--max-middle-errors)
     """
@@ -300,6 +327,8 @@ class MiddleLoopParts:
     run_log         run.jsonl (middle_error を書く)
     deep_requests   deep を呼ぶ要求の受け口 (run では DeepScheduler)
     on_stop         全体を止める関数 (理由の文字列を受け取る)
+    board           タスクのキューの部品 (run では surface のループと同じ TaskBoard)
+    trigger         middle を呼ぶきっかけの待ち (run では surface のループが同じ MiddleTrigger の notify で知らせる)
     on_press_home   成功した回の出力の press_home が真のときに呼ぶ関数 (run では app が HOME を短押しする関数)。
                     None (既定) なら呼ばない
     """
@@ -310,6 +339,8 @@ class MiddleLoopParts:
     run_log: RunLog
     deep_requests: DeepRequestSink
     on_stop: Callable[[str], None]
+    board: TaskBoard
+    trigger: MiddleTrigger
     on_press_home: Callable[[], None] | None = None
 
 
@@ -332,12 +363,18 @@ class MiddleLoop:
         """失敗が続いている回数 (成功で 0 に戻る)。"""
         return self._consecutive_errors
 
-    def run_once(self, stop: threading.Event | None = None) -> MiddleStepResult:
-        """run_middle_step(paths, analyzer, clock, window_s, deep_requests, stop) を 1 回呼び、失敗を数える。
+    def run_once(
+        self,
+        reasons: Sequence[MiddleCallReason],
+        stop: threading.Event | None = None,
+    ) -> MiddleStepResult:
+        """run_middle_step(paths, analyzer, clock, window_s, deep_requests, board, reasons, trigger.notify, stop) を
+        1 回呼び、失敗を数える。reasons はこの回に middle を呼んだ理由。
 
         - 成功したら、続けて失敗した回数を 0 にする
-        - 失敗したら回数を 1 増やし、run_log に middle_error {"error": 説明, "count": 続けて失敗した回数} を書く。
-          回数が max_errors に達したら on_stop(middle_failure_reason(回数)) を呼ぶ
+        - 失敗したら回数を 1 増やし、trigger.carry_over(reasons) で理由を次の回に持ち越し、run_log に middle_error
+          {"error": 説明, "count": 続けて失敗した回数} を書く。回数が max_errors に達したら
+          on_stop(middle_failure_reason(回数)) を呼ぶ
         - 結果の deep_request_errors ごとに、run_log に deep_request_error {"source": "middle", "kind", "trigger": "new_scene",
           "scene_id": new_scene の ID, "error": 説明} を書く (失敗の回数には数えず、ループも止めない)
         - 成功して、結果の state の press_home が真なら、最後に on_press_home() を呼ぶ (on_press_home が None なら呼ばない)
@@ -351,6 +388,9 @@ class MiddleLoop:
             parts.clock,
             self.settings.window_s,
             parts.deep_requests,
+            parts.board,
+            reasons,
+            parts.trigger.notify,
             stop,
         )
         if result.stopped:
@@ -359,6 +399,7 @@ class MiddleLoop:
             self._consecutive_errors = 0
         else:
             self._consecutive_errors += 1
+            parts.trigger.carry_over(reasons)
             parts.run_log.write(
                 EVENT_MIDDLE_ERROR, error=result.error, count=self._consecutive_errors
             )
@@ -384,24 +425,28 @@ class MiddleLoop:
         return result
 
     def run(self, stop: threading.Event) -> None:
-        """スレッドの本体。
+        """スレッドの本体 (テストで使う。run では app が同じ流れを段階に合わせて行う)。
 
         1. middle_input_builder.has_recorded_frame(paths) が True になるまで、stop.wait(FIRST_FRAME_POLL_S) で待つ
-        2. stop が立つまで、run_once(stop) を呼んでから stop.wait(interval_s) で待つことを繰り返す
+        2. reasons = trigger.first_reasons() で最初の実行の理由を決める
+        3. stop が立つまで、run_once(reasons, stop) を呼び、戻った時刻 (clock.now()) を前回の応答の時刻として
+           reasons = trigger.wait_next(stop, その時刻) で次の理由を待つことを繰り返す。wait_next が None を返したら戻る
         run_once の想定外の例外 (Exception) は外に出さず、on_stop(説明を含む理由) を呼んでから戻る。
         run_once の結果の stopped が True なら、待たずに戻る。
         """
+        parts = self.parts
         try:
-            while not stop.is_set() and not has_recorded_frame(self.parts.paths):
+            while not stop.is_set() and not has_recorded_frame(parts.paths):
                 stop.wait(FIRST_FRAME_POLL_S)
-            while not stop.is_set():
-                result = self.run_once(stop)
+            reasons: tuple[MiddleCallReason, ...] | None = parts.trigger.first_reasons()
+            while reasons is not None and not stop.is_set():
+                result = self.run_once(reasons, stop)
                 if result.stopped:
                     return
-                stop.wait(self.settings.interval_s)
+                reasons = parts.trigger.wait_next(stop, parts.clock.now())
         except Exception as error:
             logger.warning("middle loop failed", exc_info=True)
-            self.parts.on_stop(f"middle loop failed: {describe_exception(error)}")
+            parts.on_stop(f"middle loop failed: {describe_exception(error)}")
 
 
 def run_middle_once(
@@ -410,11 +455,23 @@ def run_middle_once(
     """保存済みの実行ディレクトリー run_dir に対して、middle を 1 回動かす (middle-once)。
 
     時計は、frames.jsonl の最新の t (frame_store.latest_frame_t。無ければ 0.0) に固定した run_clock.frozen_clock にする。
-    run_middle_step(paths, analyzer, その時計, window_s, deep_requests=None) を呼んで結果を返す
-    (初めての場面の deep の要求は calls.jsonl に記録するだけで、起動しない)。run.jsonl には書かない。
+    キューは tasks.task_board.restore_task_board(paths) で、保存済みの tasks.json から作り直す。
+    run_middle_step(paths, analyzer, その時計, window_s, deep_requests=None, board=作り直したキュー,
+    reasons=("interval",), trigger_notify=None) を呼んで結果を返す (run と同じ規則で取り消しと追加を行い、キューの部品が
+    保存済みの実行ディレクトリーの tasks.json・tasks.md・tasks.jsonl に書き戻す。初めての場面の deep の要求は
+    calls.jsonl に記録するだけで、起動しない)。run.jsonl には書かない。
     run_dir がディレクトリーでなければ FileNotFoundError にする。
     """
     paths = open_run_directory(run_dir)
     latest = latest_frame_t(paths)
     clock = frozen_clock(latest if latest is not None else 0.0)
-    return run_middle_step(paths, analyzer, clock, window_s, deep_requests=None)
+    return run_middle_step(
+        paths,
+        analyzer,
+        clock,
+        window_s,
+        deep_requests=None,
+        board=restore_task_board(paths),
+        reasons=("interval",),
+        trigger_notify=None,
+    )

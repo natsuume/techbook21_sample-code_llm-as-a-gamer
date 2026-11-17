@@ -28,6 +28,8 @@ from switch2_layers.surface.surface_questions import (
     STICK_DIRECTION_CHOICES,
     SURFACE_INSTRUCTIONS,
     TAP_CHOICE,
+    TASK_CANCEL_QUESTION_NAME,
+    TASK_DONE_QUESTION_NAME,
     QuestionKind,
     QuestionType,
     box_exists_question_name,
@@ -42,6 +44,7 @@ from switch2_layers.surface.surface_questions import (
     build_stick_direction_questions,
     build_stick_strength_questions,
     build_surface_questions,
+    build_task_questions,
     latest_frame_path,
 )
 
@@ -220,13 +223,33 @@ def test_advisor_status_rule_text():
 def test_instructions_describe_the_game_document():
     # documents の説明に、ほかの文書と同じ「名前 (キー)」の形でゲームの性質を足す
     for phrase in [
-        "短期タスクリスト (tasks)",
+        "実行中のタスク (tasks)",
         "攻略情報 (tips)",
         "操作説明 (controls)",
         "詰まったときの助言 (advice)",
         "ゲームの性質 (game)",
     ]:
         assert phrase in SURFACE_INSTRUCTIONS, phrase
+
+
+def test_instructions_describe_tasks_as_one_running_task_with_a_state():
+    # documents.tasks は今実行中のタスク 1 つで、達成したい状態が書かれている。その状態に近づく操作を選ぶ
+    for phrase in [
+        "`documents.tasks` は今実行中のタスク 1 つ",
+        "達成したい状態",
+        "近づく操作を選ぶ",
+    ]:
+        assert phrase in SURFACE_INSTRUCTIONS, phrase
+    assert "短期タスクリスト" not in SURFACE_INSTRUCTIONS
+
+
+def test_strategy_advisor_question_refers_to_the_running_task():
+    assert (
+        "実行中のタスク (`documents.tasks`)"
+        in ADVISOR_QUESTION_TEXTS[DocumentKind.STRATEGY]
+    )
+    for text in ADVISOR_QUESTION_TEXTS.values():
+        assert "短期タスクリスト" not in text
 
 
 def test_latest_frame_path():
@@ -517,6 +540,40 @@ def test_surface_questions_are_in_the_order_of_the_table():
     assert questions[-1].name == "box_2"
     # 最新のフレームを指す文は、5 枚の要求なら frames[4].image
     assert "`frames[4].image`" in questions[-1].instructions
+
+
+def test_surface_questions_do_not_include_the_task_questions():
+    # 先頭のタスクの 2 問は、JevSurfaceDecider が先頭のタスクがあるときだけ足す
+    questions = build_surface_questions(
+        allowed_buttons(), TARGETS, {"敵"}, frame_count=5
+    )
+    kinds = {question.kind for question in questions}
+    assert QuestionKind.TASK_DONE not in kinds
+    assert QuestionKind.TASK_CANCEL not in kinds
+
+
+def test_task_question_kinds_and_names():
+    assert QuestionKind.TASK_DONE.value == "task_done"
+    assert QuestionKind.TASK_CANCEL.value == "task_cancel"
+    assert TASK_DONE_QUESTION_NAME == "task_done"
+    assert TASK_CANCEL_QUESTION_NAME == "task_cancel"
+
+
+def test_task_questions():
+    done, cancel = build_task_questions("宿屋に入っている")
+    assert done.name == "task_done"
+    assert done.instructions == "「宿屋に入っている」を達成した。"
+    assert done.kind is QuestionKind.TASK_DONE
+    assert cancel.name == "task_cancel"
+    assert cancel.instructions == (
+        "「宿屋に入っている」は、今の状況では達成できないか、状況に合わない。"
+    )
+    assert cancel.kind is QuestionKind.TASK_CANCEL
+    for question in (done, cancel):
+        assert question.target == ""
+        assert question.question_type is QuestionType.NOUL
+        assert question.choices == ()
+        assert ID_PATTERN.fullmatch(question.name)
 
 
 def test_surface_question_ids_are_unique_and_safe():

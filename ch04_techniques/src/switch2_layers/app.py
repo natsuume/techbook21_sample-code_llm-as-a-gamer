@@ -16,7 +16,10 @@ LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、�
     実行を始めるときの安全の確かめが通ったら prepare に入る (確かめで止まったら、どの段階にも入らない)。
     prepare・recover・clean_up では、本体の画面のループ (system_screen.system_screen_loop) が本体の画面の middle に
     目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
-    1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送る。
+    1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送り、
+    タスクのキューの部品の現在の場面を場面なしにする (play に戻ったら、次の middle の出力で場面が設定される)。middle の
+    1 回の途中で play から離れたときは、その回が終わった後にも場面なしにし直す (その回の出力の書き込みが場面を設定し
+    直しても、play 以外の段階で続いた秒数を進めないため)。
     middle のゲーム用の出力の press_home が真なら、play のときだけ recover に移し (phase の行を書き、play から離れる
     中立のレポートを送る)、その後で HOME を短押しする (中立のレポートで短押しを取り消さないため)。
 押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
@@ -94,6 +97,7 @@ from switch2_layers.middle.middle_loop import (
     MiddleLoopParts,
     MiddleLoopSettings,
 )
+from switch2_layers.middle.middle_trigger import MiddleCallReason, MiddleTrigger
 from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
 from switch2_layers.orchestrator.claude_stream_session import (
@@ -166,6 +170,7 @@ from switch2_layers.system_screen.system_screen_loop import (
     SystemScreenLoopParts,
     SystemScreenLoopSettings,
 )
+from switch2_layers.tasks.task_board import TaskBoard
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -291,6 +296,7 @@ class _StartedParts:
     deep_scheduler     advisor 型の DeepScheduler。Orchestrator 型では None
     loop_threads       ループのスレッド (起動する順)
     main_loop_thread   loop_threads のうち、Orchestrator 型の主ループのスレッド。advisor 型では None
+    board              advisor 型のタスクのキューの部品 (TaskBoard)。Orchestrator 型では None
     """
 
     paths: RunPaths
@@ -303,6 +309,7 @@ class _StartedParts:
     deep_scheduler: DeepScheduler | None
     loop_threads: tuple[threading.Thread, ...]
     main_loop_thread: threading.Thread | None = None
+    board: TaskBoard | None = None
 
 
 @dataclass
@@ -354,6 +361,17 @@ def _loop_join_timeout_s(
 
 def _ignore_system_screen(judgment: SystemScreenJudgment) -> None:
     """Orchestrator 型の安全の監視の on_system_screen。照合の結果を使わない (段階の判定も本体の画面のループも無い)。"""
+
+
+def _current_scene_oldest_active_s(board: TaskBoard, t: float) -> float | None:
+    """board の現在の場面の、最も古いタスクの時刻 t での続いた秒数を返す。現在の場面が無ければ None。
+
+    middle.middle_trigger.MiddleTrigger の oldest_active_s に渡す。
+    """
+    scene_id = board.current_scene_id
+    if scene_id is None:
+        return None
+    return board.oldest_active_s(scene_id, t)
 
 
 def _start_failure_reason(error: BaseException) -> str:
@@ -571,15 +589,22 @@ class LayersApp:
            progress_state は progress/state.json の値 (progress.progress_state.read_progress_state)、
            is_play は段階が play かを返す関数、timeout_s は deep_timeout_s、stuck_advice_seconds は
            stuck_advice_seconds) を作って start する (タイムアウト・自動の呼び出し・きっかけ progress の判定のスレッド)
-        7. SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
+        7. タスクのキューの部品 TaskBoard(paths) を 1 つ作り、middle.middle_trigger.MiddleTrigger(middle_interval_s,
+           task_stuck_seconds, clock, oldest_active_s = 時刻 t を受け取り、TaskBoard.current_scene_id の場面の
+           TaskBoard.oldest_active_s(場面, t) を返す関数 (現在の場面が無ければ None)) を作る。
+           SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
            deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
-           boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
-           MiddleLoop (interval_s・window_s・max_errors。on_press_home は、段階のロックの中で、段階が play のときだけ
+           threshold_task = threshold_task、boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes、
+           board = その TaskBoard、trigger_notify = MiddleTrigger.notify) と
+           MiddleLoop (interval_s・window_s・max_errors、board = その TaskBoard、trigger = その MiddleTrigger。
+           on_press_home は、段階のロックの中で、段階が play のときだけ
            次の順に行う関数: PhaseTracker.on_press_home で recover に移し、run.jsonl に phase を書き、play から離れる
            PadOutput.neutral() を送ってから、HOME を短押しする (PadOutput.apply(PadAction(taps={"HOME"}),
            source="system"))。中立のレポートを短押しの後に送ると、短押しが取り消されるため) を作り、それぞれのスレッドを
            start_thread で起動する。on_stop には request_stop を渡す。2 つのループは、段階が play の間だけ 1 回分ずつ
-           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ --middle-interval で呼ぶ
+           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ、MiddleTrigger のきっかけで呼ぶ。
+           middle の 1 回が終わったときに段階が play でなければ、TaskBoard.set_current_scene(None, clock.now()) を呼ぶ
+           (_run_middle_while_playing)
         8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor
            (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
            on_stop = request_stop、on_start_passed = prepare に入る関数 (PhaseTracker(clock.now(),
@@ -597,8 +622,8 @@ class LayersApp:
             start_thread で起動する
         段階の判定 (PhaseTracker) の入力と読み取りは、すべて段階のロックの中で行う。入力の戻り値 (run_phase.PhaseEvent) は
         次のように扱う: 段階が変わったら run.jsonl に phase {"phase", "reason"} を書き (play から離れるときは、同じロックの
-        中で PadOutput.neutral() を送る)、止める理由なら request_stop(理由)、片付けの終わりなら片付けを終える
-        (request_stop の docstring)。
+        中で PadOutput.neutral() を送り、TaskBoard.set_current_scene(None, clock.now()) で現在の場面を場面なしにする)、
+        止める理由なら request_stop(理由)、片付けの終わりなら片付けを終える (request_stop の docstring)。
         7 の surface と middle は、prepare に入るまで (実行を始めるときの確かめが通るまで) 操作を 1 つも送らない。
         確かめで止まったら、どの段階にも入らない。10 の計測のループは操作を送らないため、段階に依らず動く。
         2 回目以降の呼び出しは RuntimeError にする。
@@ -678,7 +703,14 @@ class LayersApp:
         )
         built.deep_scheduler = deep_scheduler
         deep_scheduler.start()
-        # 7: surface と middle のループ
+        # 7: タスクのキューの部品と middle を呼ぶきっかけ、surface と middle のループ
+        board = TaskBoard(paths)
+        trigger = MiddleTrigger(
+            settings.middle_interval_s,
+            settings.task_stuck_seconds,
+            clock,
+            lambda t: _current_scene_oldest_active_s(board, t),
+        )
         surface_loop = SurfaceLoop(
             SurfaceLoopParts(
                 paths=paths,
@@ -696,8 +728,13 @@ class LayersApp:
                 on_stop=self.request_stop,
                 boxes_at=parts.surface_boxes_at,
                 plan_boxes=parts.surface_plan_boxes,
+                board=board,
+                trigger_notify=trigger.notify,
             ),
-            SurfaceLoopSettings(max_errors=settings.max_surface_errors),
+            SurfaceLoopSettings(
+                max_errors=settings.max_surface_errors,
+                threshold_task=settings.threshold_task,
+            ),
         )
         middle_loop = MiddleLoop(
             MiddleLoopParts(
@@ -707,6 +744,8 @@ class LayersApp:
                 run_log=run_log,
                 deep_requests=deep_scheduler,
                 on_stop=self.request_stop,
+                board=board,
+                trigger=trigger,
                 on_press_home=self._press_home,
             ),
             MiddleLoopSettings(
@@ -817,6 +856,7 @@ class LayersApp:
                 capture_watcher=capture_watcher,
                 deep_scheduler=deep_scheduler,
                 loop_threads=loop_threads,
+                board=board,
             )
         for thread in loop_threads:
             self.start_thread(thread)
@@ -1047,8 +1087,10 @@ class LayersApp:
                 reason=event.change.reason,
             )
             if was_play and event.change.phase is not RunPhase.PLAY:
-                # play から離れるので、surface の操作を中立にする
+                # play から離れるので、surface の操作を中立にし、タスクの現在の場面を場面なしにする
                 started.pad_output.neutral()
+                if started.board is not None:
+                    started.board.set_current_scene(None, started.clock.now())
         if event.stop_reason is not None:
             self.request_stop(event.stop_reason)
         if event.clean_up_end is not None:
@@ -1122,11 +1164,18 @@ class LayersApp:
     ) -> None:
         """middle のゲーム用のループのスレッドの本体。段階が play の間だけ MiddleLoop.run_once を呼ぶ。
 
-        最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。呼んだ後は --middle-interval 秒待つ。
+        最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。最初の実行の理由は
+        MiddleTrigger.first_reasons() (最初の実行の直前に呼び、それまでに届いたきっかけは捨てる)。
+        run_once が戻ったら (止める合図で抜けたときを除く)、段階のロックの中で段階を確かめ、play でなければ
+        TaskBoard.set_current_scene(None, clock.now()) で現在の場面を場面なしにする (run_once の途中で play から出たとき、
+        その回の出力の書き込みが場面を設定し直しても、play 以外の段階で続いた秒数を進めないため)。
+        続けて、戻った時刻 (clock.now()) を前回の応答の時刻として、MiddleTrigger.wait_next で次の理由を待つ (None なら戻る)。
         run_once の想定外の例外 (Exception) は外に出さず、request_stop(`middle loop failed: <例外の説明>`) を
         呼んでから戻る (MiddleLoop.run と同じ扱い)。
         """
         stop = self._stop_event
+        trigger = middle_loop.parts.trigger
+        reasons: tuple[MiddleCallReason, ...] | None = None
         try:
             while not stop.is_set() and not has_recorded_frame(paths):
                 stop.wait(FIRST_FRAME_POLL_S)
@@ -1134,10 +1183,20 @@ class LayersApp:
                 if not self._playing():
                     stop.wait(PLAY_POLL_S)
                     continue
-                result = middle_loop.run_once(stop)
+                if reasons is None:
+                    reasons = trigger.first_reasons()
+                result = middle_loop.run_once(reasons, stop)
                 if result.stopped:
                     return
-                stop.wait(self.settings.middle_interval_s)
+                with self._phase_lock:
+                    if not self._is_play():
+                        # run_once の途中で play から出た: その回の書き込みが設定した場面を、場面なしに戻す
+                        middle_loop.parts.board.set_current_scene(
+                            None, middle_loop.parts.clock.now()
+                        )
+                reasons = trigger.wait_next(stop, middle_loop.parts.clock.now())
+                if reasons is None:
+                    return
         except Exception as error:
             logger.warning("middle loop failed", exc_info=True)
             self.request_stop(f"middle loop failed: {describe_exception(error)}")

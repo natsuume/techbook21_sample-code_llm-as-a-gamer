@@ -4,23 +4,24 @@ run の middle のループと middle-once は、同じ build_middle_input で�
 読むファイル:
     frames.jsonl と frames/interval/     直近 window_s 秒の一定間隔のフレームから最大 MIDDLE_MAX_FRAMES 枚
     surface.jsonl・operations.jsonl      前回の middle の実行以降の行 (場面転換の印 scene_changed を含む)
+    tasks.jsonl                          前回の middle の実行以降の、タスクの出来事の行
     notes/scene_labels.json              場面ラベルの一覧
     middle/state.json                    前回の middle の出力
     notes/game.md                        ゲームの性質
     notes/strategy.md                    大方針
-    notes/scenes/<場面ID>/tasks.md        現在の場面の短期タスクリスト
     notes/scenes/<場面ID>/controls.md     現在の場面の操作説明 (無いか空なら notes/common/controls.md)
     notes/map/map.json                   マップ (場所とつながりの一覧)。場所の名前の一覧にも使う
     middle/map_records.jsonl             middle のマップの記録。記録の場所の名前を、場所の名前の一覧に使う
     progress/state.json                  画面の停滞の計測の最新の値 (progress.progress_loop が書く)
+現在の場面のタスクのキューは、ファイルではなくキューの部品 (tasks.task_board.TaskBoard) から読む。
 
-「前回の middle の実行以降」の行の決め方 (surface.jsonl と operations.jsonl のそれぞれで同じ):
+「前回の middle の実行以降」の行の決め方 (surface.jsonl・operations.jsonl・tasks.jsonl のそれぞれで同じ):
     - 行の時刻ではなく、ファイルのバイト位置で区切る。前回の middle/state.json の surface_rows_offset・
-      operations_rows_offset の位置から、その時点でファイルにある完全な行 (改行で終わる行) をすべて読む
-      (file_io.read_json_lines_from)。上限の時刻は設けない
+      operations_rows_offset・tasks_rows_offset の位置から、その時点でファイルにある完全な行 (改行で終わる行) を
+      すべて読む (file_io.read_json_lines_from)。上限の時刻は設けない
     - 改行で終わらない最後の行 (書いている途中の行) は読まず、位置にも含めない。次の回に完全な行として読む
-    - 今回読んだ完全な行の末尾の位置を、今回の MiddleInput の surface_rows_offset・operations_rows_offset にし、
-      出力を書くときに middle/state.json に記録する。読んだ行が無ければ位置は変わらない
+    - 今回読んだ完全な行の末尾の位置を、今回の MiddleInput の surface_rows_offset・operations_rows_offset・
+      tasks_rows_offset にし、出力を書くときに middle/state.json に記録する。読んだ行が無ければ位置は変わらない
     - 前回の middle/state.json が無い・壊れているときは、先頭 (位置 0) から読む。記録した位置がファイルの大きさを
       超えるとき (ファイルを作り直した等) も先頭から読む。このとき、前に読んだ行をもう一度入力に含めることがある
 時刻で区切らないのは次の理由による:
@@ -40,6 +41,7 @@ from switch2_layers.file_io import read_json_lines_from
 from switch2_layers.frames.frame_store import FrameRecord, read_frame_records
 from switch2_layers.frames.surface_frames import pick_evenly
 from switch2_layers.middle.map_records import read_recorded_place_names
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.middle.middle_types import (
     MiddleFrame,
     MiddleInput,
@@ -52,13 +54,14 @@ from switch2_layers.notes.note_paths import (
     GAME_NOTE,
     SCENE_LABELS_FILE,
     STRATEGY_NOTE,
-    scene_note,
 )
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.notes.scene_labels import read_scene_labels
 from switch2_layers.notes.surface_documents import read_surface_documents
 from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.tasks.task_board import TaskBoard
+from switch2_layers.tasks.task_queue import TaskView
 
 MIDDLE_MAX_FRAMES = 4  # middle に渡すフレームの最大の枚数
 
@@ -103,8 +106,15 @@ def select_interval_frames(
     return pick_evenly(in_window, max_count)
 
 
-def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> MiddleInput:
-    """時刻 now_t の middle の入力を、実行ディレクトリー paths のファイルだけから作る (モジュールの docstring)。
+def build_middle_input(
+    paths: RunPaths,
+    now_t: float,
+    window_s: float,
+    board: TaskBoard,
+    reasons: Sequence[MiddleCallReason],
+) -> MiddleInput:
+    """時刻 now_t の middle の入力を、実行ディレクトリー paths のファイルと、キューの部品 board から作る
+    (モジュールの docstring)。reasons はこの回に middle を呼んだ理由で、MiddleInput.reasons にタプルにして入れる。
 
     - frames: select_interval_frames(read_frame_records(paths), now_t, window_s) の各画像を読んだ MiddleFrame。
       画像のファイルが読めないものと、file がシンボリックリンクを解決した先で frames/interval/ の中を指さないものは除く
@@ -115,10 +125,14 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
       read_json_lines_from が先頭から読む。行の時刻 (t_received) では選ばない
     - operation_rows と operations_rows_offset: operations.jsonl について同じ (前回の位置は previous_state.operations_rows_offset)
     - scene_change_reported: surface_rows のどれかの scene_changed が True なら True
+    - 入力の場面: previous_state の scene_id (previous_state が None か scene_id が None なら場面なし)
+    - task_queue: 入力の場面があれば board.tasks(入力の場面, now_t)。場面なしなら空
+    - task_events と tasks_rows_offset: file_io.read_json_lines_from(tasks.jsonl, 前回の位置) の rows のうち、scene_id が
+      入力の場面で event が added でない行 (書かれた順。場面なしなら空) と、end_offset (場面に依らず読み終えた位置)。
+      前回の位置は previous_state.tasks_rows_offset (previous_state が None なら 0)
     - scene_labels: notes.scene_labels.read_scene_labels(notes/scene_labels.json)
     - game: notes/game.md の本文 (無ければ空文字列。本文は読んだまま (前後の空白も除かない) にする)
     - strategy: notes/strategy.md (無ければ空文字列)
-    - current_tasks: previous_state の scene_id の tasks.md (場面が無いか、文書が無ければ空文字列)
     - current_controls: previous_state の scene_id (previous_state が None なら None) の操作説明。
       notes.surface_documents.read_surface_documents(notes_dir, scene_id).controls と同じ規則で、場面の controls.md が
       あって空 (空白だけを含む) でなければその本文、そうでなければ notes/common/controls.md の本文 (どちらも読めなければ
@@ -130,9 +144,9 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
     - progress: progress.progress_state.read_progress_state(progress/state.json)。無い・読めない・形に合わないときは
       None (値なし。middle の実行は失敗にしない)
     ファイルが無いときは、それぞれ空 (0 枚・0 行・空のタプル・空文字列・位置 0・None) にする。
-    game・strategy・current_tasks・map.json の文書は notes.note_reader で読み、シンボリックリンクを解決した先が
+    game・strategy・map.json の文書は notes.note_reader で読み、シンボリックリンクを解決した先が
     notes/ の中の通常のファイルでなければ、無い文書 (空文字列。map.json は None) として扱う。UTF-8 として読めない
-    game・strategy・current_tasks も空文字列にする。
+    game・strategy も空文字列にする。
     """
     previous_state = read_middle_state(paths.middle_state)
     surface_chunk = read_json_lines_from(
@@ -143,11 +157,9 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         paths.operations_log,
         0 if previous_state is None else previous_state.operations_rows_offset,
     )
-    current_tasks = ""
-    if previous_state is not None and previous_state.scene_id is not None:
-        current_tasks = read_note_text(
-            paths.notes_dir, scene_note(previous_state.scene_id, "tasks")
-        )
+    task_queue, task_events, tasks_rows_offset = _read_task_inputs(
+        paths, board, previous_state, now_t
+    )
     # 操作説明は、surface が読むものと同じ文書にする (surface と同じ関数で選ぶ)
     current_controls = read_surface_documents(
         paths.notes_dir, None if previous_state is None else previous_state.scene_id
@@ -167,15 +179,42 @@ def build_middle_input(paths: RunPaths, now_t: float, window_s: float) -> Middle
         scene_labels=tuple(read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)),
         previous_state=previous_state,
         strategy=read_note_text(paths.notes_dir, STRATEGY_NOTE),
-        current_tasks=current_tasks,
+        task_queue=task_queue,
+        task_events=task_events,
         surface_rows_offset=surface_chunk.end_offset,
         operations_rows_offset=operations_chunk.end_offset,
+        tasks_rows_offset=tasks_rows_offset,
+        reasons=tuple(reasons),
         current_controls=current_controls,
         place_names=tuple(place_names),
         map_document=map_document,
         game=read_note_text(paths.notes_dir, GAME_NOTE),
         progress=read_progress_state(paths.progress_state),
     )
+
+
+def _read_task_inputs(
+    paths: RunPaths,
+    board: TaskBoard,
+    previous_state: MiddleState | None,
+    now_t: float,
+) -> tuple[tuple[TaskView, ...], tuple[dict[str, object], ...], int]:
+    """入力の場面のタスクのキュー・前回以降のタスクの出来事・tasks.jsonl を読み終えた位置を返す
+    (build_middle_input の task_queue・task_events・tasks_rows_offset)。"""
+    chunk = read_json_lines_from(
+        paths.tasks_log,
+        0 if previous_state is None else previous_state.tasks_rows_offset,
+    )
+    scene_id = None if previous_state is None else previous_state.scene_id
+    if scene_id is None:
+        # 場面なしでも、読み終えた位置は進める
+        return (), (), chunk.end_offset
+    task_events = tuple(
+        row
+        for row in chunk.rows
+        if row.get("scene_id") == scene_id and row.get("event") != "added"
+    )
+    return board.tasks(scene_id, now_t), task_events, chunk.end_offset
 
 
 def _read_frames(paths: RunPaths, now_t: float, window_s: float) -> list[MiddleFrame]:

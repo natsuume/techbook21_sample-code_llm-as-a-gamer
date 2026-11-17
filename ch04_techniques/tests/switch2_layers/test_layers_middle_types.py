@@ -23,12 +23,10 @@ STATE = MiddleState(
     timeline="## 直近",
     surface_rows_offset=120,
     operations_rows_offset=40,
+    tasks_rows_offset=60,
 )
-STATE_WITH_FIRST_TASK = dataclasses.replace(
-    STATE, first_task="宿屋に入る", first_task_since_t=3.25
-)
-# first_task と first_task_since_t のキーが無い middle/state.json
-STATE_JSON_WITHOUT_FIRST_TASK = {
+# 省けるキー (tasks_rows_offset・place_name・current_tile・press_home) が無い middle/state.json
+STATE_JSON_WITHOUT_OPTIONAL_KEYS = {
     "generated_t": 5.5,
     "based_on_t": 5.0,
     "scene_id": "scene-001",
@@ -55,14 +53,14 @@ def test_round_trip():
         "timeline",
         "surface_rows_offset",
         "operations_rows_offset",
-        "first_task",
-        "first_task_since_t",
+        "tasks_rows_offset",
         "place_name",
         "current_tile",
         "press_home",
     ]
     assert value["surface_rows_offset"] == 120
     assert value["operations_rows_offset"] == 40
+    assert value["tasks_rows_offset"] == 60
     assert middle_state_from_json(value) == STATE
 
 
@@ -78,10 +76,12 @@ def test_zero_offsets_are_allowed():
         **middle_state_to_json(STATE),
         "surface_rows_offset": 0,
         "operations_rows_offset": 0,
+        "tasks_rows_offset": 0,
     }
     state = middle_state_from_json(value)
     assert state.surface_rows_offset == 0
     assert state.operations_rows_offset == 0
+    assert state.tasks_rows_offset == 0
 
 
 @pytest.mark.parametrize(
@@ -101,6 +101,9 @@ def test_zero_offsets_are_allowed():
         {"surface_rows_offset": 1.5},
         {"surface_rows_offset": True},
         {"operations_rows_offset": "40"},
+        {"tasks_rows_offset": None},
+        {"tasks_rows_offset": -1},
+        {"tasks_rows_offset": "60"},
     ],
 )
 def test_wrong_types_are_rejected(changes):
@@ -124,83 +127,35 @@ def test_missing_key_is_rejected(key):
         middle_state_from_json(value)
 
 
-# --- 最初のタスクの文と、その文になった時刻 ---
+# --- tasks.jsonl を読み終えた位置と、使わなくなったキー ---
 
 
-def test_state_without_first_task_has_defaults():
-    assert STATE.first_task == ""
-    assert STATE.first_task_since_t is None
-
-
-def test_first_task_keys_are_written():
-    value = middle_state_to_json(STATE_WITH_FIRST_TASK)
-    assert value["first_task"] == "宿屋に入る"
-    assert value["first_task_since_t"] == 3.25
-    # 記録が無い時刻は null
-    value = middle_state_to_json(STATE)
-    assert value["first_task"] == ""
-    assert value["first_task_since_t"] is None
-
-
-def test_missing_first_task_keys_give_defaults():
-    state = middle_state_from_json(STATE_JSON_WITHOUT_FIRST_TASK)
-    assert state.first_task == ""
-    assert state.first_task_since_t is None
-    assert state == STATE
-
-
-@pytest.mark.parametrize(
-    ("first_task", "first_task_since_t"),
-    [
-        ("宿屋に入る", 3.25),
-        ("宿屋に入る", 3),
-        ("宿屋に入る", None),
-        ("", 3.25),
-    ],
-)
-def test_first_task_keys_are_read(first_task, first_task_since_t):
-    state = middle_state_from_json(
-        {
-            **STATE_JSON_WITHOUT_FIRST_TASK,
-            "first_task": first_task,
-            "first_task_since_t": first_task_since_t,
-        }
-    )
-    assert state.first_task == first_task
-    assert state.first_task_since_t == first_task_since_t
+def test_missing_tasks_rows_offset_is_read_as_zero():
+    state = middle_state_from_json(STATE_JSON_WITHOUT_OPTIONAL_KEYS)
+    assert state.tasks_rows_offset == 0
+    assert state == dataclasses.replace(STATE, tasks_rows_offset=0)
 
 
 @pytest.mark.parametrize(
     "changes",
     [
-        {"first_task": None},
-        {"first_task": 1},
+        {"first_task": "宿屋に入る", "first_task_since_t": 3.25},
+        {"first_task": "", "first_task_since_t": None},
+        # 型も確かめない
+        {"first_task": None, "first_task_since_t": "3.25"},
         {"first_task": ["宿屋に入る"]},
-        {"first_task_since_t": "3.25"},
         {"first_task_since_t": True},
-        {"first_task_since_t": [3.25]},
     ],
 )
-def test_wrong_first_task_types_are_rejected(changes):
-    value = {
-        **STATE_JSON_WITHOUT_FIRST_TASK,
-        "first_task": "宿屋に入る",
-        "first_task_since_t": 3.25,
-        **changes,
-    }
-    with pytest.raises(ValueError):
-        middle_state_from_json(value)
+def test_first_task_keys_are_ignored(changes):
+    value = {**middle_state_to_json(STATE), **changes}
+    assert middle_state_from_json(value) == STATE
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        STATE_WITH_FIRST_TASK,
-        dataclasses.replace(STATE_WITH_FIRST_TASK, first_task_since_t=None),
-    ],
-)
-def test_first_task_round_trip(state):
-    assert middle_state_from_json(middle_state_to_json(state)) == state
+def test_first_task_keys_are_not_written():
+    value = middle_state_to_json(STATE)
+    assert "first_task" not in value
+    assert "first_task_since_t" not in value
 
 
 # --- 現在地の場所とマス ---
@@ -240,7 +195,7 @@ def test_place_round_trip(state):
 
 def test_missing_place_keys_are_read_as_null():
     # place_name と current_tile のキーが無い middle/state.json は、どちらも null として読む
-    state = middle_state_from_json(STATE_JSON_WITHOUT_FIRST_TASK)
+    state = middle_state_from_json(STATE_JSON_WITHOUT_OPTIONAL_KEYS)
     assert state.place_name is None
     assert state.current_tile is None
     value = {**middle_state_to_json(STATE_WITH_PLACE)}
@@ -251,7 +206,7 @@ def test_missing_place_keys_are_read_as_null():
 
 def test_place_keys_are_read():
     value = {
-        **STATE_JSON_WITHOUT_FIRST_TASK,
+        **STATE_JSON_WITHOUT_OPTIONAL_KEYS,
         "place_name": "家の 1 階",
         "current_tile": {"x": -3, "y": 4, "floor": 1},
     }
@@ -277,7 +232,7 @@ def test_place_keys_are_read():
 )
 def test_wrong_place_types_are_rejected(changes):
     value = {
-        **STATE_JSON_WITHOUT_FIRST_TASK,
+        **STATE_JSON_WITHOUT_OPTIONAL_KEYS,
         "place_name": "家の 1 階",
         "current_tile": {"x": 1, "y": 2},
     }
@@ -294,7 +249,8 @@ def test_output_and_observation_tiles_have_defaults():
         stuck_description="",
         surface_wait_s=0.5,
         timeline="",
-        tasks="",
+        new_tasks=(),
+        cancel_task_ids=(),
     )
     assert output.current_tile is None
     observation = MapObservation(
@@ -314,7 +270,8 @@ def test_press_home_defaults_to_false():
         stuck_description="",
         surface_wait_s=0.5,
         timeline="",
-        tasks="",
+        new_tasks=(),
+        cancel_task_ids=(),
     )
     assert output.press_home is False
 
@@ -331,11 +288,11 @@ def test_missing_press_home_is_read_as_false():
     value = middle_state_to_json(dataclasses.replace(STATE, press_home=True))
     del value["press_home"]
     assert middle_state_from_json(value).press_home is False
-    assert middle_state_from_json(STATE_JSON_WITHOUT_FIRST_TASK).press_home is False
+    assert middle_state_from_json(STATE_JSON_WITHOUT_OPTIONAL_KEYS).press_home is False
 
 
 @pytest.mark.parametrize("press_home", ["true", 1, None])
 def test_wrong_press_home_type_is_rejected(press_home):
-    value = {**STATE_JSON_WITHOUT_FIRST_TASK, "press_home": press_home}
+    value = {**STATE_JSON_WITHOUT_OPTIONAL_KEYS, "press_home": press_home}
     with pytest.raises(ValueError):
         middle_state_from_json(value)

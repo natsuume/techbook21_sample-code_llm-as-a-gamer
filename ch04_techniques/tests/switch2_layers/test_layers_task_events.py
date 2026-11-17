@@ -1,16 +1,18 @@
+import dataclasses
 import json
 from pathlib import Path
 from typing import get_args
 
 import pytest
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.tasks.task_events import (
     TaskEventName,
     dropped_event_row,
     max_task_number_in_log,
     task_event_row,
 )
-from switch2_layers.tasks.task_queue import DroppedText, TaskView
+from switch2_layers.tasks.task_queue import DroppedText, TaskDestination, TaskView
 
 SCENE = "scene-001"
 TASK = TaskView(
@@ -20,8 +22,9 @@ TASK = TaskView(
     added_t=1.0,
     active_s=3.5,
     cancel_requested_t=None,
+    destination=TaskDestination(place="町", tile=TilePosition(x=3, y=4)),
 )
-ROW_KEYS = ["t", "event", "scene_id", "id", "text", "reason", "active_s"]
+ROW_KEYS = ["t", "event", "scene_id", "id", "text", "reason", "active_s", "destination"]
 
 
 def log_row(event: str, task_id: object) -> dict[str, object]:
@@ -34,6 +37,7 @@ def log_row(event: str, task_id: object) -> dict[str, object]:
         "text": "宿屋に入る",
         "reason": "empty" if event == "dropped" else None,
         "active_s": None,
+        "destination": None,
     }
 
 
@@ -60,7 +64,7 @@ def test_event_names():
 # --- 行の中身 ---
 
 
-def test_added_row_has_no_active_seconds():
+def test_added_row_has_the_destination_and_no_active_seconds():
     row = task_event_row(1.0, "added", TASK)
     assert row == {
         "t": 1.0,
@@ -70,12 +74,19 @@ def test_added_row_has_no_active_seconds():
         "text": "宿屋に入る",
         "reason": None,
         "active_s": None,
+        "destination": {"place": "町", "tile": {"x": 3, "y": 4}},
     }
     assert list(row) == ROW_KEYS
 
 
+def test_added_row_without_destination_has_null():
+    row = task_event_row(1.0, "added", dataclasses.replace(TASK, destination=None))
+    assert row["destination"] is None
+
+
 @pytest.mark.parametrize("event", ["done", "cancel_requested", "canceled"])
 def test_task_rows_after_adding_have_active_seconds(event):
+    # 行き先は added の行だけに書き、ほかの出来事では null
     row = task_event_row(5.0, event, TASK)
     assert row == {
         "t": 5.0,
@@ -85,6 +96,7 @@ def test_task_rows_after_adding_have_active_seconds(event):
         "text": "宿屋に入る",
         "reason": None,
         "active_s": 3.5,
+        "destination": None,
     }
     assert list(row) == ROW_KEYS
 
@@ -100,6 +112,7 @@ def test_dropped_row_has_the_reason_and_no_id(reason):
         "text": "宿屋に入る",
         "reason": reason,
         "active_s": None,
+        "destination": None,
     }
     assert list(row) == ROW_KEYS
 

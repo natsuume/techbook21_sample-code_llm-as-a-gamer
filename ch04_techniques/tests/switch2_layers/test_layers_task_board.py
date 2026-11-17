@@ -1,22 +1,35 @@
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from switch2_layers.file_io import read_json_lines
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.note_paths import scene_note, tasks_json_note
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.tasks.task_board import TaskBoard, restore_task_board
 from switch2_layers.tasks.task_queue import (
     AddResult,
     DroppedText,
+    NewTask,
     SceneTaskQueues,
+    TaskDestination,
     TaskView,
 )
 
 SCENE = "scene-001"
 OTHER = "scene-002"
+INN = TaskDestination(place="町", tile=TilePosition(x=3, y=4))
+INN_JSON = {"place": "町", "tile": {"x": 3, "y": 4}}
+SHOP = TaskDestination(place="町", tile=None)
+SHOP_JSON = {"place": "町", "tile": None}
+
+
+def new_tasks(*texts: str) -> list[NewTask]:
+    """行き先の無い、文だけの追加の組を返す。"""
+    return [NewTask(text=text) for text in texts]
 
 
 def tasks_json_path(paths: RunPaths, scene_id: str) -> Path:
@@ -41,6 +54,7 @@ def json_item(
     added_t: float,
     active_s: float,
     cancel_requested_t: float | None = None,
+    destination: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """tasks.json の tasks の 1 項目を返す。"""
     return {
@@ -49,6 +63,7 @@ def json_item(
         "added_t": added_t,
         "active_s": active_s,
         "cancel_requested_t": cancel_requested_t,
+        "destination": destination,
     }
 
 
@@ -60,6 +75,7 @@ def event_row(
     text: str,
     reason: str | None = None,
     active_s: float | None = None,
+    destination: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """tasks.jsonl の 1 行を返す。"""
     return {
@@ -70,6 +86,7 @@ def event_row(
         "text": text,
         "reason": reason,
         "active_s": active_s,
+        "destination": destination,
     }
 
 
@@ -101,7 +118,7 @@ def test_add_writes_scene_files_and_added_rows(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    result = board.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    result = board.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     assert result == AddResult(
         outcomes=(
             TaskView(
@@ -136,12 +153,82 @@ def test_add_writes_scene_files_and_added_rows(tmp_path):
     ]
 
 
+def test_add_writes_destinations_to_files_and_added_rows(tmp_path):
+    paths = RunPaths(tmp_path)
+    board = TaskBoard(paths)
+    board.set_current_scene(SCENE, 0.0)
+    result = board.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に入っている", destination=INN),
+            NewTask(text="店の前にいる", destination=SHOP),
+            NewTask(text="会話の枠が閉じている"),
+            NewTask(text="宿屋に 入っている", destination=SHOP),
+        ],
+        1.0,
+    )
+    assert [view.destination for view in result.added] == [INN, SHOP, None]
+    assert read_tasks_json(paths, SCENE) == {
+        "t": 1.0,
+        "tasks": [
+            json_item("task-001", "宿屋に入っている", 1.0, 0.0, destination=INN_JSON),
+            json_item("task-002", "店の前にいる", 1.0, 0.0, destination=SHOP_JSON),
+            json_item("task-003", "会話の枠が閉じている", 1.0, 0.0),
+        ],
+    }
+    # tasks.md は文の行だけ (行き先は書かない)
+    assert read_tasks_md(paths, SCENE) == (
+        "- 宿屋に入っている\n- 店の前にいる\n- 会話の枠が閉じている\n"
+    )
+    # 行き先は added の行だけに書く (dropped は null)
+    assert read_json_lines(paths.tasks_log) == [
+        event_row(
+            1.0, "added", SCENE, "task-001", "宿屋に入っている", destination=INN_JSON
+        ),
+        event_row(
+            1.0, "added", SCENE, "task-002", "店の前にいる", destination=SHOP_JSON
+        ),
+        event_row(1.0, "added", SCENE, "task-003", "会話の枠が閉じている"),
+        event_row(1.0, "dropped", SCENE, None, "宿屋に 入っている", reason="duplicate"),
+    ]
+
+
+def test_rows_after_adding_have_no_destination(tmp_path):
+    paths = RunPaths(tmp_path)
+    board = TaskBoard(paths)
+    board.set_current_scene(SCENE, 0.0)
+    board.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に入っている", destination=INN),
+            NewTask(text="店の前にいる", destination=SHOP),
+            NewTask(text="会話の枠が閉じている", destination=INN),
+        ],
+        1.0,
+    )
+    board.request_cancel(SCENE, "task-001", 2.0)
+    board.complete(SCENE, "task-001", 3.0)
+    board.cancel(["task-002"], 4.0)
+    rows = read_json_lines(paths.tasks_log)[3:]
+    assert [row["event"] for row in rows] == ["cancel_requested", "done", "canceled"]
+    assert [row["destination"] for row in rows] == [None, None, None]
+    # 残ったタスクの行き先は tasks.json に残る
+    assert read_tasks_json(paths, SCENE) == {
+        "t": 4.0,
+        "tasks": [
+            json_item(
+                "task-003", "会話の枠が閉じている", 1.0, 3.0, destination=INN_JSON
+            )
+        ],
+    }
+
+
 def test_later_add_writes_the_active_seconds_at_its_time(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る"], 1.0)
-    board.add(SCENE, ["主人に話しかける"], 4.0)
+    board.add(SCENE, new_tasks("宿屋に入る"), 1.0)
+    board.add(SCENE, new_tasks("主人に話しかける"), 4.0)
     assert read_tasks_json(paths, SCENE) == {
         "t": 4.0,
         "tasks": [
@@ -160,7 +247,7 @@ def test_add_logs_dropped_texts_in_input_order(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     result = board.add(
-        SCENE, ["宿屋に入る", " ", "宿屋に 入る", "主人に話しかける"], 1.0
+        SCENE, new_tasks("宿屋に入る", " ", "宿屋に 入る", "主人に話しかける"), 1.0
     )
     assert result.dropped == (
         DroppedText(text="", reason="empty"),
@@ -177,7 +264,7 @@ def test_add_logs_dropped_texts_in_input_order(tmp_path):
 def test_add_without_added_texts_writes_only_dropped_rows(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
-    result = board.add(SCENE, ["", "  "], 1.0)
+    result = board.add(SCENE, new_tasks("", "  "), 1.0)
     assert result.added == ()
     assert not tasks_json_path(paths, SCENE).exists()
     assert not tasks_md_path(paths, SCENE).exists()
@@ -186,10 +273,10 @@ def test_add_without_added_texts_writes_only_dropped_rows(tmp_path):
         event_row(1.0, "dropped", SCENE, None, "", reason="empty"),
     ]
     # タスクのある場面でも、1 つも足さなければ場面のファイルは書かない
-    board.add(SCENE, ["宿屋に入る"], 2.0)
+    board.add(SCENE, new_tasks("宿屋に入る"), 2.0)
     json_before = tasks_json_path(paths, SCENE).read_bytes()
     md_before = tasks_md_path(paths, SCENE).read_bytes()
-    board.add(SCENE, ["宿屋に入る"], 5.0)
+    board.add(SCENE, new_tasks("宿屋に入る"), 5.0)
     assert tasks_json_path(paths, SCENE).read_bytes() == json_before
     assert tasks_md_path(paths, SCENE).read_bytes() == md_before
     assert read_json_lines(paths.tasks_log)[-1] == event_row(
@@ -204,7 +291,7 @@ def test_complete_writes_scene_files_and_done_row(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    board.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     assert board.complete(SCENE, "task-001", 4.0) is True
     assert read_tasks_json(paths, SCENE) == {
         "t": 4.0,
@@ -230,7 +317,7 @@ def test_request_cancel_writes_scene_files_and_row(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    board.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     assert board.request_cancel(SCENE, "task-001", 3.0) is True
     assert read_tasks_json(paths, SCENE) == {
         "t": 3.0,
@@ -252,8 +339,8 @@ def test_cancel_across_scenes_writes_both_scenes(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
-    board.add(OTHER, ["町を出る"], 2.0)
+    board.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
+    board.add(OTHER, new_tasks("町を出る"), 2.0)
     assert board.cancel(["task-003", "task-001"], 5.0) == (
         TaskView(
             id="task-003",
@@ -293,7 +380,7 @@ def test_operations_without_changes_write_nothing(tmp_path):
     paths = RunPaths(tmp_path)
     board = TaskBoard(paths)
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る", "主人に話しかける"], 1.0)
+    board.add(SCENE, new_tasks("宿屋に入る", "主人に話しかける"), 1.0)
     board.request_cancel(SCENE, "task-001", 2.0)
     before = snapshot(paths)
     # 先頭でない、ほかの場面
@@ -324,11 +411,23 @@ def test_new_board_and_set_current_scene_write_nothing(tmp_path):
 # --- 状態の読み出し ---
 
 
+def test_current_scene_id(tmp_path):
+    paths = RunPaths(tmp_path)
+    board = TaskBoard(paths)
+    assert board.current_scene_id is None
+    board.set_current_scene(SCENE, 1.0)
+    assert board.current_scene_id == SCENE
+    board.set_current_scene(None, 2.0)
+    assert board.current_scene_id is None
+    # 読み取りはファイルも記録も書かない
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_tasks_and_oldest_active_s(tmp_path):
     board = TaskBoard(RunPaths(tmp_path))
     board.set_current_scene(SCENE, 0.0)
-    board.add(SCENE, ["宿屋に入る"], 1.0)
-    board.add(SCENE, ["主人に話しかける"], 2.0)
+    board.add(SCENE, new_tasks("宿屋に入る"), 1.0)
+    board.add(SCENE, new_tasks("主人に話しかける"), 2.0)
     assert board.tasks(SCENE, 5.0) == (
         TaskView(
             id="task-001",
@@ -362,7 +461,9 @@ def test_board_uses_the_given_queues(tmp_path):
     )
     board = TaskBoard(RunPaths(tmp_path), SceneTaskQueues([saved], next_number=5))
     assert board.tasks(SCENE, 3.0) == (saved,)
-    assert board.add(SCENE, ["主人に話しかける"], 3.0).added[0].id == "task-005"
+    assert (
+        board.add(SCENE, new_tasks("主人に話しかける"), 3.0).added[0].id == "task-005"
+    )
 
 
 # --- 書き込みの失敗 ---
@@ -374,7 +475,7 @@ def test_scene_file_write_error_is_raised(tmp_path):
     # tasks.json の場所をディレクトリーにして、置き換えを失敗させる
     tasks_json_path(paths, SCENE).mkdir(parents=True)
     with pytest.raises(OSError):
-        board.add(SCENE, ["宿屋に入る"], 1.0)
+        board.add(SCENE, new_tasks("宿屋に入る"), 1.0)
 
 
 def test_log_write_error_is_raised(tmp_path):
@@ -383,7 +484,7 @@ def test_log_write_error_is_raised(tmp_path):
     # tasks.jsonl の場所をディレクトリーにして、追記を失敗させる
     paths.tasks_log.mkdir()
     with pytest.raises(OSError):
-        board.add(SCENE, ["宿屋に入る"], 1.0)
+        board.add(SCENE, new_tasks("宿屋に入る"), 1.0)
 
 
 # --- 複数のスレッド ---
@@ -394,25 +495,20 @@ def test_adds_from_many_threads_get_unique_ids(tmp_path):
     board = TaskBoard(paths)
     thread_count = 8
     barrier = threading.Barrier(thread_count)
-    results: list[AddResult | None] = [None] * thread_count
 
-    def add_from_thread(index: int) -> None:
+    def add_from_thread(index: int) -> AddResult:
         barrier.wait(timeout=10.0)
-        results[index] = board.add(
-            f"scene-{index + 1:03d}", [f"タスク {index}"], float(index)
+        return board.add(
+            f"scene-{index + 1:03d}", new_tasks(f"タスク {index}"), float(index)
         )
 
-    threads = [
-        threading.Thread(target=add_from_thread, args=(index,))
-        for index in range(thread_count)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10.0)
-    added_ids = [
-        view.id for result in results if result is not None for view in result.added
-    ]
+    # スレッドで出た例外は、result() がテストのスレッドで出し直す
+    with ThreadPoolExecutor(max_workers=thread_count) as executor:
+        futures = [
+            executor.submit(add_from_thread, index) for index in range(thread_count)
+        ]
+        results = [future.result(timeout=10.0) for future in futures]
+    added_ids = [view.id for result in results for view in result.added]
     assert sorted(added_ids) == [f"task-{n:03d}" for n in range(1, thread_count + 1)]
     rows = read_json_lines(paths.tasks_log)
     assert len(rows) == thread_count
@@ -490,7 +586,49 @@ def test_restore_task_board_from_saved_run_directory(tmp_path):
     assert [view.active_s for view in board.tasks(SCENE, 83.0)] == [15.5, 7.0]
     assert board.tasks(OTHER, 83.0)[0].active_s == 2.0
     # 次の ID は、記録の中で最も大きい連番の次
-    assert board.add(OTHER, ["宿屋に戻る"], 84.0).added[0].id == "task-008"
+    assert board.add(OTHER, new_tasks("宿屋に戻る"), 84.0).added[0].id == "task-008"
+
+
+def test_destination_round_trip_through_tasks_json(tmp_path):
+    # 足す → tasks.json → 作り直し で、行き先を引き継ぐ
+    paths = RunPaths(tmp_path)
+    board = TaskBoard(paths)
+    board.set_current_scene(SCENE, 0.0)
+    board.add(
+        SCENE,
+        [
+            NewTask(text="宿屋に入っている", destination=INN),
+            NewTask(text="店の前にいる", destination=SHOP),
+            NewTask(text="会話の枠が閉じている"),
+        ],
+        1.0,
+    )
+    restored = restore_task_board(paths)
+    assert [view.destination for view in restored.tasks(SCENE, 5.0)] == [
+        INN,
+        SHOP,
+        None,
+    ]
+    assert restored.tasks(SCENE, 5.0) == board.tasks(SCENE, 1.0)
+
+
+def test_restore_without_destination_key_has_no_destination(tmp_path):
+    paths = RunPaths(tmp_path)
+    item = json_item("task-003", "宿屋に入る", 10.0, 12.5)
+    del item["destination"]
+    write_json(tasks_json_path(paths, SCENE), {"t": 40.0, "tasks": [item]})
+    board = restore_task_board(paths)
+    assert board.tasks(SCENE, 50.0) == (
+        TaskView(
+            id="task-003",
+            text="宿屋に入る",
+            scene_id=SCENE,
+            added_t=10.0,
+            active_s=12.5,
+            cancel_requested_t=None,
+            destination=None,
+        ),
+    )
 
 
 def test_restore_uses_the_largest_number_in_saved_tasks(tmp_path):
@@ -501,7 +639,24 @@ def test_restore_uses_the_largest_number_in_saved_tasks(tmp_path):
     )
     # tasks.jsonl が無い
     board = restore_task_board(paths)
-    assert board.add(SCENE, ["主人に話しかける"], 50.0).added[0].id == "task-010"
+    assert (
+        board.add(SCENE, new_tasks("主人に話しかける"), 50.0).added[0].id == "task-010"
+    )
+
+
+def test_restore_skips_tasks_json_outside_of_notes(tmp_path):
+    paths = RunPaths(tmp_path)
+    # 場面の tasks.json が notes/ の外のファイルを指すシンボリックリンク
+    secret = tmp_path / "secret.json"
+    write_json(
+        secret, {"t": 40.0, "tasks": [json_item("task-009", "宿屋に入る", 10.0, 12.5)]}
+    )
+    json_path = tasks_json_path(paths, SCENE)
+    json_path.parent.mkdir(parents=True)
+    json_path.symlink_to(secret)
+    board = restore_task_board(paths)
+    # 作り直しで、その場面のタスクを読まない
+    assert board.tasks(SCENE, 50.0) == ()
 
 
 def test_restore_empty_run_directory(tmp_path):
@@ -509,4 +664,4 @@ def test_restore_empty_run_directory(tmp_path):
     board = restore_task_board(paths)
     assert board.tasks(SCENE, 1.0) == ()
     assert list(tmp_path.iterdir()) == []
-    assert board.add(SCENE, ["宿屋に入る"], 1.0).added[0].id == "task-001"
+    assert board.add(SCENE, new_tasks("宿屋に入る"), 1.0).added[0].id == "task-001"

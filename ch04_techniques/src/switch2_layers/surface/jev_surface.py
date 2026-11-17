@@ -3,8 +3,8 @@
 要求の state (キーはこの順):
     {
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
-      "documents": {"tasks": 短期タスクリスト, "tips": 攻略情報, "controls": 操作説明, "advice": 助言,
-                    "game": ゲームの性質},
+      "documents": {"tasks": 今実行中のタスク (キューの先頭のタスクの文), "tips": 攻略情報, "controls": 操作説明,
+                    "advice": 助言, "game": ゲームの性質},
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
       "progress": {"measured": 画面の停滞の計測の値の時刻のラベル (無ければ NOT_MEASURED_TEXT),
                    "text": 2 つの値の文 (progress.progress_text。無ければ NO_PROGRESS_TEXT)},
@@ -24,10 +24,13 @@ deep_status_text)。画像 (SurfaceInput.frames の JPEG) は assets に入れ�
        前回読んだ一覧と名前が同じで説明が違う対象は、追跡をやめる (forget。3 で問い直す対象になる)
     3. 問い直す対象を box_tracking_state.select_requery_targets で選ぶ
        (2 と 3 は、送る画像を作る前に plan_boxes で済ませていれば、そのときの結果を使う)
-    4. 問いの一覧 (surface_questions.build_surface_questions) と state を作る。送る直前に、記録の形の要求
+    4. 問いの一覧 (surface_questions.build_surface_questions。先頭のタスクがある (documents.task_id が None でない)
+       ときだけ、surface_questions.build_task_questions(documents.tasks) の 2 問を最後に足す) と state を作る。
+       送る直前に、記録の形の要求
        (surface_types.SurfaceRequest。state は build_recorded_state) を SurfaceInput.request_sink に渡し
        (None なら渡さない)、JevClient.ask で送る
-    5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)
+    5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)。先頭のタスクの 2 問を
+       送ったら、その答えの確率を出力の task_done_p と task_cancel_p にする (送らなければどちらも None)
     6. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
        Jev の box を出す (出どころ jev)。Jev の box が使えない (座標か確信度が 0〜1 の外、幅か高さが 0 以下で
        None) なら、追跡をやめ、box を出さない。ほかの対象は、要求の最新のフレームの位置があれば出す (送る画像に描く
@@ -90,9 +93,12 @@ from switch2_layers.surface.jev_client import (
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
     SURFACE_INSTRUCTIONS,
+    TASK_CANCEL_QUESTION_NAME,
+    TASK_DONE_QUESTION_NAME,
     SurfaceQuestion,
     box_question_name,
     build_surface_questions,
+    build_task_questions,
 )
 from switch2_layers.surface.surface_types import (
     Box,
@@ -484,6 +490,10 @@ class JevSurfaceDecider:
         要求を作る前に失敗したとき (notes_dir が無いときなど) は呼ばない。ask が失敗したとき
         (送った後の失敗) は呼んだ後に例外が出る。request_sink が例外を出したら、ask を呼ばずにその例外を出す。
         出力の exchange は SurfaceExchange(request_sink に渡したものと同じ SurfaceRequest, ask の答え)。
+        先頭のタスクの 2 問: surface_input.documents.task_id が None でない (先頭のタスクがある) ときだけ、
+        surface_questions.build_task_questions(surface_input.documents.tasks) の 2 問を問いの一覧の最後 (box の問いの後) に
+        足し、出力の task_done_p と task_cancel_p を、答えの nouls の task_done と task_cancel の確率にする。
+        足さなかったら、どちらも None。
         """
         if self.notes_dir is None:
             raise RuntimeError("JevSurfaceDecider.decide needs the run directory")
@@ -503,11 +513,20 @@ class JevSurfaceDecider:
             JevImage(reference, frame.jpeg)
             for reference, frame in zip(references, frames, strict=True)
         ]
-        questions = build_surface_questions(
-            self.settings.allowed_buttons,
-            planned.targets,
-            planned.requery_names,
-            len(frames),
+        documents = surface_input.documents
+        task_questions = (
+            build_task_questions(documents.tasks)
+            if documents.task_id is not None
+            else []
+        )
+        questions = (
+            *build_surface_questions(
+                self.settings.allowed_buttons,
+                planned.targets,
+                planned.requery_names,
+                len(frames),
+            ),
+            *task_questions,
         )
         state = build_surface_state(surface_input, references)
         request = SurfaceRequest(
@@ -531,6 +550,12 @@ class JevSurfaceDecider:
             boxes=self._decide_boxes(planned, answers, frames[-1].t),
             scene_changed=decide_scene_changed(answers.nouls),
             exchange=SurfaceExchange(request=request, answers=answers),
+            task_done_p=answers.nouls[TASK_DONE_QUESTION_NAME]
+            if task_questions
+            else None,
+            task_cancel_p=answers.nouls[TASK_CANCEL_QUESTION_NAME]
+            if task_questions
+            else None,
         )
 
     def _select_targets(

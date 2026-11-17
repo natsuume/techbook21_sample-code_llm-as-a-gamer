@@ -20,8 +20,10 @@ from switch2_layers.settings import (
     DEFAULT_SAFETY,
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_SURFACE,
+    DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
+    DEFAULT_THRESHOLD_TASK,
     OPENAI_API_KEY_ENV,
     ORCHESTRATOR_EFFORTS,
     SAFETY_INTERVAL_MAX_S,
@@ -524,6 +526,78 @@ def test_run_settings_to_json_has_the_hold_margin():
     assert run_settings_to_json(RunSettings())["hold_margin"] == 0.1
     value = run_settings_to_json(RunSettings(hold_margin=0.25))
     assert value["hold_margin"] == 0.25
+    assert json.loads(json.dumps(value)) == value
+
+
+# --- 先頭のタスクの問いのしきい値と、詰まりのきっかけの秒数 (--threshold-task・--task-stuck-seconds) ---
+
+
+def test_task_settings_defaults_follow_the_issue():
+    settings = RunSettings()
+    assert settings.threshold_task == DEFAULT_THRESHOLD_TASK == 0.5
+    assert settings.task_stuck_seconds == DEFAULT_TASK_STUCK_SECONDS == 30.0
+
+
+def test_task_settings_follow_the_existing_arguments():
+    names = [field.name for field in dataclasses.fields(RunSettings)]
+    # しきい値の最後 (threshold_safety) の後ろと、stuck_advice_seconds の後ろ
+    assert names[names.index("threshold_safety") + 1] == "threshold_task"
+    assert names[names.index("stuck_advice_seconds") + 1] == "task_stuck_seconds"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"threshold_task": 0.0},
+        {"threshold_task": 1.0},
+        {"task_stuck_seconds": 0.001},
+        {"task_stuck_seconds": 600.0},
+    ],
+)
+def test_task_boundary_values_are_valid(changes):
+    assert run_settings_errors(dataclasses.replace(RunSettings(), **changes)) == []
+
+
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"threshold_task": -0.01}, "--threshold-task"),
+        ({"threshold_task": 1.01}, "--threshold-task"),
+        ({"threshold_task": math.nan}, "--threshold-task"),
+        ({"task_stuck_seconds": 0.0}, "--task-stuck-seconds"),
+        ({"task_stuck_seconds": -30.0}, "--task-stuck-seconds"),
+        ({"task_stuck_seconds": math.inf}, "--task-stuck-seconds"),
+        ({"task_stuck_seconds": math.nan}, "--task-stuck-seconds"),
+    ],
+)
+def test_task_out_of_range_values_are_reported_with_option_name(changes, option):
+    errors = run_settings_errors(dataclasses.replace(RunSettings(), **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_task_errors_follow_the_argument_order():
+    errors = run_settings_errors(
+        RunSettings(
+            task_stuck_seconds=0.0,
+            stuck_advice_seconds=0.0,
+            threshold_task=2.0,
+            threshold_safety=1.0,
+        )
+    )
+    assert len(errors) == 4
+    assert "--threshold-safety" in errors[0]
+    assert "--threshold-task" in errors[1]
+    assert "--stuck-advice-seconds" in errors[2]
+    assert "--task-stuck-seconds" in errors[3]
+
+
+def test_run_settings_to_json_has_the_task_arguments():
+    value = run_settings_to_json(
+        RunSettings(threshold_task=0.7, task_stuck_seconds=12.5)
+    )
+    assert value["threshold_task"] == 0.7
+    assert value["task_stuck_seconds"] == 12.5
     assert json.loads(json.dumps(value)) == value
 
 

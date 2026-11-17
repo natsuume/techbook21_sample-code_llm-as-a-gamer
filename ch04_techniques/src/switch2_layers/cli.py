@@ -7,6 +7,7 @@
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
                        [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
+                       [--threshold-task P] [--task-stuck-seconds S]
         実機で 3 層を動かす (advisor 型。--mode の既定)。準備 (コントローラーの登録・指定のソフト (--software) を
         指定のユーザー (--user) で起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
         surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
@@ -119,8 +120,10 @@ from switch2_layers.settings import (
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
+    DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
+    DEFAULT_THRESHOLD_TASK,
     DEFAULT_TURN_TIMEOUT_S,
     INTERVAL_FPS_MAX,
     INTERVAL_WIDTH_MAX,
@@ -244,6 +247,7 @@ def add_run_parser(
     --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
     --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
+    --threshold-task は float (既定 0.5)、--task-stuck-seconds は float (既定 30)。
     Orchestrator 型の引数 (add_orchestrator_arguments) も足す。
     """
     parser = commands.add_parser(
@@ -455,6 +459,25 @@ def add_run_parser(
         help=(
             "新しい画面が出ていない秒数がこれを超えたら、advice の deep を求める。超えたまま続く間は、"
             f"この秒数ごとに求める (0 より大きい値。既定 {DEFAULT_STUCK_ADVICE_SECONDS:g})"
+        ),
+    )
+    parser.add_argument(
+        "--threshold-task",
+        type=float,
+        default=DEFAULT_THRESHOLD_TASK,
+        help=(
+            "surface の先頭のタスクの完了と取り消しの要求の問いのしきい値。確率がこれを超えた要求が、"
+            f"同じタスクについて続けて 2 回あったら成立にする (0〜1。既定 {DEFAULT_THRESHOLD_TASK:g})"
+        ),
+    )
+    parser.add_argument(
+        "--task-stuck-seconds",
+        type=float,
+        default=DEFAULT_TASK_STUCK_SECONDS,
+        help=(
+            "現在の場面の最も古いタスクがキューに入ってからの秒数がこれを超えたら、間隔を待たずに middle を呼ぶ。"
+            "超えたまま続く間は、この秒数ごとに呼ぶ "
+            f"(0 より大きい値。既定 {DEFAULT_TASK_STUCK_SECONDS:g})"
         ),
     )
     add_orchestrator_arguments(parser)
@@ -689,9 +712,11 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         safety=SafetyKind(args.safety),
         safety_interval_s=args.safety_interval,
         threshold_safety=args.threshold_safety,
+        threshold_task=args.threshold_task,
         max_safety_errors=args.max_safety_errors,
         progress_window_s=args.progress_window,
         stuck_advice_seconds=args.stuck_advice_seconds,
+        task_stuck_seconds=args.task_stuck_seconds,
         mode=RunMode(args.mode),
         orchestrator_effort=args.orchestrator_effort,
         rotate_tokens=args.rotate_tokens,
