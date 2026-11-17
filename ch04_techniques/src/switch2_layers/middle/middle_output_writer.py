@@ -50,6 +50,7 @@ from switch2_layers.notes.note_paths import SCENE_LABELS_FILE
 from switch2_layers.notes.scene_labels import (
     SceneLabel,
     add_scene_label,
+    normalize_scene_name,
     read_scene_labels,
     resolve_scene,
 )
@@ -150,7 +151,7 @@ def write_middle_output(
     """
     scene: SceneLabel | None = None
     is_new = False
-    scene_name = (output.scene_name or "").strip()
+    scene_name = normalize_scene_name(output.scene_name or "")
     if scene_name:
         labels = read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)
         scene, is_new = resolve_scene(labels, scene_name, first_seen_t=middle_input.t)

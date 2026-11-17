@@ -7,6 +7,7 @@ ID は `scene-` と 3 桁の連番 (1000 番目からは 4 桁)。一覧に足�
 """
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from switch2_layers.file_io import write_json_atomic
 from switch2_layers.notes.note_paths import is_scene_id
 
 SCENE_ID_PREFIX = "scene-"
+# 名前の末尾の場面 ID「(scene-<数字>)」。直前が空白か、文字列の先頭のもの (normalize_scene_name で取り除く)
+TRAILING_SCENE_ID_PATTERN = re.compile(rf"(?:^|\s)\({SCENE_ID_PREFIX}\d+\)$")
 
 
 @dataclass(frozen=True)
@@ -83,7 +86,10 @@ def normalize_scene_name(name: str) -> str:
     一覧の名前と同じにするため。全角の括弧、末尾以外の場面 ID、直前に空白の無い場面 ID は取り除かない。
     例: 「メインメニュー (scene-004) (scene-005)」→「メインメニュー」、「(scene-004)」→ 空文字列
     """
-    return name.strip()
+    normalized = name.strip()
+    while (match := TRAILING_SCENE_ID_PATTERN.search(normalized)) is not None:
+        normalized = normalized[: match.start()].strip()
+    return normalized
 
 
 def find_scene_id(labels: Sequence[SceneLabel], name: str) -> str | None:

@@ -164,8 +164,9 @@ def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
     if not labels:
         return EMPTY_TEXT
     return "\n".join(
-        f"- {label.name} ({label.id}。初めて名前を付けた時刻 "
-        f"{format_frame_label(label.first_seen_t)})"
+        f"- {label.name}\n"
+        f"  場面 ID: {label.id}、初めて名前を付けた時刻: "
+        f"{format_frame_label(label.first_seen_t)}"
         for label in labels
     )
 
@@ -224,16 +225,16 @@ def describe_previous_state(state: MiddleState | None) -> str:
     if state is None:
         return EMPTY_TEXT
     if state.scene_id is None or state.scene_name is None:
-        scene = "(決まっていない)"
+        scene_lines = ["場面: (決まっていない)"]
     else:
-        scene = f"{state.scene_name} ({state.scene_id})"
+        scene_lines = [f"場面: {state.scene_name}", f"場面 ID: {state.scene_id}"]
     return "\n".join(
         [
             (
                 f"作成時刻: {format_frame_label(state.generated_t)} "
                 f"(入力の時刻 {format_frame_label(state.based_on_t)})"
             ),
-            f"場面: {scene}",
+            *scene_lines,
             f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
             f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
             f"surface の待ち時間: {state.surface_wait_s:g} 秒",

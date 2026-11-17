@@ -458,7 +458,7 @@ def test_previous_state_section_has_no_first_task_lines():
     lines = section_body(build_user_sections(FULL_INPUT), "前回の middle の出力").split(
         "\n"
     )
-    assert lines[4:6] == ["surface の待ち時間: 0.4 秒", "系列情報:"]
+    assert lines[5:7] == ["surface の待ち時間: 0.4 秒", "系列情報:"]
     assert not any(line.startswith("最初のタスク") for line in lines)
 
 
