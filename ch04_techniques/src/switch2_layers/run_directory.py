@@ -14,6 +14,8 @@
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
+    middle/requests.jsonl                   ゲーム用の middle が gpt-6-luna に送った要求の記録
+                                            (middle.middle_call_record.middle_request_row)
     middle/map_records.jsonl                middle のマップの記録 (middle.map_records)
     middle/system_calls.jsonl               本体の画面の middle の呼び出しと、操作の列の実行の結果
                                             (middle.system_call_record)
@@ -76,6 +78,8 @@ NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
 MIDDLE_CALLS_FILE = "calls.jsonl"
+# ゲーム用の middle が gpt-6-luna に送った要求の記録 (middle.middle_call_record.middle_request_row)
+MIDDLE_REQUESTS_FILE = "requests.jsonl"
 # middle のマップの記録 (middle.map_records)
 MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
 # 本体の画面の middle の呼び出しと、操作の列の実行の結果 (middle.system_call_record)
@@ -180,6 +184,11 @@ class RunPaths:
     def middle_calls(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_CALLS_FILE"""
         return self.root / MIDDLE_DIR / MIDDLE_CALLS_FILE
+
+    @property
+    def middle_requests(self) -> Path:
+        """root / MIDDLE_DIR / MIDDLE_REQUESTS_FILE"""
+        return self.root / MIDDLE_DIR / MIDDLE_REQUESTS_FILE
 
     @property
     def middle_map_records(self) -> Path:

@@ -8,10 +8,16 @@ from switch2_layers.middle.middle_call_record import (
     MiddleCallRecord,
     middle_call_row,
     middle_call_row_with_details,
+    middle_request_row,
     take_analyzer_call_details,
 )
 from switch2_layers.middle.middle_output_writer import MiddleWriteResult
-from switch2_layers.middle.middle_types import MiddleFrame, MiddleInput, MiddleState
+from switch2_layers.middle.middle_types import (
+    MiddleFrame,
+    MiddleInput,
+    MiddleRequest,
+    MiddleState,
+)
 from switch2_layers.middle.task_destination_fix import DestinationFix
 from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.scene_labels import SceneLabel
@@ -20,6 +26,7 @@ from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 CALL_KEYS = [
     "t_sent",
     "t_received",
+    "request",
     "based_on_t",
     "frames",
     "surface_rows",
@@ -108,12 +115,14 @@ def test_row_of_successful_call_with_new_scene():
         deep_requests_sent=True,
         error=None,
         reasons=("queue_empty", "stuck"),
+        request=12,
     )
     row = middle_call_row(record)
     assert list(row) == CALL_KEYS
     assert row == {
         "t_sent": 10.1,
         "t_received": 10.6,
+        "request": 12,
         "based_on_t": 10.0,
         "frames": [
             {"t": 4.0, "file": "frames/interval/000004000.jpg"},
@@ -228,9 +237,12 @@ def test_row_of_failed_call():
         deep_requests_sent=False,
         error="RuntimeError: luna failed",
         reasons=("cancel_requested", "interval"),
+        request=3,
     )
     row = middle_call_row(record)
     assert list(row) == CALL_KEYS
+    # 送った後に失敗した回も、送った要求の番号を書く
+    assert row["request"] == 3
     assert row["scene_id"] is None
     assert row["scene_name"] is None
     assert row["surface_wait_s"] is None
@@ -264,6 +276,8 @@ def test_row_when_input_could_not_be_built():
     )
     row = middle_call_row(record)
     assert row["reasons"] == ["interval"]
+    # 要求を送らなかった回は null
+    assert row["request"] is None
     assert row["based_on_t"] is None
     assert row["frames"] == []
     assert row["surface_rows"] == 0
@@ -356,3 +370,52 @@ def test_take_analyzer_call_details_from_fake_is_empty():
     analyzer = FakeMiddleAnalyzer()
     assert not isinstance(analyzer, MiddleCallDetailsSource)
     assert take_analyzer_call_details(analyzer) == {}
+
+
+# --- middle/requests.jsonl の行 (gpt-6-luna に送った要求の記録) ---
+
+REQUEST = MiddleRequest(
+    model="gpt-6-luna",
+    reasoning_effort="none",
+    reasons=("queue_empty", "scene_change"),
+    sections=(
+        "## 現在の時刻\nt=10.000",
+        "## 場面ラベルの一覧\n- 起動ロゴ\n  場面 ID: scene-001、初めて名前を付けた時刻: t=2.000",
+    ),
+    frames=INPUT.frames,
+)
+
+
+def test_request_row_has_sections_and_frame_files():
+    row = middle_request_row(12, 123.456, REQUEST)
+    assert list(row) == [
+        "request",
+        "t_sent",
+        "model",
+        "reasoning_effort",
+        "reasons",
+        "sections",
+        "frames",
+    ]
+    # 節の文はそのまま書き、画像はバイト列を書かずに時刻とファイル名だけを書く
+    assert row == {
+        "request": 12,
+        "t_sent": 123.456,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "none",
+        "reasons": ["queue_empty", "scene_change"],
+        "sections": [
+            "## 現在の時刻\nt=10.000",
+            "## 場面ラベルの一覧\n- 起動ロゴ\n  場面 ID: scene-001、初めて名前を付けた時刻: t=2.000",
+        ],
+        "frames": [
+            {"t": 4.0, "file": "frames/interval/000004000.jpg"},
+            {"t": 10.0, "file": "frames/interval/000010000.jpg"},
+        ],
+    }
+    assert json.loads(json.dumps(row, ensure_ascii=False)) == row
+
+
+def test_request_row_without_frames_has_empty_frames():
+    row = middle_request_row(1, 3.0, dataclasses.replace(REQUEST, frames=()))
+    assert row["frames"] == []

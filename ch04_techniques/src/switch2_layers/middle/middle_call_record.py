@@ -1,11 +1,15 @@
-"""middle/calls.jsonl の 1 行 (middle の 1 回の実行の記録) を作る。
+"""middle/calls.jsonl の 1 行 (middle の 1 回の実行の記録) と、middle/requests.jsonl の 1 行 (ゲーム用の middle が
+gpt-6-luna に送った要求の記録) を作る。
 
-行の形:
-    {"t_sent", "t_received", "based_on_t", "frames": [{"t", "file"}], "surface_rows": 行数, "operation_rows": 行数,
-     "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "press_home",
+middle/calls.jsonl の行の形:
+    {"t_sent", "t_received", "request", "based_on_t", "frames": [{"t", "file"}], "surface_rows": 行数,
+     "operation_rows": 行数, "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "press_home",
      "deep_requests": [種類...], "deep_requests_sent", "error",
      "reasons": [理由...], "new_tasks": [{"text", "destination"}, ...], "destination_fixes": [直した内容, ...],
      "cancel_task_ids": [ID...], "cancel_used": 真偽, "new_tasks_used": 真偽}
+request はその回に gpt-6-luna に送った要求の番号 (同じ回の middle/requests.jsonl の行の request と同じ値)。要求を
+送らなかった回 (フェイクの MiddleAnalyzer と、入力を作れずに失敗した回) は null。送った後に失敗した回と、requests.jsonl の
+追記に失敗した回 (requests.jsonl にその番号の行が無い) も、送った要求の番号を書く。
 reasons はその回に middle を呼んだ理由 (middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順。失敗した回も書く)。
 new_tasks は行き先を直した後の出力の new_tasks (destination は tasks.task_files.destination_to_json の形)、
 destination_fixes は直した内容 (middle.task_destination_fix.destination_fix_to_json の形。無ければ空の配列)、
@@ -15,6 +19,14 @@ cancel_task_ids は出力の cancel_task_ids、cancel_used と new_tasks_used �
 cancel_used・new_tasks_used を null、new_scene を false、deep_requests を空にし、error に説明を書く。
 MiddleAnalyzer が MiddleCallDetailsSource でもあれば (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を
 上のキーの後ろに足す (middle_call_row_with_details)。フェイクの MiddleAnalyzer では上のキーだけにする。
+
+middle/requests.jsonl の行の形 (middle_request_row):
+    {"request", "t_sent", "model", "reasoning_effort", "reasons": [理由...], "sections": [節の文...],
+     "frames": [{"t", "file"}]}
+    request は要求の番号、t_sent は同じ回の middle/calls.jsonl の行の t_sent と同じ値 (analyze を呼ぶ直前に読んだ時刻)。
+    model・reasoning_effort・reasons・sections・frames は middle_types.MiddleRequest の値 (frames は送った画像の t と
+    file。送った画像が無ければ空の配列)。developer メッセージ・text.format・画像のバイト列と data URL・API キー・
+    HTTP のヘッダーは書かない。節の文は切り詰めず、間引かない。
 """
 
 from collections.abc import Mapping, Sequence
@@ -24,7 +36,7 @@ from typing import Protocol, runtime_checkable
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.middle.middle_output_writer import MiddleWriteResult
 from switch2_layers.middle.middle_trigger import MiddleCallReason
-from switch2_layers.middle.middle_types import MiddleInput
+from switch2_layers.middle.middle_types import MiddleInput, MiddleRequest
 from switch2_layers.middle.task_destination_fix import destination_fix_to_json
 from switch2_layers.tasks.task_files import destination_to_json
 
@@ -42,6 +54,9 @@ class MiddleCallRecord:
     deep_requests_sent   deep のスケジューラーに渡したら True (middle-once では渡さず False)
     error                失敗の説明。成功なら None
     reasons              その回に middle を呼んだ理由 (入力を作れずに失敗した回も、呼んだ理由を持つ)
+    request              その回に gpt-6-luna に送った要求の番号 (middle/requests.jsonl の行の request)。要求を送らなかった
+                         回 (フェイクの MiddleAnalyzer と、入力を作れずに失敗した回) は None。既定値の None は、要求を
+                         送らない記録 (フェイクやテストなど) のため
     """
 
     t_sent: float
@@ -52,11 +67,13 @@ class MiddleCallRecord:
     deep_requests_sent: bool
     error: str | None
     reasons: Sequence[MiddleCallReason]
+    request: int | None = None
 
 
 def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
     """middle/calls.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
+    request は record.request (None なら null)。
     based_on_t は middle_input.t、frames は middle_input.frames の [{"t", "file"}]、surface_rows と operation_rows は
     行数、scene_id・scene_name・surface_wait_s・press_home は write_result.state の値、new_scene は write_result.new_scene が
     あれば True、deep_requests は種類の値 (文字列) のリスト。
@@ -156,3 +173,15 @@ def middle_call_row_with_details(
         if key not in skeleton_keys:
             row[key] = value
     return row
+
+
+def middle_request_row(
+    request_number: int, t_sent: float, request: MiddleRequest
+) -> dict[str, object]:
+    """middle/requests.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
+
+    request は request_number、t_sent は t_sent、model・reasoning_effort は request の値、reasons は request.reasons の
+    リスト、sections は request.sections のリスト (文はそのまま)、frames は request.frames の [{"t", "file"}]
+    (jpeg は入れない)。
+    """
+    raise NotImplementedError

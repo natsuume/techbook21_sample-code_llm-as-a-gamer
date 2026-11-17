@@ -1,8 +1,11 @@
-"""MiddleAnalyzer の gpt-6-luna の実装 (LunaMiddleAnalyzer) と、middle/calls.jsonl の行に足す記録。
+"""MiddleAnalyzer の gpt-6-luna の実装 (LunaMiddleAnalyzer) と、middle/calls.jsonl の行に足す記録と、
+middle/requests.jsonl に書く要求の内容 (build_middle_request)。
 
 1 回の analyze の流れ:
     1. luna_request.build_luna_payload(middle_input, reasoning_effort=reasoning_effort) で要求の本文を作る
-    2. luna_client.post_responses で 1 回だけ送る (タイムアウトは timeout_s。再試行はしない)
+    2. middle_input.request_sink が None でなければ、送る直前に build_middle_request(middle_input, reasoning_effort) を
+       渡して 1 回だけ呼ぶ (middle/requests.jsonl に 1 行書く。書き込み先は追記の失敗を外に出さない)。
+       luna_client.post_responses で 1 回だけ送る (タイムアウトは timeout_s。再試行はしない)
     3. luna_client.read_output_text で出力の文を取り出す (status が completed でない・拒否・出力の文が無いときは
        LunaCallError)
     4. luna_output_schema.parse_middle_output で MiddleOutput にする (スキーマに合わなければ ValueError)
@@ -34,9 +37,21 @@ from switch2_layers.middle.luna_usage import (
     read_usage,
     usage_to_json,
 )
-from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
+from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput, MiddleRequest
 
 CALL_DETAIL_KEYS: tuple[str, ...] = ("usage", "cost_usd", "response", "error_body_head")
+
+
+def build_middle_request(
+    middle_input: MiddleInput, reasoning_effort: str
+) -> MiddleRequest:
+    """middle_input から送る要求の、記録に書く内容 (middle_types.MiddleRequest) を作って返す。
+
+    model は luna_request.LUNA_MODEL、reasoning_effort はそのまま (build_luna_payload に渡す値と同じ)、reasons は
+    middle_input.reasons、sections は luna_request.build_user_sections(middle_input) をタプルにしたもの
+    (build_luna_payload が user メッセージに置く input_text の文と同じ)、frames は middle_input.frames。
+    """
+    raise NotImplementedError
 
 
 def build_call_details(
@@ -90,6 +105,9 @@ class LunaMiddleAnalyzer:
         """middle_input から gpt-6-luna の出力を得て MiddleOutput を返す (モジュールの docstring の 1〜4)。
 
         要求の reasoning の effort は reasoning_effort にする。
+        middle_input.request_sink が None でなければ、post_responses を呼ぶ直前に
+        build_middle_request(middle_input, reasoning_effort) を渡して 1 回だけ呼ぶ (送った後に失敗する回も、
+        送る前に呼ぶ)。
         始めに、持っている記録を build_call_details(None, None) に置き換える (前の回の記録を残さない)。
         応答の本文を受け取ったら build_call_details(本文, None)、LunaCallError なら
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、例外を外に出す。
