@@ -153,8 +153,12 @@ def frame_label(t: float) -> str:
 
 
 def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
-    """場面ラベルの一覧を、1 件 1 行「- <name> (<id>。初めて名前を付けた時刻 t=<first_seen_t>)」の文にする。
+    """場面ラベルの一覧を、1 件につき次の 2 行の文にする (2 行目は 2 字下げる)。
 
+        - <name>
+          場面 ID: <id>、初めて名前を付けた時刻: t=<first_seen_t>
+
+    名前の後ろの括弧に場面 ID を書かないのは、middle が名前と一緒に場面 ID を場面名として書き返さないようにするため。
     t は format_frame_label の形。一覧が空なら EMPTY_TEXT を返す。
     """
     if not labels:
@@ -208,7 +212,8 @@ def describe_previous_state(state: MiddleState | None) -> str:
     """前回の middle の出力を、次の行の文にする。state が None なら EMPTY_TEXT を返す。
 
         作成時刻: t=<generated_t> (入力の時刻 t=<based_on_t>)
-        場面: <scene_name> (<scene_id>)        場面が決まっていなければ「場面: (決まっていない)」
+        場面: <scene_name>                     場面が決まっていなければ「場面: (決まっていない)」の 1 行だけ
+        場面 ID: <scene_id>                    (名前の後ろの括弧に書かない。describe_scene_labels と同じ理由)
         止まっているか: はい | いいえ
         詰まり方: <stuck_description>          空なら EMPTY_TEXT
         surface の待ち時間: <surface_wait_s> 秒        surface_wait_s は書式 g (例: 0.4)

@@ -545,10 +545,13 @@ def test_frame_label_uses_milliseconds():
 
 def test_describe_scene_labels():
     labels = (SceneLabel("scene-001", "町", 3.0), SceneLabel("scene-002", "戦闘", 9.5))
+    # 名前の後ろの括弧に場面 ID を書かない (middle が名前と一緒に書き返さないため)
     assert describe_scene_labels(labels) == lines_of(
         [
-            "- 町 (scene-001。初めて名前を付けた時刻 t=3.000)",
-            "- 戦闘 (scene-002。初めて名前を付けた時刻 t=9.500)",
+            "- 町",
+            "  場面 ID: scene-001、初めて名前を付けた時刻: t=3.000",
+            "- 戦闘",
+            "  場面 ID: scene-002、初めて名前を付けた時刻: t=9.500",
         ]
     )
     assert describe_scene_labels(()) == "(無い)"
@@ -580,7 +583,8 @@ def test_describe_previous_state():
     assert describe_previous_state(PREVIOUS_STATE) == lines_of(
         [
             "作成時刻: t=10.600 (入力の時刻 t=10.000)",
-            "場面: 町 (scene-001)",
+            "場面: 町",
+            "場面 ID: scene-001",
             "止まっているか: いいえ",
             "詰まり方: (無い)",
             "surface の待ち時間: 0.4 秒",
