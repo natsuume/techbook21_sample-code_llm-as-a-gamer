@@ -26,7 +26,7 @@ from switch2_harness.screen_change import load_sample
 from switch2_harness.workspace import WorkspacePaths
 
 # 撮影を始めてから次の撮影を始めるまでの秒数
-SAMPLE_INTERVAL_S = 0.5
+SAMPLE_INTERVAL_S = 0.1
 
 # 裏の撮影でデーモンの応答を待つ上限の秒数
 SHOT_TIMEOUT_S = 5.0
