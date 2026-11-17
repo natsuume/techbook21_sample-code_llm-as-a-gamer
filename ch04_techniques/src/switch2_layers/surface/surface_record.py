@@ -1,12 +1,14 @@
 """surface.jsonl の 1 行 (surface の 1 回の要求の記録) と、surface_requests.jsonl の 1 行 (Jev に送った要求の記録) を作る。
 
 surface.jsonl の行の形:
-    {"t_sent", "t_received", "frames": [{"t", "file"}], "scene_id", "task_id",
+    {"t_sent", "t_received", "frames": [{"t", "file"}], "scene_id", "task_id", "map_place",
      "uses_common": {"controls": 真偽, "tips": 真偽},
      "middle_generated_t", "action", "blocked_buttons", "deep_requests", "info_labels", "boxes", "scene_changed",
      "wait_s", "error", "request", "answers": {"choices": {問いの ID: {選択肢の名前: 確率}}, "nouls": {問いの ID: 確率}},
      "usage"}
     task_id はその要求の先頭のタスクの ID (SurfaceDocuments.task_id。無ければ null。失敗した要求の行にも書く)
+    map_place はその要求の state の map に入れたマップの場所の name (SurfaceOutput.map_place。マップを渡さなかった
+    要求と、失敗した要求は null)
 surface_requests.jsonl の行の形:
     {"request", "t_sent", "model", "state", "questions": [{"id", "type", "instructions", "criteria"}]}
     questions の各要素は、問いの ID と、Jev に送った問いの値 (surface.jev_client.build_question_json) を並べたもの
@@ -125,7 +127,8 @@ def answers_to_json(answers: JevAnswers) -> dict[str, object]:
 def surface_row(record: SurfaceRecord) -> dict[str, object]:
     """surface.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
-    frames は [{"t", "file"}]、scene_id は documents.scene_id、task_id は documents.task_id、uses_common は
+    frames は [{"t", "file"}]、scene_id は documents.scene_id、task_id は documents.task_id、map_place は
+    record.map_place (None なら null)、uses_common は
     {"controls": documents.uses_common_controls, "tips": documents.uses_common_tips}、
     action は pad_action.action_to_json(action) (None なら null)、blocked_buttons はリスト、
     deep_requests は種類の値 (文字列) のリスト、info_labels と boxes は info_label_to_json・box_to_json のリスト。
@@ -140,6 +143,7 @@ def surface_row(record: SurfaceRecord) -> dict[str, object]:
         "frames": [{"t": frame.t, "file": frame.file} for frame in record.frames],
         "scene_id": documents.scene_id,
         "task_id": documents.task_id,
+        "map_place": record.map_place,
         "uses_common": {
             "controls": documents.uses_common_controls,
             "tips": documents.uses_common_tips,
