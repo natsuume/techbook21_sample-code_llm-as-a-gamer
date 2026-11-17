@@ -1512,7 +1512,7 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 振り返り: notes.md の「振り返り」の節を書き換えました
 ```
 
-`records/events.jsonl` には、批評を書くたびに `command` が `reflection` の行 (`args` は批評の通し番号) を、知らせを出した `look` の後に `command` が `reflection-notice` の行を足します。`report` のコマンドの回数には、それぞれの回数が出ます。批評役の費用は `report` の集計に入りません。費用は `records/reflections/critic-<NNN>.jsonl` の result の `total_cost_usd` にあります。
+`records/events.jsonl` には、批評を書くたびに `command` が `reflection` の行 (`args` は批評の通し番号) を、知らせを出した `look` の後に `command` が `reflection-notice` の行を足します。`report` のコマンドの回数には、それぞれの回数が出ます。批評役の費用は、`report` の集計にも、`run` の `--max-budget-usd` の予算にも入りません。費用は `records/reflections/critic-<NNN>.jsonl` の result の `total_cost_usd` にあります。
 
 | パス (`records/reflections/` の中) | 内容 |
 |---|---|
