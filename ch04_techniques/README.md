@@ -254,7 +254,7 @@ surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。
 
 3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。オンライン・通報・購入・本体の設定などの画面を見つけたら、操作を中立にして実行全体を止めます。同じ要求で、今の画面が本体のどの画面 (HOME メニュー・ユーザー選択など) かを見本の画像と照合して記録します。照合の結果では止めず、段階の移り変わりと本体の画面の操作に使います。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視は、止める問いの確率をすべて 0 とし、どの見本の画面でもないと答えるフェイクになります。
 
-advisor 型の run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`recover`)・片付け (`clean_up`) の 4 つの段階に分けて動きます (「本体の画面の扱い」の節)。Orchestrator 型の run は段階に分けません (「Orchestrator 型」の節)。surface と middle のゲーム用のループと deep の自動の呼び出しは、play の段階の間だけ動きます。本体の画面 (HOME メニュー・ユーザー選択など) を操作する準備・復帰・片付けの段階では、middle が本体の画面の操作の列を決め、コードが送ります。
+advisor 型の run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`recover`)・片付け (`clean_up`) の 4 つの段階に分けて動きます (「本体の画面の扱い」の節)。surface と middle のゲーム用のループと deep の自動の呼び出しは、play の段階の間だけ動きます。本体の画面 (HOME メニュー・ユーザー選択など) を操作する準備・復帰・片付けの段階では、middle が本体の画面の操作の列を決め、コードが送ります。Orchestrator 型の run は段階に分けません (「Orchestrator 型」の節)。
 
 ### サブコマンド
 
@@ -902,7 +902,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 1 ターンが `--turn-timeout` 秒 (既定 120) を超えたとき、子プロセスが終わったときも、そのセッションを終えて新しいセッションを始めます。新しいセッションが最初のターンを終えずに終わることが 3 回続くと、実行全体を止めます。
 
-主ループの Claude Code は、サブスクリプションのログインで動かします (子プロセスの環境変数から `ANTHROPIC_API_KEY` と `ANTHROPIC_AUTH_TOKEN` を除きます)。そのため、主ループの使用量は、5 時間枠と週次枠を同じアカウントのほかの Claude Code の利用と共有します。
+主ループの Claude Code は、サブスクリプションのログインで動かします (子プロセスの環境変数から `ANTHROPIC_API_KEY` と `ANTHROPIC_AUTH_TOKEN` を除きます)。そのため、主ループの使用量は、同じアカウントのほかの Claude Code と Claude のアプリ (claude.ai・デスクトップ・モバイル) の利用と、同じ使用量の枠を共有します。Pro と Max のプランでは、5 時間ごとの枠と週ごとの枠です (2026-11-17 に Claude のヘルプセンターで確認。Ultra のプランには 5 時間ごとの枠がありません)。
 
 #### 人の初期指示とゲームの名前
 
@@ -910,7 +910,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 #### Orchestrator 型の起動引数
 
-次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。
+次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。ただし、値の範囲は advisor 型でも確かめます (下の段落)。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
@@ -923,7 +923,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 | `--monitor-threshold P` | 監視の当たりのしきい値 | 0.5 | 0 より大きく 1 より小さい値 |
 | `--max-monitor-errors N` | 監視の Jev の失敗がこの回数続いたら、監視を止めます | 5 | 1 以上の整数 |
 
-初期指示は任意です。どちらも渡さなければ、主ループには初期指示が無いことを伝えます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
+初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
 
 advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds` は使いません。
 
