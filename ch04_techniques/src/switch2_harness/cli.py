@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 
 from switch2_harness.action_history import FramesChanged, frames_changed_on_disk
 from switch2_harness.agent_launcher import (
@@ -45,10 +46,12 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    STAGNATION_ALERT_FEATURE,
     Feature,
 )
 from switch2_harness.harness_config import DEFAULT_GOAL, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
+from switch2_harness.screen_recorder import read_latest_last_new_screen_time
 from switch2_harness.workspace import (
     NotAWorkspaceError,
     WorkspacePaths,
@@ -214,6 +217,21 @@ def _look_frames_changed(
     return None
 
 
+def _look_last_new_screen_time(
+    paths: WorkspacePaths, available: tuple[Feature, ...]
+) -> Callable[[], float | None] | None:
+    """look に渡す last_new_screen_time を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に停滞の知らせの要素
+    (features.STAGNATION_ALERT_FEATURE) があれば、screen_recorder.read_latest_last_new_screen_time を
+    paths で呼ぶ関数、無ければ None。
+    """
+    config = read_config(paths.harness_file, available)
+    if STAGNATION_ALERT_FEATURE in config.features:
+        return partial(read_latest_last_new_screen_time, paths)
+    return None
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
@@ -225,6 +243,7 @@ def _dispatch(
             send=deps.send,
             clock=deps.clock,
             frames_changed=_look_frames_changed(paths, deps.available),
+            last_new_screen_time=_look_last_new_screen_time(paths, deps.available),
         )
     if command == "press":
         return handle_press(
@@ -269,6 +288,10 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     look は、harness.json (read_config(..., deps.available)) で行動履歴の要素 (features.ACTION_HISTORY_FEATURE) が
     有効なら、action_history.frames_changed_on_disk(<作業ディレクトリー>) を frames_changed として commands.handle_look に渡す
     (look の応答の後に直近の行動を表示する)。無効なら渡さない。
+    また look は、停滞の知らせの要素 (features.STAGNATION_ALERT_FEATURE) が有効なら、
+    screen_recorder.read_latest_last_new_screen_time(<作業ディレクトリー>) を呼ぶ関数を last_new_screen_time として渡す
+    (最後の新しい画面から stagnation_alert.STAGNATION_SECONDS 秒以上たっていたら、look の応答の直後に知らせの行を表示する)。
+    無効なら渡さない。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)

@@ -1,11 +1,16 @@
-"""要素「停滞の知らせ」(stagnation-alert) のうち、run の間に裏で画面を撮り、縮小画像と時刻を記録する部分。
+"""要素「停滞の知らせ」(stagnation-alert) のうち、run の間に裏で画面を撮って記録し、撮影ごとに新しい画面かを判定する部分。
 
 記録は records/screen-samples/run-<NNN>/ に、run ごとに分けて置く。run ごとのディレクトリーの中身:
     samples.jsonl  撮影ごとに 1 行の JSON。成功は {"index": <番号>, "time": <時刻>, "file": <縮小画像のファイル名>}、
                    失敗は {"time": <時刻>, "error": <error 行>}
     000001.png ... 撮影した画面を 160x90 のグレースケールに縮小した PNG (成功した撮影ごとに 1 から連番)
+    last-new-screen.json
+                   最後の新しい画面の {"index": <番号>, "time": <時刻>, "file": <縮小画像のファイル名>}
+                   (stagnation_alert.LAST_NEW_SCREEN_FILE_NAME。新しい画面が出るたびに書き換える)
     shot.png       デーモンに元の大きさで保存させる一時ファイル (撮影のたびに上書きし、記録を止めたら消す)
-記録は、画面が変わらない状態 (停滞) をどう見分けるかを、後で分析して決めるために使う。
+撮影に成功するたびに、stagnation_alert.NewScreenTracker でその run の撮影と比べて新しい画面かを判定し、
+新しい画面なら状態ファイル last-new-screen.json を書く。look は read_latest_last_new_screen_time で
+番号が最大の run の状態ファイルを読み、停滞の知らせを出すかを決める。
 
 commands.handle_run が recording_screens で裏のスレッドを動かし、撮影はエージェントの操作と並行に進む。
 デーモンへの送信 (send) と時計 (clock) は引数で受け取る。
@@ -18,11 +23,16 @@ import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
+from typing import cast
 
 import cv2
 
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.screen_change import load_sample
+from switch2_harness.stagnation_alert import (
+    NewScreenTracker,
+    read_last_new_screen_time,
+)
 from switch2_harness.workspace import WorkspacePaths
 
 # 撮影を始めてから次の撮影を始めるまでの秒数
@@ -53,6 +63,19 @@ SHOT_FILE_NAME = "shot.png"
 ScreenRecording = Callable[[WorkspacePaths], AbstractContextManager[object]]
 
 
+def _numbered_run_dirs(samples_dir: Path) -> list[tuple[int, Path]]:
+    """samples_dir の直下の run のディレクトリーを、(番号, パス) の組のリストで返す (順は決めない)。
+
+    名前が RUN_DIR_PREFIX ("run-") と 3 桁以上の数字でできたディレクトリーだけを返す (例: run-001、run-1234)。
+    名前の規則に合わないものと、ディレクトリーでないものは除く。samples_dir はあるものとして呼ぶ。
+    """
+    return [
+        (int(match.group(1)), entry)
+        for entry in samples_dir.iterdir()
+        if entry.is_dir() and (match := _RUN_DIR_PATTERN.fullmatch(entry.name))
+    ]
+
+
 def next_run_dir(samples_dir: Path) -> Path:
     """今回の run の記録を置くディレクトリーを作って返す。
 
@@ -63,11 +86,7 @@ def next_run_dir(samples_dir: Path) -> Path:
     例: samples_dir が空なら run-001。run-001 と run-007 があれば run-008。
     """
     samples_dir.mkdir(parents=True, exist_ok=True)
-    numbers = [
-        int(match.group(1))
-        for entry in samples_dir.iterdir()
-        if entry.is_dir() and (match := _RUN_DIR_PATTERN.fullmatch(entry.name))
-    ]
+    numbers = [number for number, _ in _numbered_run_dirs(samples_dir)]
     run_dir = samples_dir / f"{RUN_DIR_PREFIX}{max(numbers, default=0) + 1:03d}"
     run_dir.mkdir()
     return run_dir
@@ -80,7 +99,13 @@ def latest_run_dir(samples_dir: Path) -> Path | None:
     番号が最大のものを返す。samples_dir が無いとき、または規則に合うディレクトリーが無いときは None。
     例: run-001 と run-007 があれば samples_dir / "run-007"。
     """
-    raise NotImplementedError
+    if not samples_dir.is_dir():
+        return None
+    run_dirs = _numbered_run_dirs(samples_dir)
+    if not run_dirs:
+        return None
+    _, largest = max(run_dirs, key=lambda numbered: numbered[0])
+    return largest
 
 
 def read_latest_last_new_screen_time(paths: WorkspacePaths) -> float | None:
@@ -90,7 +115,10 @@ def read_latest_last_new_screen_time(paths: WorkspacePaths) -> float | None:
     そうでなければ stagnation_alert.read_last_new_screen_time(<そのディレクトリー>) の結果を返す
     (状態ファイルがまだ無いときなどは None)。
     """
-    raise NotImplementedError
+    run_dir = latest_run_dir(paths.records_dir / SAMPLES_DIR_NAME)
+    if run_dir is None:
+        return None
+    return read_last_new_screen_time(run_dir)
 
 
 def sample_file_name(index: int) -> str:
@@ -147,24 +175,33 @@ def run_recording(
     clock: Callable[[], float],
     interval_s: float = SAMPLE_INTERVAL_S,
 ) -> None:
-    """stop が set されるまで、interval_s 秒ごとに画面を撮って run_dir に記録する。recording_screens が裏のスレッドで動かす。
+    """stop が set されるまで、interval_s 秒ごとに画面を撮って run_dir に記録し、撮影ごとに新しい画面かを判定する。
 
+    recording_screens が裏のスレッドで動かす。
+    最初に tracker = stagnation_alert.NewScreenTracker(run_dir) を作る。
     撮影の番号 index を 1 から始め、stop.is_set() になるまで次を繰り返す:
         1. started = clock()
         2. entry = record_sample(run_dir, index, send=send, clock=clock)
         3. append_sample_line(run_dir / INDEX_FILE_NAME, entry)
-        4. entry に "index" があれば (撮影に成功したら) index を 1 進める。error の行では進めないので、画像の番号は飛ばない
+        4. entry に "index" があれば (撮影に成功したら)、tracker.add_sample(sample_file_name(index), index, entry["time"])
+           で新しい画面かを判定し (新しい画面なら状態ファイルを書く)、index を 1 進める。
+           entry["time"] は record_sample が clock() で取った撮影の時刻。
+           error の行では判定せず、index も進めないので、画像の番号は飛ばない
         5. stop.wait(min(interval_s, max(0.0, interval_s - (clock() - started)))) で、撮影を始めてから interval_s 秒たつまで待つ
            (撮影に interval_s 秒以上かかったら待たない。待っている間に stop が set されたら、すぐに次の確認に進む)。
            時計 (本番は壁時計) が戻って経過時間が負になっても、待ちは interval_s を超えない
     繰り返しを抜けたら、一時ファイル run_dir / SHOT_FILE_NAME を unlink(missing_ok=True) で消す。
     """
+    tracker = NewScreenTracker(run_dir)
     index = 1
     while not stop.is_set():
         started = clock()
         entry = record_sample(run_dir, index, send=send, clock=clock)
         append_sample_line(run_dir / INDEX_FILE_NAME, entry)
         if "index" in entry:
+            # 成功した撮影の entry の "time" は、record_sample が clock() で取った float
+            shot_time = cast(float, entry["time"])
+            tracker.add_sample(sample_file_name(index), index, shot_time)
             index += 1
         stop.wait(min(interval_s, max(0.0, interval_s - (clock() - started))))
     (run_dir / SHOT_FILE_NAME).unlink(missing_ok=True)
@@ -174,7 +211,9 @@ def run_recording(
 def recording_screens(
     paths: WorkspacePaths, *, send: SendCommand, clock: Callable[[], float]
 ) -> Iterator[Path]:
-    """with の中にいる間、裏のスレッドで画面を撮って記録する。with ... as で今回の run の記録のディレクトリーを受け取れる。
+    """with の中にいる間、裏のスレッドで画面を撮って記録し、撮影ごとに新しい画面かを判定して状態ファイルを書く。
+
+    with ... as で今回の run の記録のディレクトリーを受け取れる。
 
     1. run_dir = next_run_dir(paths.records_dir / SAMPLES_DIR_NAME) で、今回の run のディレクトリーを作る
     2. stop = threading.Event() と、threading.Thread(target=run_recording, args=(run_dir, stop),

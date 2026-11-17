@@ -6,7 +6,8 @@
       CLAUDE.md      エージェントへの指示 (instructions)
       <要素のファイル>  要素が置き、エージェントが書き換えられるファイル (features.WritableFile。例: notes.md)
       records/       events.jsonl (全コマンドの記録)、agent.jsonl (claude -p の stream-json)、agent-stderr.log、
-                     screen-samples/ (停滞の知らせの要素を有効にしたときの、run ごとの画面の記録。screen_recorder)
+                     screen-samples/ (停滞の知らせの要素を有効にしたときの、run ごとの画面の撮影の記録と、
+                     最後の新しい画面の状態ファイル。screen_recorder・stagnation_alert)
       frames/        撮影した PNG (000001.png から連番)
 """
 
