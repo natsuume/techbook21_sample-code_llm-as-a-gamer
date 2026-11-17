@@ -1275,7 +1275,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 |---|---|
 | `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
 | `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
-| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ |
+| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ。振り返り (`reflection`) も有効にすると、末尾の「振り返り」の節をハーネスが書き換える |
 | `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
@@ -1493,7 +1493,7 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
   - その時点の `notes.md`
 - 指示は `src/switch2_harness/instructions/reflection-critic.md` です。先へ進んだか、まだ試していない方法、`notes.md` と画面の食い違いの 3 点を、400 字以内の箇条書きで書かせます
 - モデルは claude-opus-5-5、effort は medium です。ツールは渡さず (`--tools ""`)、プレイ中のエージェントと同じく、起動した人の設定・`CLAUDE.md`・MCP・Skill を読ませません。撮影は、標準入力の stream-json のメッセージに PNG のまま base64 で入れます。会話はディスクに残しません (`--no-session-persistence`)
-- 起動から 240 秒たっても終わらない批評役は止めます。`run` が止まるときも、動いている批評役を止めます
+- 入力を渡し終えてから 240 秒たっても終わらない批評役は止めます。`run` が止まるときも、動いている批評役を止めます
 
 批評役が返した批評は、次の形で `notes.md` の「振り返り」の節に書きます。節が無ければ末尾に足します。ハーネスは別のファイルに書いてから置き換えるため、プレイ中のエージェントが書きかけの `notes.md` を読むことはありません。ただし、エージェントが読んだ後にハーネスが書き換えると、エージェントの Edit は失敗します。
 
@@ -1528,4 +1528,5 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 - シグナルを受けてから後片付けに入るまでのごく短い間に、2 回目のシグナルが届いた場合の動作は確かめていません。期限などで `run` のループを抜けた直後の、後片付けの関数に入るまでのごく短い間に最初のシグナルが届いた場合は、後片付けが行われません
 - Claude Code を起動している最中に割り込みが届くと、その起動の start / resume が記録されず、`report` の起動の回数が 1 少なくなります
 - `run` を SIGKILL で止めると、後片付けは行われません。別のセッションで動く Claude Code は残るため、人が止めてから、`ch02_setup` ディレクトリーで `uv run switch2-remote up ALL` を送ってください
+- 振り返り (`reflection`) の批評役を動かす裏のスレッドで例外が起きると (`claude` が見つからない、など)、その `run` の残りの間は批評役を起動しません。`run` は止まらず、標準エラー出力に例外の内容が出るだけです。批評が書かれているかは、`records/reflections/reflections.jsonl` の `written` の行で確かめてください
 - 費用の集計と予算の残りは、Claude Code が result に書く `total_cost_usd` (Claude Code が計算した推定値) にもとづきます。Claude Code が result を書かずに異常終了してから起動し直した場合は、その起動の費用が次の起動に渡す残りの予算の計算に入らないため、`--max-budget-usd` をその分超えることがあります

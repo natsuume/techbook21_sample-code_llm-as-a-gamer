@@ -12,8 +12,11 @@
 このモジュールはファイル・プロセス・時計に触れない (reflection_critic と commands が使う)。
 """
 
-from collections.abc import Iterable, Sequence
+import json
+import math
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from switch2_harness.event_log import CommandEvent
 
@@ -61,7 +64,8 @@ def format_offset(seconds: float) -> str:
 
     例: 0 → "0:00"、75.9 → "1:15"、300 → "5:00"、-3 → "0:00"。
     """
-    raise NotImplementedError("Phase B で実装する")
+    minutes, rest = divmod(max(0, math.floor(seconds)), 60)
+    return f"{minutes}:{rest:02d}"
 
 
 def window_actions(
@@ -71,7 +75,11 @@ def window_actions(
 
     成功・失敗のどちらも含める。
     """
-    raise NotImplementedError("Phase B で実装する")
+    return [
+        event
+        for event in events
+        if event.command in ACTION_COMMANDS and window_start <= event.time <= window_end
+    ]
 
 
 def select_frames(
@@ -87,7 +95,16 @@ def select_frames(
     - looks が空なら空のリストを返す。max_count は 2 以上として呼ぶ
     例: 時刻 0, 10, 20, ..., 90 の 10 枚から 4 枚なら、目標 0, 30, 60, 90 で 0, 30, 60, 90 の撮影。
     """
-    raise NotImplementedError("Phase B で実装する")
+    if len(looks) <= max_count:
+        return list(looks)
+    first = looks[0][0]
+    last = looks[-1][0]
+    chosen: set[int] = set()
+    for k in range(max_count):
+        target = first + (last - first) * k / (max_count - 1)
+        # min は差が同じ撮影のうち最初のもの (looks の前のほう) を返す
+        chosen.add(min(range(len(looks)), key=lambda i: abs(looks[i][0] - target)))
+    return [looks[i] for i in sorted(chosen)]
 
 
 def format_action_lines(
@@ -100,7 +117,30 @@ def format_action_lines(
         press:          `- <時刻> press <args を空白でつないだもの>: <reply>`
     例: `- 0:12 look 000123.png`、`- 0:15 press tap A: ok tap A`、`- 0:20 press tap HOME: error HOME is not allowed`。
     """
-    raise NotImplementedError("Phase B で実装する")
+    lines: list[str] = []
+    for action in actions:
+        offset = format_offset(action.time - window_start)
+        if action.command != "look":
+            lines.append(f"- {offset} press {' '.join(action.args)}: {action.reply}")
+        elif action.ok and action.frame is not None:
+            lines.append(f"- {offset} look {PurePosixPath(action.frame).name}")
+        else:
+            lines.append(f"- {offset} look: {action.reply}")
+    return lines
+
+
+def _json_objects(lines: Iterable[str]) -> Iterator[dict[str, object]]:
+    """行のうち、JSON のオブジェクトとして読める行を順に返す。読めない行と空行は読み飛ばす。"""
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            value: object = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            yield value
 
 
 def assistant_texts(lines: Iterable[str]) -> list[str]:
@@ -112,7 +152,21 @@ def assistant_texts(lines: Iterable[str]) -> list[str]:
     例: {"type":"assistant","message":{"content":[{"type":"text","text":" 右へ進みます\\n"},{"type":"tool_use",...}]}}
     の行からは "右へ進みます"。
     """
-    raise NotImplementedError("Phase B で実装する")
+    texts: list[str] = []
+    for message in _json_objects(lines):
+        body = message.get("message")
+        if message.get("type") != "assistant" or not isinstance(body, dict):
+            continue
+        content = body.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+    return texts
 
 
 def build_critic_content(
@@ -136,7 +190,35 @@ def build_critic_content(
            - "## プレイヤーの発言 (古い順)\\n\\n" + <statements を "\\n\\n" でつないだもの。空なら "(なし)">
            - "## notes.md\\n\\n" + <notes_text の末尾の改行を除いたもの。空 (空白だけを含む) なら "(空)">
     """
-    raise NotImplementedError("Phase B で実装する")
+    shots_header = "## 直近 5 分の撮影 (古い順)"
+    content: list[dict[str, object]] = [{"type": "text", "text": instructions}]
+    if frames:
+        content.append({"type": "text", "text": shots_header})
+    else:
+        content.append({"type": "text", "text": f"{shots_header}\n\n(なし)"})
+    for i, frame in enumerate(frames, start=1):
+        label = f"撮影 {i}: {frame.file_name} ({format_offset(frame.offset_s)})"
+        content.append({"type": "text", "text": label})
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": frame.png_base64,
+                },
+            }
+        )
+    actions_text = "\n".join(action_lines) or "(なし)"
+    statements_text = "\n\n".join(statements) or "(なし)"
+    notes = notes_text.rstrip("\n") if notes_text.strip() else "(空)"
+    records = [
+        f"## 直近 5 分の行動 (時刻は 5 分の始まりからの経過)\n\n{actions_text}",
+        f"## プレイヤーの発言 (古い順)\n\n{statements_text}",
+        f"## notes.md\n\n{notes}",
+    ]
+    content.append({"type": "text", "text": "\n\n".join(records)})
+    return content
 
 
 def critic_input_line(content: Sequence[dict[str, object]]) -> str:
@@ -145,7 +227,8 @@ def critic_input_line(content: Sequence[dict[str, object]]) -> str:
     {"type": "user", "message": {"role": "user", "content": <content のリスト>}} を json.dumps(..., ensure_ascii=False) にし、
     "\\n" を付ける。
     """
-    raise NotImplementedError("Phase B で実装する")
+    message = {"type": "user", "message": {"role": "user", "content": list(content)}}
+    return json.dumps(message, ensure_ascii=False) + "\n"
 
 
 def critique_from_result(lines: Iterable[str]) -> str | None:
@@ -155,7 +238,16 @@ def critique_from_result(lines: Iterable[str]) -> str | None:
     "is_error" が true でなく、"result" が文字列で、前後の空白を除いて空でなければ、前後の空白を除いた "result" を返す。
     そうでなければ (result の行が無いときを含む) None。
     """
-    raise NotImplementedError("Phase B で実装する")
+    last: dict[str, object] | None = None
+    for message in _json_objects(lines):
+        if message.get("type") == "result":
+            last = message
+    if last is None or last.get("subtype") != "success" or last.get("is_error") is True:
+        return None
+    result = last.get("result")
+    if not isinstance(result, str) or not result.strip():
+        return None
+    return result.strip()
 
 
 def section_body(minutes: int, critique: str) -> str:
@@ -165,7 +257,7 @@ def section_body(minutes: int, critique: str) -> str:
     (末尾に改行は付けない)。
     例: (10, "- 進んでいない\\n") → "(run の開始から 10 分の時点の批評)\\n\\n- 進んでいない"。
     """
-    raise NotImplementedError("Phase B で実装する")
+    return f"(run の開始から {minutes} 分の時点の批評)\n\n{critique.strip()}"
 
 
 def replace_reflection_section(notes_text: str, body: str) -> str:
@@ -180,7 +272,28 @@ def replace_reflection_section(notes_text: str, body: str) -> str:
     結果は改行 1 つで終わる。
     例: ("# メモ\\n\\n## 操作方法\\n\\n- A\\n\\n## 振り返り\\n", "前") → "# メモ\\n\\n## 操作方法\\n\\n- A\\n\\n## 振り返り\\n\\n前\\n"。
     """
-    raise NotImplementedError("Phase B で実装する")
+    section = f"{REFLECTION_SECTION_HEADING}\n\n{body}\n"
+    lines = notes_text.split("\n")
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.rstrip() == REFLECTION_SECTION_HEADING
+        ),
+        None,
+    )
+    if start is None:
+        before = notes_text.rstrip("\n")
+        return f"{before}\n\n{section}" if before else section
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith(("# ", "## "))),
+        None,
+    )
+    before = "".join(line + "\n" for line in lines[:start])
+    if end is None:
+        return before + section
+    after = "\n".join(lines[end:]).rstrip("\n")
+    return f"{before}{section}\n{after}\n"
 
 
 def next_tick_index(
@@ -197,7 +310,13 @@ def next_tick_index(
     例: run_start=0、interval_s=300 で、(now=10, last_index=0) → 1、(now=310, last_index=1) → 2、
     (now=650, last_index=1) → 3 (2 回目の 600 は過ぎたので飛ばす)。
     """
-    raise NotImplementedError("Phase B で実装する")
+    k = max(1, math.floor((now - run_start) / interval_s) + 1)
+    # 割り算の丸めで起動の時刻の前後がずれないよう、起動の時刻そのものを now と比べて合わせる
+    while k > 1 and run_start + (k - 1) * interval_s > now:
+        k -= 1
+    while run_start + k * interval_s <= now:
+        k += 1
+    return max(last_index + 1, k)
 
 
 def notice_pending(events: Sequence[CommandEvent]) -> bool:
@@ -207,7 +326,14 @@ def notice_pending(events: Sequence[CommandEvent]) -> bool:
     後ろ (リストの位置で比べる) にあれば True。REFLECTION_COMMAND の行が無ければ False。
     REFLECTION_NOTICE_COMMAND の行が無く REFLECTION_COMMAND の行があれば True。
     """
-    raise NotImplementedError("Phase B で実装する")
+    last_reflection = -1
+    last_notice = -1
+    for i, event in enumerate(events):
+        if event.command == REFLECTION_COMMAND:
+            last_reflection = i
+        elif event.command == REFLECTION_NOTICE_COMMAND:
+            last_notice = i
+    return last_reflection > last_notice
 
 
 def build_notice_event(look_time: float, frame: str) -> CommandEvent:
@@ -216,7 +342,15 @@ def build_notice_event(look_time: float, frame: str) -> CommandEvent:
     CommandEvent(time=look_time, command=REFLECTION_NOTICE_COMMAND, args=(), reply=NOTICE_LINE, ok=True,
     elapsed_s=0.0, frame=frame) を返す。
     """
-    raise NotImplementedError("Phase B で実装する")
+    return CommandEvent(
+        time=look_time,
+        command=REFLECTION_NOTICE_COMMAND,
+        args=(),
+        reply=NOTICE_LINE,
+        ok=True,
+        elapsed_s=0.0,
+        frame=frame,
+    )
 
 
 def build_reflection_event(time: float, index: int, elapsed_s: float) -> CommandEvent:
@@ -226,4 +360,12 @@ def build_reflection_event(time: float, index: int, elapsed_s: float) -> Command
     elapsed_s=elapsed_s, frame=None) を返す。index は批評の通し番号 (reflection_critic の記録の番号)、
     elapsed_s は批評役を起動してから書き終えるまでの秒数。
     """
-    raise NotImplementedError("Phase B で実装する")
+    return CommandEvent(
+        time=time,
+        command=REFLECTION_COMMAND,
+        args=(str(index),),
+        reply="ok notes.md",
+        ok=True,
+        elapsed_s=elapsed_s,
+        frame=None,
+    )

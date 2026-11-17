@@ -28,15 +28,48 @@ commands.handle_run が reflecting_with_critic で裏のスレッドを動かし
 1 回の待ちは POLL_INTERVAL_S 秒までにして、そのたびに壁時計で起動の時刻を確かめる。
 """
 
+import base64
+import json
+import os
+import re
+import signal
+import subprocess
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Protocol
+from pathlib import Path, PurePosixPath
+from string import Template
+from typing import Literal, Protocol
 
-from switch2_harness.agent_launcher import AgentProcess, ClaudeProcess
+from switch2_harness.agent_launcher import (
+    CLAUDE_COMMAND,
+    CLAUDE_SETTINGS_JSON,
+    AgentProcess,
+    ClaudeProcess,
+    agent_log_size,
+    build_claude_env,
+)
+from switch2_harness.event_log import append_event, read_events
+from switch2_harness.features import NOTES_FILE_NAME
 from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.instructions import ReadTemplate, read_package_template
+from switch2_harness.reflection import (
+    CRITIC_INSTRUCTION_FILE,
+    REFLECTION_INTERVAL_S,
+    CriticFrame,
+    assistant_texts,
+    build_critic_content,
+    build_reflection_event,
+    critic_input_line,
+    critique_from_result,
+    format_action_lines,
+    next_tick_index,
+    replace_reflection_section,
+    section_body,
+    select_frames,
+    window_actions,
+)
 from switch2_harness.workspace import WorkspacePaths
 
 # 批評役のモデルと effort (ユーザーが決めた値。プレイ中のエージェントと同じ)
@@ -63,6 +96,12 @@ REFLECTIONS_INDEX_FILE_NAME = "reflections.jsonl"
 
 # 批評役の標準エラー出力のファイル名
 CRITIC_STDERR_FILE_NAME = "critic-stderr.log"
+
+# 批評役の標準出力のファイル名に合う正規表現。グループ 1 が通し番号
+_CRITIC_OUTPUT_PATTERN = re.compile(r"critic-([0-9]+)\.jsonl")
+
+# 批評役を止めたときの、回の結果 ("stopped": 止める合図で止めた、"timeout": 時間切れで止めた)
+StopStatus = Literal["stopped", "timeout"]
 
 # 作業ディレクトリーと設定を受け取り、振り返りを始めて終えるコンテキストマネージャーを返す関数の型。commands.handle_run が受け取る
 Reflecting = Callable[[WorkspacePaths, HarnessConfig], AbstractContextManager[object]]
@@ -120,7 +159,31 @@ def build_critic_args() -> list[str]:
           --effort <CRITIC_EFFORT>
     `--tools ""` は、引数 "--tools" と空の文字列 "" の 2 つの要素にする。
     """
-    raise NotImplementedError("Phase B で実装する")
+    return [
+        CLAUDE_COMMAND,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "dontAsk",
+        "--tools",
+        "",
+        "--disallowedTools",
+        "Skill",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--restricted",
+        "--settings",
+        CLAUDE_SETTINGS_JSON,
+        "--no-session-persistence",
+        "--model",
+        CRITIC_MODEL,
+        "--effort",
+        CRITIC_EFFORT,
+    ]
 
 
 def start_critic_process(
@@ -137,7 +200,21 @@ def start_critic_process(
     新しいセッション (start_new_session=True) で起動する (端末の Ctrl-C が直接届かないようにし、
     止めるときはプロセスグループにシグナルを送る)。開いたファイルは起動後に閉じる (子プロセスは複製を持つ)。
     """
-    raise NotImplementedError("Phase B で実装する")
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("ab") as stderr_file:
+        popen = subprocess.Popen(
+            args,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+    # stdin=subprocess.PIPE で起動したので、popen.stdin は None でない
+    if popen.stdin is not None:
+        popen.stdin.write(input_text.encode("utf-8"))
+        popen.stdin.close()
+    return ClaudeProcess(popen)
 
 
 def reflections_dir(paths: WorkspacePaths) -> Path:
@@ -150,12 +227,19 @@ def next_critic_index(directory: Path) -> int:
 
     該当するファイルが無いか、directory が無ければ 1。
     """
-    raise NotImplementedError("Phase B で実装する")
+    if not directory.is_dir():
+        return 1
+    numbers = [
+        int(match.group(1))
+        for entry in directory.iterdir()
+        if entry.is_file() and (match := _CRITIC_OUTPUT_PATTERN.fullmatch(entry.name))
+    ]
+    return max(numbers, default=0) + 1
 
 
 def critic_output_file_name(index: int) -> str:
     """批評役の標準出力のファイル名を返す。例: 1 → "critic-001.jsonl"、1234 → "critic-1234.jsonl"。"""
-    raise NotImplementedError("Phase B で実装する")
+    return f"critic-{index:03d}.jsonl"
 
 
 def write_notes(path: Path, text: str) -> None:
@@ -164,7 +248,17 @@ def write_notes(path: Path, text: str) -> None:
     path に ".tmp" を足したファイルに UTF-8 で書いてから、os.replace で path に置き換える
     (プレイ中のエージェントに、書きかけの notes.md を読ませない)。
     """
-    raise NotImplementedError("Phase B で実装する")
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _signal_group_if_present(process: AgentProcess, sig: int) -> None:
+    """process のプロセスグループに sig を送る。グループが無ければ (ProcessLookupError) 何もしない。"""
+    try:
+        process.signal_group(sig)
+    except ProcessLookupError:
+        pass
 
 
 def stop_critic(process: AgentProcess, wait: Callable[[float], bool]) -> None:
@@ -174,7 +268,100 @@ def stop_critic(process: AgentProcess, wait: Callable[[float], bool]) -> None:
     STOP_GRACE_S 秒まで POLL_INTERVAL_S 秒ずつ wait で待つ (wait の戻り値は見ない)。
     それでも終わらなければ SIGKILL を送り (グループが無ければ何もしない)、process.wait() で終わりを待つ。
     """
-    raise NotImplementedError("Phase B で実装する")
+    _signal_group_if_present(process, signal.SIGTERM)
+    waited_s = 0.0
+    while process.poll() is None and waited_s < STOP_GRACE_S:
+        wait(POLL_INTERVAL_S)
+        waited_s += POLL_INTERVAL_S
+    if process.poll() is None:
+        _signal_group_if_present(process, signal.SIGKILL)
+        process.wait()
+
+
+def _read_notes(path: Path) -> str:
+    """notes.md を UTF-8 で読んで返す。無ければ空の文字列。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def _read_log_lines(path: Path, start: int, end: int | None = None) -> list[str]:
+    """path の start バイト目から end バイト目の手前まで (end が None なら最後まで) を行に分けて返す。
+
+    agent_launcher.read_agent_log_lines と同じく、UTF-8 の errors="replace" でデコードし、"\\n" だけで分け、
+    最後の "\\n" の後の空の要素は含めない。path が無ければ空のリスト。
+    """
+    try:
+        with path.open("rb") as log_file:
+            log_file.seek(start)
+            data = (
+                log_file.read() if end is None else log_file.read(max(0, end - start))
+            )
+    except FileNotFoundError:
+        return []
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _append_index_line(directory: Path, entry: Mapping[str, object]) -> None:
+    """entry を 1 行の JSON (json.dumps(..., ensure_ascii=False)) にして、directory の reflections.jsonl に追記する。
+
+    directory が無ければ作る。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / REFLECTIONS_INDEX_FILE_NAME).open("a", encoding="utf-8") as out:
+        out.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _critic_frames(
+    paths: WorkspacePaths,
+    looks: list[tuple[float, str]],
+    window_start: float,
+) -> tuple[list[CriticFrame], list[str]]:
+    """選んだ撮影 looks ((時刻, frame) の組) を読んで、批評役に渡す撮影と、その frame のリストを返す。
+
+    paths.root / frame を読んで base64 にする。ファイルが無い撮影は、どちらのリストにも入れない。
+    """
+    frames: list[CriticFrame] = []
+    passed: list[str] = []
+    for time, frame in looks:
+        try:
+            data = (paths.root / frame).read_bytes()
+        except FileNotFoundError:
+            continue
+        frames.append(
+            CriticFrame(
+                file_name=PurePosixPath(frame).name,
+                offset_s=time - window_start,
+                png_base64=base64.b64encode(data).decode("ascii"),
+            )
+        )
+        passed.append(frame)
+    return frames, passed
+
+
+def _wait_for_critic(
+    process: AgentProcess,
+    started: float,
+    clock: Callable[[], float],
+    wait: Callable[[float], bool],
+) -> StopStatus | None:
+    """批評役が終わるまで、POLL_INTERVAL_S 秒ずつ wait で待つ。
+
+    自分で終わったら None を返す。clock() - started が CRITIC_TIMEOUT_S 以上になったら stop_critic で止めて "timeout"、
+    wait が True (止める合図) を返したら stop_critic で止めて "stopped" を返す。
+    """
+    while process.poll() is None:
+        if clock() - started >= CRITIC_TIMEOUT_S:
+            stop_critic(process, wait)
+            return "timeout"
+        if wait(POLL_INTERVAL_S):
+            stop_critic(process, wait)
+            return "stopped"
+    return None
 
 
 def reflect_once(
@@ -216,7 +403,80 @@ def reflect_once(
     11. agent_log_to を返す
     section_body の分は tick * int(REFLECTION_INTERVAL_S / 60) (5 分ごとなら tick * 5)。
     """
-    raise NotImplementedError("Phase B で実装する")
+    paths = setting.paths
+    clock = setting.clock
+    started = clock()
+    window_start = started - REFLECTION_INTERVAL_S
+    events = read_events(paths.events_file)
+    looks = [
+        (event.time, event.frame)
+        for event in events
+        if event.command == "look"
+        and event.ok
+        and event.frame is not None
+        and window_start <= event.time <= started
+    ]
+    frames, passed = _critic_frames(paths, select_frames(looks), window_start)
+    action_lines = format_action_lines(
+        window_actions(events, window_start, started), window_start
+    )
+    agent_log_to = agent_log_size(paths.agent_log_file)
+    statements = assistant_texts(
+        _read_log_lines(paths.agent_log_file, agent_log_offset, agent_log_to)
+    )
+    notes_path = paths.root / NOTES_FILE_NAME
+    instructions = Template(setting.read_template(CRITIC_INSTRUCTION_FILE)).substitute(
+        game=setting.game, goal=setting.goal
+    )
+    content = build_critic_content(
+        instructions, frames, action_lines, statements, _read_notes(notes_path)
+    )
+    directory = reflections_dir(paths)
+    directory.mkdir(parents=True, exist_ok=True)
+    index = next_critic_index(directory)
+    output_path = directory / critic_output_file_name(index)
+    process = setting.start_critic(
+        build_critic_args(),
+        paths.root,
+        build_claude_env(setting.base_env, paths.root),
+        critic_input_line(content),
+        output_path,
+        directory / CRITIC_STDERR_FILE_NAME,
+    )
+    status: str | None = _wait_for_critic(process, started, clock, wait)
+    critique: str | None = None
+    if status is None:
+        critique = critique_from_result(_read_log_lines(output_path, 0))
+        if critique is None:
+            status = "failed"
+        else:
+            minutes = tick * int(REFLECTION_INTERVAL_S / 60)
+            body = section_body(minutes, critique)
+            write_notes(
+                notes_path, replace_reflection_section(_read_notes(notes_path), body)
+            )
+            written_at = clock()
+            append_event(
+                paths.events_file,
+                build_reflection_event(written_at, index, written_at - started),
+            )
+            status = "written"
+    _append_index_line(
+        directory,
+        {
+            "index": index,
+            "tick": tick,
+            "time": started,
+            "window_start": window_start,
+            "frames": passed,
+            "agent_log_from": agent_log_offset,
+            "agent_log_to": agent_log_to,
+            "status": status,
+            "critique": critique,
+            "elapsed_s": clock() - started,
+        },
+    )
+    return agent_log_to
 
 
 def run_reflections(setting: CriticSetting, wait: Callable[[float], bool]) -> None:
@@ -232,7 +492,30 @@ def run_reflections(setting: CriticSetting, wait: Callable[[float], bool]) -> No
        c. offset = reflect_once(setting, tick, run_start, offset, wait)、last = tick
        d. wait(0.0) が True なら (止める合図がすでにあれば) 終える
     """
-    raise NotImplementedError("Phase B で実装する")
+    paths = setting.paths
+    clock = setting.clock
+    run_start = clock()
+    offset = agent_log_size(paths.agent_log_file)
+    last = 0
+    while True:
+        tick = next_tick_index(run_start, clock(), last)
+        for skipped in range(last + 1, tick):
+            _append_index_line(
+                reflections_dir(paths),
+                {
+                    "tick": skipped,
+                    "time": run_start + skipped * REFLECTION_INTERVAL_S,
+                    "status": "skipped",
+                },
+            )
+        launch_at = run_start + tick * REFLECTION_INTERVAL_S
+        while (now := clock()) < launch_at:
+            if wait(min(POLL_INTERVAL_S, launch_at - now)):
+                return
+        offset = reflect_once(setting, tick, run_start, offset, wait)
+        last = tick
+        if wait(0.0):
+            return
 
 
 @contextmanager
@@ -256,5 +539,22 @@ def reflecting_with_critic(
 
     commands.handle_run は、reflecting を受け取らなかったときに、これを clock と base_env を渡して使う。
     """
-    raise NotImplementedError("Phase B で実装する")
-    yield
+    stop = threading.Event()
+    setting = CriticSetting(
+        paths=paths,
+        game=config.game,
+        goal=config.goal,
+        base_env=base_env,
+        start_critic=start_critic,
+        clock=clock,
+        read_template=read_template,
+    )
+    thread = threading.Thread(
+        target=run_reflections, args=(setting, stop.wait), daemon=True
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=STOP_JOIN_TIMEOUT_S)

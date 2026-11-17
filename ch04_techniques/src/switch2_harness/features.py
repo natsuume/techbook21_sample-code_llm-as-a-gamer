@@ -147,7 +147,12 @@ def validate_feature_names(
             f"(available: {available_names_text(available)})"
         )
     wanted = set(requested)
-    # requires の検証は Phase B で足す
+    for feature in available:
+        if feature.name not in wanted:
+            continue
+        for required in feature.requires:
+            if required not in wanted:
+                raise ValueError(f"feature {feature.name} requires {required}")
     return tuple(feature.name for feature in available if feature.name in wanted)
 
 
@@ -194,4 +199,10 @@ def agent_file_appends(
     enabled に名前がある要素の file_appends を、available の順に続けたもの。
     enabled は validate_feature_names を通した名前を渡す。
     """
-    raise NotImplementedError("Phase B で実装する")
+    enabled_names = set(enabled)
+    return tuple(
+        file_append
+        for feature in available
+        if feature.name in enabled_names
+        for file_append in feature.file_appends
+    )

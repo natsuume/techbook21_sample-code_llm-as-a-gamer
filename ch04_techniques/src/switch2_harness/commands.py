@@ -39,9 +39,11 @@ from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import (
     FEATURES,
+    REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
     agent_commands,
+    agent_file_appends,
     agent_writable_files,
     validate_feature_names,
 )
@@ -57,9 +59,11 @@ from switch2_harness.instructions import (
     render_instructions,
 )
 from switch2_harness.press_args import press_args_error, split_press_args
+from switch2_harness.reflection import NOTICE_LINE, build_notice_event, notice_pending
 from switch2_harness.reflection_critic import (
     Reflecting,
     StartCritic,
+    reflecting_with_critic,
     start_critic_process,
 )
 from switch2_harness.screen_change import load_sample
@@ -177,6 +181,21 @@ def _stagnation_alert_lines(
     return (alert_line(seconds),)
 
 
+def _reflection_notice_lines(
+    paths: WorkspacePaths, look: CommandEvent, frame: str
+) -> tuple[str, ...]:
+    """成功した look のイベント look について、振り返りの知らせを出すなら記録して、知らせの行を返す。
+
+    event_log.read_events(paths.events_file) を読み、reflection.notice_pending が False なら、何も記録せず () を返す。
+    True なら reflection.build_notice_event(look.time, frame) を paths.events_file に追記し、
+    (reflection.NOTICE_LINE,) を返す。
+    """
+    if not notice_pending(read_events(paths.events_file)):
+        return ()
+    append_event(paths.events_file, build_notice_event(look.time, frame))
+    return (NOTICE_LINE,)
+
+
 def _reply_result(*replies: str) -> CommandResult:
     """応答を stdout に出し、どれかが error なら終了コード 1 にした結果を返す。"""
     failed = any(is_error_reply(reply) for reply in replies)
@@ -217,11 +236,15 @@ def handle_init(
     )
     paths = workspace_paths(directory)
     instructions_text = render_instructions(config, read_template, available)
-    # 要素のファイルの最初の内容は、テンプレートを置換せずにそのまま書く
+    # 要素のファイルの最初の内容と、その末尾に足す内容は、テンプレートを置換せずにそのまま書く
     initial_files = {
         writable_file.name: read_template(writable_file.template_file)
         for writable_file in agent_writable_files(names, available)
     }
+    for file_append in agent_file_appends(names, available):
+        text = initial_files[file_append.name].rstrip("\n")
+        addition = read_template(file_append.template_file).rstrip("\n")
+        initial_files[file_append.name] = f"{text}\n\n{addition}\n"
     try:
         create_workspace(paths, config, instructions_text, initial_files)
     except WorkspaceNotEmptyError as e:
@@ -293,8 +316,13 @@ def handle_look(
         frame_path.unlink(missing_ok=True)
         return _reply_result(reply)
     alert_lines = _stagnation_alert_lines(paths, look, frame, last_new_screen_time)
+    notice_lines = (
+        _reflection_notice_lines(paths, look, frame) if reflection_notice else ()
+    )
     if frames_changed is None:
-        return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines))
+        return CommandResult(
+            exit_code=0, stdout_lines=(reply, *alert_lines, *notice_lines)
+        )
     events = read_events(paths.events_file)
     index = next(
         i
@@ -304,7 +332,9 @@ def handle_look(
     history = build_history_lines(
         events[:index], events[index].time, frame, frames_changed
     )
-    return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines, *history))
+    return CommandResult(
+        exit_code=0, stdout_lines=(reply, *alert_lines, *notice_lines, *history)
+    )
 
 
 def handle_press(
@@ -477,8 +507,23 @@ def handle_run(
         recording = screen_recording(paths)
     else:
         recording = recording_screens(paths, send=send, clock=clock)
+    reflection: contextlib.AbstractContextManager[object]
+    if REFLECTION_FEATURE not in config.features:
+        reflection = contextlib.nullcontext()
+    elif reflecting is not None:
+        reflection = reflecting(paths, config)
+    else:
+        reflection = reflecting_with_critic(
+            paths,
+            config,
+            clock=clock,
+            base_env=base_env,
+            start_critic=start_critic,
+            read_template=read_template,
+        )
     try:
-        with interrupts_as_exceptions(), recording:
+        # 振り返りは、画面の記録の with の内側で動かす
+        with interrupts_as_exceptions(), recording, reflection:
             outcome = run_agent_until(
                 minutes,
                 paths,

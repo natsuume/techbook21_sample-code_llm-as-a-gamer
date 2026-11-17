@@ -46,6 +46,7 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
 )
@@ -237,6 +238,18 @@ def _look_last_new_screen_time(
     return None
 
 
+def _look_reflection_notice(
+    paths: WorkspacePaths, available: tuple[Feature, ...]
+) -> bool:
+    """look に渡す reflection_notice を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に振り返りの要素
+    (features.REFLECTION_FEATURE) があれば True、無ければ False。
+    """
+    config = read_config(paths.harness_file, available)
+    return REFLECTION_FEATURE in config.features
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
@@ -249,6 +262,7 @@ def _dispatch(
             clock=deps.clock,
             frames_changed=_look_frames_changed(paths, deps.available),
             last_new_screen_time=_look_last_new_screen_time(paths, deps.available),
+            reflection_notice=_look_reflection_notice(paths, deps.available),
         )
     if command == "press":
         return handle_press(
