@@ -7,6 +7,7 @@ main (本番の依存) を呼ぶのは、デーモンにも claude にも触れ�
 import json
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
+    FAKE_STAGNATION_ALERT,
     FakeClock,
     FakeDaemon,
     FakeProcessStarter,
@@ -35,7 +37,7 @@ from switch2_harness.cli import (
     run_cli,
 )
 from switch2_harness.daemon_client import send_command
-from switch2_harness.features import FEATURES
+from switch2_harness.features import FEATURES, STAGNATION_ALERT_FEATURE
 from switch2_harness.instructions import read_package_template
 from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
@@ -84,15 +86,18 @@ def workspace(tmp_path: Path) -> Path:
     return make_workspace(tmp_path / "play")
 
 
-def make_workspace(root: Path) -> Path:
-    """init を使わずに root に作業ディレクトリー (harness.json・records/・frames/) を作る。"""
+def make_workspace(root: Path, features: Sequence[str] = ()) -> Path:
+    """init を使わずに root に作業ディレクトリー (harness.json・records/・frames/) を作る。
+
+    harness.json の features は、features の名前にする。
+    """
     paths = make_paths(root)
     paths.harness_file.write_text(
         json.dumps(
             {
                 "game": "ゲーム A",
                 "goal": "できるだけ先へ進める",
-                "features": [],
+                "features": list(features),
                 "created_at": "2026-11-16T21:00:05+09:00",
             },
             ensure_ascii=False,
@@ -339,6 +344,41 @@ def test_look_prints_no_history_without_features(tmp_path, harness, capsys):
     capsys.readouterr()
     assert harness.run("look", *workspace) == 0
     assert capsys.readouterr().out == f"ok {directory / 'frames' / '000002.png'}\n"
+
+
+# --- 停滞の知らせ (stagnation-alert) ---
+
+# 停滞の知らせの要素を含む、cli のテスト用の要素
+FEATURES_WITH_STAGNATION_ALERT = (*FAKE_FEATURES, FAKE_STAGNATION_ALERT)
+
+
+def write_last_new_screen_time(workspace: Path, last_new_time: float) -> None:
+    """records/screen-samples/run-001/last-new-screen.json に、最後の新しい画面の時刻 last_new_time を書く。"""
+    run_dir = workspace / "records" / "screen-samples" / "run-001"
+    run_dir.mkdir(parents=True)
+    state = {"index": 1, "time": last_new_time, "file": "000001.png"}
+    (run_dir / "last-new-screen.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_look_prints_the_stagnation_alert_when_enabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play", [STAGNATION_ALERT_FEATURE])
+    harness.deps = replace(harness.deps, available=FEATURES_WITH_STAGNATION_ALERT)
+    # look の時刻 (1000 秒) の 300 秒前に、最後の新しい画面があった
+    write_last_new_screen_time(workspace, 700.0)
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    assert capsys.readouterr().out == (
+        f"ok {frame_path}\n停滞の知らせ: 新しい画面が 300 秒出ていません\n"
+    )
+
+
+def test_look_prints_no_stagnation_alert_when_disabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play")
+    harness.deps = replace(harness.deps, available=FEATURES_WITH_STAGNATION_ALERT)
+    write_last_new_screen_time(workspace, 700.0)
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {frame_path}\n"
 
 
 # --- メモファイル (notes) ---

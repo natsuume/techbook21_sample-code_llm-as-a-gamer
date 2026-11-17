@@ -47,11 +47,11 @@ def test_features_has_stagnation_alert_last():
         "notes",
         "stagnation-alert",
     )
-    # CLAUDE.md に節を足さず、サブコマンドも書き換えられるファイルも増やさない
+    # CLAUDE.md に節を足し、サブコマンドも書き換えられるファイルも増やさない
     assert FEATURES[2] == Feature(
         name="stagnation-alert",
         title="停滞の知らせ",
-        instruction_file=None,
+        instruction_file="stagnation-alert.md",
         commands=(),
     )
     assert FEATURES[2].writable_files == ()

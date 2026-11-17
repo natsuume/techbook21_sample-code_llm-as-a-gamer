@@ -29,7 +29,14 @@ PRESS = CommandEvent(
 
 
 def test_event_commands():
-    assert EVENT_COMMANDS == ("look", "press", "status", "finish", "run")
+    assert EVENT_COMMANDS == (
+        "look",
+        "press",
+        "status",
+        "finish",
+        "run",
+        "stagnation-alert",
+    )
 
 
 def test_frame_defaults_to_none():

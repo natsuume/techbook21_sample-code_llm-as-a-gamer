@@ -73,6 +73,26 @@ def next_run_dir(samples_dir: Path) -> Path:
     return run_dir
 
 
+def latest_run_dir(samples_dir: Path) -> Path | None:
+    """samples_dir の直下の、番号が最大の run のディレクトリーを返す。ディレクトリーは作らない。
+
+    next_run_dir と同じ名前の規則 (RUN_DIR_PREFIX ("run-") と 3 桁以上の数字) のディレクトリーのうち、
+    番号が最大のものを返す。samples_dir が無いとき、または規則に合うディレクトリーが無いときは None。
+    例: run-001 と run-007 があれば samples_dir / "run-007"。
+    """
+    raise NotImplementedError
+
+
+def read_latest_last_new_screen_time(paths: WorkspacePaths) -> float | None:
+    """作業ディレクトリーの最新の run の、最後の新しい画面の時刻を返す。look の停滞の知らせが使う。
+
+    latest_run_dir(paths.records_dir / SAMPLES_DIR_NAME) が None なら None。
+    そうでなければ stagnation_alert.read_last_new_screen_time(<そのディレクトリー>) の結果を返す
+    (状態ファイルがまだ無いときなどは None)。
+    """
+    raise NotImplementedError
+
+
 def sample_file_name(index: int) -> str:
     """撮影の番号 index (1 から) の縮小画像のファイル名を返す。番号は 6 桁にゼロ埋めする。例: 1 は "000001.png"。"""
     return f"{index:06d}.png"

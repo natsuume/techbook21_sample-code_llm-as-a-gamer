@@ -3,6 +3,8 @@
 1 行が 1 イベントの JSON で、形は次のとおり:
     {"time": float, "command": str, "args": [str, ...], "reply": str, "ok": bool, "elapsed_s": float, "frame": str | null}
 記録は要素の有効/無効によらず常に取り、session_report の集計に使う。
+ただし command が "stagnation-alert" の行は、停滞の知らせの要素 (stagnation-alert) が知らせを出した look の行の直後に足す
+(args は秒数の文字列 1 つ、reply は知らせの文、frame はその look の frame)。
 """
 
 import json
@@ -11,7 +13,14 @@ from pathlib import Path
 from typing import TypeGuard
 
 # イベントの command に入る値
-EVENT_COMMANDS: tuple[str, ...] = ("look", "press", "status", "finish", "run")
+EVENT_COMMANDS: tuple[str, ...] = (
+    "look",
+    "press",
+    "status",
+    "finish",
+    "run",
+    "stagnation-alert",
+)
 
 
 @dataclass(frozen=True)
@@ -19,13 +28,15 @@ class CommandEvent:
     """1 つのコマンドの記録。
 
     time: コマンドを始めた時刻 (epoch 秒)
-    command: "look" / "press" / "status" / "finish" / "run" のいずれか
-    args: コマンドの引数 (commands の各処理の説明を参照)
-    reply: デーモンの応答、または拒否・説明のメッセージ
+    command: "look" / "press" / "status" / "finish" / "run" / "stagnation-alert" のいずれか。
+        "stagnation-alert" は、停滞の知らせを出した look の直後に足す行 (time はその look の time)
+    args: コマンドの引数 (commands の各処理の説明を参照。"stagnation-alert" は秒数の文字列 1 つ)
+    reply: デーモンの応答、または拒否・説明のメッセージ ("stagnation-alert" は知らせの文)
     ok: 成功したか (reply が error で始まらなければ True)
     elapsed_s: コマンドにかかった秒数
     frame: look で保存した PNG の、作業ディレクトリーからの相対パス (例: "frames/000001.png")。
-        look が失敗したときと、look 以外のコマンドでは None
+        "stagnation-alert" では、知らせを出した look の frame。
+        look が失敗したときと、look・"stagnation-alert" 以外のコマンドでは None
     """
 
     time: float

@@ -191,6 +191,7 @@ def handle_look(
     send: SendCommand,
     clock: Callable[[], float],
     frames_changed: FramesChanged | None = None,
+    last_new_screen_time: Callable[[], float | None] | None = None,
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
 
@@ -202,12 +203,25 @@ def handle_look(
     イベント: command="look"、args=()、frame=<作業ディレクトリーからの相対パス (例: "frames/000001.png")>。
     応答が error なら frame は None。
 
-    frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら上のとおり応答だけを出す。
+    last_new_screen_time は停滞の知らせの要素 (stagnation-alert) が有効なときに渡す、最後の新しい画面の時刻
+    (epoch 秒。分からなければ None) を返す関数。None なら呼ばず、知らせを出さない。
+    応答が error なら呼ばず、知らせを出さない。応答が error でなければ last = last_new_screen_time() を呼び、
+    last が None なら知らせを出さない。None でなければ
+    seconds = stagnation_alert.alert_seconds(<今回の look のイベントの time>, last) を求め、None なら知らせを出さない。
+    seconds があれば、event_log.append_event(paths.events_file,
+    stagnation_alert.build_alert_event(<今回の look のイベントの time>, <今回の frame>, seconds)) で、
+    look の行の後に知らせを記録し、stagnation_alert.alert_line(seconds) の行を応答の行の直後に stdout に出す。
+
+    frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら行動履歴を出さない。
     None でなく応答が error でなければ、イベントを記録した後に event_log.read_events(paths.events_file) を読み、
     今回の frame を持つ look のイベントを後ろから探して今回の look (current) とし、それより前のイベントを previous として、
-    action_history.build_history_lines(previous, current.time, <今回の frame>, frames_changed) の行を、
-    応答の行の後に stdout に続ける (並行に走ったコマンドのイベントが今回の look の後ろに追記されていることがあるため、
-    最後のイベントを今回の look とはみなさない)。応答が error なら履歴は出さない。どちらでも終了コードは上と同じ。
+    action_history.build_history_lines(previous, current.time, <今回の frame>, frames_changed) の行を stdout に続ける
+    (並行に走ったコマンドのイベントが今回の look の後ろに追記されていることがあるため、
+    最後のイベントを今回の look とはみなさない)。previous は今回の look より前のイベントだけなので、今回の知らせの行は入らない。
+    応答が error なら履歴は出さない。
+
+    stdout の行の順は、応答、知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。
+    どの場合も終了コードは上と同じ。
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()
