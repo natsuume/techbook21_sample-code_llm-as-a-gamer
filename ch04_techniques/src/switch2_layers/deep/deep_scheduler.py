@@ -101,6 +101,10 @@ REQUEST_PENDING = "pending"
 # check_progress は、progress/state.json の t がこの秒数より前の値では判定を見送る。
 # フレームの保存か値の書き込みが止まったときに、しきい値を超えた古い値で advice を求め続けないため
 PROGRESS_STATE_MAX_AGE_S = 10.0
+# check_system が、続いた秒数を数える段階 (本体の画面の middle が操作を決める段階のうち、片付けを除くもの)
+SYSTEM_ADVICE_PHASES: frozenset[RunPhase] = frozenset(
+    {RunPhase.PREPARE, RunPhase.RECOVER}
+)
 
 
 class DeepStopReason(StrEnum):
@@ -369,6 +373,8 @@ class DeepScheduler:
         self._thread: threading.Thread | None = None
         # きっかけ progress で要求するかの判定 (check_progress だけが使う)
         self._stuck_advice = StuckAdviceTrigger(settings.stuck_advice_seconds)
+        # きっかけ system で要求するかの判定 (check_system だけが使う)
+        self._system_advice = StuckAdviceTrigger(settings.system_advice_seconds)
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -600,7 +606,30 @@ class DeepScheduler:
         is_play には依らない (段階は 1 の current_phase で確かめる)。
         判定の状態 (前回の要求の時刻) を持つため、1 つのスレッド (start で起動する判定のスレッド) からだけ呼ぶ。
         """
-        raise NotImplementedError
+        with self._lock:
+            if self._closed:
+                return None
+        now = self.parts.clock.now()
+        current = self.parts.current_phase()
+        elapsed = None
+        if current is not None and current[0] in SYSTEM_ADVICE_PHASES:
+            elapsed = now - current[1]
+        advice_running = self.is_running(document_key(DocumentKind.ADVICE, None))
+        if not self._system_advice.check(now, elapsed, advice_running):
+            return None
+        try:
+            return self.request(DocumentKind.ADVICE, DeepTrigger.SYSTEM, None)
+        except Exception as error:
+            logger.debug("system deep request failed", exc_info=True)
+            self.parts.run_log.write(
+                EVENT_DEEP_REQUEST_ERROR,
+                source="system",
+                kind=DocumentKind.ADVICE.value,
+                trigger=DeepTrigger.SYSTEM.value,
+                scene_id=None,
+                error=describe_exception(error),
+            )
+            return None
 
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
@@ -1008,7 +1037,7 @@ class DeepScheduler:
 
     def _run_checks(self) -> None:
         """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts・check_auto・
-        check_progress を呼ぶ。"""
+        check_progress・check_system を呼ぶ。"""
         while not self._stop_checks.wait(CHECK_INTERVAL_S):
             try:
                 self.check_timeouts()
@@ -1022,6 +1051,10 @@ class DeepScheduler:
                 self.check_progress()
             except Exception:
                 logger.warning("checking progress deep requests failed", exc_info=True)
+            try:
+                self.check_system()
+            except Exception:
+                logger.warning("checking system deep requests failed", exc_info=True)
 
 
 def _call_runner(action: Callable[[Path], None], job_dir: Path) -> None:

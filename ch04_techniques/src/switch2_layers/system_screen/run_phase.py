@@ -2,10 +2,12 @@
 
 段階と、それぞれの段階で動くもの (段階を変える処理と、段階に合わせて部品を動かす処理は app が行う):
     段階       surface・middle のゲーム用のループ   deep の自動の呼び出しと advice の要求   本体の画面の操作
-    prepare    動かさない                           しない                                  目的 prepare で middle を呼ぶ
-    play       動かす                               する                                    しない
-    recover    止める                               しない                                  目的 recover で middle を呼ぶ
+    prepare    動かさない                           きっかけ system の advice の要求だけ    目的 prepare で middle を呼ぶ
+    play       動かす                               する (きっかけ system を除く)           しない
+    recover    止める                               きっかけ system の advice の要求だけ    目的 recover で middle を呼ぶ
     clean_up   止める                               しない                                  目的 clean_up で middle を呼ぶ
+    (きっかけ system の advice の要求は、prepare・recover が --system-advice-seconds を超えて続いたときに、deep の
+    スケジューラーが行う)
 
 移り変わり (照合の結果は、安全の監視の答えのあった確かめ 1 回ごとに 1 件。続けた数は、段階が変わるたびに 0 に戻す):
     prepare → play       本体の画面の middle が done を真で返した後、照合の結果が続けて exit_streak 回 None
@@ -14,9 +16,7 @@
                          ゲーム用の出力の press_home が真で、HOME を短押しした
     recover → play       操作の列を送っていない間に、照合の結果が続けて exit_streak 回 None になった
     どの段階 → clean_up   片付けを行う理由で止めるとき (app が begin_clean_up を呼ぶ)
-時間切れ:
-    prepare が始まってから prepare_timeout_s 秒       止める (REASON_PREPARATION_TIMED_OUT。片付けはしない)
-    recover が始まってから recover_timeout_s 秒       止める (REASON_RECOVERY_TIMED_OUT。片付けはしない)
+時間切れ (clean_up だけ。prepare と recover には時間切れが無く、止めるまでその段階を続ける):
     clean_up が始まってから clean_up_timeout_s 秒     片付けを終える (CleanUpResult.TIMEOUT)
 片付けの終わり (PhaseTracker が返すもの):
     本体の画面の middle が done を真で返し、最新の照合の結果が home_menu       CleanUpResult.DONE
@@ -35,16 +35,8 @@ from enum import StrEnum
 ENTER_STREAK = 2
 # 照合の結果が続けてこの回数 None になったら、prepare (done の後) と recover から play に移る
 EXIT_STREAK = 3
-# prepare が始まってから、この秒数で play に移れなければ止める
-PREPARE_TIMEOUT_S = 180.0
-# recover が始まってから、この秒数で play に戻れなければ止める
-RECOVER_TIMEOUT_S = 180.0
 # clean_up が始まってから、この秒数で片付けを終える
 CLEAN_UP_TIMEOUT_S = 45.0
-
-# 止める理由
-REASON_PREPARATION_TIMED_OUT = "preparation timed out"
-REASON_RECOVERY_TIMED_OUT = "recovery timed out"
 
 # 段階の変化の理由 (run.jsonl の phase の reason)。clean_up に移るときは、片付けを始めた理由 (止める理由) を使う
 PHASE_REASON_START_CHECK_PASSED = (
@@ -92,15 +84,11 @@ class PhaseTimings:
 
     enter_streak         play → recover に移る、続けた本体の画面の照合の結果の回数
     exit_streak          prepare (done の後) と recover → play に移る、続けた None の照合の結果の回数
-    prepare_timeout_s    prepare の時間切れの秒数
-    recover_timeout_s    recover の時間切れの秒数
     clean_up_timeout_s   clean_up の時間切れの秒数
     """
 
     enter_streak: int = ENTER_STREAK
     exit_streak: int = EXIT_STREAK
-    prepare_timeout_s: float = PREPARE_TIMEOUT_S
-    recover_timeout_s: float = RECOVER_TIMEOUT_S
     clean_up_timeout_s: float = CLEAN_UP_TIMEOUT_S
 
 
@@ -125,7 +113,7 @@ class PhaseEvent:
     """段階の判定に入力を 1 つ渡した結果。何も起きなければ、3 つとも None (NO_EVENT)。
 
     change         段階が変わったら、その変化。変わらなければ None
-    stop_reason    止める理由 (prepare と recover の時間切れ)。止めなければ None
+    stop_reason    止める理由。止めなければ None (今の判定は、止める理由を返す入力を持たない)
     clean_up_end   片付けが終わったら、その終わり方。終わらなければ None
     """
 
@@ -285,23 +273,14 @@ class PhaseTracker:
         return self._change_to(t, RunPhase.CLEAN_UP, reason)
 
     def check_time(self, t: float) -> PhaseEvent:
-        """時刻 t の時間切れを確かめる (今の段階に入ってから、それぞれの秒数がたったら時間切れとする)。
+        """時刻 t の時間切れを確かめる。
 
-        PREPARE    prepare_timeout_s → 止める理由 REASON_PREPARATION_TIMED_OUT
-        RECOVER    recover_timeout_s → 止める理由 REASON_RECOVERY_TIMED_OUT
-        CLEAN_UP   clean_up_timeout_s → 片付けの終わり (CleanUpResult.TIMEOUT)
-        PLAY       時間切れは無い
-        prepare と recover の止める理由は、時間切れの間は呼ぶたびに返す (止めるのは呼び出し側)。
+        CLEAN_UP に入ってから clean_up_timeout_s 秒たったら、片付けの終わり (CleanUpResult.TIMEOUT) を返す。
+        PREPARE・PLAY・RECOVER には時間切れが無く、いつも NO_EVENT を返す。
         """
-        if self._clean_up_ended:
+        if self._clean_up_ended or self._phase is not RunPhase.CLEAN_UP:
             return NO_EVENT
-        elapsed = t - self._phase_started_t
-        timings = self.timings
-        if self._phase is RunPhase.PREPARE and elapsed >= timings.prepare_timeout_s:
-            return PhaseEvent(stop_reason=REASON_PREPARATION_TIMED_OUT)
-        if self._phase is RunPhase.RECOVER and elapsed >= timings.recover_timeout_s:
-            return PhaseEvent(stop_reason=REASON_RECOVERY_TIMED_OUT)
-        if self._phase is RunPhase.CLEAN_UP and elapsed >= timings.clean_up_timeout_s:
+        if t - self._phase_started_t >= self.timings.clean_up_timeout_s:
             return self._end_clean_up(CleanUpResult.TIMEOUT)
         return NO_EVENT
 

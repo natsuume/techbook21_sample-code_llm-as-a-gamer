@@ -8,7 +8,8 @@
        後のフレームの結果 (反映前の画面でカーソルの位置を読ませないため。前の段階の列を送っている間に段階が変わった
        場合も、その列の後の画面を待つ)。届くまで middle を呼ばない
     4. 入力の画像は、その照合のフレーム以降の最新のフレーム
-    5. SystemScreenInput (目的は段階から PHASE_GOALS で決める。履歴はこの段階のもの) を作り、middle の decide を呼ぶ
+    5. SystemScreenInput (目的は段階から PHASE_GOALS で決める。履歴はこの段階のもの。deep の助言は、呼び出しごとに
+       notes/advice.md の「本体の画面」の節を読み直したもの) を作り、middle の decide を呼ぶ
     6. 失敗 (SystemScreenMiddleError) なら、middle/system_calls.jsonl に呼び出しの行を書き、続けた失敗を数える。
        段階の判定に on_system_middle_failed を渡してから、max_errors 回に達していれば on_stop を呼ぶ (on_stop で
        片付けに移った後に、同じ失敗を片付けの middle の失敗として渡さないため)
@@ -59,6 +60,7 @@ from switch2_layers.middle.system_screen_types import (
     SystemScreenOutput,
     SystemStepRecord,
 )
+from switch2_layers.notes.system_screen_advice import read_system_screen_advice
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.system_screen.run_phase import RunPhase
@@ -197,7 +199,7 @@ class SystemScreenLoopSettings:
 class SystemScreenLoopParts:
     """本体の画面のループが使う部品。
 
-    paths          実行ディレクトリー (middle/system_calls.jsonl に書く)
+    paths          実行ディレクトリー (middle/system_calls.jsonl に書き、notes/advice.md を読む)
     middle         本体の画面の middle
     runner         操作の列を送るもの (run では SystemOperationRunner)
     judgments      最新の照合の結果を読む部品 (run では system_screen.screen_judgment.LatestSystemScreen)
@@ -261,7 +263,9 @@ class SystemScreenLoop:
         5. frame = latest_frame()。None か、frame.t が照合の結果の frame_t より小さければ NO_JUDGMENT を返す
         6. screen_input = SystemScreenInput(t=clock.now(), goal=PHASE_GOALS[phase], software_name, user_name,
            frame_jpeg=frame を image_width 以下に縮小した JPEG, frame_t=frame.t, judged_screen=照合の結果の screen,
-           judged_frame_t=照合の結果の frame_t, history=この段階の履歴)。t_sent = clock.now() で middle.decide を呼び、
+           judged_frame_t=照合の結果の frame_t, history=この段階の履歴, deep_advice=
+           notes.system_screen_advice.read_system_screen_advice(paths.notes_dir) (notes/ の外を指すシンボリックリンク
+           などの読めない文書は無い文書として扱い、空文字列))。t_sent = clock.now() で middle.decide を呼び、
            戻ったら (例外でも) t_received = clock.now()。middle の記録は
            middle.middle_call_record.take_analyzer_call_details(middle) で受け取る。ここで stop を確かめる
         7. phases.phase_started_t が 2 で読んだ値と違えば (middle を呼んでいる間に段階が変わった)、呼び出しの行だけを
@@ -386,6 +390,7 @@ class SystemScreenLoop:
             judged_screen=judgment.screen,
             judged_frame_t=judgment.frame_t,
             history=tuple(self._history),
+            deep_advice=read_system_screen_advice(self.parts.paths.notes_dir),
         )
 
     def _handle_middle_error(

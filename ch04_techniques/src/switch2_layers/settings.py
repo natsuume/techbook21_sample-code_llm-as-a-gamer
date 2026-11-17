@@ -309,6 +309,11 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
             "--stuck-advice-seconds must be a finite number more than 0: "
             f"{settings.stuck_advice_seconds}"
         )
+    if not _is_finite_positive(settings.system_advice_seconds):
+        errors.append(
+            "--system-advice-seconds must be a finite number more than 0: "
+            f"{settings.system_advice_seconds}"
+        )
     return errors
 
 

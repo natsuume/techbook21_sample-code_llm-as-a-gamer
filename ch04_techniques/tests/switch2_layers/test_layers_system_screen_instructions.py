@@ -210,11 +210,18 @@ def test_prepare_text_does_not_treat_the_software_list_as_the_game_screen():
 def test_prepare_text_opens_more_software_when_the_software_is_not_on_the_top_row():
     line = step_line(goal_text(SystemGoal.PREPARE), 6)
     for phrase in [
-        "「もっとみる」まで確かめても無ければ",
-        "「もっとみる」を選",
+        "今の画像の上の段に見えなければ",
+        "「もっとみる」が選ばれたことを確かめてから A",
         "一覧で指定のソフトを探",
     ]:
         assert phrase in line, phrase
+
+
+def test_prepare_text_writes_the_registration_state_first():
+    text = goal_text(SystemGoal.PREPARE)
+    # 登録を確かめたかを先に判定して observation の最初に書き、確かめた後は下の段へ移らない
+    for phrase in ["「登録: 確かめた」か「登録: まだ」", "手順 2〜5", "DOWN を押さず"]:
+        assert phrase in text, phrase
 
 
 @pytest.mark.parametrize("goal", [SystemGoal.RECOVER, SystemGoal.CLEAN_UP])

@@ -12,6 +12,9 @@
 
 from pathlib import Path
 
+from switch2_layers.notes.note_paths import ADVICE_NOTE
+from switch2_layers.notes.note_reader import read_note_text
+
 # 「本体の画面」の節の見出しの行
 SYSTEM_SCREEN_ADVICE_HEADING = "## 本体の画面"
 
@@ -21,7 +24,17 @@ def parse_system_screen_advice(text: str) -> str:
 
     見出しの行が複数あれば、最初のものを使う。見出しの行が無い・本文が空 (空白だけを含む) なら空文字列を返す。
     """
-    raise NotImplementedError
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != SYSTEM_SCREEN_ADVICE_HEADING:
+            continue
+        body: list[str] = []
+        for section_line in lines[index + 1 :]:
+            if section_line.startswith("## "):
+                break
+            body.append(section_line)
+        return "\n".join(body).strip()
+    return ""
 
 
 def read_system_screen_advice(notes_dir: Path) -> str:
@@ -30,4 +43,4 @@ def read_system_screen_advice(notes_dir: Path) -> str:
     文書は notes.note_reader.read_note_text で読む。読めない文書 (無い・シンボリックリンクを解決した先が notes/ の中の
     通常のファイルでない・OSError・UTF-8 として読めない) は空文字列になり、空文字列を返す。例外は出さない。
     """
-    raise NotImplementedError
+    return parse_system_screen_advice(read_note_text(notes_dir, ADVICE_NOTE))

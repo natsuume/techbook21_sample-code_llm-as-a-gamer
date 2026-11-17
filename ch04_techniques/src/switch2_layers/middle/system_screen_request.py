@@ -3,7 +3,7 @@
 要求の形:
     {
       "model": luna_request.LUNA_MODEL,
-      "reasoning": {"effort": luna_request.REASONING_EFFORT},
+      "reasoning": {"effort": SYSTEM_SCREEN_REASONING_EFFORT},
       "text": {"format": system_screen_schema.build_system_screen_text_format(screen_names)},
       "prompt_cache_options": {"mode": "explicit"},
       "input": [
@@ -11,12 +11,13 @@
           {"type": "input_text", "text": system_screen_instructions.SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 8>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 9>},
           {"type": "input_text", "text": luna_request.frame_label(frame_t)},
           {"type": "input_image", "image_url": luna_request.jpeg_data_url(frame_jpeg)}]}
       ]
     }
-モデルと reasoning の effort は、ゲームの画面の middle (luna_request) と同じにする。developer メッセージは入力によらず
+モデルはゲームの画面の middle (luna_request) と同じにする。reasoning の effort は SYSTEM_SCREEN_REASONING_EFFORT (low) にする。
+effort が none では、HOME メニューで選ばれている絵やアイコンを読み違えることが多いため (2026-11-17 に保存した画面の再生で確認)。developer メッセージは入力によらず
 同じにし、その最後の (唯一の) 内容に明示のキャッシュの区切りを置く。user メッセージには区切りを置かない。
 画像の detail は指定しない (既定の auto)。
 
@@ -29,7 +30,8 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     5. 照合の結果             describe_judgment(judged_screen, judged_frame_t)
     6. この段階のこれまでの呼び出し   describe_history(history) (新しい方から MAX_HISTORY_ENTRIES 件)
     7. この段階で送った A・B・X        describe_sent_buttons(history) (履歴のすべてから)
-    8. 今の画像               IMAGE_SECTION_TEXT
+    8. deep の助言            screen_input.deep_advice (notes/advice.md の「本体の画面」の節の本文)。空なら EMPTY_TEXT
+    9. 今の画像               IMAGE_SECTION_TEXT
 節の後ろに、今の画像の時刻のラベル (frame_label(frame_t)) と画像 (input_image) を 1 組置く。
 """
 
@@ -39,7 +41,6 @@ from collections.abc import Sequence
 from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.middle.luna_request import (
     LUNA_MODEL,
-    REASONING_EFFORT,
     frame_label,
     jpeg_data_url,
 )
@@ -59,6 +60,8 @@ from switch2_layers.middle.system_screen_types import (
     SystemStepRecord,
 )
 
+# 本体の画面の middle の reasoning の effort (ゲームの画面の middle の luna_request.REASONING_EFFORT とは別に決める)
+SYSTEM_SCREEN_REASONING_EFFORT = "low"
 # user メッセージの節の見出し (この順に置く)
 USER_SECTION_TITLES: tuple[str, ...] = (
     "現在の時刻",
@@ -68,6 +71,7 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "照合の結果",
     "この段階のこれまでの呼び出し",
     "この段階で送った A・B・X",
+    "deep の助言",
     "今の画像",
 )
 EMPTY_TEXT = "(無い)"
@@ -157,7 +161,7 @@ def describe_sent_buttons(history: Sequence[SystemStepRecord]) -> str:
 
 
 def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
-    """user メッセージの 8 つの節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 9 つの節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     goal = screen_input.goal
     bodies = [
         format_frame_label(screen_input.t),
@@ -167,6 +171,7 @@ def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
         describe_judgment(screen_input.judged_screen, screen_input.judged_frame_t),
         describe_history(screen_input.history),
         describe_sent_buttons(screen_input.history),
+        screen_input.deep_advice or EMPTY_TEXT,
         IMAGE_SECTION_TEXT,
     ]
     return [
@@ -218,7 +223,7 @@ def build_system_screen_payload(
     """
     return {
         "model": LUNA_MODEL,
-        "reasoning": {"effort": REASONING_EFFORT},
+        "reasoning": {"effort": SYSTEM_SCREEN_REASONING_EFFORT},
         "text": {"format": build_system_screen_text_format(screen_names)},
         "prompt_cache_options": {"mode": "explicit"},
         "input": [build_developer_message(), build_user_message(screen_input)],

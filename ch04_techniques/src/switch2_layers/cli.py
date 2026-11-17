@@ -6,6 +6,7 @@
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
                        [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
+                       [--system-advice-seconds S]
         実機で 3 層を動かす。準備 (コントローラーの登録・指定のソフト (--software) を指定のユーザー (--user) で
         起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
         surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
@@ -87,6 +88,7 @@ from switch2_layers.settings import (
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
     INTERVAL_FPS_MAX,
@@ -350,6 +352,16 @@ def add_run_parser(
             f"この秒数ごとに求める (0 より大きい値。既定 {DEFAULT_STUCK_ADVICE_SECONDS:g})"
         ),
     )
+    parser.add_argument(
+        "--system-advice-seconds",
+        type=float,
+        default=DEFAULT_SYSTEM_ADVICE_SECONDS,
+        help=(
+            "本体の画面の段階 (準備・復帰) がこの秒数を超えて続いたら、advice の deep を求める。"
+            "超えたまま続く間は、この秒数ごとに求める "
+            f"(0 より大きい値。既定 {DEFAULT_SYSTEM_ADVICE_SECONDS:g})"
+        ),
+    )
     parser.set_defaults(handler=run_command)
 
 
@@ -497,6 +509,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         max_safety_errors=args.max_safety_errors,
         progress_window_s=args.progress_window,
         stuck_advice_seconds=args.stuck_advice_seconds,
+        system_advice_seconds=args.system_advice_seconds,
     )
 
 

@@ -183,9 +183,9 @@ def test_decide_sends_model_reasoning_and_strict_schema():
     assert str(request.url) == "https://api.openai.com/v1/responses"
     assert request.headers["Authorization"] == "Bearer sk-test"
     payload = handler.payload()
-    # ゲームの画面の middle と同じモデルと effort
+    # モデルはゲームの画面の middle と同じで、effort は本体の画面の middle だけ low
     assert payload["model"] == "gpt-6-luna"
-    assert payload["reasoning"] == {"effort": "none"}
+    assert payload["reasoning"] == {"effort": "low"}
     text_format = payload["text"]["format"]
     assert text_format["type"] == "json_schema"
     assert text_format["strict"] is True
