@@ -46,6 +46,9 @@ def test_prepare_text_decides_by_the_sent_buttons():
     ) in text
     # 登録を確かめたかは、送った A・B・X の節に controllers での B があるかで決める
     assert "「この段階で送った A・B・X」に「controllers で B」の行がある" in text
+    # HOME メニューでの手順 2 (コントローラーを開く) と手順 6 (ソフトを起動する) にも、同じ条件を書く
+    assert "まだ登録を確かめていなければ (「この段階で送った A・B・X」に" in text
+    assert "登録を確かめた後なら (「この段階で送った A・B・X」に" in text
     # 最初の呼び出しかどうかと、最後に送った操作による見分けは使わない
     assert "最初の呼び出し" not in text
     assert "最後に送った操作" not in text
