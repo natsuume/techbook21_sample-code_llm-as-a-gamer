@@ -2561,3 +2561,133 @@ def test_delegate_stop_of_the_run_while_delegating_records_the_end(tmp_path, cle
     assert [
         (row["reason"], row["detail"]) for row in run_rows_of(h, "delegate_end")
     ] == [("stop", RUN_STOP_DETAIL)]
+
+
+# --- 委任型: 委任で Jev が選んだ回数 ---
+
+# run.jsonl の delegate_end の行のキー (この順)
+DELEGATE_END_ROW_KEYS = ["t", "event", "reason", "detail", "chosen_counts", "failures"]
+
+
+def test_delegate_return_by_jev_tells_the_chosen_counts_and_the_failures(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), none=0.9))
+    wait_delegate_rows(h, 2)
+    h.set_time(0.6)
+    h.wait_request(3)
+    h.jev.respond(JevError("HTTP 500"))
+    wait_delegate_rows(h, 3)
+    h.set_time(0.9)
+    h.jev.respond(answer(h.wait_request(4), return_control=0.9))
+    wait_delegate_rows(h, 4)
+    h.set_time(1.2)
+    h.jev.respond(answer(h.wait_request(5), return_control=0.9))
+    h.wait_until(lambda: run_rows_of(h, "delegate_end"), "the delegate_end row")
+    # 1 回目と 2 回目の「操作を返す」を数え、失敗は選択肢の回数に入れずに別に数える
+    expected = (("none", 1), ("attack", 0), ("guard", 1), ("return_control", 2))
+    [end] = h.controller.take_events().delegate_ends
+    assert end.reason == "jev_return"
+    assert end.chosen_counts == expected
+    assert end.failure_count == 1
+    [row] = run_rows_of(h, "delegate_end")
+    assert list(row) == DELEGATE_END_ROW_KEYS
+    assert list(row["chosen_counts"].items()) == list(expected)
+    assert row["failures"] == 1
+
+
+def test_delegate_stop_from_the_main_loop_does_not_count_an_ignored_answer(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), attack=0.9))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    second = h.wait_request(2)
+    # 要求を送った後に update を当てたので、その要求の答えは使わない (ignored)
+    h.controller.apply(Decision(delegate=DelegateUpdate(tasks=("前に出すぎない",))))
+    h.jev.respond(answer(second, guard=0.9))
+    wait_delegate_rows(h, 2)
+    assert delegate_rows(h)[1]["handling"] == "ignored"
+    h.controller.apply(stop_delegation())
+    expected = (("none", 0), ("attack", 1), ("guard", 0), ("return_control", 0))
+    [end] = h.controller.take_events().delegate_ends
+    assert end.reason == "main_stop"
+    assert end.chosen_counts == expected
+    assert end.failure_count == 0
+    [row] = run_rows_of(h, "delegate_end")
+    assert list(row) == DELEGATE_END_ROW_KEYS
+    assert list(row["chosen_counts"].items()) == list(expected)
+    assert row["failures"] == 0
+
+
+def test_delegate_failures_end_has_every_option_with_zero_and_the_failures(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups, max_errors=2)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.jev.respond(JevError("HTTP 500"))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    h.wait_request(2)
+    h.jev.respond(JevError("HTTP 500"))
+    h.wait_until(lambda: run_rows_of(h, "delegate_end"), "the delegate_end row")
+    expected = (("none", 0), ("attack", 0), ("guard", 0), ("return_control", 0))
+    [end] = h.controller.take_events().delegate_ends
+    assert end.reason == "errors"
+    assert end.chosen_counts == expected
+    assert end.failure_count == 2
+    [row] = run_rows_of(h, "delegate_end")
+    assert list(row) == DELEGATE_END_ROW_KEYS
+    assert list(row["chosen_counts"].items()) == list(expected)
+    assert row["failures"] == 2
+
+
+def test_delegate_end_counts_put_names_replaced_by_an_update_after_the_options(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    wait_delegate_rows(h, 1)
+    h.controller.apply(
+        Decision(
+            macros_set={"dodge": (tap("UP"),)},
+            delegate=DelegateUpdate(choices=(DODGE,)),
+        )
+    )
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), dodge=0.9))
+    wait_delegate_rows(h, 2)
+    h.controller.apply(stop_delegation())
+    # 終わった時点の選択肢 (none・dodge・return_control) の後ろに、置き換えて無くなった guard を並べる
+    expected = (("none", 0), ("dodge", 1), ("return_control", 0), ("guard", 1))
+    [end] = h.controller.take_events().delegate_ends
+    assert end.chosen_counts == expected
+    [row] = run_rows_of(h, "delegate_end")
+    assert list(row["chosen_counts"].items()) == list(expected)
+
+
+def test_delegate_stop_of_the_run_records_the_chosen_counts(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), attack=0.9))
+    wait_delegate_rows(h, 1)
+    h.shutdown()
+    [row] = run_rows_of(h, "delegate_end")
+    assert list(row) == DELEGATE_END_ROW_KEYS
+    assert row["reason"] == "stop"
+    assert list(row["chosen_counts"].items()) == [
+        ("none", 0),
+        ("attack", 1),
+        ("guard", 0),
+        ("return_control", 0),
+    ]
+    assert row["failures"] == 0

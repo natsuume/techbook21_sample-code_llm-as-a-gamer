@@ -42,7 +42,8 @@ EVENT_ORCHESTRATOR_SESSION_END = "orchestrator_session_end"
 EVENT_ORCHESTRATOR_DECISION_ERROR = "orchestrator_decision_error"
 # 委任型の委任の始まり。tasks・cautions・choices ([{"name", "description"}, ...]) を含む
 EVENT_DELEGATE_START = "delegate_start"
-# 委任型の委任の終わり。reason (jev_return・main_stop・errors・stop) と detail (理由の説明) を含む
+# 委任型の委任の終わり。reason (jev_return・main_stop・errors・stop)・detail (理由の説明)・chosen_counts (選択肢の名前 →
+# その委任で Jev が選んだ回数)・failures (その委任で失敗した要求の数) を含む
 EVENT_DELEGATE_END = "delegate_end"
 
 

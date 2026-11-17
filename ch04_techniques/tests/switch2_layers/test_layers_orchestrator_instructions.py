@@ -320,6 +320,40 @@ def test_delegate_instructions_say_moves_can_be_combined_with_attacks():
     assert sentences_with(delegate_instructions(), ("移動", "攻撃", "1 つ", "マクロ"))
 
 
+def test_delegate_instructions_say_to_always_delegate_scenes_where_time_runs():
+    text = delegate_instructions()
+    assert sentences_with(text, ("戦い", "自分で操作せず", "委任"))
+    # 時間の止まる画面は、自分で操作する
+    assert sentences_with(text, ("時間の止まる画面", "自分で操作"))
+
+
+def test_delegate_instructions_say_to_fix_the_values_with_update_while_delegating():
+    text = delegate_instructions()
+    assert sentences_with(text, ("update", "直す"))
+    # 文の中の JSON の波かっこは、エスケープせずにそのまま届く
+    assert '{"action": "update", ...}' in text
+
+
+def test_delegate_instructions_say_stop_is_only_for_jev_not_returning_control():
+    assert sentences_with(delegate_instructions(), ("stop", "操作を返さない"))
+
+
+def test_delegate_instructions_say_to_start_again_when_control_returns_mid_battle():
+    assert sentences_with(delegate_instructions(), ("戦いの場面が続いている", "start"))
+
+
+def test_delegate_instructions_say_to_review_each_delegation_with_the_chosen_counts():
+    text = delegate_instructions()
+    assert sentences_with(text, ("振り返", "選んだ回数"))
+    # 振り返りに合わせて、次の委任の値を直す
+    assert sentences_with(text, ("振り返", '"choices"', '"tasks"', '"cautions"', "直"))
+    assert sentences_with(text, ("振り返", "notes/"))
+
+
+def test_delegate_instructions_say_failures_are_not_a_reason_to_stop_delegating():
+    assert sentences_with(delegate_instructions(), ("委任をやめる理由にしません",))
+
+
 def test_delegate_instructions_say_actions_are_discarded_while_delegating():
     assert sentences_with(delegate_instructions(), ("委任中", "actions", "捨て"))
 

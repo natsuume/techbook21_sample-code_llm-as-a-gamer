@@ -268,8 +268,25 @@ def delegate_failure_detail(count: int, last_error: str) -> str:
     return f"jev failed {count} times in a row: {last_error}"
 
 
+def order_chosen_counts(
+    counts: Mapping[str, int], option_names: Sequence[str]
+) -> tuple[tuple[str, int], ...]:
+    """委任で Jev が選んだ回数 counts (選択肢の名前 → 回数。最初に選んだ順) を、(名前, 回数) の並びにして返す (I/O なし)。
+
+    option_names (委任が終わった時点の選択肢の名前。delegate_questions.delegate_option_names の順) の順に、
+    各名前の回数 (counts に無ければ 0) を並べる。その後ろに、counts の名前のうち option_names に無いもの (update で
+    行動を置き換えたために、終わった時点の選択肢に無いが選ばれていた名前) を、counts の順に並べる。
+    """
+    option_set = set(option_names)
+    ordered = [(name, counts.get(name, 0)) for name in option_names]
+    ordered += [
+        (name, count) for name, count in counts.items() if name not in option_set
+    ]
+    return tuple(ordered)
+
+
 class ActiveDelegation:
-    """今の委任 1 つの状態 (委任の値、直近に選んで始めた行動、「操作を返す」と失敗の続いた回数)。
+    """今の委任 1 つの状態 (委任の値、直近に選んで始めた行動、「操作を返す」と失敗の続いた回数、選んだ回数と失敗の合計)。
 
     values       委任の値 (タスク・注意事項・行動)
     started_t    委任を始めた時刻
@@ -279,7 +296,7 @@ class ActiveDelegation:
     def __init__(
         self, values: DelegateStart, started_t: float, max_errors: int
     ) -> None:
-        """直近の行動なし、「操作を返す」と失敗の回数 0 で作る。max_errors が 1 未満なら ValueError。"""
+        """直近の行動なし、「操作を返す」と失敗の回数・選んだ回数・失敗の合計 0 で作る。max_errors が 1 未満なら ValueError。"""
         if max_errors < 1:
             raise ValueError(f"max errors must be 1 or more: {max_errors}")
         self._values = values
@@ -288,6 +305,9 @@ class ActiveDelegation:
         self._picks: deque[DelegatePick] = deque(maxlen=MAX_RECENT_PICKS)
         self._return_streak = 0
         self._errors_in_a_row = 0
+        # 選んだ選択肢の名前 → 回数 (最初に選んだ順)。update で選択肢を置き換えても消さない
+        self._chosen_counts: dict[str, int] = {}
+        self._failure_count = 0
 
     @property
     def values(self) -> DelegateStart:
@@ -307,20 +327,33 @@ class ActiveDelegation:
         """今の委任で直近に選んで始めた行動を、古い順に返す (最大 delegate_questions.MAX_RECENT_PICKS 件)。"""
         return tuple(self._picks)
 
+    def chosen_counts(self) -> tuple[tuple[str, int], ...]:
+        """今の委任で Jev が選んだ回数 (record_answer で選んだ選択肢ごとの回数) を、
+        order_chosen_counts(回数, delegate_option_names(今の値の choices)) の並びで返す。"""
+        return order_chosen_counts(
+            self._chosen_counts, delegate_option_names(self._values.choices)
+        )
+
+    @property
+    def failure_count(self) -> int:
+        """今の委任で record_failure に渡した失敗の数 (続いた回数ではなく合計。答えがあっても 0 に戻さない)。"""
+        return self._failure_count
+
     def record_answer(
         self, probabilities: Mapping[str, float], t: float
     ) -> DelegateAnswer:
         """答えのあった要求を記録し、どうするかを返す。t は行動を始める時刻 (今の時刻)。
 
         1. chosen = delegate_questions.choose_option(probabilities, delegate_option_names(values.choices))
-        2. 失敗の回数を 0 に戻す
+        2. 失敗の続いた回数を 0 に戻し、chosen の選んだ回数を 1 足す (1 回目の RETURN_CONTROL_OPTION も数える)
         3. chosen が
              行動の名前              「操作を返す」の回数を 0 に戻し、DelegatePick(chosen, t) を直近の行動に足して、
                                     DelegateAnswer(chosen, start_action=chosen, end=None) を返す
              NONE_OPTION            「操作を返す」の回数を 0 に戻し、DelegateAnswer(chosen, None, None) を返す
              RETURN_CONTROL_OPTION  「操作を返す」の回数を 1 足す。RETURN_CONTROL_STREAK 回になったら
-                                    DelegateAnswer(chosen, None, DelegateEnd("jev_return", delegate_return_detail(回数)))、
-                                    ならなければ DelegateAnswer(chosen, None, None) を返す
+                                    DelegateAnswer(chosen, None, DelegateEnd("jev_return", delegate_return_detail(回数),
+                                    chosen_counts(), failure_count))、ならなければ DelegateAnswer(chosen, None, None)
+                                    を返す
         probabilities にどれかの選択肢の名前が無ければ KeyError。呼び出し側は、今の委任と同じ通し番号で送った要求の
         確率だけを渡す (そのとき、要求で送った選択肢の名前は、今の値の選択肢の名前と同じ)。
         """
@@ -328,12 +361,16 @@ class ActiveDelegation:
             probabilities, delegate_option_names(self._values.choices)
         )
         self._errors_in_a_row = 0
+        self._chosen_counts[chosen] = self._chosen_counts.get(chosen, 0) + 1
         if chosen == RETURN_CONTROL_OPTION:
             self._return_streak += 1
             if self._return_streak < RETURN_CONTROL_STREAK:
                 return DelegateAnswer(chosen=chosen, start_action=None, end=None)
             end = DelegateEnd(
-                reason="jev_return", detail=delegate_return_detail(self._return_streak)
+                reason="jev_return",
+                detail=delegate_return_detail(self._return_streak),
+                chosen_counts=self.chosen_counts(),
+                failure_count=self._failure_count,
             )
             return DelegateAnswer(chosen=chosen, start_action=None, end=end)
         self._return_streak = 0
@@ -343,17 +380,21 @@ class ActiveDelegation:
         return DelegateAnswer(chosen=chosen, start_action=chosen, end=None)
 
     def record_failure(self, error: str) -> DelegateEnd | None:
-        """失敗した要求を記録する。失敗の回数を 1 足し、max_errors 回になったら
-        DelegateEnd("errors", delegate_failure_detail(回数, error)) を返す。ならなければ None。
+        """失敗した要求を記録する。失敗の続いた回数と failure_count を 1 ずつ足し、続いた回数が max_errors 回に
+        なったら DelegateEnd("errors", delegate_failure_detail(続いた回数, error), chosen_counts(), failure_count) を
+        返す。ならなければ None。
 
-        「操作を返す」の回数は変えない (失敗は選択肢を選んだことにしない)。
+        「操作を返す」の回数と選んだ回数は変えない (失敗は選択肢を選んだことにしない)。
         """
         self._errors_in_a_row += 1
+        self._failure_count += 1
         if self._errors_in_a_row < self._max_errors:
             return None
         return DelegateEnd(
             reason="errors",
             detail=delegate_failure_detail(self._errors_in_a_row, error),
+            chosen_counts=self.chosen_counts(),
+            failure_count=self._failure_count,
         )
 
     def status(self) -> DelegationStatus:

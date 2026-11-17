@@ -49,6 +49,7 @@ from switch2_layers.orchestrator.decision_types import (
     WaitAction,
 )
 from switch2_layers.orchestrator.orchestrator_events import (
+    DelegateEnd,
     DelegationStatus,
     MainActionsRun,
     OrchestratorEvents,
@@ -181,6 +182,7 @@ def describe_events(events: OrchestratorEvents) -> str:
                              action_to_json の JSON の配列にしたもの> を実行した
         監視の終わりごとに   監視 <name> が終わった (<reason>): <detail>
         委任の終わりごとに   委任が終わり、操作権が主ループに戻った (<reason>): <detail>
+                             と、その次の行に describe_delegate_chosen_counts の 1 行
         当てなかった delegate の action ごとに (delegate_skipped_actions の順)
                              委任はすでに終わっていたため、delegate の <action (stop か update)> を当てなかった
         捨てた操作が 1 以上   新しい actions で捨てた前の操作: <discarded_action_count> 個
@@ -198,10 +200,11 @@ def describe_events(events: OrchestratorEvents) -> str:
         f"監視 {end.name} が終わった ({end.reason}): {end.detail}"
         for end in events.monitor_ends
     ]
-    lines += [
-        f"委任が終わり、操作権が主ループに戻った ({end.reason}): {end.detail}"
-        for end in events.delegate_ends
-    ]
+    for end in events.delegate_ends:
+        lines.append(
+            f"委任が終わり、操作権が主ループに戻った ({end.reason}): {end.detail}"
+        )
+        lines.append(describe_delegate_chosen_counts(end))
     lines += [
         f"委任はすでに終わっていたため、delegate の {action} を当てなかった"
         for action in events.delegate_skipped_actions
@@ -217,6 +220,21 @@ def describe_events(events: OrchestratorEvents) -> str:
     if events.blocked_buttons:
         lines.append(f"押せずに外したボタン: {', '.join(events.blocked_buttons)}")
     return "\n".join(lines) if lines else NONE_TEXT
+
+
+def describe_delegate_chosen_counts(end: DelegateEnd) -> str:
+    """委任の終わり end の、Jev が選んだ回数の 1 行の文を返す。
+
+        この委任で Jev が選んだ回数 (要求 <合計> 回、失敗 <end.failure_count> 回): <名前> <回数>、<名前> <回数>、...
+    名前と回数は end.chosen_counts の順に並べ、名前と回数を半角スペース、項目を「、」で区切る。合計は、
+    chosen_counts の回数の和と failure_count の和。
+    """
+    total = sum(count for _, count in end.chosen_counts) + end.failure_count
+    counts = "、".join(f"{name} {count}" for name, count in end.chosen_counts)
+    return (
+        f"この委任で Jev が選んだ回数 (要求 {total} 回、失敗 {end.failure_count} 回): "
+        f"{counts}"
+    )
 
 
 def describe_running(events: OrchestratorEvents) -> str:

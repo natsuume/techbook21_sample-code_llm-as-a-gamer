@@ -120,7 +120,8 @@ take_events:
           捨てたか) で始める
         - DelegateUpdate: 委任中ならその値を置き換え (ActiveDelegation.update)、始める前なら始める値を置き換える。
           前の委任の値も置き換える。委任の通し番号を 1 進める。実行中の行動は止めない
-        - DelegateStop: 委任中なら操作権を返す (理由 main_stop、detail delegate_loop.MAIN_STOP_DETAIL)。始める前なら、
+        - DelegateStop: 委任中なら操作権を返す (理由 main_stop、detail delegate_loop.MAIN_STOP_DETAIL、回数は
+          ActiveDelegation.chosen_counts と failure_count)。始める前なら、
           委任を始めずに取り消す (delegate_start も delegate_end も書かず、出来事にも入れない)
         - 委任中でも始める前でもないときの update と stop (主ループが JSON を書く間か、読んだ後に、Jev の返却や失敗で
           委任が終わっていたときに起きる): 委任を変えない (前の委任の値も通し番号も変えず、delegate_start・delegate_end
@@ -160,9 +161,13 @@ take_events:
     操作権を返す (理由 jev_return・main_stop・errors): 委任の行動の列を実行していれば捨てて中立に戻し
         (ActionExecutor.cancel。apply の stop で返したときは、送信を run のループのスレッドだけで行うため、次の回りの
         1 で捨てる)、ActiveDelegation を捨て、委任の通し番号を 1 進め、DelegateEnd を出来事に入れ、run.jsonl に
-        delegate_end {"reason", "detail"} を書く。前の委任の値は残す
+        delegate_end {"reason", "detail", "chosen_counts", "failures"} を書く。chosen_counts は DelegateEnd.chosen_counts
+        を {名前: 回数} の object にしたもの (キーは同じ順)、failures は DelegateEnd.failure_count。前の委任の値は残す
+    委任で Jev が選んだ回数: ActiveDelegation.record_answer と record_failure を呼んだ要求 (返った委任の要求の処理の
+        handling が ignored でないもの) だけを数える (orchestrator_events.DelegateEnd の chosen_counts・failure_count)
     stop が立って run が戻るときに委任中なら、run.jsonl に delegate_end {"reason": "stop", "detail":
-        delegate_loop.RUN_STOP_DETAIL} を書く (出来事には入れない)
+        delegate_loop.RUN_STOP_DETAIL, "chosen_counts", "failures"} (回数は ActiveDelegation.chosen_counts と
+        failure_count) を書く (出来事には入れない)
     take_events: 監視型の値に加えて、前回の取り出し以降の delegate_ends・delegate_discarded_action_count・
         delegate_skipped_actions を返して空にし、
         delegation に取り出した時点の委任の状況 (委任中なら ActiveDelegation.status、始める前なら active が True で
@@ -885,7 +890,12 @@ class OrchestratorController:
         # DelegateStop
         if delegation is not None:
             self._return_control_locked(
-                DelegateEnd(reason="main_stop", detail=MAIN_STOP_DETAIL),
+                DelegateEnd(
+                    reason="main_stop",
+                    detail=MAIN_STOP_DETAIL,
+                    chosen_counts=delegation.chosen_counts(),
+                    failure_count=delegation.failure_count,
+                ),
                 from_loop=False,
             )
         elif pending is not None:
@@ -903,8 +913,8 @@ class OrchestratorController:
         self._delegation = None
         self._delegate_serial += 1
         self._delegate_ends.append(end)
-        self._write_run_log_locked(
-            EVENT_DELEGATE_END, reason=end.reason, detail=end.detail
+        self._write_delegate_end_locked(
+            end.reason, end.detail, end.chosen_counts, end.failure_count
         )
         if from_loop:
             if self._executor.owner == "delegate":
@@ -917,6 +927,23 @@ class OrchestratorController:
         run_log = self._parts.run_log
         if run_log is not None:
             run_log.write(event, **fields)
+
+    def _write_delegate_end_locked(
+        self,
+        reason: str,
+        detail: str,
+        chosen_counts: Sequence[tuple[str, int]],
+        failure_count: int,
+    ) -> None:
+        """run.jsonl に delegate_end {"reason", "detail", "chosen_counts": {名前: 回数, ...}, "failures"} を書く
+        (chosen_counts の object のキーは chosen_counts の順)。"""
+        self._write_run_log_locked(
+            EVENT_DELEGATE_END,
+            reason=reason,
+            detail=detail,
+            chosen_counts=dict(chosen_counts),
+            failures=failure_count,
+        )
 
     def _apply_pending_delegate_changes_locked(self) -> None:
         """回りの 1 (委任型): apply の stop で返した委任の行動の列を捨て、始めるのを待っている委任を始める。"""
@@ -1116,11 +1143,16 @@ class OrchestratorController:
         )
 
     def _end_delegation_at_stop_locked(self) -> None:
-        """stop が立って run が戻るときに委任中なら、委任を終え、run.jsonl に delegate_end (理由 stop) を書く。"""
-        if self._delegation is None:
+        """stop が立って run が戻るときに委任中なら、委任を終え、run.jsonl に delegate_end (理由 stop。その委任の
+        選んだ回数と失敗の回数を含む) を書く。"""
+        delegation = self._delegation
+        if delegation is None:
             return
         self._delegation = None
         self._delegate_serial += 1
-        self._write_run_log_locked(
-            EVENT_DELEGATE_END, reason="stop", detail=RUN_STOP_DETAIL
+        self._write_delegate_end_locked(
+            "stop",
+            RUN_STOP_DETAIL,
+            delegation.chosen_counts(),
+            delegation.failure_count,
         )

@@ -66,7 +66,7 @@ def test_delegate_event_field_names_and_defaults_follow_the_io_contract():
     def names(cls: type) -> list[str]:
         return [field.name for field in dataclasses.fields(cls)]
 
-    assert names(DelegateEnd) == ["reason", "detail"]
+    assert names(DelegateEnd) == ["reason", "detail", "chosen_counts", "failure_count"]
     assert names(DelegatePick) == ["name", "t"]
     assert names(DelegationStatus) == [
         "active",

@@ -27,6 +27,7 @@ from switch2_layers.orchestrator.delegate_loop import (
     ask_delegate,
     delegate_failure_detail,
     delegate_return_detail,
+    order_chosen_counts,
     select_delegate_frames,
 )
 from switch2_layers.orchestrator.delegate_questions import (
@@ -281,8 +282,10 @@ def test_delegate_second_return_control_in_a_row_returns_control():
     answer = delegation.record_answer(probabilities(return_control=0.9), 6.9)
     assert answer.chosen == "return_control"
     assert answer.start_action is None
-    assert answer.end == DelegateEnd(
-        reason="jev_return", detail=delegate_return_detail(2)
+    assert answer.end is not None
+    assert (answer.end.reason, answer.end.detail) == (
+        "jev_return",
+        delegate_return_detail(2),
     )
 
 
@@ -299,8 +302,10 @@ def test_delegate_failures_up_to_the_limit_return_control():
     assert delegation.record_failure("JevError: HTTP 500") is None
     assert delegation.record_failure("JevError: HTTP 500") is None
     end = delegation.record_failure("JevError: timeout")
-    assert end == DelegateEnd(
-        reason="errors", detail=delegate_failure_detail(3, "JevError: timeout")
+    assert end is not None
+    assert (end.reason, end.detail) == (
+        "errors",
+        delegate_failure_detail(3, "JevError: timeout"),
     )
 
 
@@ -353,4 +358,137 @@ def test_delegate_end_details_name_the_count_and_the_last_error():
     assert (
         delegate_failure_detail(5, "JevError: HTTP 500")
         == "jev failed 5 times in a row: JevError: HTTP 500"
+    )
+
+
+# --- 委任で Jev が選んだ回数 ---
+
+# update で置き換える行動 (置き換えた後の選択肢は none・dodge・return_control)
+DODGE = DelegateChoice(name="dodge", description="上に動いて衝撃波をよける")
+
+
+def dodge_probabilities(**values: float) -> dict[str, float]:
+    """行動を DODGE だけに置き換えた後の、委任の問いの確率 (無い選択肢は 0)。"""
+    names = ("none", "dodge", "return_control")
+    return {name: values.get(name, 0.0) for name in names}
+
+
+def test_order_chosen_counts_lists_every_option_then_the_names_no_longer_in_the_options():
+    counts = {"move_up": 2, "none": 3, "dodge": 1, "old_attack": 4}
+    assert order_chosen_counts(
+        counts, ("none", "attack", "dodge", "return_control")
+    ) == (
+        ("none", 3),
+        ("attack", 0),
+        ("dodge", 1),
+        ("return_control", 0),
+        # 選択肢に無い名前は、counts の順 (最初に選んだ順)
+        ("move_up", 2),
+        ("old_attack", 4),
+    )
+
+
+def test_order_chosen_counts_without_any_choice_is_every_option_with_zero():
+    assert order_chosen_counts({}, ("none", "attack", "return_control")) == (
+        ("none", 0),
+        ("attack", 0),
+        ("return_control", 0),
+    )
+
+
+def test_delegate_chosen_counts_start_at_zero_for_every_option():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=5)
+    assert delegation.chosen_counts() == (
+        ("none", 0),
+        ("attack", 0),
+        ("move_up", 0),
+        ("return_control", 0),
+    )
+    assert delegation.failure_count == 0
+
+
+def test_delegate_chosen_counts_count_each_answer_including_the_first_return_control():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=5)
+    delegation.record_answer(probabilities(attack=0.9), 6.0)
+    delegation.record_answer(probabilities(none=0.9), 6.5)
+    delegation.record_answer(probabilities(none=0.9), 7.0)
+    # 1 回目の「操作を返す」(実行中の行動を続ける) も数える
+    delegation.record_answer(probabilities(return_control=0.9), 7.5)
+    delegation.record_answer(probabilities(move_up=0.9), 8.0)
+    assert delegation.chosen_counts() == (
+        ("none", 2),
+        ("attack", 1),
+        ("move_up", 1),
+        ("return_control", 1),
+    )
+    assert delegation.failure_count == 0
+
+
+def test_delegate_failures_are_counted_in_total_apart_from_the_chosen_counts():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=5)
+    delegation.record_failure("JevError: HTTP 500")
+    delegation.record_answer(probabilities(none=0.9), 6.5)
+    delegation.record_failure("JevError: HTTP 500")
+    # 答えで続いた回数は 0 に戻るが、失敗の合計は戻さない。失敗は選択肢の回数に入れない
+    assert delegation.failure_count == 2
+    assert delegation.chosen_counts() == (
+        ("none", 1),
+        ("attack", 0),
+        ("move_up", 0),
+        ("return_control", 0),
+    )
+
+
+def test_delegate_chosen_counts_put_names_replaced_by_an_update_after_the_options():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=5)
+    delegation.record_answer(probabilities(move_up=0.9), 6.0)
+    delegation.record_answer(probabilities(attack=0.9), 6.5)
+    delegation.update(DelegateUpdate(choices=(DODGE,)))
+    delegation.record_answer(dodge_probabilities(dodge=0.9), 7.0)
+    assert delegation.chosen_counts() == (
+        ("none", 0),
+        ("dodge", 1),
+        ("return_control", 0),
+        # 置き換えて選択肢に無くなった名前は、最初に選んだ順に後ろへ
+        ("move_up", 1),
+        ("attack", 1),
+    )
+
+
+def test_delegate_jev_return_end_has_the_counts_of_the_delegation():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=5)
+    delegation.record_answer(probabilities(none=0.9), 6.0)
+    delegation.record_failure("JevError: HTTP 500")
+    delegation.record_answer(probabilities(return_control=0.9), 6.5)
+    answer = delegation.record_answer(probabilities(return_control=0.9), 7.0)
+    # 委任を終える答え (2 回目の「操作を返す」) も数える
+    assert answer.end == DelegateEnd(
+        reason="jev_return",
+        detail=delegate_return_detail(2),
+        chosen_counts=(
+            ("none", 1),
+            ("attack", 0),
+            ("move_up", 0),
+            ("return_control", 2),
+        ),
+        failure_count=1,
+    )
+
+
+def test_delegate_errors_end_has_the_counts_of_the_delegation():
+    delegation = ActiveDelegation(VALUES, started_t=5.0, max_errors=2)
+    delegation.record_answer(probabilities(attack=0.9), 6.0)
+    delegation.record_failure("JevError: HTTP 500")
+    end = delegation.record_failure("JevError: timeout")
+    # 委任を終える失敗も数える
+    assert end == DelegateEnd(
+        reason="errors",
+        detail=delegate_failure_detail(2, "JevError: timeout"),
+        chosen_counts=(
+            ("none", 0),
+            ("attack", 1),
+            ("move_up", 0),
+            ("return_control", 0),
+        ),
+        failure_count=2,
     )
