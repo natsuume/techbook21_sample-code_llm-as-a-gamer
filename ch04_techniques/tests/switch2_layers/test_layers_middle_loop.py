@@ -7,13 +7,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 import pytest
 
 from switch2_layers.deep.deep_types import DeepRequestResult, DeepTrigger, DocumentKind
+from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.luna_middle import CALL_DETAIL_KEYS, LunaMiddleAnalyzer
+from switch2_layers.middle.luna_request import build_user_sections
 from switch2_layers.middle.middle_loop import (
     MiddleLoop,
     MiddleLoopParts,
     MiddleLoopSettings,
+    MiddleRequestLog,
     middle_failure_reason,
     run_middle_once,
     run_middle_step,
@@ -140,6 +145,7 @@ def step(
     board: TaskBoard | None = None,
     reasons: tuple[MiddleCallReason, ...] = INTERVAL,
     trigger_notify: Callable[[MiddleCallReason], None] | None = None,
+    request_log: MiddleRequestLog | None = None,
 ):
     """run_middle_step を呼ぶ。board が None なら空のキューの部品を渡す。"""
     return run_middle_step(
@@ -152,6 +158,7 @@ def step(
         reasons,
         trigger_notify,
         stop,
+        request_log=request_log,
     )
 
 
@@ -847,6 +854,7 @@ def test_stop_during_new_scene_deep_request_skips_the_rest(tmp_path):
 SKELETON_CALL_KEYS = [
     "t_sent",
     "t_received",
+    "request",
     "based_on_t",
     "frames",
     "surface_rows",
@@ -1611,3 +1619,334 @@ def test_middle_once_uses_the_saved_queue_and_writes_it_back(tmp_path):
     assert row["reasons"] == ["interval"]
     assert row["cancel_used"] is False
     assert row["new_tasks_used"] is True
+
+
+# --- gpt-6-luna に送った要求の記録 (middle/requests.jsonl) と、calls.jsonl の request ---
+
+# gpt-6-luna の出力 (スキーマのキーの順)
+LUNA_OUTPUT = {
+    "place_name": "",
+    "current_tile": None,
+    "new_connections": [],
+    "new_observations": [],
+    "is_stuck": False,
+    "stuck_description": "",
+    "press_home": False,
+    "surface_wait_s": 1.5,
+    "timeline": "## 直近",
+    "scene_name": "町",
+    "cancel_task_ids": [],
+    "new_tasks": [],
+}
+REQUEST_ROW_KEYS = [
+    "request",
+    "t_sent",
+    "model",
+    "reasoning_effort",
+    "reasons",
+    "sections",
+    "frames",
+]
+
+
+def luna_body(
+    output: dict | None = None,
+    status: str = "completed",
+    content: list | None = None,
+) -> dict:
+    """Responses API の応答の本文。content を渡さなければ output の JSON の output_text 1 つ。"""
+    text = json.dumps(LUNA_OUTPUT if output is None else output, ensure_ascii=False)
+    return {
+        "id": "resp_test",
+        "object": "response",
+        "status": status,
+        "incomplete_details": None
+        if status == "completed"
+        else {"reason": "max_output_tokens"},
+        "model": "gpt-6-luna",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_test",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}]
+                if content is None
+                else content,
+            }
+        ],
+        "usage": None,
+    }
+
+
+def ok_response() -> httpx.Response:
+    return httpx.Response(200, json=luna_body())
+
+
+class LunaHandler:
+    """MockTransport の handler。受け取った要求を記録し、response を返す。
+
+    on_request は要求を受け取ったときに呼ぶ関数 (要求を送った後、応答を待つ間に全体が止められた場合を作る)。
+    """
+
+    def __init__(self, response: httpx.Response):
+        self.response = response
+        self.requests: list[httpx.Request] = []
+        self.on_request: Callable[[], None] | None = None
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.on_request is not None:
+            self.on_request()
+        return self.response
+
+    def user_texts(self, index: int) -> list[str]:
+        """index 番目の要求の user メッセージの input_text の文 (送った順)。"""
+        payload = json.loads(self.requests[index].content)
+        return [
+            part["text"]
+            for part in payload["input"][1]["content"]
+            if part["type"] == "input_text"
+        ]
+
+
+class RecordingLunaAnalyzer(LunaMiddleAnalyzer):
+    """フェイクの HTTP (MockTransport) で送る LunaMiddleAnalyzer。受け取った入力を記録する。"""
+
+    def __init__(self, handler: LunaHandler, reasoning_effort: str = "none"):
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        super().__init__("sk-test", client=client, reasoning_effort=reasoning_effort)
+        self.inputs: list[MiddleInput] = []
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        self.inputs.append(middle_input)
+        return super().analyze(middle_input)
+
+
+def request_rows(root: Path) -> list[dict]:
+    return read_rows(root / "middle" / "requests.jsonl")
+
+
+def test_request_row_has_the_sections_and_frames_that_were_sent(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_frames(root, [4.0, 8.0, 9.5])
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    handler = LunaHandler(ok_response())
+    analyzer = RecordingLunaAnalyzer(handler, reasoning_effort="low")
+    result = step(
+        paths,
+        analyzer,
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        reasons=("queue_empty", "scene_change"),
+        request_log=MiddleRequestLog(paths.middle_requests),
+    )
+    assert result.ok is True
+    [row] = request_rows(root)
+    assert list(row) == REQUEST_ROW_KEYS
+    assert row["request"] == 1
+    assert row["model"] == "gpt-6-luna"
+    assert row["reasoning_effort"] == "low"
+    assert row["reasons"] == ["queue_empty", "scene_change"]
+    # 節の文は build_user_sections の結果で、送った input_text の文と同じ (画像の前の時刻のラベルは含まない)
+    sections = build_user_sections(analyzer.inputs[0])
+    assert row["sections"] == sections
+    assert row["sections"] == handler.user_texts(0)[: len(sections)]
+    assert row["frames"] == [
+        {"t": 4.0, "file": "frames/interval/000004000.jpg"},
+        {"t": 8.0, "file": "frames/interval/000008000.jpg"},
+        {"t": 9.5, "file": "frames/interval/000009500.jpg"},
+    ]
+    # 画像の data URL と API キーは書かない
+    text = (root / "middle" / "requests.jsonl").read_text(encoding="utf-8")
+    assert "base64," not in text
+    assert "sk-test" not in text
+
+
+def test_calls_row_has_the_request_and_t_sent_of_its_request_row(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    # 読むたびに 0.25 秒進む時計 (入力を作った時刻と、analyze を呼ぶ直前の時刻が違う)
+    monotonic = TickingMonotonic(ORIGIN + 10.0, step_s=0.25)
+    clock = RunClock(monotonic, origin=ORIGIN)
+    analyzer = RecordingLunaAnalyzer(LunaHandler(ok_response()))
+    log = MiddleRequestLog(paths.middle_requests)
+    for _ in range(2):
+        assert step(paths, analyzer, clock, 10.0, None, request_log=log).ok is True
+    requests = request_rows(root)
+    calls = read_rows(root / "middle" / "calls.jsonl")
+    # 要求を送るたびに番号を 1 増やす (1 から数える)
+    assert [row["request"] for row in requests] == [1, 2]
+    assert [row["request"] for row in calls] == [1, 2]
+    # t_sent は、入力を作った時刻ではなく、analyze を呼ぶ直前に読んだ時刻 (calls.jsonl と同じ値)
+    assert [row["t_sent"] for row in requests] == [row["t_sent"] for row in calls]
+    assert all(row["t_sent"] != row["based_on_t"] for row in calls)
+    # request は t_received の後ろに置き、gpt-6-luna の記録はほかのキーの後ろに足す
+    assert list(calls[0]) == SKELETON_CALL_KEYS + list(CALL_DETAIL_KEYS)
+    # 画像を送らなかった回の frames は空の配列
+    assert requests[0]["frames"] == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, text="server error"),
+        httpx.Response(200, json=luna_body(status="incomplete")),
+        httpx.Response(
+            200,
+            json=luna_body(content=[{"type": "refusal", "refusal": "Sorry, I can't."}]),
+        ),
+        httpx.Response(200, json=luna_body({**LUNA_OUTPUT, "extra": 1})),
+    ],
+    ids=["http-error", "incomplete", "refusal", "schema-mismatch"],
+)
+def test_request_failing_after_sending_keeps_its_row_and_number(tmp_path, response):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    handler = LunaHandler(response)
+    result = step(
+        paths,
+        RecordingLunaAnalyzer(handler),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        request_log=MiddleRequestLog(paths.middle_requests),
+    )
+    assert result.ok is False
+    assert len(handler.requests) == 1
+    [request_row] = request_rows(root)
+    [call_row] = read_rows(root / "middle" / "calls.jsonl")
+    assert call_row["error"] is not None
+    # 送った後に失敗した回も、要求の行が残り、calls.jsonl の失敗の行に同じ番号を書く
+    assert request_row["request"] == 1
+    assert call_row["request"] == 1
+    assert call_row["t_sent"] == request_row["t_sent"]
+
+
+def test_fake_middle_writes_no_request_row_and_null_request(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    result = step(
+        paths,
+        FakeMiddleAnalyzer(),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        request_log=MiddleRequestLog(paths.middle_requests),
+    )
+    assert result.ok is True
+    assert not (root / "middle" / "requests.jsonl").exists()
+    [row] = read_rows(root / "middle" / "calls.jsonl")
+    assert row["request"] is None
+
+
+def test_failed_input_build_writes_no_request_row_and_null_request(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    # surface.jsonl をディレクトリーにして、入力の作成を失敗させる
+    (root / "surface.jsonl").mkdir()
+    handler = LunaHandler(ok_response())
+    result = step(
+        paths,
+        RecordingLunaAnalyzer(handler),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        request_log=MiddleRequestLog(paths.middle_requests),
+    )
+    assert result.ok is False
+    assert handler.requests == []
+    assert not (root / "middle" / "requests.jsonl").exists()
+    [row] = read_rows(root / "middle" / "calls.jsonl")
+    assert row["error"] is not None
+    assert row["request"] is None
+
+
+def test_stop_while_waiting_for_the_response_leaves_only_the_request_row(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    monotonic = FakeMonotonic(ORIGIN + 10.0)
+    stop = threading.Event()
+    handler = LunaHandler(ok_response())
+    # 要求を送った後、応答を待つ間に全体が止められる
+    handler.on_request = stop.set
+    result = step(
+        paths,
+        RecordingLunaAnalyzer(handler),
+        RunClock(monotonic, origin=ORIGIN),
+        10.0,
+        None,
+        stop,
+        request_log=MiddleRequestLog(paths.middle_requests),
+    )
+    assert result.stopped is True
+    # 送る直前に書いた要求の行だけが残り、calls.jsonl の行は書かない
+    assert [row["request"] for row in request_rows(root)] == [1]
+    assert read_rows(root / "middle" / "calls.jsonl") == []
+
+
+@pytest.mark.parametrize(
+    ("saved", "expected"),
+    [
+        (None, 1),
+        ("", 1),
+        ('{"request": 6}\n{"request": 7}\n', 8),
+    ],
+    ids=["no-file", "no-rows", "after-saved-rows"],
+)
+def test_middle_once_numbers_its_request_after_the_saved_ones(
+    tmp_path, saved, expected
+):
+    root = make_run(tmp_path)
+    write_frames(root, [4.0, 8.0, 12.5])
+    if saved is not None:
+        (root / "middle" / "requests.jsonl").write_text(saved, encoding="utf-8")
+    handler = LunaHandler(ok_response())
+    result = run_middle_once(root, RecordingLunaAnalyzer(handler), 10.0)
+    assert result.ok is True
+    # 保存済みの実行ディレクトリーの requests.jsonl に、最後の番号の次の番号で追記する
+    rows = request_rows(root)
+    saved_count = 0 if saved is None else saved.count("\n")
+    assert len(rows) == saved_count + 1
+    assert rows[-1]["request"] == expected
+    assert rows[-1]["t_sent"] == 12.5
+    [call] = read_rows(root / "middle" / "calls.jsonl")
+    assert call["request"] == expected
+    assert call["t_sent"] == 12.5
+
+
+def test_failed_request_append_still_sends_and_is_not_a_middle_failure(
+    tmp_path, caplog
+):
+    caplog.set_level(logging.WARNING)
+    harness = make_loop(tmp_path, output(), max_errors=1)
+    handler = LunaHandler(ok_response())
+    harness.loop.parts = dataclasses.replace(
+        harness.loop.parts, analyzer=RecordingLunaAnalyzer(handler)
+    )
+    # middle/requests.jsonl をディレクトリーにして、要求の記録の追記を失敗させる
+    requests_path = harness.root / "middle" / "requests.jsonl"
+    requests_path.mkdir()
+    result = harness.loop.run_once(INTERVAL)
+    # 要求は送り、middle の失敗に数えず、止めず、run.jsonl にも書かない
+    assert len(handler.requests) == 1
+    assert result.ok is True
+    assert harness.loop.consecutive_errors == 0
+    assert harness.stops == []
+    assert read_rows(harness.root / "run.jsonl") == []
+    # 警告を書く
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+    # calls.jsonl の行には送った要求の番号を書く (requests.jsonl にその番号の行は無い)
+    [row] = read_rows(harness.root / "middle" / "calls.jsonl")
+    assert row["request"] == 1
+    # 次の回の番号は 1 つ進んでいる
+    requests_path.rmdir()
+    assert harness.loop.run_once(INTERVAL).ok is True
+    assert [row["request"] for row in request_rows(harness.root)] == [2]
+    calls = read_rows(harness.root / "middle" / "calls.jsonl")
+    assert [row["request"] for row in calls] == [1, 2]

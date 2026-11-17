@@ -314,7 +314,7 @@ middle は、マップを次のように扱います。
 
 ゲームの性質 (`notes/game.md`) は、大方針の前の節に、前後の空白を除いて送ります。無い・読めない・空 (空白だけ) のときは「(無い)」です。変わらない指示では、ゲームの性質のリアルタイムに進む部分 (プレイヤーの入力を待たずに進む部分) とターン制の部分 (入力を待って進む部分) を見て、素早い反応が要るか (待ち時間) を決めさせ、ダメージとゲームオーバーの条件のうち、確かめたもの (「(推測)」が付いていないもの) に当たる行動をタスクにさせません。
 
-`middle/calls.jsonl` の各行には、トークン数 (`usage`。入力・キャッシュから読んだ入力・キャッシュに書いた入力・出力・推論)、公式の単価から計算した概算の費用 (`cost_usd`。USD)、デバッグ用の応答の本文 (`response`。エラーの応答では本文の先頭を `error_body_head`) も書きます。
+`middle/calls.jsonl` の各行には、トークン数 (`usage`。入力・キャッシュから読んだ入力・キャッシュに書いた入力・出力・推論)、公式の単価から計算した概算の費用 (`cost_usd`。USD)、デバッグ用の応答の本文 (`response`。エラーの応答では本文の先頭を `error_body_head`) も書きます。各行の `request` は、その回に送った要求の番号です。`middle/requests.jsonl` の同じ `request` の行に、その回に送った user メッセージの節の文と、画像の時刻とファイル名を残します (「実行ディレクトリー」の節)。
 
 #### マップの型と経路の計算
 
@@ -1187,7 +1187,8 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
 | `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録 (`surface.jsonl`・`operations.jsonl`・`tasks.jsonl`) の位置、現在地の場所とマス、HOME を押して本体の画面に出るか `press_home`)。surface は要求ごとにこのファイルを読みます |
-| `middle/calls.jsonl` | middle の実行ごとの記録。呼ばれた理由 (`reasons`)、足すタスクと取り消すタスク、行き先を直した内容、取り消しと追加を行ったか (「middle の実装」の節の「短期のタスクのキュー」)、`press_home` も書きます。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
+| `middle/calls.jsonl` | middle の実行ごとの記録。呼ばれた理由 (`reasons`)、足すタスクと取り消すタスク、行き先を直した内容、取り消しと追加を行ったか (「middle の実装」の節の「短期のタスクのキュー」)、`press_home` も書きます。その回に gpt-6-luna に送った要求の番号 (`request`) も書きます。`request` と `t_sent` は、同じ回の `middle/requests.jsonl` の行と同じ値です。`request` は、`--middle fake` の行と、入力を作れずに失敗した行では null です。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
+| `middle/requests.jsonl` | ゲーム用の middle が gpt-6-luna に送った要求の記録。送る直前に 1 行ずつ足します。要求の番号 (`request`。run では 1 から数え、middle-once では保存済みの最後の行の番号の次から数えます)、送った時刻 (`t_sent`)、モデル名 (`model`)、reasoning effort (`reasoning_effort`)、呼ばれた理由 (`reasons`)、user メッセージの節の文 (`sections`。送った順に、送ったままの文字列)、送った画像の時刻とファイル名 (`frames`。`middle/calls.jsonl` の `frames` と同じ形) を書きます。変わらない指示 (developer メッセージ)、出力のスキーマ、画像のデータ、API キー、HTTP のヘッダーは書きません。送った後に失敗した要求 (HTTP のエラー、完了しなかった応答、拒否、形の合わない出力) の行も残ります。`--middle fake` では書かず、本体の画面の middle の要求も書きません。追記に失敗しても要求は送り、middle の失敗には数えずに警告を書きます。1 行は節の文を含むため数 KB〜十数 KB になる見込みですが、切り詰めや間引きはしません |
 | `middle/system_calls.jsonl` | 本体の画面の middle の呼び出しごとの行 (`kind` が `call`) と、操作の列を送り終えるごとの行 (`kind` が `run`)。「本体の画面の扱い」の節 |
 | `progress/state.json` | 画面の停滞の計測の最新の値 (`t`・`static_s`・`no_novel_s`・`window_s`。「画面の停滞の計測」の節)。まだフレームが無いときは無く、surface と middle は要求ごとに、deep のスケジューラーは 0.5 秒ごとに読みます |
 | `middle/map_records.jsonl` | middle のマップの記録。現在地の場所の名前とマス、新しく分かった場所のつながりと観察 (マス目型のマップではマスの座標を含みます) を、判断に使った画像の時刻と場面 ID とともに、1 行 1 回の JSON で足します (「middle の実装」の節)。deep の `map` のジョブが読みます |

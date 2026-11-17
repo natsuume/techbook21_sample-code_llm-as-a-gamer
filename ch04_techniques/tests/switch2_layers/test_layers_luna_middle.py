@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import json
 
 import httpx
@@ -10,8 +11,14 @@ from switch2_layers.middle.luna_middle import (
     LunaMiddleAnalyzer,
     build_call_details,
 )
+from switch2_layers.middle.luna_request import build_user_sections
 from switch2_layers.middle.middle_call_record import MiddleCallDetailsSource
-from switch2_layers.middle.middle_types import MiddleFrame, MiddleInput, MiddleOutput
+from switch2_layers.middle.middle_types import (
+    MiddleFrame,
+    MiddleInput,
+    MiddleOutput,
+    MiddleRequest,
+)
 
 JPEG = b"\xff\xd8\xff\xe0frame"
 MIDDLE_INPUT = MiddleInput(
@@ -200,6 +207,54 @@ def test_analyze_sends_the_given_reasoning_effort(effort):
     assert analyzer.reasoning_effort == effort
     assert analyzer.analyze(MIDDLE_INPUT).scene_name == "タイトル画面"
     assert handler.payload()["reasoning"] == {"effort": effort}
+
+
+class RequestSinkRecorder:
+    """MiddleInput.request_sink の偽物。渡された要求と、呼ばれたときに handler が受け取っていた要求の数を記録する。"""
+
+    def __init__(self, handler: RecordingHandler):
+        self.handler = handler
+        self.requests: list[MiddleRequest] = []
+        self.sent_before: list[int] = []
+
+    def __call__(self, request: MiddleRequest) -> None:
+        self.requests.append(request)
+        self.sent_before.append(len(self.handler.requests))
+
+
+@pytest.mark.parametrize("effort", ["none", "low"])
+def test_analyze_gives_the_request_to_the_sink_just_before_sending(effort):
+    handler = RecordingHandler(httpx.Response(200, json=response_body()))
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    analyzer = LunaMiddleAnalyzer("sk-test", client=client, reasoning_effort=effort)
+    sink = RequestSinkRecorder(handler)
+    analyzer.analyze(dataclasses.replace(MIDDLE_INPUT, request_sink=sink))
+    # 送る直前 (まだ要求を受け取っていない) に 1 回だけ呼ぶ
+    assert sink.sent_before == [0]
+    assert len(handler.requests) == 1
+    [request] = sink.requests
+    payload = handler.payload()
+    assert request.model == payload["model"] == "gpt-6-luna"
+    assert request.reasoning_effort == payload["reasoning"]["effort"] == effort
+    assert request.reasons == ("interval",)
+    # 節の文は build_user_sections の結果で、送った user メッセージの input_text の文と同じ
+    assert request.sections == tuple(build_user_sections(MIDDLE_INPUT))
+    user_texts = [
+        part["text"]
+        for part in payload["input"][1]["content"]
+        if part["type"] == "input_text"
+    ]
+    assert list(request.sections) == user_texts[: len(request.sections)]
+    assert request.frames == MIDDLE_INPUT.frames
+    # 書き込み先を渡しても、要求の中身は変わらない
+    plain_handler = RecordingHandler(httpx.Response(200, json=response_body()))
+    plain = LunaMiddleAnalyzer(
+        "sk-test",
+        client=httpx.Client(transport=httpx.MockTransport(plain_handler)),
+        reasoning_effort=effort,
+    )
+    plain.analyze(MIDDLE_INPUT)
+    assert payload == plain_handler.payload()
 
 
 def test_details_after_success_have_usage_cost_and_response():

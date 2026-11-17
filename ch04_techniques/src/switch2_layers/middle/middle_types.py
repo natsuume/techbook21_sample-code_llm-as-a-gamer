@@ -1,5 +1,6 @@
 """middle 層の型: MiddleAnalyzer の入力 (MiddleInput) と出力 (MiddleOutput)、middle/state.json (MiddleState)、Protocol。
 
+gpt-6-luna に送る要求の記録に書く内容 (MiddleRequest。middle/requests.jsonl の 1 行の元) もここに置く。
 出力のマップの観察 (MapObservation と ObservationKind) もここに置く。つながり (MapConnection) は、map.json と同じ型
 (notes.map_document) を使う。
 
@@ -16,7 +17,7 @@ place_name は出力の現在地の場所の名前 (前後の空白を除いた�
 press_home は出力の press_home (HOME を押して本体の画面に出るか) を残したもの。読むときは、キーが無ければ false とみなす。
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -119,6 +120,26 @@ class MiddleState:
 
 
 @dataclass(frozen=True)
+class MiddleRequest:
+    """ゲーム用の middle が gpt-6-luna に送る要求 1 回の、記録に書く内容 (middle/requests.jsonl の 1 行の元)。
+
+    model              要求の model (luna_request.LUNA_MODEL)
+    reasoning_effort   要求の reasoning.effort の値
+    reasons            この回に middle を呼んだ理由 (MiddleInput.reasons の順)
+    sections           user メッセージの節の文 (luna_request.build_user_sections の結果)。送った順に、送ったままの文字列
+    frames             送った画像 (送った順。MiddleInput.frames)。記録には t と file だけを書き、jpeg は書かない
+    developer メッセージ (変わらない指示) と text.format (出力のスキーマ) は、入力に依らず同じでコードから分かるため
+    持たない。API キーと HTTP のヘッダーも持たない。
+    """
+
+    model: str
+    reasoning_effort: str
+    reasons: tuple[MiddleCallReason, ...]
+    sections: tuple[str, ...]
+    frames: tuple[MiddleFrame, ...]
+
+
+@dataclass(frozen=True)
 class MiddleInput:
     """MiddleAnalyzer.analyze の入力。実行ディレクトリーのファイルだけから作る (middle_input_builder)。
 
@@ -155,6 +176,11 @@ class MiddleInput:
                              無い・読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
     progress                 画面の停滞の計測の最新の値 (progress/state.json。progress.progress_state.read_progress_state)。
                              無い・読めないときは None。既定値の None は、値を渡さない入力 (テストなど) のため
+    request_sink             送る要求の書き込み先 (middle/requests.jsonl。middle_loop.run_middle_step が回ごとに入れる)。
+                             gpt-6-luna を呼ぶ実装は、要求を送る直前に 1 回だけ MiddleRequest を渡して呼ぶ。書き込み先は
+                             追記の失敗を外に出さない。None なら何も書かない。gpt-6-luna を呼ばない実装 (フェイク) は
+                             呼ばない。既定値の None は、書き込み先を渡さない入力 (middle_input_builder が作った直後と
+                             テストなど) のため
     """
 
     t: float
@@ -176,6 +202,7 @@ class MiddleInput:
     map_document: MapDocument | GridMapDocument | None = None
     game: str = ""
     progress: ProgressState | None = None
+    request_sink: Callable[[MiddleRequest], None] | None = None
 
 
 @dataclass(frozen=True)
