@@ -55,6 +55,19 @@ def test_create_run_directory_creates_parent_and_subdirectories(tmp_path):
     assert (paths.root / "deep").is_dir()
 
 
+def test_create_run_directory_does_not_create_the_latest_frames_directory(tmp_path):
+    # frames/latest/ は Orchestrator 型の run で LatestFrames が作る (advisor 型の run には無い)
+    paths = create_run_directory(tmp_path, STARTED_AT)
+    assert not (paths.root / "frames" / "latest").exists()
+
+
+def test_latest_frame_paths(tmp_path):
+    paths = RunPaths(tmp_path / "run")
+    assert paths.latest_frames_dir == tmp_path / "run" / "frames" / "latest"
+    assert paths.latest_frame(1) == tmp_path / "run" / "frames" / "latest" / "1.jpg"
+    assert paths.latest_frame(5) == tmp_path / "run" / "frames" / "latest" / "5.jpg"
+
+
 def test_create_run_directory_creates_progress_directory_without_state(tmp_path):
     paths = create_run_directory(tmp_path, STARTED_AT)
     assert paths.progress_dir == paths.root / "progress"

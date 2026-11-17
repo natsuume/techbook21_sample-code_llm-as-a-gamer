@@ -1,11 +1,13 @@
 """主ループの 1 ターンの入力 (テキストと画像のユーザーメッセージ 1 つ) を組み立てる。
 
-ファイルを読む関数 (list_note_files・read_turn_images) のほかは、I/O を扱わない。
+ファイルを読む関数 (list_note_files) のほかは、I/O を扱わない。
 
 テキスト (build_turn_text) は、次の節を順に改行でつないだもの:
     ## 時刻                         t=<今の時刻> (frames.surface_frames.format_frame_label の形)
     ## 前の判断の後の出来事           describe_events
     ## 主ループの操作                 describe_running
+    ## 前の操作の列                   describe_previous_actions (前のターンの操作の列を始めた時刻と終えた時刻。
+                                    TurnContext.previous_actions が None (前のターンに操作が無かった) なら節を置かない)
     ## 画面の停滞 (コードの計測)       describe_progress_for_turn
     ## 前の JSON の誤り               describe_decision_error
     ## 写さなかったスキル              describe_skipped_skills
@@ -16,8 +18,9 @@
 notes/handoff.md の中身)。人の初期指示が無いときも節は省かず、本文を NONE_TEXT にして、初期指示が無いことを伝える。
 出来事の繰り越し (carry_over_events): result を受け取れなかった入力に載せた一度だけの出来事 (条件の当たり・監視の
 終わり・捨てた操作の数・外したボタン) は、次の入力で新しく取り出した出来事と合わせて渡す。
-画像 (select_turn_frames): 前の入力を送った時刻から今までの一定間隔のフレームから、均等に最大 TURN_MAX_IMAGES 枚
-(frames/interval/ に保存した幅 640 の JPEG をそのまま使う)。セッションの最初のターンは最新の 1 枚。
+画像 (select_turn_frames): 入力を作る時点の最新の一定間隔のフレームのうち、新しいものから最大 TURN_MAX_IMAGES 枚を
+古い順に並べたもの。主ループが入力を作るときに 1 回受け取った、同じ時点の frames/latest/ の画像
+(frames.latest_frames.LatestFrames.snapshot。時刻を書き込んだ JPEG) を使う。セッションの最初のターンも同じ。
 メッセージの内容 (build_turn_content): テキストのブロックの後に、画像ごとに時刻のラベルのテキストのブロックと画像の
 ブロックを置く。
 """
@@ -31,8 +34,8 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_scheduler import PROGRESS_STATE_MAX_AGE_S
 from switch2_layers.file_io import is_temporary_file_name
-from switch2_layers.frames.frame_store import FrameRecord
-from switch2_layers.frames.surface_frames import format_frame_label, pick_evenly
+from switch2_layers.frames.latest_frames import LatestFrame
+from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.orchestrator.decision_types import (
     Action,
     DecisionError,
@@ -42,17 +45,19 @@ from switch2_layers.orchestrator.decision_types import (
     ProcedureAction,
     WaitAction,
 )
-from switch2_layers.orchestrator.orchestrator_events import OrchestratorEvents
+from switch2_layers.orchestrator.orchestrator_events import (
+    MainActionsRun,
+    OrchestratorEvents,
+)
 from switch2_layers.orchestrator.skill_copy import SkippedGameSkill
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.progress.progress_text import (
     NO_PROGRESS_TEXT,
     describe_progress_values,
 )
-from switch2_layers.run_directory import RunPaths
 
-# 1 ターンに送る画像の最大の枚数
-TURN_MAX_IMAGES = 3
+# 1 ターンに送る画像の最大の枚数 (frames/latest/ の最新の 5 枚)
+TURN_MAX_IMAGES = 5
 # 節の中身が無いときに書く文
 NONE_TEXT = "無し"
 # 古いフレームの節の文
@@ -69,8 +74,9 @@ class TurnImage:
     """入力に入れる画像 1 枚。
 
     t      フレームの時刻
-    file   画像の実行ディレクトリーからの相対パス (frames.jsonl の file)
-    jpeg   画像のバイト列 (保存したものをそのまま使う)
+    file   元になった一定間隔のフレームの画像の、実行ディレクトリーからの相対パス (frames/interval/<tミリ秒9桁>.jpg。
+           frames.jsonl の file。ラベルと turns.jsonl の images に書く)
+    jpeg   送る画像のバイト列 (frames/latest/ に置いた、時刻を書き込んだ JPEG)
     """
 
     t: float
@@ -89,6 +95,8 @@ class TurnContext:
     previous_error   前のターンの JSON の誤り。前のターンに誤りが無かった・前のターンが無ければ None
     skipped_skills   最後にゲームの内容のスキルを写したとき (skill_copy.copy_game_skills) に、中身を確かめて
                      写さなかったスキル
+    previous_actions 前のターンの操作の列の時刻 (主ループが終わるのを待った列。終わった列だけを渡す)。前のターンの
+                     actions が空だった・JSON の誤り・引き継ぎの依頼・セッションの最初のターンなら None
     """
 
     now_t: float
@@ -96,6 +104,7 @@ class TurnContext:
     progress: ProgressState | None
     previous_error: DecisionError | None
     skipped_skills: tuple[SkippedGameSkill, ...] = ()
+    previous_actions: MainActionsRun | None = None
 
 
 @dataclass(frozen=True)
@@ -112,59 +121,16 @@ class SessionOpening:
     handoff_text: str
 
 
-def select_turn_frames(
-    records: Sequence[FrameRecord], previous_sent_t: float | None, now_t: float
-) -> list[FrameRecord]:
-    """frames.jsonl の記録 records から、入力に入れるフレームを選んで t の古い順に返す。
+def select_turn_frames(latest: Sequence[LatestFrame]) -> list[TurnImage]:
+    """最新のフレームの画像 latest (新しい順。frames.latest_frames.LatestFrames.snapshot の値) から、入力に入れる画像を
+    選んで古い順に返す (I/O なし)。
 
-    対象は kind が "interval" で t <= now_t のもの (t の順に並べる)。
-    - previous_sent_t が None (セッションの最初のターン): 対象のうち最新の 1 枚
-    - そうでなければ、previous_sent_t < t <= now_t のものを frames.surface_frames.pick_evenly(…, TURN_MAX_IMAGES) で
-      選ぶ (最も古いものと最新のものを含め、添字で等間隔)
-    - その範囲に 1 枚も無ければ、対象のうち最新の 1 枚 (前の入力に入れたものと同じでもよい)
-    対象が 1 枚も無ければ空のリスト。
+    latest の先頭 (新しいもの) から最大 TURN_MAX_IMAGES 枚を取り、古い順に並べ直して、それぞれを
+    TurnImage(t=frame.t, file=frame.source_file, jpeg=frame.jpeg) にする。TURN_MAX_IMAGES 枚に満たなければある分だけ、
+    latest が空なら空のリスト。
     """
-    candidates = sorted(
-        (
-            record
-            for record in records
-            if record.kind == "interval" and record.t <= now_t
-        ),
-        key=lambda record: record.t,
-    )
-    if not candidates:
-        return []
-    if previous_sent_t is not None:
-        since_previous = [record for record in candidates if record.t > previous_sent_t]
-        if since_previous:
-            return pick_evenly(since_previous, TURN_MAX_IMAGES)
-    return [candidates[-1]]
-
-
-def read_turn_images(
-    paths: RunPaths, records: Sequence[FrameRecord]
-) -> list[TurnImage]:
-    """records の各画像を読み、TurnImage のリストを records の順に返す。
-
-    画像のファイルが読めないもの (OSError) と、file のシンボリックリンクを解決した先が frames/interval/ を解決した
-    先の下に無いものは除く (frames.jsonl の行が書き換えられても、実行ディレクトリーの外のファイルを送らないため。
-    middle の入力と同じ規則)。
-    """
-    images: list[TurnImage] = []
-    try:
-        interval_dir = paths.interval_frames_dir.resolve()
-    except (OSError, RuntimeError):
-        return images
-    for record in records:
-        try:
-            image_path = (paths.root / record.file).resolve()
-            if interval_dir not in image_path.parents:
-                continue
-            jpeg = image_path.read_bytes()
-        except (OSError, RuntimeError):
-            continue
-        images.append(TurnImage(t=record.t, file=record.file, jpeg=jpeg))
-    return images
+    # 未実装: 画像を選ばない (空のリストを返す)
+    return []
 
 
 def action_to_json(action: Action) -> dict[str, object]:
@@ -232,6 +198,16 @@ def describe_running(events: OrchestratorEvents) -> str:
     """主ループの操作の状態を 2 行の文にする: `実行中: はい` か `実行中: いいえ` と、`残りの操作: <remaining_action_count> 個`。"""
     running = "はい" if events.running else "いいえ"
     return f"実行中: {running}\n残りの操作: {events.remaining_action_count} 個"
+
+
+def describe_previous_actions(run: MainActionsRun) -> str:
+    """前のターンの操作の列 run (終わった列。ended_t が None でない) の時刻を 2 行の文にする。
+
+        始めた時刻: <format_frame_label(run.started_t)>
+        終えた時刻 (最後に離した時刻): <format_frame_label(終えた時刻)>
+    終えた時刻は run.released_t。押す操作の無い列 (released_t が None) なら run.ended_t。
+    """
+    raise NotImplementedError
 
 
 def describe_progress_for_turn(progress: ProgressState | None, now_t: float) -> str:
@@ -330,7 +306,10 @@ def describe_macros(macros: Mapping[str, Sequence[Action]]) -> str:
 
 
 def build_turn_text(context: TurnContext) -> str:
-    """ふつうのターンのテキスト (モジュールの docstring の節の並び) を返す。"""
+    """ふつうのターンのテキスト (モジュールの docstring の節の並び) を返す。
+
+    context.previous_actions が None なら「## 前の操作の列」の節を置かない (ほかの節はいつも置く)。
+    """
     sections = [
         ("## 時刻", format_frame_label(context.now_t)),
         ("## 前の判断の後の出来事", describe_events(context.events)),

@@ -44,7 +44,8 @@ DECISION_EXAMPLE = """\
 def orchestrator_instructions() -> str:
     """変わらない指示の文を返す。次の 9 つをすべて書く:
 
-    1. 役割: 送られた画面の画像と出来事だけを見て、ゲームを進める
+    1. 役割: 送られた画面の画像と出来事だけを見て、ゲームを進める。毎ターン、テキストと、最新の 5 枚のフレームの画像
+       (古い順。それぞれの前に時刻のラベル) が届くこと
     2. JSON の形: 毎ターンの応答の最後に ```json のブロックを 1 つ書き、コードはそのブロックだけを読む。
        最上位のキーは actions・macros・monitor (どれも省ける。ほかのキーは誤り)。操作は type が press・wait・
        procedure・macro の 4 種類。press の buttons に書けるボタンの名前 (switch2_remote.controller_state.BUTTON_ORDER
@@ -58,8 +59,10 @@ def orchestrator_instructions() -> str:
        (実行ディレクトリーの間残る。マクロの中から macro は呼べない)・監視 (同時に 1 つ。
        条件に当たると操作を実行する)・スキル (Skill のツールで .claude/skills/ のスキルを使う) の使い方。
        Claude の操作 (actions) の実行中は、監視が止まること
-    4. 判断は休まず続き、次の JSON の actions は前の actions の残りを捨てて置き換えること。空の actions なら前の
-       操作が続くこと。操作の実行中で続けさせたいときや、監視に任せて待つときは、空の actions で答えること
+    4. 判断の続け方: 答えの actions が空でなければ、その操作の列がすべて終わり、最後にボタンとスティックを離してから
+       action_settle.ACTIONS_SETTLE_S 秒 (0.3 秒) たってから、次の画面と出来事が届くこと。空の actions は「何もしない」
+       の意味で、次の画面と出来事はすぐに届くこと (すぐ届くと書くのは、空の actions のときだけ)。監視に任せて
+       待つときは、空の actions で答えること。次の JSON の actions は、前の actions の残りを捨てて置き換えること
     5. safety.safety_rules.SAFETY_RULES (文をそのまま入れる)
     6. 監視の条件の文は画面の見た目だけで書き、ゲーム名や作品に固有の名前を書かないこと
     7. notes/ に、分かったこと (操作の割り当て、攻略の情報、方針) を書くこと
@@ -69,7 +72,9 @@ def orchestrator_instructions() -> str:
        1 行ずつだけ、本文にシェルのコマンドを実行する書き方を書かないこと (skill_copy.check_game_skill_text の規則)。
        frontmatter は `name: game-<名前>` と `description: "<どの場面で使うか>"` の 2 行で書くこと。
        守らないスキルは写されず、次の入力の「写さなかったスキル」の節で理由が届くこと
-    9. 古いフレームは frames/interval/ から必要なときだけ読むこと (読んだ画像もコンテキストに残るため)
+    9. フレームの読み方: frames/latest/1.jpg〜5.jpg は最新の 5 枚で、1.jpg が最新であること。いつ Read しても、
+       その時点の最新の画面が読めること。それより古いフレームは frames/interval/ にあること (ファイル名は時刻の
+       ミリ秒)
     """
     buttons = "・".join(BUTTON_ORDER)
     max_hold = f"{MAX_HOLD_SECONDS:g}"

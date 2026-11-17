@@ -25,6 +25,7 @@ def turn_record(**changes: object) -> TurnRecord:
         "session": 2,
         "turn": 3,
         "kind": TurnKind.TURN,
+        "t_wait_start": 10.5,
         "t_sent": 10.5,
         "t_result": 13.2501,
         "input_text": "## 時刻\nt=10.500",
@@ -155,6 +156,8 @@ def test_turn_row_has_the_keys_in_order():
         "session",
         "turn",
         "kind",
+        "t_wait_start",
+        "wait_s",
         "t_sent",
         "t_result",
         "duration_s",
@@ -173,6 +176,24 @@ def test_turn_row_has_the_keys_in_order():
         "frames/interval/000010000.jpg",
     ]
     assert row["errors"] is None
+
+
+def test_turn_row_has_the_wait_before_the_input():
+    # 前のターンの操作の列が終わるのを t=8.2 から待ち、t=10.5 に入力を作った
+    row = turn_row(turn_record(t_wait_start=8.2, t_sent=10.5))
+    assert {key: row.get(key) for key in ("t_wait_start", "wait_s", "t_sent")} == {
+        "t_wait_start": 8.2,
+        "wait_s": 2.3,
+        "t_sent": 10.5,
+    }
+
+
+def test_turn_row_of_a_turn_without_wait_has_zero_wait():
+    row = turn_row(turn_record(t_wait_start=10.5, t_sent=10.5))
+    assert {key: row.get(key) for key in ("t_wait_start", "wait_s")} == {
+        "t_wait_start": 10.5,
+        "wait_s": 0.0,
+    }
 
 
 def test_turn_row_of_an_invalid_turn_lists_the_errors():

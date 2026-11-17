@@ -81,6 +81,7 @@ from switch2_layers.deep.deep_types import DeepRunner
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame, FrameBuffer
 from switch2_layers.frames.frame_store import FrameStore, latest_frame_t
+from switch2_layers.frames.latest_frames import LatestFrames
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
 from switch2_layers.hardware.capture_source import CaptureSource, LatestFrameReader
 from switch2_layers.hardware.capture_watcher import (
@@ -495,9 +496,11 @@ class LayersApp:
            (mode と Orchestrator 型の 6 つの値を含む)
         4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個),
            on_operation=OperationLog.write) を作る。surface.surface_output_gate.SurfaceOutputGate は通さない
-        5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …)、CaptureWatcher を作る
-           (advisor 型と同じ。on_frame は渡さない)
-        6〜7 は orchestrator.orchestrator_assembly.build_orchestrator_loops で作る。
+        5. frames.latest_frames.LatestFrames(paths) を作り、FrameBuffer、FrameStore(interval_fps, interval_width,
+           latest_frames = その LatestFrames)、CaptureSource(frame_reader, …)、CaptureWatcher を作る (LatestFrames を
+           渡すほかは advisor 型と同じ。on_frame は渡さない)。一定間隔のフレームを保存するたびに、frames/latest/ を置き換える
+        6〜7 は orchestrator.orchestrator_assembly.build_orchestrator_loops で作る (latest_frames には 5 の
+           LatestFrames.snapshot を渡す)。
         6. orchestrator.orchestrator_controller.OrchestratorController(OrchestratorParts(pad_output = 4 の PadOutput,
            jev = parts.monitor, latest_frame = FrameBuffer.latest, clock, paths),
            OrchestratorSettings(monitor_threshold, max_monitor_errors))
@@ -584,7 +587,7 @@ class LayersApp:
         4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個),
            on_operation=OperationLog.write) を作る
         5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …,
-           on_frame=parts.on_frame)、CaptureWatcher を作る
+           on_frame=parts.on_frame)、CaptureWatcher を作る (FrameStore に LatestFrames を渡さず、frames/latest/ を書かない)
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            progress_state は progress/state.json の値 (progress.progress_state.read_progress_state)、
            is_play は段階が play かを返す関数、current_phase は段階とその段階に入った時刻の組を返す関数 (段階に入る前は
@@ -873,13 +876,16 @@ class LayersApp:
         paths: RunPaths,
         clock: RunClock,
         built: _PartsBuiltSoFar,
+        latest_frames: LatestFrames | None = None,
     ) -> _OutputAndCapture:
         """start の 4 と 5 (advisor 型と Orchestrator 型で同じ) を行う。作った部品は、作った直後に built に記録する。
 
         4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個), clock = parts.monotonic,
            on_operation = OperationLog.write)
-        5. FrameBuffer、FrameStore(paths, interval_fps, interval_width)、CaptureSource(frame_reader, clock, FrameBuffer,
-           FrameStore, on_frame = on_frame)、CaptureWatcher(frame_reader.is_ended, CaptureSource.latest_t, clock)
+        5. FrameBuffer、FrameStore(paths, interval_fps, interval_width, latest_frames = latest_frames)、
+           CaptureSource(frame_reader, clock, FrameBuffer, FrameStore, on_frame = on_frame)、
+           CaptureWatcher(frame_reader.is_ended, CaptureSource.latest_t, clock)
+        latest_frames は Orchestrator 型だけが渡す (advisor 型は None で、frames/latest/ を書かない)。
         """
         settings = self.settings
         operation_log = OperationLog(paths.operations_log, clock)
@@ -891,7 +897,12 @@ class LayersApp:
         )
         built.pad_output = pad_output
         frame_buffer = FrameBuffer()
-        frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
+        frame_store = FrameStore(
+            paths,
+            settings.interval_fps,
+            settings.interval_width,
+            latest_frames=latest_frames,
+        )
         built.frame_store = frame_store
         capture_source = CaptureSource(
             parts.frame_reader,
@@ -933,7 +944,11 @@ class LayersApp:
         )
         built.run_log = run_log
         # 4〜5: 操作の送信 (surface の関門を通さない 17 個のボタン) とキャプチャーのフレーム
-        shared = self._build_output_and_capture(parts, None, paths, clock, built)
+        # (一定間隔のフレームの最新の 5 枚を frames/latest/ に置き換え続ける)
+        latest_frames = LatestFrames(paths)
+        shared = self._build_output_and_capture(
+            parts, None, paths, clock, built, latest_frames
+        )
         # 6〜7: 操作の実行と監視・主ループ
         loops = build_orchestrator_loops(
             OrchestratorLoopParts(
@@ -942,6 +957,7 @@ class LayersApp:
                 run_log=run_log,
                 pad_output=shared.pad_output,
                 latest_frame=shared.frame_buffer.latest,
+                latest_frames=latest_frames.snapshot,
                 monitor=parts.monitor,
                 initial_instruction=parts.initial_instruction,
                 on_stop=self.request_stop,

@@ -12,10 +12,14 @@ orchestrator/sessions.jsonl の行 (キーはこの順):
     要約       {"t", "event": "compact", "session", "metadata": compact_boundary の行の compact_metadata (無ければ null)}
 orchestrator/turns.jsonl の行 (1 ターンに 1 行。result を受け取ったとき、またはターンを終えずにセッションを終えたときに
 書く。キーはこの順):
-    {"session", "turn": セッションの中の番号 (1 始まり), "kind": TurnKind の値, "t_sent", "t_result": result を受け取った
+    {"session", "turn": セッションの中の番号 (1 始まり), "kind": TurnKind の値,
+     "t_wait_start": この入力を作る前に、前のターンの操作の列が終わるのを待ち始めた時刻 (待たなかったら t_sent と同じ),
+     "wait_s": t_sent - t_wait_start (待った秒数。小数第 3 位に丸める。待たなかったら 0),
+     "t_sent": この入力を作った時刻 (待ちの後。--turn-timeout はここから測る), "t_result": result を受け取った
      時刻 (受け取らなかったら null), "duration_s": t_result - t_sent (小数第 3 位に丸める。受け取らなかったら null),
-     "input_text": 送ったテキストのブロックの文 (画像のラベルは除く), "images": 送った画像の実行ディレクトリーからの
-     相対パス (古い順), "response_json": 最後の assistant の文の、最後の ```json のブロックの中身 (無ければ null),
+     "input_text": 送ったテキストのブロックの文 (画像のラベルは除く), "images": 送った画像の元になった一定間隔の
+     フレームの、frames/interval/ の画像の実行ディレクトリーからの相対パス (古い順。frames/latest/ のパスではない),
+     "response_json": 最後の assistant の文の、最後の ```json のブロックの中身 (無ければ null),
      "errors": parse_decision の誤りの説明のリスト (誤りが無い・読まなかったら null), "outcome": TurnOutcome の値,
      "usage_tokens": result を受け取った時点 (受け取らなかったら、ターンを終えた時点) のセッションの使用量}
 """
@@ -75,11 +79,12 @@ class TurnOutcome(StrEnum):
 
 @dataclass(frozen=True)
 class TurnRecord:
-    """turns.jsonl の 1 行の中身 (モジュールの docstring の各キーと同じ名前)。"""
+    """turns.jsonl の 1 行の中身 (モジュールの docstring の各キーと同じ名前。wait_s と duration_s は turn_row が計算する)。"""
 
     session: int
     turn: int
     kind: TurnKind
+    t_wait_start: float
     t_sent: float
     t_result: float | None
     input_text: str
@@ -158,8 +163,8 @@ def compact_row(t: float, session: int, metadata: object | None) -> dict[str, ob
 def turn_row(record: TurnRecord) -> dict[str, object]:
     """turns.jsonl の 1 行の辞書を、モジュールの docstring のキーの順で返す。
 
-    duration_s は t_result があれば round(t_result - t_sent, 3)、無ければ None。kind と outcome は値の文字列、images と
-    errors はリスト (errors が None なら None) にする。
+    wait_s は round(t_sent - t_wait_start, 3)。duration_s は t_result があれば round(t_result - t_sent, 3)、無ければ
+    None。kind と outcome は値の文字列、images と errors はリスト (errors が None なら None) にする。
     """
     duration_s = (
         None if record.t_result is None else round(record.t_result - record.t_sent, 3)

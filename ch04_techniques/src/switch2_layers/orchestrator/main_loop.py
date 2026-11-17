@@ -1,7 +1,8 @@
 """Orchestrator 型の主ループ (OrchestratorMainLoop)。
 
-主ループの Claude Code (claude -p) を stream-json の入出力で開いたままにし、前の判断が終わるとすぐ次の画面と出来事を
-渡し、各ターンの最後の JSON を、操作の実行と監視の部品 (OrchestratorController。parse_decision と apply) に渡す。
+主ループの Claude Code (claude -p) を stream-json の入出力で開いたままにし、前の判断の操作の列が終わって画面が
+落ち着いたら (actions が空なら、すぐ) 次の画面と出来事を渡し、各ターンの最後の JSON を、操作の実行と監視の部品
+(OrchestratorController。parse_decision と apply) に渡す。
 セッションの使用量がしきい値を超えたら、引き継ぎを書かせてからセッションを入れ替える。
 
 使う部品:
@@ -9,19 +10,20 @@
     parent_skill_names       親のディレクトリーのスキルの名前 (skillOverrides で off にする)
     skill_copy               本体の操作のスキルとゲームの内容のスキルを .claude/skills/ に写す
     orchestrator_instructions  変わらない指示 (--append-system-prompt) と引き継ぎの依頼の文
+    action_settle            前のターンの操作の列が終わって落ち着くのを待つ
     turn_input               入力のテキストと画像
     claude_stream_session    子プロセスの起動・標準入力・標準出力・終了
     stream_messages          stream-json の行の読み方と、標準入力に送る行の形
     session_record           orchestrator/sessions.jsonl・turns.jsonl
-入れ替えの間も、操作の実行と監視の部品は動き続ける (前のセッションの actions の残りは、そのまま実行される)。
-時計 (RunClock)・子プロセスの起動・シグナルの送り先・環境変数・本体の操作のスキルの写す元を差し替えられ、テストでは
-偽の stream-json を返すプロセスと、時間を進められる時計を使う。
+入れ替えの間も、操作の実行と監視の部品は動き続ける。
+時計 (RunClock)・最新のフレームの受け取り方・子プロセスの起動・シグナルの送り先・環境変数・本体の操作のスキルの写す元を
+差し替えられ、テストでは偽の stream-json を返すプロセスと、時間を進められる時計を使う。
 """
 
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -29,7 +31,7 @@ from typing import Protocol
 
 from switch2_layers.deep.claude_stream_log import assistant_text, is_result_message
 from switch2_layers.error_text import describe_exception
-from switch2_layers.frames.frame_store import read_frame_records
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.orchestrator.claude_session_command import (
     ClaudeSessionOptions,
@@ -45,7 +47,10 @@ from switch2_layers.orchestrator.claude_stream_session import (
     StreamProcessStarter,
 )
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
-from switch2_layers.orchestrator.orchestrator_events import OrchestratorEvents
+from switch2_layers.orchestrator.orchestrator_events import (
+    MainActionsRun,
+    OrchestratorEvents,
+)
 from switch2_layers.orchestrator.orchestrator_instructions import (
     HANDOFF_NOTE,
     handoff_request_text,
@@ -83,7 +88,6 @@ from switch2_layers.orchestrator.turn_input import (
     build_turn_text,
     carry_over_events,
     list_note_files,
-    read_turn_images,
     select_turn_frames,
 )
 from switch2_layers.progress.progress_state import read_progress_state
@@ -143,11 +147,19 @@ class DecisionParser(Protocol):
 class DecisionApplier(Protocol):
     """主ループが使う、操作の実行と監視の部品 (OrchestratorController) の部分。
 
-    run と set_started は、組み立て (app) が別のスレッドで呼ぶ。主ループは apply と take_events だけを呼ぶ。
+    run と set_started は、組み立て (app) が別のスレッドで呼ぶ。主ループは apply・main_actions_run・take_events だけを
+    呼ぶ。
     """
 
     def apply(self, decision: Decision) -> None:
-        """マクロ・監視・操作を当てる。"""
+        """マクロ・監視・操作を当てる。空でない actions なら、戻る前に main_actions_run をその列のものにする。"""
+        ...
+
+    def main_actions_run(self) -> MainActionsRun | None:
+        """最後に受け付けた主ループの空でない actions の操作の列の時刻を返す (無ければ None)。出来事は取り出さない。
+
+        主ループは、前のターンの操作の列が終わるのを待つ間、READ_POLL_S 秒ごとに呼ぶ (action_settle.wait_for_settled_actions)。
+        """
         ...
 
     def take_events(self) -> OrchestratorEvents:
@@ -160,8 +172,8 @@ class OrchestratorMainLoopSettings:
     """主ループのしきい値と上限。
 
     rotate_tokens         セッションの使用量がこれを超えたら、引き継ぎの依頼を送って入れ替える (--rotate-tokens)
-    turn_timeout_s        1 ターン (入力を作った時刻から result まで。標準入力への書き込みを待つ時間を含む) の上限の
-                          秒数 (--turn-timeout)
+    turn_timeout_s        1 ターン (入力を作った時刻から result まで。標準入力への書き込みを待つ時間を含み、入力を作る
+                          前に前のターンの操作の列が終わるのを待つ時間は含まない) の上限の秒数 (--turn-timeout)
     max_decision_errors   JSON の誤りが続けてこの回数になったら、実行全体を止める (--max-decision-errors)
     close_grace_s         セッションを終えるときに、標準入力を閉じてから SIGTERM まで・SIGTERM から SIGKILL までに
                           待つ秒数 (既定 claude_stream_session.SESSION_CLOSE_GRACE_S)
@@ -182,6 +194,8 @@ class OrchestratorMainLoopParts:
     claude                 Claude Code の起動の設定 (claude のパス・モデル・effort・隠す環境変数)
     parse_decision         応答の本文から JSON を読む関数 (DecisionParser の渡し方。テストではフェイク)
     controller             操作の実行と監視の部品 (テストではフェイク)
+    latest_frames          最新の一定間隔のフレームの画像を、新しい順にまとめて返す関数 (run では
+                           frames.latest_frames.LatestFrames.snapshot。テストではフェイク)。入力を作るときに 1 回呼ぶ
     initial_instruction    人の初期指示。無ければ None (各セッションの最初の入力に入れる)
     run_log                run.jsonl (orchestrator_session_start・orchestrator_session_end・
                            orchestrator_decision_error を書く)
@@ -197,6 +211,7 @@ class OrchestratorMainLoopParts:
     claude: ClaudeSessionOptions
     parse_decision: DecisionParser
     controller: DecisionApplier
+    latest_frames: Callable[[], Sequence[LatestFrame]]
     initial_instruction: str | None
     run_log: RunLog
     on_stop: Callable[[str], None]
@@ -229,9 +244,10 @@ class _SentTurn:
 
     number        セッションの中の番号 (1 始まり)
     kind          ふつうのターンか、引き継ぎの依頼か
-    t_sent        送った時刻
+    t_wait_start  この入力を作る前に、前のターンの操作の列が終わるのを待ち始めた時刻 (待たなかったら t_sent と同じ)
+    t_sent        入力を作った時刻 (待ちの後。--turn-timeout はここから測る)
     input_text    送ったテキスト
-    images        送った画像の実行ディレクトリーからの相対パス
+    images        送った画像の元になった一定間隔のフレームの、frames/interval/ の画像の実行ディレクトリーからの相対パス
     events        その入力に載せた出来事 (引き継ぎの依頼では None)。result を受け取れなければ繰り越す
     last_text     そのターンの最後の assistant の文 (まだ無ければ None)
     result_is_error  届いた result の is_error が true なら True
@@ -239,6 +255,7 @@ class _SentTurn:
 
     number: int
     kind: TurnKind
+    t_wait_start: float
     t_sent: float
     input_text: str
     images: tuple[str, ...]
@@ -286,12 +303,13 @@ class OrchestratorMainLoop:
            orchestrator_session_start {"session"} を書く。起動できなければ (OSError)、開始の行は書かずに、終了の行
            (理由 exit、returncode null、error に説明) と orchestrator_session_end を書き、最初のターンを終えずに終わった
            セッションとして数える
-        2. 最初の入力: events = turn_input.carry_over_events(繰り越した出来事, controller.take_events()) とし、
+        2. 最初の入力 (待たずに作る): events = turn_input.carry_over_events(繰り越した出来事, controller.take_events()) とし、
            turn_input.build_session_opening_text(SessionOpening(initial_instruction, list_note_files(paths.notes_dir),
            notes/handoff.md の中身 (notes.note_reader.read_note_text))) と build_turn_text(TurnContext(clock.now(),
-           events, read_progress_state(paths.progress_state), 前の JSON の誤り, 写さなかったスキル)) を改行でつないだ
-           テキストと、select_turn_frames(frames.jsonl の記録, None, now) (最新の 1 枚) の画像を、build_turn_content の
-           内容にして送る。入力を作ったら、繰り越した出来事を None に戻す
+           events, read_progress_state(paths.progress_state), 前の JSON の誤り, 写さなかったスキル,
+           previous_actions=None)) を改行でつないだテキストと、select_turn_frames(latest_frames()) (入力を作るときに
+           latest_frames を 1 回呼んで受け取った、同じ時点の最新の 5 枚。古い順) の画像を、build_turn_content の内容に
+           して送る。turns.jsonl の t_wait_start は t_sent と同じ (待たない)。入力を作ったら、繰り越した出来事を None に戻す
            入力の送り方: ClaudeStreamSession.send_in_background で書き込み用のスレッドに書かせ、書き終わるのを
            READ_POLL_S 秒ごとに、停止の合図と turn_timeout_s を確かめながら待つ (子プロセスが標準入力を読まなくなっても、
            主ループのスレッドを止めないため)。書き込みに失敗したとき、または入力を作った時刻から turn_timeout_s 秒の
@@ -324,11 +342,21 @@ class OrchestratorMainLoop:
                回数が max_decision_errors に達したら、on_stop(decision_failure_reason(回数)) を呼び、セッションを終えて
                (理由 close) 戻る。
                stop が立っていれば、セッションを終えて (理由 close) 戻る。
+               次の入力を作る時点: 空でない actions の Decision を apply したら、待ち始めた時刻 (clock.now()) を覚え、
+               action_settle.wait_for_settled_actions(controller.main_actions_run, clock, stop, READ_POLL_S) で、
+               その操作の列 (マクロとコードの手順を含む) が終わり、最後にボタンとスティックを離してから
+               action_settle.ACTIONS_SETTLE_S 秒たつまで待つ (監視の操作は待たない)。待っている間に stop が立ったら、
+               待つのをやめ、次の入力を送らずにセッションを終えて (理由 close) 戻る (次の入力の行は書かない)。
+               actions が空の Decision と、JSON の誤り (DecisionError) のときは待たない (待ち始めた時刻は、次の入力を
+               作った時刻と同じ)。引き継ぎの依頼も次の入力なので、同じく待ってから送る。
                使用量が rotate_tokens を超えていれば (ちょうどなら超えない)、orchestrator_instructions.
                handoff_request_text() のテキストだけの入力 (画像を付けず、take_events も呼ばない。出来事は次の
                セッションの最初の入力に入る) を、引き継ぎの依頼として送る。
-               そうでなければ、すぐ次の入力を送る (2 と同じ材料で、セッションの開始の節は付けず、画像は
-               select_turn_frames(記録, 前の入力を送った時刻, now)。出来事も 2 と同じく carry_over_events で作る)
+               そうでなければ、次の入力を送る (2 と同じ材料で、セッションの開始の節は付けず、TurnContext の
+               previous_actions は待った列の時刻 (待たなかったら None)。画像は 2 と同じく select_turn_frames(
+               latest_frames())。出来事も 2 と同じく carry_over_events で作る)。
+               どちらの入力も、t_sent (入力を作った時刻) は待ちの後の clock.now() で、turn_timeout_s はここから測る。
+               turns.jsonl のその入力の行には、覚えた待ち始めた時刻を t_wait_start に書く
              引き継ぎの依頼: JSON は読まない (parse_decision も apply も呼ばず、JSON の誤りの回数も変えない)。
                turns.jsonl に行 (kind HANDOFF、outcome HANDOFF) を書き、セッションを終える (理由 rotate)
         5. ターンを終えずにセッションを終えるとき (turns.jsonl に、t_result が null の行を書く):
@@ -343,7 +371,8 @@ class OrchestratorMainLoop:
         待たずに SIGTERM を送る)。終えたら、sessions.jsonl に終了の行、run.jsonl に
         orchestrator_session_end {"session", "reason", "returncode", "usage_tokens"} を書く。
     セッションの続け方:
-        - 理由 rotate・timeout・exit で終えたら、すぐ次のセッションを始める (引き継ぎは notes/ にあるものだけ)
+        - 理由 rotate・timeout・exit で終えたら、すぐ次のセッションを始める (引き継ぎは notes/ にあるものだけ)。
+          新しいセッションの最初の入力は、前のターンの操作の列を待たずに作る (2)
         - 最初のターンの result を受け取る前に終わったセッション (起動できない・送れない・timeout・exit・最初の
           ターンの result の is_error が true) が、続けて MAX_SESSION_FAILURES 回になったら、
           on_stop(session_failure_reason(回数)) を呼んで戻る。最初のターンの result (is_error が true のものを除く) を
@@ -523,7 +552,8 @@ class OrchestratorMainLoop:
     ) -> _SentTurn | _SendFailure:
         """ふつうのターンの入力を作って送り、送ったターンを返す。送れなければ出来事を繰り越して _SendFailure を返す。
 
-        first なら、セッションの開始の節を付け、画像を最新の 1 枚にする (セッションの流れの 2)。
+        first なら、セッションの開始の節を付ける (セッションの流れの 2)。画像は first に関わらず
+        select_turn_frames(latest_frames()) (最新の 5 枚)。
         """
         parts = self.parts
         paths = parts.paths
@@ -546,13 +576,11 @@ class OrchestratorMainLoop:
                 handoff_text=read_note_text(paths.notes_dir, HANDOFF_NOTE),
             )
             text = f"{build_session_opening_text(opening)}\n{text}"
-        frames = select_turn_frames(
-            read_frame_records(paths), None if first else session.previous_sent_t, now
-        )
-        images = read_turn_images(paths, frames)
+        images = select_turn_frames(parts.latest_frames())
         turn = _SentTurn(
             number=session.turn_count + 1,
             kind=TurnKind.TURN,
+            t_wait_start=now,
             t_sent=now,
             input_text=text,
             images=tuple(image.file for image in images),
@@ -575,6 +603,7 @@ class OrchestratorMainLoop:
         turn = _SentTurn(
             number=session.turn_count + 1,
             kind=TurnKind.HANDOFF,
+            t_wait_start=now,
             t_sent=now,
             input_text=text,
             images=(),
@@ -788,6 +817,7 @@ class OrchestratorMainLoop:
                 session=session.number,
                 turn=turn.number,
                 kind=turn.kind,
+                t_wait_start=turn.t_wait_start,
                 t_sent=turn.t_sent,
                 t_result=t_result,
                 input_text=turn.input_text,

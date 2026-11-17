@@ -1,8 +1,10 @@
 """Orchestrator 型の操作の実行と監視 (OrchestratorController)。主ループ (Claude Code) の Decision を当て、操作の列と
 「画面の条件 → 操作」の Jev の監視を 1 つのループ (run) で動かす。
 
-主ループのスレッドは、parse_decision の結果を apply で渡し、次の入力を作るときに take_events で出来事を取り出す。
-apply・take_events・macro_names・set_started はどのスレッドから呼んでもよい (状態は 1 つのロックの中で変える)。
+主ループのスレッドは、parse_decision の結果を apply で渡し、前のターンの操作の列が終わるのを main_actions_run で
+確かめてから、次の入力を作るときに take_events で出来事を取り出す。
+apply・take_events・main_actions_run・macro_names・set_started はどのスレッドから呼んでもよい (状態は 1 つのロックの
+中で変える)。
 PadOutput への送信と orchestrator/monitor.jsonl への書き込みは、run のループのスレッドだけが行う。Jev への要求は、
 ループが別のスレッドで送る (要求の応答を待つ間も、主ループの操作をすぐ始めるため)。
 
@@ -15,9 +17,10 @@ apply (decision_parser.parse_decision を通った Decision を受け取る):
        新しい監視には、1 から始まる連番の世代を振る (同じ内容の監視を作り直したときも新しい番号。monitor_loop の
        「監視の世代」)。MonitorStop なら今の監視を止める。None なら変えない。止めた監視の操作の列は捨てる (次の回りで
        中立に戻す)。止めた監視の MonitorEnd は知らせに入れない
-    4. 操作: decision.actions が空なら何もしない (実行中の操作の列も止めない)。空でなければ、主ループの操作の残りの数
-       (実行中の操作と、まだ始めていない操作を含む) を捨てた操作の数に足し、actions を expand_actions で展開した列を
-       次の回りで始める主ループの列にする (残りの操作の数は、この時点で新しい列の数になる)
+    4. 操作: decision.actions が空なら何もしない (実行中の操作の列も止めない。main_actions_run も変えない)。空でなければ、
+       主ループの操作の残りの数 (実行中の操作と、まだ始めていない操作を含む) を捨てた操作の数に足し、actions を
+       expand_actions で展開した列を次の回りで始める主ループの列にする (残りの操作の数は、この時点で新しい列の数になる)。
+       main_actions_run は、apply が戻る前に、この新しい列の時刻 (どれもまだ None) に置き換える
     PadOutput には送らない。
 run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を済ませてから 5 で待つ):
     1. set_started の後なら、apply の変更を送信に当てる: 主ループの新しい列があれば、実行中の列 (主ループか監視) を
@@ -70,6 +73,17 @@ run のループの 1 回の回り (stop が立つまで繰り返す。1〜4 を
         と、空の列の確かめの直後に止まったとき)。この列は最後まで実行しないので、case_finished も MonitorEnd も無い。
         stop_output は別のスレッドから、どの確かめと送信の間にも入るため、確かめを足しても食い違いは無くせない。
         停止の後は要求を送らないので、記録と実際の送信が食い違うのは、停止 1 回につき多くても 1 回の当たりだけ
+主ループの操作の列の時刻 (main_actions_run。orchestrator_events.MainActionsRun):
+    最後に apply で受け付けた空でない actions の列 1 つについて、次の時刻を持つ (時刻は clock.now() の値)。
+        started_t    run のループの回りの 1 でその列を始めた時刻 (ActionExecutor.start を呼んだ時刻。出力が止まっていて
+                     始められなかったときも、その時刻)
+        released_t   その列の押す操作を離した時刻と、その列を途中で捨てたときに中立に戻した時刻のうち、最後のもの
+                     (ActionExecutor の last_release_t のうち、その列を始めた後に、その列が離したもの。列を始めるときに
+                     前の列 (監視の列など) を捨てて中立に戻した時刻は含めない)
+        ended_t      その列を最後まで実行し終えた回り (ActionExecutor.take_finished_owner が orchestrator を返した回り) の
+                     clock.now()、またはその列を途中で捨てた時刻 (出力が止まったときなど)。展開した列が空なら started_t と
+                     同じ時刻
+    監視の列 (source が monitor) は、どの時刻も変えない (主ループは監視の操作の終わりを待たない)。
 take_events:
     前回の呼び出し以降の case_hits・monitor_ends・discarded_action_count・blocked_buttons (主ループと監視の両方の操作で
     外したボタン) を返して空にし、running・remaining_action_count・macros・monitor は呼んだ時点の値を返す
@@ -112,6 +126,7 @@ from switch2_layers.orchestrator.monitor_loop import (
 from switch2_layers.orchestrator.monitor_record import MonitorLog, MonitorRecord
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    MainActionsRun,
     MonitorEnd,
     OrchestratorEvents,
 )
@@ -315,6 +330,12 @@ class OrchestratorController:
             self._discarded = 0
             self._blocked = set()
             return events
+
+    def main_actions_run(self) -> MainActionsRun | None:
+        """最後に apply で受け付けた、主ループの空でない actions の操作の列の時刻を返す (モジュールの docstring の
+        「主ループの操作の列の時刻」)。まだ受け付けていなければ None。出来事は取り出さない (何度呼んでもよい)。
+        """
+        raise NotImplementedError
 
     def macro_names(self) -> frozenset[str]:
         """今登録しているマクロの名前の集合を返す。出来事は取り出さない。

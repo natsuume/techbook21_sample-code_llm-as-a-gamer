@@ -292,6 +292,8 @@ def test_run_with_fake_layers_for_a_few_seconds(tmp_path):
     assert sum(row["kind"] == "interval" for row in frame_rows) >= 5
     assert any(row["kind"] == "surface" for row in frame_rows)
     assert all((root / row["file"]).is_file() for row in frame_rows)
+    # advisor 型では frames/latest/ を書かない (Orchestrator 型の run だけ)
+    assert not (root / "frames" / "latest").exists()
 
     # 操作: 最後は中立にして出力を止めた
     operation_rows = read_rows(root / "operations.jsonl")

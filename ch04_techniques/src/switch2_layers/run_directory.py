@@ -6,6 +6,9 @@
     frames/interval/<tミリ秒9桁>.jpg          一定間隔のフレーム
     frames/surface/<tミリ秒9桁>.jpg           surface に送った画像 (同じ t で書き込んだ box が違う 2 つ目以降は
                                             <tミリ秒9桁>-2.jpg・<tミリ秒9桁>-3.jpg …)
+    frames/latest/<n>.jpg                   一定間隔のフレームの最新の 5 枚 (n は 1〜5。1 が最新)。Orchestrator 型の
+                                            run だけで、frames.latest_frames.LatestFrames が最初の 1 枚を置くときに
+                                            frames/latest/ を作って書く
     surface.jsonl                           surface の 1 回ごとの記録
     surface_requests.jsonl                  surface が Jev に送った要求の記録 (surface.surface_record)
     safety.jsonl                            安全の確かめの 1 回ごとの記録 (safety.safety_record)
@@ -68,6 +71,8 @@ FRAMES_LOG_FILE = "frames.jsonl"
 FRAMES_DIR = "frames"
 INTERVAL_FRAMES_DIR = "interval"
 SURFACE_FRAMES_DIR = "surface"
+# 一定間隔のフレームの最新の数枚を、決まった名前 <n>.jpg で置き換え続けるディレクトリー (frames.latest_frames)
+LATEST_FRAMES_DIR = "latest"
 SURFACE_LOG_FILE = "surface.jsonl"
 SURFACE_REQUESTS_LOG_FILE = "surface_requests.jsonl"
 SAFETY_LOG_FILE = "safety.jsonl"
@@ -139,6 +144,18 @@ class RunPaths:
     def surface_frames_dir(self) -> Path:
         """root / FRAMES_DIR / SURFACE_FRAMES_DIR"""
         return self.root / FRAMES_DIR / SURFACE_FRAMES_DIR
+
+    @property
+    def latest_frames_dir(self) -> Path:
+        """root / FRAMES_DIR / LATEST_FRAMES_DIR"""
+        return self.root / FRAMES_DIR / LATEST_FRAMES_DIR
+
+    def latest_frame(self, number: int) -> Path:
+        """最新の一定間隔のフレームのうち number 番目 (1 始まり。1 が最新) の画像のパス
+        latest_frames_dir / `<number>.jpg` (例: 1 → frames/latest/1.jpg)。number が 1 未満なら ValueError。"""
+        if number < 1:
+            raise ValueError(f"latest frame number must be 1 or more: {number}")
+        return self.latest_frames_dir / f"{number}{FRAME_FILE_SUFFIX}"
 
     @property
     def surface_log(self) -> Path:
@@ -310,7 +327,8 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
     - 作るのは mkdir(exist_ok=False) で行い、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
     - 中に frames/interval/、frames/surface/、middle/、deep/、progress/ も作る。notes/ は write_initial_notes
       (advisor 型) か create_empty_notes (Orchestrator 型) で作る。
-      progress/state.json は作らない (最初の一定間隔のフレームの値を計算したときに progress.progress_loop が書く)
+      progress/state.json は作らない (最初の一定間隔のフレームの値を計算したときに progress.progress_loop が書く)。
+      frames/latest/ も作らない (Orchestrator 型の run で、frames.latest_frames.LatestFrames が作る)
     """
     runs_dir.mkdir(parents=True, exist_ok=True)
     base_name = run_directory_name(started_at)
