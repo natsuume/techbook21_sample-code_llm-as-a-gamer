@@ -1143,14 +1143,16 @@ uv run --env-file .env switch2-layers run --mode delegate --instruction-file ins
   "actions": [{"type": "press", "buttons": ["A"]}],
   "macros": {"set": {
     "attack": [{"type": "press", "buttons": ["B"]}],
-    "move_up": [{"type": "press", "buttons": ["UP"]}]
+    "evade": [{"type": "press", "buttons": ["LEFT"], "seconds": 0.3}],
+    "approach_and_attack": [{"type": "press", "buttons": ["RIGHT"], "seconds": 0.3}, {"type": "press", "buttons": ["B"]}]
   }},
   "delegate": {"action": "start",
-    "tasks": ["最重要: 自分の HP を 0 にせずに、敵をすべて倒す", "敵の攻撃は、可能なら避ける"],
-    "cautions": ["敵が腕を振り上げた後、横一列に進む衝撃波が来る"],
+    "tasks": ["最重要: 自分の HP を 0 にせずに、敵をすべて倒す", "敵の攻撃は、可能ならよける"],
+    "cautions": ["敵は攻撃の前に一瞬止まり、その後にまっすぐ進む弾を撃つ"],
     "choices": [
-      {"name": "attack", "description": "前にいる敵を攻撃する"},
-      {"name": "move_up", "description": "上に 1 マス移動する"}
+      {"name": "attack", "description": "敵が目の前にいるときに、敵を攻撃する"},
+      {"name": "evade", "description": "敵の攻撃が自分に向かってくるときに、後ろに下がってよける"},
+      {"name": "approach_and_attack", "description": "敵が離れているときに、敵に近づいてから攻撃する"}
     ]}
 }
 ```
@@ -1177,6 +1179,8 @@ uv run --env-file .env switch2-layers run --mode delegate --instruction-file ins
 - 敵の攻撃を避けることが要る場面では、そのことを `tasks` に書く
 - 敵の攻撃の動きを観測できたら、`cautions` に書く
 - タスク・注意事項・行動の説明に、ゲーム名や作品に固有の名前 (登場人物・地名など) を書かない
+- 行動は、ボタンの名前ではなく、意図 (近づく・離れる・よける・攻撃するなど) が分かる名前と説明にし、説明にはその行動を選ぶ場面も書く
+- Jev は攻撃の行動を選びやすく、移動だけの行動を選びにくいことがあるため、位置を変える行動は、移動と攻撃を 1 つにしたマクロにもできる
 - 委任中は、最上位の `actions` が捨てられる。取り返すときは `{"action": "stop"}` を書く
 
 #### 委任中の主ループ
@@ -1201,7 +1205,7 @@ uv run --env-file .env switch2-layers run --mode delegate --instruction-file ins
 
 要求の state には、役割の説明、`tasks`、`cautions`、今の委任で直近に選んで始めた行動 (最大 5 件。行動の名前と始めた時刻)、最新の 5 枚の画像を入れます。画像は、一定間隔のフレーム (`--interval-fps`) の直近 5 枚と同じ時刻のフレームを、元のフレームから幅 `--delegate-image-width` で作ります。時刻や枠は書き込まず、古い順に並べて、時刻のラベルを付けます。元のフレームは直近の 3 秒分だけを持つため、`--interval-fps` を下げて 5 枚が 3 秒より前にさかのぼると、残っている分だけを送ります。
 
-問いは Choice の 1 問で、選択肢は `none` (何もしない)、主ループが書いた行動 (書いた順。選択肢の名前はマクロの名前)、`return_control` (操作を返す) の順です。Jev は先頭の選択肢に寄ることがあるため、先頭を何もしない `none` にしています。答えは、確率がいちばん高い選択肢 (同じ確率なら先の選択肢) で決めます。
+問いは Choice の 1 問で、選択肢は `none` (何もしない)、主ループが書いた行動 (書いた順。選択肢の名前はマクロの名前)、`return_control` (操作を返す) の順です。Jev は先頭の選択肢に寄ることがあるため、先頭を何もしない `none` にしています。答えは、確率がいちばん高い選択肢 (同じ確率なら先の選択肢) で決めます。ただし、いちばん高いのが `none` で、その確率が 0.5 より小さいときは、行動 (`none` と `return_control` 以外) のうち確率がいちばん高いもの (同じ確率なら先の行動) を選びます。行動の確率は行動の数だけ分かれ、何もしない側は `none` の 1 つに集まるため、いちばん高い 1 つだけで決めると、行動の確率の和が大きくても `none` が選ばれ、何もしない時間が続くためです。このときに `return_control` は選びません。
 
 | 選んだ選択肢 | 動き |
 |---|---|

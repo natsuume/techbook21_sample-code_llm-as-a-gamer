@@ -17,7 +17,12 @@
     frames は、送る画像 (古い順)。時刻のラベルは frames.surface_frames.format_frame_label の形 (t=12.345)。
     画像の参照文字列は state の中に 1 回ずつだけ置き、問いの文は画像を state の中のパス `frames` で指す。
 選んだ選択肢 (choose_option):
-    確率がいちばん高い選択肢。同じ確率なら、選択肢の順で先のもの。監視と違い、しきい値は無い。
+    確率がいちばん高い選択肢。同じ確率なら、選択肢の順で先のもの。
+    ただし、いちばん高いのが NONE_OPTION で、その確率が NONE_MIN_PROBABILITY より小さいときは、行動の選択肢
+    (NONE_OPTION と RETURN_CONTROL_OPTION 以外) のうち確率がいちばん高いもの (同じ確率なら先のもの) を選ぶ。
+    行動の確率は選択肢の数だけ分かれ、何もしない側は NONE_OPTION の 1 つに集まるため、いちばん高い 1 つだけで
+    決めると、行動の確率の和が大きくても NONE_OPTION が選ばれ、何もしない時間が続くため。
+    RETURN_CONTROL_OPTION は代わりに選ばない (操作を返すのは、RETURN_CONTROL_OPTION がいちばん高いときだけ)。
 """
 
 from collections.abc import Mapping, Sequence
@@ -45,6 +50,8 @@ RETURN_CONTROL_OPTION_DESCRIPTION = (
 )
 # 行動の名前に使えない選択肢の名前
 RESERVED_OPTION_NAMES: tuple[str, ...] = (NONE_OPTION, RETURN_CONTROL_OPTION)
+# NONE_OPTION がいちばん高いときに、そのまま NONE_OPTION を選ぶ確率の下限 (これより小さければ行動を選ぶ)
+NONE_MIN_PROBABILITY = 0.5
 # state の recent_actions に入れる行動の最大の件数
 MAX_RECENT_PICKS = 5
 # state の中で画像の参照文字列を置くキー (問いの文がこのパスで画像を指す)
@@ -152,8 +159,19 @@ def choose_option(
     """
     if not option_names:
         raise ValueError("option names must not be empty")
-    best = option_names[0]
-    for name in option_names:
+    best = highest_option(probabilities, option_names)
+    if best != NONE_OPTION or probabilities[NONE_OPTION] >= NONE_MIN_PROBABILITY:
+        return best
+    action_names = [name for name in option_names if name not in RESERVED_OPTION_NAMES]
+    if not action_names:
+        return best
+    return highest_option(probabilities, action_names)
+
+
+def highest_option(probabilities: Mapping[str, float], names: Sequence[str]) -> str:
+    """names のうち、probabilities の確率がいちばん高い名前を返す。同じ確率なら names の順で先のもの。"""
+    best = names[0]
+    for name in names:
         # 同じ確率なら、選択肢の順で先のものを残す
         if probabilities[name] > probabilities[best]:
             best = name
