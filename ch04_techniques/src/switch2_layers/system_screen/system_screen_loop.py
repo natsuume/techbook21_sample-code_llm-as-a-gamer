@@ -60,7 +60,10 @@ from switch2_layers.middle.system_screen_types import (
     SystemScreenOutput,
     SystemStepRecord,
 )
-from switch2_layers.notes.system_screen_advice import read_system_screen_advice
+from switch2_layers.notes.system_screen_advice import (
+    advice_for_phase,
+    read_system_screen_advice,
+)
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.system_screen.run_phase import RunPhase
@@ -264,8 +267,8 @@ class SystemScreenLoop:
         6. screen_input = SystemScreenInput(t=clock.now(), goal=PHASE_GOALS[phase], software_name, user_name,
            frame_jpeg=frame を image_width 以下に縮小した JPEG, frame_t=frame.t, judged_screen=照合の結果の screen,
            judged_frame_t=照合の結果の frame_t, history=この段階の履歴, deep_advice=
-           notes.system_screen_advice.read_system_screen_advice(paths.notes_dir) (notes/ の外を指すシンボリックリンク
-           などの読めない文書は無い文書として扱い、空文字列))。t_sent = clock.now() で middle.decide を呼び、
+           notes.system_screen_advice.read_system_screen_advice(paths.notes_dir) を advice_for_phase で目的の値に合う
+           ものだけにしたもの (notes/ の外を指すシンボリックリンクなどの読めない文書と、別の段階で書いた助言は空文字列))。t_sent = clock.now() で middle.decide を呼び、
            戻ったら (例外でも) t_received = clock.now()。middle の記録は
            middle.middle_call_record.take_analyzer_call_details(middle) で受け取る。ここで stop を確かめる
         7. phases.phase_started_t が 2 で読んだ値と違えば (middle を呼んでいる間に段階が変わった)、呼び出しの行だけを
@@ -390,7 +393,10 @@ class SystemScreenLoop:
             judged_screen=judgment.screen,
             judged_frame_t=judgment.frame_t,
             history=tuple(self._history),
-            deep_advice=read_system_screen_advice(self.parts.paths.notes_dir),
+            deep_advice=advice_for_phase(
+                read_system_screen_advice(self.parts.paths.notes_dir),
+                PHASE_GOALS[phase].value,
+            ),
         )
 
     def _handle_middle_error(

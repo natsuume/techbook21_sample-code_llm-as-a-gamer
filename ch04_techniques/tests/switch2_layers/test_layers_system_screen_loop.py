@@ -435,13 +435,14 @@ def test_input_has_the_deep_advice_read_for_each_call(tmp_path):
     assert step(harness) == outcome(SystemScreenStepOutcome.SENT)
     # 呼び出しごとに読み直す
     write_advice(
-        harness, "# 詰まったときの助言\n\n## 本体の画面\n- もっとみる を開く\n"
+        harness,
+        "# 詰まったときの助言\n\n## 本体の画面\n- 段階: prepare (t=9.000)\n- もっとみる を開く\n",
     )
     show(harness)
     assert step(harness) == outcome(SystemScreenStepOutcome.SENT)
     assert [screen_input.deep_advice for screen_input in harness.middle.inputs] == [
         "- 段階: prepare (t=5.000)\n- 指定のソフトは上の段に無い",
-        "- もっとみる を開く",
+        "- 段階: prepare (t=9.000)\n- もっとみる を開く",
     ]
 
 
@@ -449,20 +450,45 @@ def test_input_has_no_deep_advice_through_a_symlink_outside_notes(tmp_path):
     harness = make_harness(
         tmp_path, [output_of(press("home_menu", "DOWN"))], [sent_all(1)]
     )
-    path = write_advice(harness, "## 本体の画面\n- notes の中の助言\n")
+    path = write_advice(harness, "## 本体の画面\n- 段階: prepare\n- notes の中の助言\n")
     show(harness)
     step(harness)
     # notes/ の外を指すシンボリックリンクは、無い文書として扱う
     outside = tmp_path / "outside.md"
-    outside.write_text("## 本体の画面\n- notes の外の助言\n", encoding="utf-8")
+    outside.write_text(
+        "## 本体の画面\n- 段階: prepare\n- notes の外の助言\n", encoding="utf-8"
+    )
     path.unlink()
     path.symlink_to(outside)
     show(harness)
     step(harness)
     assert [screen_input.deep_advice for screen_input in harness.middle.inputs] == [
-        "- notes の中の助言",
+        "- 段階: prepare\n- notes の中の助言",
         "",
     ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        (RunPhase.PREPARE, "- 段階: prepare (t=5.000)\n- もっとみる を開く"),
+        (RunPhase.RECOVER, ""),
+        (RunPhase.CLEAN_UP, ""),
+    ],
+)
+def test_input_has_the_deep_advice_only_for_the_phase_it_was_written_for(
+    tmp_path, phase, expected
+):
+    harness = make_harness(
+        tmp_path, [output_of(press("home_menu", "DOWN"))], [sent_all(1)], phase=phase
+    )
+    # 準備のときに書かれた助言は、復帰と片付けの middle には渡さない
+    write_advice(
+        harness, "## 本体の画面\n- 段階: prepare (t=5.000)\n- もっとみる を開く\n"
+    )
+    show(harness)
+    step(harness)
+    assert harness.middle.inputs[0].deep_advice == expected
 
 
 def test_goal_and_history_follow_the_phase(tmp_path):

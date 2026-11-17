@@ -1068,6 +1068,9 @@ def test_advice_prompt_has_the_rules_of_the_system_screen_section():
     # きっかけが system のジョブはこの節だけを書き直し、ほかのきっかけのジョブはこの節を変えず消さない
     for phrase in ["この節だけを書き直し", "この節を変えず", "消さない"]:
         assert phrase in advice, phrase
+    # ほかのきっかけのジョブは、本体の画面の節より前に書き、この節を文書の最後に保つ
+    for phrase in ["`## 本体の画面` の節より前に書く", "文書の最後に保ち"]:
+        assert phrase in advice, phrase
     # 最初に、書いた時点の段階と、使った最新のフレームの時刻を書く
     for phrase in ["prepare", "recover", "t="]:
         assert phrase in advice, phrase

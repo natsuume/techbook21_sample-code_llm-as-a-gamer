@@ -4,6 +4,7 @@ import pytest
 
 from switch2_layers.notes.system_screen_advice import (
     SYSTEM_SCREEN_ADVICE_HEADING,
+    advice_for_phase,
     parse_system_screen_advice,
     read_system_screen_advice,
 )
@@ -101,3 +102,22 @@ def test_read_treats_a_symlink_outside_notes_as_missing(tmp_path):
     (notes / "advice.md").unlink()
     (notes / "advice.md").symlink_to(inside)
     assert read_system_screen_advice(notes) == SYSTEM_BODY
+
+
+@pytest.mark.parametrize(
+    ("section", "phase_name", "expected_kept"),
+    [
+        ("- 段階: prepare (t=5.000)\n- 一覧を開く", "prepare", True),
+        ("\n- 段階: recover (t=8.000)\n- 再開する", "recover", True),
+        ("- 段階: prepare (t=5.000)\n- 一覧を開く", "recover", False),
+        ("- 段階: prepare (t=5.000)\n- 一覧を開く", "clean_up", False),
+        # 段階の行が無い助言は、どの段階のものか分からないので渡さない
+        ("- 一覧を開く", "prepare", False),
+        ("", "prepare", False),
+    ],
+)
+def test_advice_for_phase_keeps_only_the_advice_written_for_the_phase(
+    section, phase_name, expected_kept
+):
+    expected = section if expected_kept else ""
+    assert advice_for_phase(section, phase_name) == expected

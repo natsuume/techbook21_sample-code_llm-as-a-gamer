@@ -7,7 +7,9 @@
     - 見出しの次の行から、次の `## ` で始まる見出しの行より前までを節の本文とし、前後の空白を除いて返す
     - 見出しの行が無い、または本文が空なら、空文字列を返す
 本体の画面のループ (system_screen.system_screen_loop) が、本体の画面の middle を呼ぶたびに read_system_screen_advice で
-読み、本体の画面の middle の入力 (middle.system_screen_types.SystemScreenInput.deep_advice) に入れる。
+読み、advice_for_phase で今の目的 (prepare・recover・clean_up) に合う助言だけを選んで、本体の画面の middle の入力
+(middle.system_screen_types.SystemScreenInput.deep_advice) に入れる。deep は節の最初の行に、書いた段階を
+「- 段階: <prepare か recover> (…)」の形で書く。
 """
 
 from pathlib import Path
@@ -35,6 +37,18 @@ def parse_system_screen_advice(text: str) -> str:
             body.append(section_line)
         return "\n".join(body).strip()
     return ""
+
+
+def advice_for_phase(section: str, phase_name: str) -> str:
+    """節の本文 section が段階 phase_name (目的の値) のために書かれたものなら section を、そうでなければ空文字列を返す。
+
+    最初の空でない行に「段階: <phase_name>」があるかで決める。I/O を扱わない。準備のときに書かれた助言を、復帰や
+    片付けの middle に渡さないために使う (deep は prepare・recover のときだけ書くため、clean_up ではいつも空になる)。
+    """
+    first_line = next(
+        (line.strip() for line in section.splitlines() if line.strip()), ""
+    )
+    return section if f"段階: {phase_name}" in first_line else ""
 
 
 def read_system_screen_advice(notes_dir: Path) -> str:
