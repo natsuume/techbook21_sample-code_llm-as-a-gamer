@@ -16,7 +16,8 @@ play のときだけ HOME を短押しし、復帰の段階に移る)。
 ループ (MiddleLoop.run) は、最初のフレームが frames.jsonl に載るのを待ってから、理由 interval で最初の実行を始め
 (middle.middle_trigger.MiddleTrigger.first_reasons)、その後は MiddleTrigger.wait_next で、前回の応答 (失敗を含む) の
 後のきっかけ (キューが空になった・取り消しの要求・詰まり・場面転換・一定の間隔) を待って次を始める。analyze が例外を
-出したら、前回の出力を残したまま、その回の理由を次の回に持ち越して (MiddleTrigger.carry_over) 再び呼ぶ。max_errors 回
+出したら、前回の出力を残したまま、その回の理由を次の回に持ち越して (MiddleTrigger.carry_over)、前回の応答から
+interval_s 秒たってから再び呼ぶ (持ち越した理由やほかのきっかけがあっても、失敗の後の間隔は縮めない)。max_errors 回
 続けたら on_stop で全体を止める。
 止める合図は、analyze が戻ったとき (例外を含む)、出力の書き込み (キューの部品の操作の前・middle/state.json・
 notes/scene_labels.json)・middle/map_records.jsonl・middle/calls.jsonl のそれぞれの直前、deep を要求する直前 (種類ごと)

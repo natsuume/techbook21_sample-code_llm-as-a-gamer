@@ -370,6 +370,42 @@ def test_leaving_play_sets_no_current_scene_on_the_task_board(tmp_path, monkeypa
     assert board.paths.root == root
 
 
+class InterruptingMiddle:
+    """middle の偽物。最初の analyze の途中で app に Ctrl+C 相当の停止を求め (片付けに移って play から出る)、
+    フェイクの middle の出力 (場面 FAKE_SCENE_NAME) を返す。"""
+
+    def __init__(self) -> None:
+        self.app: LayersApp | None = None
+        self.calls = 0
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        self.calls += 1
+        if self.calls == 1 and self.app is not None:
+            self.app.request_stop(REASON_INTERRUPTED)
+        return FakeMiddleAnalyzer().analyze(middle_input)
+
+
+def test_middle_call_finished_after_leaving_play_leaves_no_current_scene(
+    tmp_path, monkeypatch
+):
+    recorder = TaskBoardRecorder(monkeypatch)
+    middle = InterruptingMiddle()
+    app = LayersApp(settings(tmp_path), parts(FakeSender(), middle=middle))
+    middle.app = app
+    reason, root = run_app(app, stop_after=None)
+    assert reason == REASON_INTERRUPTED
+    # 片付けに移った後は middle を呼ばない
+    assert middle.calls == 1
+    [clean_up] = [row for row in phase_rows(root) if row["phase"] == "clean_up"]
+    # middle の 1 回の途中で片付けに移り、その回の出力の書き込みが場面を設定し直した
+    assert any(
+        scene_id == "scene-001" and t >= clean_up["t"]
+        for scene_id, t in recorder.scenes
+    )
+    # その回が終わった後に、現在の場面を場面なしに戻す (最後の設定は場面なし)
+    assert recorder.scenes[-1][0] is None
+
+
 def test_home_is_never_sent_to_the_controller(tmp_path):
     sender = FakeSender()
     app = LayersApp(settings(tmp_path), parts(sender, surface=HomePressingSurface()))

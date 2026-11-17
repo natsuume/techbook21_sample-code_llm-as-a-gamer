@@ -13,7 +13,9 @@
     prepare・recover・clean_up では、本体の画面のループ (system_screen.system_screen_loop) が本体の画面の middle に
     目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
     1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送り、
-    タスクのキューの部品の現在の場面を場面なしにする (play に戻ったら、次の middle の出力で場面が設定される)。
+    タスクのキューの部品の現在の場面を場面なしにする (play に戻ったら、次の middle の出力で場面が設定される)。middle の
+    1 回の途中で play から離れたときは、その回が終わった後にも場面なしにし直す (その回の出力の書き込みが場面を設定し
+    直しても、play 以外の段階で続いた秒数を進めないため)。
     middle のゲーム用の出力の press_home が真なら、play のときだけ recover に移し (phase の行を書き、play から離れる
     中立のレポートを送る)、その後で HOME を短押しする (中立のレポートで短押しを取り消さないため)。
 押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
@@ -443,7 +445,9 @@ class LayersApp:
            PadOutput.neutral() を送ってから、HOME を短押しする (PadOutput.apply(PadAction(taps={"HOME"}),
            source="system"))。中立のレポートを短押しの後に送ると、短押しが取り消されるため) を作り、それぞれのスレッドを
            start_thread で起動する。on_stop には request_stop を渡す。2 つのループは、段階が play の間だけ 1 回分ずつ
-           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ、MiddleTrigger のきっかけで呼ぶ
+           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ、MiddleTrigger のきっかけで呼ぶ。
+           middle の 1 回が終わったときに段階が play でなければ、TaskBoard.set_current_scene(None, clock.now()) を呼ぶ
+           (_run_middle_while_playing)
         8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor
            (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
            on_stop = request_stop、on_start_passed = prepare に入る関数 (PhaseTracker(clock.now(),
@@ -850,8 +854,11 @@ class LayersApp:
         """middle のゲーム用のループのスレッドの本体。段階が play の間だけ MiddleLoop.run_once を呼ぶ。
 
         最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。最初の実行の理由は
-        MiddleTrigger.first_reasons() (最初の実行の直前に呼び、それまでに届いたきっかけは捨てる)。呼んだ後は、戻った時刻
-        (clock.now()) を前回の応答の時刻として、MiddleTrigger.wait_next で次の理由を待つ (None なら戻る)。
+        MiddleTrigger.first_reasons() (最初の実行の直前に呼び、それまでに届いたきっかけは捨てる)。
+        run_once が戻ったら (止める合図で抜けたときを除く)、段階のロックの中で段階を確かめ、play でなければ
+        TaskBoard.set_current_scene(None, clock.now()) で現在の場面を場面なしにする (run_once の途中で play から出たとき、
+        その回の出力の書き込みが場面を設定し直しても、play 以外の段階で続いた秒数を進めないため)。
+        続けて、戻った時刻 (clock.now()) を前回の応答の時刻として、MiddleTrigger.wait_next で次の理由を待つ (None なら戻る)。
         run_once の想定外の例外 (Exception) は外に出さず、request_stop(`middle loop failed: <例外の説明>`) を
         呼んでから戻る (MiddleLoop.run と同じ扱い)。
         """
@@ -870,6 +877,12 @@ class LayersApp:
                 result = middle_loop.run_once(reasons, stop)
                 if result.stopped:
                     return
+                with self._phase_lock:
+                    if not self._is_play():
+                        # run_once の途中で play から出た: その回の書き込みが設定した場面を、場面なしに戻す
+                        middle_loop.parts.board.set_current_scene(
+                            None, middle_loop.parts.clock.now()
+                        )
                 reasons = trigger.wait_next(stop, middle_loop.parts.clock.now())
                 if reasons is None:
                     return

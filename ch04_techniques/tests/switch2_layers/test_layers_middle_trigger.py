@@ -160,14 +160,17 @@ def test_stuck_is_forgotten_at_or_below_the_seconds(below):
     assert reasons.take(110.0) == ("stuck",)
 
 
-# --- 失敗した回の理由の持ち越し ---
+# --- 失敗した回の理由の持ち越しと、失敗の後の間隔 ---
 
 
 def test_carry_over_keeps_the_reasons_except_interval():
     reasons = tracker()
     reasons.carry_over(("queue_empty", "stuck", "interval"))
-    assert reasons.ready(11.0, 10.0) is True
-    assert reasons.take(11.0) == ("queue_empty", "stuck")
+    # 失敗の後は、持ち越した理由があっても interval_s まで始めない
+    assert reasons.ready(14.999, 10.0) is False
+    assert reasons.ready(15.0, 10.0) is True
+    # 始める回の理由は interval ではなく、持ち越した理由
+    assert reasons.take(15.0) == ("queue_empty", "stuck")
 
 
 def test_carry_over_of_interval_only_waits_for_the_interval():
@@ -178,27 +181,58 @@ def test_carry_over_of_interval_only_waits_for_the_interval():
     assert reasons.take(15.0) == ("interval",)
 
 
+def test_after_a_failure_new_reasons_also_wait_for_the_interval():
+    reasons = tracker()
+    reasons.carry_over(("cancel_requested",))
+    # 失敗の後に届いた知らせと stuck も、間隔を縮めない
+    reasons.notify("scene_change")
+    reasons.observe_stuck(31.0, 12.0)
+    assert reasons.ready(11.0, 10.0) is False
+    assert reasons.ready(14.999, 10.0) is False
+    assert reasons.ready(15.0, 10.0) is True
+    assert reasons.take(15.0) == ("cancel_requested", "stuck", "scene_change")
+
+
+def test_rules_return_after_the_call_following_a_failure():
+    reasons = tracker()
+    reasons.carry_over(("cancel_requested",))
+    assert reasons.ready(15.0, 10.0) is True
+    assert reasons.take(15.0) == ("cancel_requested",)
+    # その回は成功した (応答は t=16.0)。保留が無ければ interval_s を待つ
+    assert reasons.ready(17.0, 16.0) is False
+    # 知らせがあれば、前回の応答から 1 秒で始める
+    reasons.notify("queue_empty")
+    assert reasons.ready(16.999, 16.0) is False
+    assert reasons.ready(17.0, 16.0) is True
+    assert reasons.take(17.0) == ("queue_empty",)
+
+
 def test_carry_over_merges_with_reasons_notified_during_the_call():
     reasons = tracker()
     # 実行中に届いた理由と、失敗した回の理由を、次の回にまとめて渡す
     reasons.notify("scene_change")
     reasons.carry_over(("cancel_requested", "scene_change"))
-    assert reasons.take(12.0) == ("cancel_requested", "scene_change")
+    assert reasons.ready(14.0, 10.0) is False
+    assert reasons.ready(15.0, 10.0) is True
+    assert reasons.take(15.0) == ("cancel_requested", "scene_change")
 
 
 def test_carried_stuck_is_taken_with_the_next_call():
     reasons = tracker()
     reasons.observe_stuck(31.0, 100.0)
     assert reasons.take(100.0) == ("stuck",)
+    # その回は失敗した (応答は t=100.5)
     reasons.carry_over(("stuck",))
     # 前回 stuck で呼んでから 30 秒たっていなくても、持ち越した stuck は次の回に渡す
-    reasons.observe_stuck(40.0, 105.0)
-    assert reasons.take(105.0) == ("stuck",)
+    reasons.observe_stuck(40.0, 105.5)
+    assert reasons.ready(105.499, 100.5) is False
+    assert reasons.ready(105.5, 100.5) is True
+    assert reasons.take(105.5) == ("stuck",)
     # 次の stuck は、持ち越した stuck を渡した時刻から数える
-    reasons.observe_stuck(70.0, 134.999)
-    assert reasons.take(134.999) == ("interval",)
-    reasons.observe_stuck(70.0, 135.0)
-    assert reasons.take(135.0) == ("stuck",)
+    reasons.observe_stuck(70.0, 135.499)
+    assert reasons.take(135.499) == ("interval",)
+    reasons.observe_stuck(70.0, 135.5)
+    assert reasons.take(135.5) == ("stuck",)
 
 
 # --- スレッドから使う待ち (MiddleTrigger) ---
@@ -277,6 +311,21 @@ def test_wait_next_checks_the_oldest_task_at_the_clock_time():
 
 
 def test_carry_over_through_the_trigger():
-    trigger = MiddleTrigger(1000.0, STUCK_SECONDS, run_clock(11.0), lambda t: None)
+    trigger = MiddleTrigger(INTERVAL_S, STUCK_SECONDS, run_clock(15.0), lambda t: None)
     trigger.carry_over(("cancel_requested", "interval"))
+    # 失敗の後は interval_s で明け、理由は持ち越したもの
     assert trigger.wait_next(threading.Event(), 10.0) == ("cancel_requested",)
+
+
+def test_wait_after_carry_over_is_not_ended_by_notify_before_the_interval():
+    trigger = MiddleTrigger(INTERVAL_S, STUCK_SECONDS, run_clock(12.0), lambda t: None)
+    trigger.carry_over(("cancel_requested",))
+    trigger.notify("scene_change")
+    stop = threading.Event()
+    timer = threading.Timer(0.3, stop.set)
+    timer.start()
+    try:
+        # 前回の応答 (t=10.0) から interval_s たっていないので、知らせがあっても明けない
+        assert trigger.wait_next(stop, 10.0) is None
+    finally:
+        timer.cancel()

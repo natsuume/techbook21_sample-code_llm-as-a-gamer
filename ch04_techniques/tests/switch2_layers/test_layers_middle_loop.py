@@ -1455,8 +1455,8 @@ def test_failed_run_once_carries_the_reasons_over(tmp_path):
     result = harness.loop.run_once(("cancel_requested", "interval"))
     assert result.ok is False
     last_response_t = harness.loop.parts.clock.now()
-    # 前回の応答から 1 秒たった後の待ちは、持ち越した理由 (interval を除く) ですぐに明ける
-    harness.monotonic.now += 1.0
+    # 前回の応答から interval_s (5 秒) たった後の待ちは、持ち越した理由で明ける
+    harness.monotonic.now += 5.0
     stop = threading.Event()
     assert harness.trigger.wait_next(stop, last_response_t) == ("cancel_requested",)
 
