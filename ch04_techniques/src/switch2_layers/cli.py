@@ -4,7 +4,7 @@
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
-                       [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
+                       [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
         実機で 3 層を動かす。準備 (コントローラーの登録・指定のソフト (--software) を指定のユーザー (--user) で
         起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
@@ -72,6 +72,7 @@ from switch2_layers.settings import (
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
     DEFAULT_DEEP_TIMEOUT_S,
+    DEFAULT_HOLD_MARGIN,
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
     DEFAULT_MAX_MIDDLE_ERRORS,
@@ -149,7 +150,7 @@ def add_run_parser(
     --software NAME と --user NAME は必須 (無ければ argparse の誤り)。空か空白だけの値も argparse の誤り
     (SystemExit 2) にする。値は書かれたまま Namespace の software と user に入る。
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
-    --box-requery-every は int (既定 5)。
+    --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
     --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
     """
@@ -282,6 +283,15 @@ def add_run_parser(
         help=(
             "追えている box も、前回の問い直しからこの回数の要求がたったら Jev に問い直す "
             f"(1 以上。既定 {DEFAULT_BOX_REQUERY_EVERY})"
+        ),
+    )
+    parser.add_argument(
+        "--hold-margin",
+        type=float,
+        default=DEFAULT_HOLD_MARGIN,
+        help=(
+            "surface のボタンと十字キーで、hold の確率が tap の確率をこの値より大きく上回ったときだけ押し続けにする "
+            f"(0〜1。既定 {DEFAULT_HOLD_MARGIN:g})"
         ),
     )
     add_deep_runner_argument(parser)
@@ -479,6 +489,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         surface=SurfaceKind(args.surface),
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
+        hold_margin=args.hold_margin,
         deep=DeepRunnerChoice(args.deep),
         safety=SafetyKind(args.safety),
         safety_interval_s=args.safety_interval,

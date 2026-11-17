@@ -5,20 +5,26 @@
     nouls     noul の問いの ID → 真である確率
 問いの ID と選択肢の名前は surface.surface_questions の規則に従う。I/O・スレッド・時刻を扱わない。
 
-操作の決め方 (decide_pad_action):
-    1. ボタン: none・tap・hold_short・hold_long の確率を p_none・p_tap・p_hold_short・p_hold_long とする。
-       押す側の合計 p_tap + p_hold_short + p_hold_long が p_none より大きい (>) ときだけ押す (同じ値なら押さない。
-       同じ値かは probabilities_equal で判定する)。押すなら、押す側の 3 つのうち確率が最も高いものを押し方にする
-       (確率はそのまま比べ、最大が同率なら短い方を tap・hold_short・hold_long の順に選ぶ)。tap は短押し (taps)、
-       hold_short と hold_long は押し続け (held) にし、hold_seconds に HOLD_CHOICE_SECONDS の秒数 (0.3 か 1.0) を入れる
-    2. 十字キー: 4 方向のうち押す側になった方向が 2 つ以上あれば、押す側の合計が最も高い 1 方向だけを残す。
-       最も高い合計の方向が 2 つ以上 (同じ値かは probabilities_equal で判定する) なら、十字キーの方向をすべて外す。
-       十字キーとスティックの組み合わせは絞らない
+操作の決め方 (decide_pad_action。hold_margin は引数で受け取る 0〜1 の値):
+    1. ボタン (十字キー以外): none・tap・hold の確率を p_none・p_tap・p_hold とする。p_tap + p_hold が p_none より
+       大きい (>) ときだけ押す (同じ値なら押さない。同じ値かは probabilities_equal で判定する)。押し方は、下の
+       「押し方の選び方」で決める
+    2. 十字キー: dpad_direction の none の確率を p_none、8 方向の確率の和を p_dirs とする。p_dirs が p_none より
+       大きい (>) ときだけ押す (同じ値なら押さない。同じ値かは probabilities_equal で判定する)。押すときは、8 方向の
+       うち確率が最も高い方向を採り、DPAD_DIRECTION_BUTTONS のボタン (斜めは 2 つ) を押す。最も高い確率の方向が
+       2 つ以上 (probabilities_equal) なら押さない。押し方は dpad_press の答えから「押し方の選び方」で決め、斜めの
+       2 つのボタンは同じ押し方にする。押さないときは dpad_press の答えを使わない。十字キーと、ほかのボタン・
+       スティックは同時に押せる
     3. スティックの向き: 軸ごとに、確率が最も高い選択肢を採る。最大の確率の選択肢が 2 つ以上あれば none
     4. スティックの強さ: 向きが none でない軸だけ計算する。50・75・100 の確率を p50・p75・p100 とし、
        q50 = p50、q75 = min(p75, q50)、q100 = min(p100, q75) と単調に下がるよう切り下げて、
        強さ s = STICK_MIN_STRENGTH + STICK_STRENGTH_STEP × (q50 + q75 + q100) (0.25〜1.0) にする。
        軸の値は、正の向き (right / up) なら +s、負の向き (left / down) なら −s、none なら 0
+押し方の選び方 (1 のボタンと 2 の十字キーで共通。スティックには使わない):
+    tap と hold の確率を p_tap・p_hold とする。p_hold − p_tap が hold_margin より大きい (>) ときだけ押し続け (held)
+    にし、それ以外は短押し (taps) にする。差が hold_margin と同じ値 (probabilities_equal で判定する) なら短押し。
+    hold_margin が 0 なら p_hold が p_tap より高いときに押し続け、1 なら常に短押しになる。押し続けには秒数を
+    付けない (hold_seconds は空)。押し続けは次の操作を送るまで続き、次の判断でも押し続けを選べば離さずに続く
 ほかの出力:
     deep を呼ぶ種類   advisor の問いの確率が threshold_advisor を超えた (>) 種類
     情報ラベル        INFO_LABEL_NAMES の順に、名前と確率 (しきい値で選ばず、すべて記録する)
@@ -29,17 +35,16 @@
 import math
 from collections.abc import Mapping, Sequence
 
-from switch2_remote.controller_state import DPAD_DIRECTIONS
-
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.pad_action import PadAction
 from switch2_layers.surface.box_targets import BoxTarget
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
-    HOLD_CHOICE_SECONDS,
+    DPAD_DIRECTION_BUTTONS,
+    DPAD_PRESS_QUESTION_NAME,
+    HOLD_CHOICE,
     INFO_LABEL_NAMES,
     NONE_CHOICE,
-    PRESS_CHOICES,
     SCENE_CHANGE_QUESTION_NAME,
     STICK_AXIS_DIRECTIONS,
     STICK_STRENGTH_LEVELS,
@@ -94,51 +99,70 @@ def check_answers(
         raise ValueError(f"missing answers: {' '.join(missing)}")
 
 
-def adopt_buttons(
+def _is_greater(a: float, b: float) -> bool:
+    """a が b より大きく、同じ値 (probabilities_equal) でなければ True を返す。"""
+    return a > b and not probabilities_equal(a, b)
+
+
+def _is_hold(values: Mapping[str, float], hold_margin: float) -> bool:
+    """押し方の答え values (tap と hold の確率) から、押し続けにするなら True を返す (押し方の選び方)。
+
+    hold − tap が hold_margin より大きいときだけ True。同じ値 (probabilities_equal) なら False (短押し)。
+    """
+    return _is_greater(values[HOLD_CHOICE] - values[TAP_CHOICE], hold_margin)
+
+
+def _decide_buttons(
     choices: Mapping[str, Mapping[str, float]],
     questions: Sequence[SurfaceQuestion],
-) -> dict[str, tuple[str, float]]:
-    """ボタンの問いの答えから、押すボタン → (押し方の選択肢の名前, 押す側の合計) を返す (操作の決め方の 1)。
-
-    押し方の選択肢の名前は PRESS_CHOICES のどれか (tap・hold_short・hold_long)。押さないボタンは入れない。
-    """
-    adopted: dict[str, tuple[str, float]] = {}
+    hold_margin: float,
+) -> tuple[set[str], set[str]]:
+    """ボタン (十字キー以外) の問いの答えから、(押し続けるボタン, 短押しのボタン) を返す (操作の決め方の 1)。"""
+    held: set[str] = set()
+    taps: set[str] = set()
     for question in questions:
         if question.kind is not QuestionKind.BUTTON:
             continue
         values = choices[question.name]
-        press_side = sum(values[choice] for choice in PRESS_CHOICES)
-        none = values[NONE_CHOICE]
-        if press_side > none and not probabilities_equal(press_side, none):
-            # max は最大の値のうち最初のものを返すので、同率なら PRESS_CHOICES の先 (短い方) になる
-            kind = max(PRESS_CHOICES, key=lambda choice: values[choice])
-            adopted[question.target] = (kind, press_side)
-    return adopted
+        if not _is_greater(
+            values[TAP_CHOICE] + values[HOLD_CHOICE], values[NONE_CHOICE]
+        ):
+            continue
+        (held if _is_hold(values, hold_margin) else taps).add(question.target)
+    return held, taps
 
 
-def keep_single_dpad_direction(
-    adopted: Mapping[str, tuple[str, float]],
-) -> dict[str, tuple[str, float]]:
-    """adopt_buttons の結果から、十字キーの方向を 1 つに絞った新しい辞書を返す (操作の決め方の 2)。adopted は変えない。
+def _decide_dpad(
+    choices: Mapping[str, Mapping[str, float]],
+    questions: Sequence[SurfaceQuestion],
+    hold_margin: float,
+) -> tuple[set[str], set[str]]:
+    """十字キーの方向と押し方の問いの答えから、(押し続けるボタン, 短押しのボタン) を返す (操作の決め方の 2)。
 
-    十字キーの 4 方向 (UP・DOWN・LEFT・RIGHT) のうち adopted にある方向が 2 つ以上あれば、押す側の合計が最も高い
-    1 方向だけを残す。最も高い合計の方向が 2 つ以上 (同じ値かは probabilities_equal で判定する) なら、十字キーの方向を
-    すべて外す。十字キー以外のボタンは変えない。
+    押さないときは空の集合 2 つを返し、押し方の答えは見ない。
     """
-    kept = dict(adopted)
-    directions = [button for button in adopted if button in DPAD_DIRECTIONS]
-    if len(directions) < 2:
-        return kept
-    highest = max(adopted[direction][1] for direction in directions)
-    top = [
-        direction
-        for direction in directions
-        if probabilities_equal(adopted[direction][1], highest)
-    ]
-    for direction in directions:
-        if len(top) > 1 or direction != top[0]:
-            del kept[direction]
-    return kept
+    for question in questions:
+        if question.kind is not QuestionKind.DPAD_DIRECTION:
+            continue
+        values = choices[question.name]
+        directions = [
+            choice.name for choice in question.choices if choice.name != NONE_CHOICE
+        ]
+        if not _is_greater(
+            sum(values[name] for name in directions), values[NONE_CHOICE]
+        ):
+            return set(), set()
+        highest = max(values[name] for name in directions)
+        top = [
+            name for name in directions if probabilities_equal(values[name], highest)
+        ]
+        if len(top) > 1:
+            return set(), set()
+        buttons = set(DPAD_DIRECTION_BUTTONS[top[0]])
+        if _is_hold(choices[DPAD_PRESS_QUESTION_NAME], hold_margin):
+            return buttons, set()
+        return set(), buttons
+    return set(), set()
 
 
 def choose_direction(question: SurfaceQuestion, values: Mapping[str, float]) -> str:
@@ -201,31 +225,26 @@ def decide_pad_action(
     choices: Mapping[str, Mapping[str, float]],
     nouls: Mapping[str, float],
     questions: Sequence[SurfaceQuestion],
+    hold_margin: float,
 ) -> PadAction:
     """答えと questions から、操作 (モジュールの docstring の操作の決め方) を決めて返す。
 
-    はじめに check_answers で答えがそろっているかを確かめる (スティックの強さの答えは、その軸の向きが none でも要る)。
-    held は hold_short か hold_long を選んだボタン、hold_seconds はそのボタン → HOLD_CHOICE_SECONDS の秒数、
-    taps は tap を選んだボタン、left_stick と right_stick は decide_sticks の LS と RS。
+    hold_margin は「押し方の選び方」の差の値 (0〜1。run では --hold-margin)。
+    はじめに check_answers で答えがそろっているかを確かめる (スティックの強さの答えは、その軸の向きが none でも要る。
+    dpad_press の答えは、十字キーを押さないときも要る)。
+    held は押し続けにしたボタン (十字キーのボタンを含む)、taps は短押しにしたボタン (十字キーのボタンを含む)、
+    hold_seconds は空、left_stick と right_stick は decide_sticks の LS と RS。
     questions に無い ID と選択肢は無視する。
     """
     check_answers(choices, nouls, questions)
-    adopted = keep_single_dpad_direction(adopt_buttons(choices, questions))
-    hold_seconds = {
-        button: HOLD_CHOICE_SECONDS[kind]
-        for button, (kind, _) in adopted.items()
-        if kind in HOLD_CHOICE_SECONDS
-    }
-    taps = frozenset(
-        button for button, (kind, _) in adopted.items() if kind == TAP_CHOICE
-    )
+    button_held, button_taps = _decide_buttons(choices, questions, hold_margin)
+    dpad_held, dpad_taps = _decide_dpad(choices, questions, hold_margin)
     sticks = decide_sticks(choices, nouls, questions)
     return PadAction(
-        held=frozenset(hold_seconds),
-        taps=taps,
+        held=frozenset(button_held | dpad_held),
+        taps=frozenset(button_taps | dpad_taps),
         left_stick=sticks.get("LS", (0.0, 0.0)),
         right_stick=sticks.get("RS", (0.0, 0.0)),
-        hold_seconds=hold_seconds,
     )
 
 

@@ -63,6 +63,8 @@ DEFAULT_DEEP_AUTO_SECONDS = 60.0
 DEFAULT_DEEP_TIMEOUT_S = 300.0
 DEFAULT_THRESHOLD_ADVISOR = 0.5
 DEFAULT_BOX_REQUERY_EVERY = 5
+# surface の押し方の選び方で、押し続けにするのに要る hold と tap の確率の差
+DEFAULT_HOLD_MARGIN = 0.1
 
 
 class SurfaceKind(StrEnum):
@@ -132,6 +134,8 @@ class RunSettings:
                                 (--threshold-advisor、既定 0.5。0 以上 1 以下)
     box_requery_every           前回の問い直しからこの回数の要求がたった対象の box を Jev に問い直す
                                 (--box-requery-every、既定 5。1 以上)
+    hold_margin                 surface のボタンと十字キーで、hold の確率が tap の確率をこの値より大きく上回ったときだけ
+                                押し続けにする (--hold-margin、既定 0.1。0 以上 1 以下)
     deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
     safety                      安全の監視の実装 (--safety、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
                                 (safety_api_key_errors)
@@ -163,6 +167,7 @@ class RunSettings:
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
+    hold_margin: float = DEFAULT_HOLD_MARGIN
     deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
     safety: SafetyKind = DEFAULT_SAFETY
     safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S
@@ -209,7 +214,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
-    --box-requery-every は 1 以上。surface は値の型 (SurfaceKind) で決まるため確かめない。
+    --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
+    surface は値の型 (SurfaceKind) で決まるため確かめない。
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
@@ -270,6 +276,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             f"--box-requery-every must be 1 or more: {settings.box_requery_every}"
         )
+    if not 0.0 <= settings.hold_margin <= 1.0:
+        errors.append(f"--hold-margin must be 0..1: {settings.hold_margin}")
     if not SAFETY_INTERVAL_MIN_S <= settings.safety_interval_s <= SAFETY_INTERVAL_MAX_S:
         errors.append(
             f"--safety-interval must be {SAFETY_INTERVAL_MIN_S:g}..{SAFETY_INTERVAL_MAX_S:g}: "

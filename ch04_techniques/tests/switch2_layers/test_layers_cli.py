@@ -43,6 +43,7 @@ from switch2_layers.settings import (
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_TIMEOUT_S,
+    DEFAULT_HOLD_MARGIN,
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
     DEFAULT_MAX_MIDDLE_ERRORS,
@@ -54,6 +55,7 @@ from switch2_layers.settings import (
     RunSettings,
     SafetyKind,
     SurfaceKind,
+    run_settings_to_json,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_surface import JevSurfaceDecider
@@ -1477,3 +1479,59 @@ def test_run_passes_the_progress_arguments_in_settings(monkeypatch):
     # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
     assert settings.progress_window_s == 90.0
     assert settings.stuck_advice_seconds == 45.0
+
+
+# --- 押し方の選び方の差 (--hold-margin) ---
+
+
+def test_run_hold_margin_default_follows_the_issue():
+    args = build_parser().parse_args(RUN)
+    assert args.hold_margin == DEFAULT_HOLD_MARGIN == 0.1
+    assert run_settings_from_args(args).hold_margin == 0.1
+
+
+def test_run_accepts_hold_margin():
+    args = build_parser().parse_args([*RUN, "--hold-margin", "0.25"])
+    assert args.hold_margin == 0.25
+    assert run_settings_from_args(args).hold_margin == 0.25
+
+
+def test_run_rejects_hold_margin_that_is_not_a_number(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, "--hold-margin", "abc"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--hold-margin" in err
+    assert "invalid float value" in err
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf"])
+def test_run_hold_margin_range_errors_exit_before_hardware(
+    no_hardware, tmp_path, capsys, value
+):
+    runs_dir = tmp_path / "runs"
+    code = main([*RUN, "--runs-dir", str(runs_dir), *ALL_FAKE, "--hold-margin", value])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--hold-margin" in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize("value, expected", [("0", 0.0), ("0.3", 0.3), ("1", 1.0)])
+def test_run_passes_the_hold_margin_in_settings(monkeypatch, value, expected):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, *ALL_FAKE, "--hold-margin", value]) == 0
+    [(settings, _)] = created
+    assert settings.hold_margin == expected
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    assert run_settings_to_json(settings)["hold_margin"] == expected
+
+
+def test_run_passes_the_hold_margin_to_the_jev_surface(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, "--middle", "fake", "--hold-margin", "0.3"]) == 0
+    [(_, parts)] = created
+    assert isinstance(parts.surface, JevSurfaceDecider)
+    assert parts.surface.settings.hold_margin == 0.3

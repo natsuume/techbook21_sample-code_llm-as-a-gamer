@@ -12,6 +12,7 @@ from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
+    DEFAULT_HOLD_MARGIN,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_SAFETY,
@@ -492,4 +493,30 @@ def test_run_settings_to_json_has_the_progress_arguments():
     )
     assert value["progress_window_s"] == 120.0
     assert value["stuck_advice_seconds"] == 30.0
+    assert json.loads(json.dumps(value)) == value
+
+
+# --- 押し方の選び方の差 (--hold-margin) ---
+
+
+def test_hold_margin_default_follows_the_issue():
+    assert DEFAULT_HOLD_MARGIN == 0.1
+    assert RunSettings().hold_margin == 0.1
+
+
+@pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+def test_hold_margin_boundary_values_are_valid(value):
+    assert run_settings_errors(RunSettings(hold_margin=value)) == []
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, math.nan, math.inf])
+def test_hold_margin_out_of_range_is_an_error(value):
+    errors = run_settings_errors(RunSettings(hold_margin=value))
+    assert errors == [f"--hold-margin must be 0..1: {value}"]
+
+
+def test_run_settings_to_json_has_the_hold_margin():
+    assert run_settings_to_json(RunSettings())["hold_margin"] == 0.1
+    value = run_settings_to_json(RunSettings(hold_margin=0.25))
+    assert value["hold_margin"] == 0.25
     assert json.loads(json.dumps(value)) == value

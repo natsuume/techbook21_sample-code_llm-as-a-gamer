@@ -5,7 +5,8 @@
     hold_deadlines   held のうち秒数を指定したボタンと、離す時刻 (期限。clock の値)
     pending_holds    間をあけてから始める押し続けのボタンと、始める時刻 (clock の値) と秒数。レポートには含めない
     tapping          短押しの最中のボタンと、離す時刻 (clock の値)
-    pending_taps     いったん離してから始める短押しのボタンと、始める時刻 (clock の値)。レポートには含めない
+    pending_taps     後の時刻に始める短押しのボタン (いったん離してから押し直すものと、十字キーの斜めでもう片方に
+                     合わせて待つもの) と、始める時刻 (clock の値)。レポートには含めない
 送るレポートは held と tapping を合わせた押下状態を switch2_remote.controller_state.build_report にしたもの。
 短押しは、押すレポートの送信が戻ってから TAP_PRESS_S 秒後に、タイマースレッドが release_due_taps で離す。
 
@@ -23,6 +24,8 @@ apply まで押したままにする。押し続けている (held にある) �
       start_due_taps で短押しを始める
     - 離してから TAP_RELEASE_GAP_S 秒たっていないボタン (タイマーが短押しや押し続けを離した直後など) の短押しは、
       「最後に離した時刻 + TAP_RELEASE_GAP_S」に start_due_taps で始める
+1 回の apply の短押しに十字キーの 2 つの方向 (斜め) があり、どちらかが上のように待つ (前の apply から待っているものを
+含む) ときは、もう片方も待たせ、2 つの始める時刻を遅い方にそろえて、同じレポートで押し始める。
 期限で離したボタン (release_due_holds) は、押し続けも同じく間をあける。離してから TAP_RELEASE_GAP_S 秒たっていない
 押し続けは、「期限で離した時刻 + TAP_RELEASE_GAP_S」にタイマースレッドが start_due_holds で始め、その送信が戻った
 時刻から秒数を数える。
@@ -221,19 +224,24 @@ class PadOutput:
                入れなかったボタンとスティックに置き換える。新しい held にあるボタンの pending_taps は取り消す
             7. taps の各ボタンを名前の順に扱う:
                - 新しい held にあるボタン (pending_holds に入れたものを含む) は何もしない (押し続ける)
-               - 既に pending_taps にあるボタンは何もしない (始める時刻は変えない)
+               - 既に pending_taps にあるボタンは何もしない (始める時刻は変えない。ただし下の斜めの規則でそろえる)
                - pressed_before にあるボタン (押し続けから短押しへの切り替えと、短押しの最中の再度の短押し):
                  tapping にあれば外し (このレポートで離す)、pending_taps に入れる (始める時刻は 9 で決める)
                - 最後に離した時刻から TAP_RELEASE_GAP_S 秒たっていないボタン: pending_taps に入れ、始める時刻を
                  「最後に離した時刻 + TAP_RELEASE_GAP_S」にする
                - 十字キーの方向で、反対の方向が tapping か pending_taps にあるボタンは捨てる (始めない)
                - それ以外のボタンは、すぐに短押しとして始める (tapping に入れる。離す時刻は 9 で決める)
+               最後に、十字キーの斜めの押し始めをそろえる。taps の十字キーの方向のうち、新しい held に無く、反対の方向の
+               規則で捨てなかったもの (すぐ始めるものと、pending_taps にあるもの) が 2 つあり、どちらかが pending_taps に
+               あるときは、もう片方も pending_taps に入れる (すぐ始めることにした方は tapping から外し、このレポートでは
+               押さない)。どちらかが pressed_before から入れたものなら、2 つとも始める時刻を 9 で決める。そうでなければ、
+               2 つの始める時刻を大きい方にそろえる。十字キー以外のボタンの短押しは、そろえない
             8. held と tapping のボタンとスティックを合わせたレポートを送る (pending_holds と pending_taps は含めない。
                7 で離すと決めたボタンは、このレポートで離れる)。短押しの十字キーの方向と held の反対の方向が重なったら、
                短押しを優先し、送るレポートからだけ held の方向を外す
             9. 送信が成功したら、送信が戻った時刻 sent_at = clock() として、この apply で始めた短押しの離す時刻を
-               sent_at + TAP_PRESS_S、pressed_before から pending_taps に入れたボタンの始める時刻を
-               sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、7 で tapping から
+               sent_at + TAP_PRESS_S、pressed_before から pending_taps に入れたボタン (7 で斜めをそろえるために一緒に
+               入れた方向を含む) の始める時刻を sent_at + TAP_RELEASE_GAP_S、このレポートで離したボタン (古い held から外れたものと、7 で tapping から
                外したもの) の最後に離した時刻を sent_at にする。held の各ボタンの期限は、秒数があれば sent_at + 秒数に
                置き換え、無ければ外す (次の apply まで押し続ける)
             10. on_operation に OperationEvent(source=source, action=2〜5 の後の操作, ok, error) を渡す
@@ -293,6 +301,9 @@ class PadOutput:
                     continue
                 self._tapping[button] = now + TAP_PRESS_S
                 started.append(button)
+            self._align_diagonal_taps_locked(
+                sent_action.taps, new_held, started, waiting_after_release, now
+            )
             # 古い held から外れたボタンのうち、まだ短押しの最中のものは、このレポートでは離れない
             released -= set(self._tapping)
             error = self._send_locked()
@@ -463,7 +474,7 @@ class PadOutput:
         """押している、または押す予定のボタンの集合を返す。
 
         ロックの中で、held (押し続けているボタン。期限を過ぎてタイマーがまだ離していないものを含む)・tapping
-        (短押しの最中のボタン)・pending_taps (いったん離してから始める短押しのボタン)・pending_holds (間をあけてから
+        (短押しの最中のボタン)・pending_taps (後の時刻に始める短押しのボタン)・pending_holds (間をあけてから
         始める押し続けのボタン) の和集合を返す。スティックは含めない。どのボタンも押していなければ空の集合。
         送ったボタンを実際に離し終えたか (タイマースレッドが離すレポートを送ったか) を確かめるのに使う。
         """
@@ -555,6 +566,46 @@ class PadOutput:
                 self._hold_deadlines.pop(button, None)
             else:
                 self._hold_deadlines[button] = sent_at + seconds
+
+    def _align_diagonal_taps_locked(
+        self,
+        taps: frozenset[str],
+        new_held: frozenset[str],
+        started: list[str],
+        waiting_after_release: list[str],
+        now: float,
+    ) -> None:
+        """apply の 7 の最後に、短押しの十字キーの 2 つの方向 (斜め) の押し始めをそろえる。呼び出し側がロックを持つ。
+
+        taps の十字キーの方向のうち、new_held に無く、すぐ始める (started) か pending_taps にあるものが 2 つあり、
+        どちらかが pending_taps にあるときだけそろえる。started にある方は started と tapping から外し (このレポートでは
+        押さない)、pending_taps に入れる。どちらかが waiting_after_release (pressed_before から入れたもの) にあれば、
+        2 つとも waiting_after_release に入れ、始める時刻を仮に now + TAP_RELEASE_GAP_S にする (9 で決め直す)。
+        そうでなければ、2 つの始める時刻を pending_taps の時刻の大きい方にする。started と waiting_after_release は
+        書き換える。
+        """
+        diagonal = [
+            button
+            for button in sorted(taps & DPAD_DIRECTIONS)
+            if button not in new_held
+            and (button in started or button in self._pending_taps)
+        ]
+        waiting = [button for button in diagonal if button in self._pending_taps]
+        if len(diagonal) != 2 or not waiting:
+            return
+        for button in diagonal:
+            if button in started:
+                started.remove(button)
+                del self._tapping[button]
+        if any(button in waiting_after_release for button in diagonal):
+            for button in diagonal:
+                self._pending_taps[button] = now + TAP_RELEASE_GAP_S
+                if button not in waiting_after_release:
+                    waiting_after_release.append(button)
+            return
+        start_at = max(self._pending_taps[button] for button in waiting)
+        for button in diagonal:
+            self._pending_taps[button] = start_at
 
     def _opposite_is_tapping_or_waiting(self, button: str) -> bool:
         """button が十字キーの方向で、その反対の方向が tapping か pending_taps にあれば True。呼び出し側がロックを持つ。"""

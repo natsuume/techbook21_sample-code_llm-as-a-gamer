@@ -63,3 +63,15 @@ def test_jev_surface_never_asks_about_home():
 def test_jev_surface_needs_api_key(key):
     with pytest.raises(ValueError):
         build_surface_assembly(RunSettings(), key)
+
+
+def test_jev_surface_gets_the_hold_margin():
+    http = httpx.Client(transport=httpx.MockTransport(unused_transport))
+    assembly = build_surface_assembly(
+        RunSettings(hold_margin=0.3), "test-key", http_client=http
+    )
+    assert assembly.decider.settings.hold_margin == 0.3
+    assembly.close()
+    default = build_surface_assembly(RunSettings(), "test-key", http_client=http)
+    assert default.decider.settings.hold_margin == RunSettings().hold_margin
+    default.close()

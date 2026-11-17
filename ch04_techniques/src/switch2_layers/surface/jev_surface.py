@@ -66,6 +66,7 @@ from switch2_layers.progress.progress_text import (
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
+    DEFAULT_HOLD_MARGIN,
     DEFAULT_THRESHOLD_ADVISOR,
 )
 from switch2_layers.surface.action_rules import (
@@ -142,13 +143,17 @@ class JevSurfaceSettings:
     """JevSurfaceDecider の設定。
 
     allowed_buttons     押せるボタン (run では buttons.allowed_buttons() の HOME を除く 16 個)。ボタンの問いはこのボタンだけにする
+                        (十字キーの 4 方向はボタンの問いにせず、十字キーの方向と押し方の 2 問で問う)
     threshold_advisor   advisor 判定のしきい値 (--threshold-advisor)。確率がこれを超えた種類の deep を呼ぶ
     box_requery_every   前回の問い直しからこの回数の要求がたった対象の box を問い直す (--box-requery-every)
+    hold_margin         押し方の選び方の差の値 (--hold-margin)。hold の確率が tap の確率をこの値より大きく上回ったときだけ
+                        押し続けにする (surface.action_rules.decide_pad_action に渡す)
     """
 
     allowed_buttons: frozenset[str]
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
+    hold_margin: float = DEFAULT_HOLD_MARGIN
 
 
 @dataclass(frozen=True)
@@ -516,7 +521,9 @@ class JevSurfaceDecider:
             surface_input.request_sink(request)
         answers = self.client.ask(state, questions, images)
         return SurfaceOutput(
-            action=decide_pad_action(answers.choices, answers.nouls, questions),
+            action=decide_pad_action(
+                answers.choices, answers.nouls, questions, self.settings.hold_margin
+            ),
             deep_kinds=decide_deep_kinds(
                 answers.nouls, self.settings.threshold_advisor
             ),

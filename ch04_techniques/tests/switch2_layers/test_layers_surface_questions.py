@@ -13,12 +13,17 @@ from switch2_layers.surface.surface_questions import (
     ADVISOR_QUESTION_TEXTS,
     ADVISOR_STATUS_RULE_TEXT,
     BUTTON_CHOICES,
-    HOLD_LONG_CHOICE,
-    HOLD_LONG_SECONDS,
-    HOLD_SHORT_CHOICE,
-    HOLD_SHORT_SECONDS,
+    DPAD_DIRECTION_BUTTONS,
+    DPAD_DIRECTION_CHOICES,
+    DPAD_DIRECTION_QUESTION_NAME,
+    DPAD_PRESS_CHOICES,
+    DPAD_PRESS_QUESTION_NAME,
+    DPAD_TARGET,
+    HOLD_CHOICE,
+    HOLD_CHOICE_DESCRIPTION,
     INFO_LABEL_NAMES,
     NONE_CHOICE,
+    PRESS_CHOICES,
     SCENE_CHANGE_QUESTION_NAME,
     STICK_DIRECTION_CHOICES,
     SURFACE_INSTRUCTIONS,
@@ -31,6 +36,7 @@ from switch2_layers.surface.surface_questions import (
     build_box_exists_questions,
     build_box_questions,
     build_button_questions,
+    build_dpad_questions,
     build_info_label_questions,
     build_scene_change_question,
     build_stick_direction_questions,
@@ -40,6 +46,8 @@ from switch2_layers.surface.surface_questions import (
 )
 
 ID_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+# 十字キーの 4 方向のボタン名
+DPAD_BUTTONS = {"UP", "RIGHT", "DOWN", "LEFT"}
 TARGETS = (
     BoxTarget("自機", "赤い帽子の人"),
     BoxTarget("敵", "茶色のきのこ"),
@@ -64,12 +72,7 @@ def test_question_lists_follow_the_issue():
 
 
 def test_choices_put_none_first():
-    assert [choice.name for choice in BUTTON_CHOICES] == [
-        "none",
-        "tap",
-        "hold_short",
-        "hold_long",
-    ]
+    assert [choice.name for choice in BUTTON_CHOICES] == ["none", "tap", "hold"]
     # スティックの向きは none・負の向き・正の向き
     assert [choice.name for choice in STICK_DIRECTION_CHOICES["x"]] == [
         "none",
@@ -83,23 +86,79 @@ def test_choices_put_none_first():
     ]
 
 
-def test_button_choice_names_and_hold_seconds_are_constants():
-    assert (TAP_CHOICE, HOLD_SHORT_CHOICE, HOLD_LONG_CHOICE) == (
-        "tap",
-        "hold_short",
-        "hold_long",
+def test_button_choice_names_are_constants():
+    assert (NONE_CHOICE, TAP_CHOICE, HOLD_CHOICE) == ("none", "tap", "hold")
+    assert PRESS_CHOICES == ("tap", "hold")
+
+
+def test_button_choices_describe_tap_and_hold():
+    assert [(choice.name, choice.description) for choice in BUTTON_CHOICES] == [
+        ("none", "押さない"),
+        ("tap", "1 回だけ短く押す"),
+        ("hold", HOLD_CHOICE_DESCRIPTION),
+    ]
+
+
+def test_hold_description_says_it_lasts_until_the_next_decision_and_continues():
+    assert HOLD_CHOICE_DESCRIPTION == (
+        "押した状態にする。押した状態は次の判断まで続く。"
+        "次の判断でも hold を選ぶと、離さずに押し続ける"
     )
-    assert HOLD_SHORT_SECONDS == 0.3
-    assert HOLD_LONG_SECONDS == 1.0
+    # 押し続けの長さは秒数ではなく、次の判断までで決まる
+    assert "秒" not in HOLD_CHOICE_DESCRIPTION
 
 
-def test_hold_choices_describe_seconds_and_that_holding_again_continues():
-    descriptions = {choice.name: choice.description for choice in BUTTON_CHOICES}
-    assert "0.3 秒" in descriptions["hold_short"]
-    assert "1.0 秒" in descriptions["hold_long"]
-    # 次の判断でも同じボタンの押し続けを選ぶと、離さずに続くこと
-    for name in ["hold_short", "hold_long"]:
-        assert "離さず" in descriptions[name]
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HOLD_SHORT_CHOICE",
+        "HOLD_LONG_CHOICE",
+        "HOLD_SHORT_SECONDS",
+        "HOLD_LONG_SECONDS",
+        "HOLD_CHOICE_SECONDS",
+    ],
+)
+def test_timed_hold_names_are_removed(name):
+    assert not hasattr(surface_questions_module, name)
+
+
+def test_dpad_direction_choices_follow_the_issue():
+    assert [(choice.name, choice.description) for choice in DPAD_DIRECTION_CHOICES] == [
+        ("none", "十字キーを押さない"),
+        ("up", "上を押す"),
+        ("right", "右を押す"),
+        ("down", "下を押す"),
+        ("left", "左を押す"),
+        ("up_right", "右上 (上と右を同時に押す)"),
+        ("down_right", "右下 (下と右を同時に押す)"),
+        ("down_left", "左下 (下と左を同時に押す)"),
+        ("up_left", "左上 (上と左を同時に押す)"),
+    ]
+
+
+def test_dpad_press_choices_are_tap_and_hold_without_none():
+    assert [(choice.name, choice.description) for choice in DPAD_PRESS_CHOICES] == [
+        ("tap", "1 回だけ短く押す"),
+        ("hold", HOLD_CHOICE_DESCRIPTION),
+    ]
+
+
+def test_dpad_direction_buttons_follow_the_issue():
+    assert DPAD_DIRECTION_BUTTONS == {
+        "none": (),
+        "up": ("UP",),
+        "right": ("RIGHT",),
+        "down": ("DOWN",),
+        "left": ("LEFT",),
+        "up_right": ("UP", "RIGHT"),
+        "down_right": ("DOWN", "RIGHT"),
+        "down_left": ("DOWN", "LEFT"),
+        "up_left": ("UP", "LEFT"),
+    }
+    # 並びは方向の問いの選択肢と同じ
+    assert list(DPAD_DIRECTION_BUTTONS) == [
+        choice.name for choice in DPAD_DIRECTION_CHOICES
+    ]
 
 
 def test_instructions_say_that_action_and_other_questions_are_independent():
@@ -192,9 +251,10 @@ def test_box_question_names():
 def test_button_questions_are_only_for_allowed_buttons_in_button_order():
     questions = build_button_questions(allowed_buttons())
     assert [question.target for question in questions] == [
-        button for button in BUTTON_ORDER if button != "HOME"
+        button for button in BUTTON_ORDER if button not in DPAD_BUTTONS | {"HOME"}
     ]
-    assert len(questions) == 16
+    # 十字キーの 4 方向は、ボタンの問いではなく十字キーの 2 問で問う
+    assert len(questions) == 12
     first = questions[0]
     assert first.name == "button_A"
     assert first.instructions == "今、A ボタンをどうするか。"
@@ -209,12 +269,46 @@ def test_home_question_only_when_home_is_allowed():
     with_home = build_button_questions(ALL_BUTTONS)
     assert "button_HOME" not in [question.name for question in without]
     assert "button_HOME" in [question.name for question in with_home]
-    assert len(with_home) == 17
+    assert len(with_home) == 13
 
 
 def test_button_questions_ignore_unknown_names():
     questions = build_button_questions({"A", "TURBO"})
     assert [question.name for question in questions] == ["button_A"]
+
+
+def test_button_questions_never_ask_about_dpad_directions():
+    questions = build_button_questions({"A", "UP", "RIGHT", "DOWN", "LEFT"})
+    assert [question.name for question in questions] == ["button_A"]
+
+
+def test_dpad_questions():
+    questions = build_dpad_questions()
+    assert [question.name for question in questions] == [
+        DPAD_DIRECTION_QUESTION_NAME,
+        DPAD_PRESS_QUESTION_NAME,
+    ]
+    assert (DPAD_DIRECTION_QUESTION_NAME, DPAD_PRESS_QUESTION_NAME) == (
+        "dpad_direction",
+        "dpad_press",
+    )
+    direction, press = questions
+    assert direction.kind is QuestionKind.DPAD_DIRECTION
+    assert press.kind is QuestionKind.DPAD_PRESS
+    assert (QuestionKind.DPAD_DIRECTION, QuestionKind.DPAD_PRESS) == (
+        "dpad_direction",
+        "dpad_press",
+    )
+    assert DPAD_TARGET == "dpad"
+    assert direction.target == press.target == "dpad"
+    assert direction.question_type is QuestionType.CHOICE
+    assert press.question_type is QuestionType.CHOICE
+    assert direction.choices == DPAD_DIRECTION_CHOICES
+    assert press.choices == DPAD_PRESS_CHOICES
+    assert direction.instructions == (
+        "今、十字キーをどの方向に押すか。斜めは 2 つの方向を同時に押す。"
+    )
+    assert press.instructions == "十字キーを押す場合、短く押すか、押し続けるか。"
 
 
 def test_stick_direction_questions():
@@ -402,7 +496,8 @@ def test_surface_questions_are_in_the_order_of_the_table():
     )
     kinds = [question.kind for question in questions]
     expected = (
-        [QuestionKind.BUTTON] * 16
+        [QuestionKind.BUTTON] * 12
+        + [QuestionKind.DPAD_DIRECTION, QuestionKind.DPAD_PRESS]
         + [QuestionKind.STICK_DIRECTION] * 4
         + [QuestionKind.STICK_STRENGTH] * 12
         + [QuestionKind.ADVISOR] * 5
@@ -412,6 +507,13 @@ def test_surface_questions_are_in_the_order_of_the_table():
         + [QuestionKind.BOX]
     )
     assert kinds == expected
+    # 十字キーの 2 問は、ボタンの問いの直後 (スティックの向きの問いの前)
+    assert [question.name for question in questions[11:15]] == [
+        "button_MINUS",
+        "dpad_direction",
+        "dpad_press",
+        "stick_LS_x",
+    ]
     assert questions[-1].name == "box_2"
     # 最新のフレームを指す文は、5 枚の要求なら frames[4].image
     assert "`frames[4].image`" in questions[-1].instructions
@@ -427,8 +529,12 @@ def test_surface_question_ids_are_unique_and_safe():
     ids = [question.name for question in questions]
     assert len(ids) == len(set(ids))
     assert all(ID_PATTERN.fullmatch(name) for name in ids)
+    # 十字キーの押し方の問いは、選択肢の問いの中で 1 つだけ none を持たない (押さないかは方向の問いで決まる)
+    assert DPAD_PRESS_QUESTION_NAME in ids
     for question in questions:
-        if question.question_type is QuestionType.CHOICE:
+        if question.name == DPAD_PRESS_QUESTION_NAME:
+            assert NONE_CHOICE not in [choice.name for choice in question.choices]
+        elif question.question_type is QuestionType.CHOICE:
             assert question.choices[0].name == NONE_CHOICE
         else:
             assert question.choices == ()
@@ -440,3 +546,15 @@ def test_surface_questions_without_requery_have_no_box_question():
     )
     assert not any(q.question_type is QuestionType.BOX for q in questions)
     assert sum(q.kind is QuestionKind.BOX_EXISTS for q in questions) == 3
+
+
+@pytest.mark.parametrize(
+    "allowed", [set(), {"A"}, {"A", "UP", "RIGHT", "DOWN", "LEFT"}]
+)
+def test_dpad_questions_are_sent_regardless_of_allowed_buttons(allowed):
+    questions = build_surface_questions(allowed, TARGETS, set(), frame_count=1)
+    names = [question.name for question in questions]
+    assert names.count("dpad_direction") == 1
+    assert names.count("dpad_press") == 1
+    for button in DPAD_BUTTONS:
+        assert f"button_{button}" not in names
