@@ -613,7 +613,29 @@ class SurfaceLoop:
 
         t はこの回の行の t_received。
         """
-        raise NotImplementedError
+        decision = self._task_answer_streak.observe(
+            documents.task_id,
+            output.task_done_p,
+            output.task_cancel_p,
+            self.settings.threshold_task,
+        )
+        board = self.parts.board
+        scene_id = documents.scene_id
+        task_id = documents.task_id
+        # 先頭のタスクがあれば場面も決まっている (場面が無ければ先頭のタスクを読まない)
+        if board is not None and scene_id is not None and task_id is not None:
+            completed = decision.done and board.complete(scene_id, task_id, t)
+            if completed and not board.tasks(scene_id, t):
+                self._notify("queue_empty")
+            if decision.cancel and board.request_cancel(scene_id, task_id, t):
+                self._notify("cancel_requested")
+        if output.scene_changed:
+            self._notify("scene_change")
+
+    def _notify(self, reason: MiddleCallReason) -> None:
+        """trigger_notify で middle を呼ぶきっかけ reason を知らせる。trigger_notify が None なら何もしない。"""
+        if self.parts.trigger_notify is not None:
+            self.parts.trigger_notify(reason)
 
     def _request_deep(
         self,

@@ -45,7 +45,7 @@ from switch2_layers.middle.middle_types import (
     MiddleState,
     middle_state_to_json,
 )
-from switch2_layers.middle.task_destination_fix import DestinationFix
+from switch2_layers.middle.task_destination_fix import DestinationFix, fix_new_tasks
 from switch2_layers.notes.note_paths import SCENE_LABELS_FILE
 from switch2_layers.notes.scene_labels import (
     SceneLabel,
@@ -210,7 +210,37 @@ def _update_task_board(
     c の追加は、scene_id があり、入力の場面 (middle_input.previous_state の scene_id。previous_state が None なら None)
     が scene_id と同じか、入力の場面が None で b の後の scene_id のキューが空のときだけ行う。
     """
-    raise NotImplementedError
+    # a. 現在の場面
+    board.set_current_scene(scene_id, generated_t)
+    # b. 取り消し (取り消しの要求か詰まりがある回だけ)
+    cancel_used = "cancel_requested" in reasons or "stuck" in reasons or output.is_stuck
+    canceled = board.cancel(output.cancel_task_ids, generated_t) if cancel_used else ()
+    # c. 追加 (行き先の補正は、足さない回も計算する)
+    new_tasks, destination_fixes = fix_new_tasks(
+        output.new_tasks, middle_input.map_document
+    )
+    previous_state = middle_input.previous_state
+    input_scene_id = None if previous_state is None else previous_state.scene_id
+    new_tasks_used = scene_id is not None and (
+        input_scene_id == scene_id
+        or (input_scene_id is None and not board.tasks(scene_id, generated_t))
+    )
+    if scene_id is not None and new_tasks_used:
+        board.add(scene_id, new_tasks, generated_t)
+    # d. 取り消しでキューが空になったことの知らせ
+    if (
+        canceled
+        and scene_id is not None
+        and trigger_notify is not None
+        and not board.tasks(scene_id, generated_t)
+    ):
+        trigger_notify("queue_empty")
+    return _TaskBoardUpdate(
+        new_tasks=new_tasks,
+        destination_fixes=destination_fixes,
+        cancel_used=cancel_used,
+        new_tasks_used=new_tasks_used,
+    )
 
 
 def _is_stopped(stop: threading.Event | None) -> bool:

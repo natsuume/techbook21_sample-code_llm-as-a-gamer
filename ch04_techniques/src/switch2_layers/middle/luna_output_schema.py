@@ -41,7 +41,7 @@ from switch2_layers.surface.middle_state_reader import (
     SURFACE_WAIT_MAX_S,
     SURFACE_WAIT_MIN_S,
 )
-from switch2_layers.tasks.task_queue import NewTask
+from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 OUTPUT_FORMAT_NAME = "middle_output"
 
@@ -402,12 +402,37 @@ def _observation(item: object) -> MapObservation:
 
 def _new_task(item: object) -> NewTask:
     """new_tasks の要素 item を NewTask にする。スキーマに合わなければ ValueError (parse_middle_output の規則)。"""
-    raise NotImplementedError
+    where = "an element of new_tasks"
+    value = _element_object(item, where)
+    _check_keys(value, _NEW_TASK_KEYS, where)
+    return NewTask(
+        text=_string(value, "text"),
+        destination=_destination(value["destination"]),
+    )
+
+
+def _destination(item: object) -> TaskDestination | None:
+    """new_tasks の要素の destination の値 item が null なら None、行き先の object なら TaskDestination にする。
+
+    object のキーが place と tile に一致しない、place が文字列でない、tile が null でも座標の object でもないとき、
+    null でも object でもないときは ValueError。
+    """
+    if item is None:
+        return None
+    where = "'destination' in new_tasks"
+    value = _element_object(item, where)
+    _check_keys(value, _DESTINATION_KEYS, where)
+    return TaskDestination(
+        place=_string(value, "place"),
+        tile=_tile(value["tile"], f"'tile' of {where}"),
+    )
 
 
 def _cancel_task_id(item: object) -> str:
     """cancel_task_ids の要素 item が文字列ならその値を返す。それ以外は ValueError (ID の形は確かめない)。"""
-    raise NotImplementedError
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"an element of cancel_task_ids must be a string: {item!r}")
 
 
 def _tile(item: object, where: str) -> TilePosition | None:

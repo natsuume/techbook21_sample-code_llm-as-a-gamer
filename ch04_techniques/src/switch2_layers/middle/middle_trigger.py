@@ -55,13 +55,19 @@ class MiddleReasonTracker:
 
     def __init__(self, interval_s: float, stuck_seconds: float) -> None:
         """保留の理由が無く、前回 stuck で呼んだ時刻も無く、直前の回が失敗していない状態で作る。"""
-        raise NotImplementedError
+        self._interval_s = interval_s
+        self._stuck_seconds = stuck_seconds
+        self._pending: set[MiddleCallReason] = set()
+        # 前回 stuck で呼んだ時刻 (take が stuck を返した時刻)。しきい値以下に戻ったら忘れる
+        self._last_stuck_t: float | None = None
+        # 直前の回が失敗したか (carry_over で立て、take で解く)
+        self._after_failure = False
 
     def notify(
         self, reason: Literal["queue_empty", "cancel_requested", "scene_change"]
     ) -> None:
         """理由 reason を保留に足す (既に保留にあれば何もしない)。"""
-        raise NotImplementedError
+        self._pending.add(reason)
 
     def observe_stuck(self, oldest_active_s: float | None, t: float) -> None:
         """時刻 t の、現在の場面の最も古いタスクの続いた秒数 oldest_active_s から、stuck を保留に足すかを決める。
@@ -72,7 +78,11 @@ class MiddleReasonTracker:
            t − その時刻 ≥ stuck_seconds なら、stuck を保留に足す
         前回 stuck で呼んだ時刻は、ここでは決めない (take で決める)。
         """
-        raise NotImplementedError
+        if oldest_active_s is None or oldest_active_s <= self._stuck_seconds:
+            self._last_stuck_t = None
+            return
+        if self._last_stuck_t is None or t - self._last_stuck_t >= self._stuck_seconds:
+            self._pending.add("stuck")
 
     def ready(self, t: float, last_response_t: float) -> bool:
         """時刻 t に次の実行を始めてよいなら True を返す。last_response_t は前回の応答 (失敗を含む) の時刻。
@@ -84,7 +94,14 @@ class MiddleReasonTracker:
         4. 保留の理由が無ければ、t − last_response_t ≥ interval_s なら True、そうでなければ False
         保留も、直前の回が失敗した状態も変えない。
         """
-        raise NotImplementedError
+        elapsed = t - last_response_t
+        if self._after_failure:
+            return elapsed >= self._interval_s
+        if elapsed < MIN_MIDDLE_GAP_S:
+            return False
+        if self._pending:
+            return True
+        return elapsed >= self._interval_s
 
     def take(self, t: float) -> tuple[MiddleCallReason, ...]:
         """時刻 t に始める実行の理由を返し、保留を空にして、直前の回が失敗した状態を解く。
@@ -92,7 +109,14 @@ class MiddleReasonTracker:
         保留の理由を MIDDLE_CALL_REASON_ORDER の順に並べて返す。保留が無ければ ("interval",)。
         返す理由に stuck を含むなら、前回 stuck で呼んだ時刻を t にする。
         """
-        raise NotImplementedError
+        reasons = tuple(
+            reason for reason in MIDDLE_CALL_REASON_ORDER if reason in self._pending
+        )
+        self._pending.clear()
+        self._after_failure = False
+        if "stuck" in reasons:
+            self._last_stuck_t = t
+        return reasons if reasons else ("interval",)
 
     def carry_over(self, reasons: Sequence[MiddleCallReason]) -> None:
         """失敗した回の理由 reasons のうち、interval を除くものを保留に戻し (次の回に持ち越す)、直前の回が失敗した
@@ -100,7 +124,12 @@ class MiddleReasonTracker:
 
         stuck を戻しても、前回 stuck で呼んだ時刻は変えない。
         """
-        raise NotImplementedError
+        self._pending.update(reason for reason in reasons if reason != "interval")
+        self._after_failure = True
+
+    def _discard_pending(self) -> None:
+        """保留の理由をすべて捨てる (MiddleTrigger.first_reasons が使う)。"""
+        self._pending.clear()
 
 
 class MiddleTrigger:
@@ -124,12 +153,17 @@ class MiddleTrigger:
         oldest_active_s: Callable[[float], float | None],
     ) -> None:
         """MiddleReasonTracker(interval_s, stuck_seconds) と threading.Condition を作って持つ。"""
-        raise NotImplementedError
+        self._tracker = MiddleReasonTracker(interval_s, stuck_seconds)
+        self._condition = threading.Condition()
+        self._clock = clock
+        self._oldest_active_s = oldest_active_s
 
     def notify(self, reason: MiddleCallReason) -> None:
         """理由 reason (queue_empty・cancel_requested・scene_change のどれか) を保留に足し
         (MiddleReasonTracker.notify)、wait_next で待っているスレッドを起こす。どのスレッドからでも呼べる。"""
-        raise NotImplementedError
+        with self._condition:
+            self._tracker.notify(reason)
+            self._condition.notify_all()
 
     def wait_next(
         self, stop: threading.Event, last_response_t: float
@@ -142,7 +176,16 @@ class MiddleTrigger:
         last_response_t は前回の応答 (失敗を含む) の時刻。carry_over の後 (直前の回が失敗した) は、notify で起きても、
         前回の応答から interval_s 秒たつまでは返さない。
         """
-        raise NotImplementedError
+        while not stop.is_set():
+            t = self._clock.now()
+            # キューの部品は自分のロックを持つため、Condition の外で読む
+            oldest_active_s = self._oldest_active_s(t)
+            with self._condition:
+                self._tracker.observe_stuck(oldest_active_s, t)
+                if self._tracker.ready(t, last_response_t):
+                    return self._tracker.take(t)
+                self._condition.wait(TRIGGER_POLL_S)
+        return None
 
     def carry_over(self, reasons: Sequence[MiddleCallReason]) -> None:
         """失敗した回の理由 reasons を保留に戻し、直前の回が失敗した状態にする (MiddleReasonTracker.carry_over)。
@@ -150,8 +193,11 @@ class MiddleTrigger:
         次の wait_next は、前回の応答から interval_s 秒たつまで明けず、明けたら持ち越した理由 (と、その後に届いた理由。
         無ければ interval) を返す。
         """
-        raise NotImplementedError
+        with self._condition:
+            self._tracker.carry_over(reasons)
 
     def first_reasons(self) -> tuple[MiddleCallReason, ...]:
         """最初の実行の理由 ("interval",) を返す。それまでに届いた保留の理由は捨てる (保留を空にする)。"""
-        raise NotImplementedError
+        with self._condition:
+            self._tracker._discard_pending()
+        return ("interval",)

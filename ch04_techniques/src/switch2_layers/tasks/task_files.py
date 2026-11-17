@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from switch2_layers.file_io import write_json_atomic, write_text_atomic
+from switch2_layers.notes.map_document import TilePosition, tile_position_to_json
 from switch2_layers.notes.note_paths import (
     SCENES_DIR,
     is_scene_id,
@@ -37,7 +38,13 @@ def destination_to_json(
 
     tile は notes.map_document.tile_position_to_json の形 (None なら null)。destination が None なら None を返す。
     """
-    raise NotImplementedError
+    if destination is None:
+        return None
+    tile = destination.tile
+    return {
+        "place": destination.place,
+        "tile": None if tile is None else tile_position_to_json(tile),
+    }
 
 
 def destination_from_json(value: object) -> TaskDestination | None:
@@ -46,7 +53,15 @@ def destination_from_json(value: object) -> TaskDestination | None:
     value が None なら None を返す。{"place": 文字列, "tile": {"x": 整数, "y": 整数} か null} なら、place と
     tile (null なら None、座標なら notes.map_document.TilePosition) の TaskDestination を返す。
     """
-    raise NotImplementedError
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError(f"destination must be a JSON object or null: {value!r}")
+    tile = value["tile"]
+    return TaskDestination(
+        place=value["place"],
+        tile=None if tile is None else TilePosition(x=tile["x"], y=tile["y"]),
+    )
 
 
 def tasks_json_value(tasks: Sequence[TaskView], t: float) -> dict[str, object]:

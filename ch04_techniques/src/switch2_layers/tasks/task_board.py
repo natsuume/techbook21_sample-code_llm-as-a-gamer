@@ -108,7 +108,8 @@ class TaskBoard:
     @property
     def current_scene_id(self) -> str | None:
         """ロックの中で SceneTaskQueues.current_scene_id (現在の場面 ID。場面なしなら None) を返す。"""
-        raise NotImplementedError
+        with self._lock:
+            return self._queues.current_scene_id
 
     def set_current_scene(self, scene_id: str | None, t: float) -> None:
         """SceneTaskQueues.set_current_scene(scene_id, t) で現在の場面を変える。ファイルも記録も書かない。"""

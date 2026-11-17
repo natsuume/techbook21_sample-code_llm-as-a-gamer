@@ -201,7 +201,20 @@ def _read_task_inputs(
 ) -> tuple[tuple[TaskView, ...], tuple[dict[str, object], ...], int]:
     """入力の場面のタスクのキュー・前回以降のタスクの出来事・tasks.jsonl を読み終えた位置を返す
     (build_middle_input の task_queue・task_events・tasks_rows_offset)。"""
-    raise NotImplementedError
+    chunk = read_json_lines_from(
+        paths.tasks_log,
+        0 if previous_state is None else previous_state.tasks_rows_offset,
+    )
+    scene_id = None if previous_state is None else previous_state.scene_id
+    if scene_id is None:
+        # 場面なしでも、読み終えた位置は進める
+        return (), (), chunk.end_offset
+    task_events = tuple(
+        row
+        for row in chunk.rows
+        if row.get("scene_id") == scene_id and row.get("event") != "added"
+    )
+    return board.tasks(scene_id, now_t), task_events, chunk.end_offset
 
 
 def _read_frames(paths: RunPaths, now_t: float, window_s: float) -> list[MiddleFrame]:

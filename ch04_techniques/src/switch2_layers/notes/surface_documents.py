@@ -12,6 +12,7 @@ notes/ の中の通常のファイルでない・OSError・UnicodeDecodeError) �
 共通の文書を読む。tasks.json なら、先頭のタスクが無いものとして扱う)。
 """
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +23,7 @@ from switch2_layers.notes.note_paths import (
     common_note,
     is_scene_id,
     scene_note,
+    tasks_json_note,
 )
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.surface.surface_types import SurfaceDocuments
@@ -75,7 +77,14 @@ def _read_head_task(notes_dir: Path, scene_id: str) -> tuple[str, str | None]:
     (シンボリックリンクを解決した先が notes/ の外なら読まない)。読んだ文字列が空 (無い・notes/ の外を指す・UTF-8 で
     ない) か、tasks が空なら ("", None)。
     """
-    raise NotImplementedError
+    text = read_note_text(notes_dir, tasks_json_note(scene_id))
+    if not text:
+        return "", None
+    tasks = json.loads(text)["tasks"]
+    if not tasks:
+        return "", None
+    head = tasks[0]
+    return head["text"], head["id"]
 
 
 def _read_scene_or_common(

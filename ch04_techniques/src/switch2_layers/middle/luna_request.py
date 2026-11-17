@@ -58,7 +58,10 @@ from collections.abc import Mapping, Sequence
 from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.middle.luna_instructions import LUNA_DEVELOPER_INSTRUCTIONS
 from switch2_layers.middle.luna_output_schema import build_text_format
-from switch2_layers.middle.middle_trigger import MiddleCallReason
+from switch2_layers.middle.middle_trigger import (
+    MIDDLE_CALL_REASON_ORDER,
+    MiddleCallReason,
+)
 from switch2_layers.middle.middle_types import MiddleInput, MiddleState
 from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
@@ -79,7 +82,7 @@ from switch2_layers.progress.progress_text import (
     NO_PROGRESS_TEXT,
     describe_progress_values,
 )
-from switch2_layers.tasks.task_queue import DropReason, TaskView
+from switch2_layers.tasks.task_queue import DropReason, TaskDestination, TaskView
 
 LUNA_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
@@ -246,7 +249,27 @@ def describe_task_queue(tasks: Sequence[TaskView]) -> str:
         要求     cancel_requested_t があれば「、取り消しの要求あり」、無ければ何も書かない
     例: 「- task-003: 宿屋に入っている (行き先: 町 (3, 4)、キューに入ってから 12.5 秒、取り消しの要求あり)」
     """
-    raise NotImplementedError
+    if not tasks:
+        return EMPTY_TEXT
+    lines: list[str] = []
+    for task in tasks:
+        requested = (
+            "、取り消しの要求あり" if task.cancel_requested_t is not None else ""
+        )
+        lines.append(
+            f"- {task.id}: {task.text} (行き先: {_describe_destination(task.destination)}、"
+            f"キューに入ってから {task.active_s:g} 秒{requested})"
+        )
+    return "\n".join(lines)
+
+
+def _describe_destination(destination: TaskDestination | None) -> str:
+    """タスクのキューの節の行き先「<place> (<x>, <y>)」・「<place>」・NO_DESTINATION_TEXT を返す。"""
+    if destination is None:
+        return NO_DESTINATION_TEXT
+    if destination.tile is None:
+        return destination.place
+    return f"{destination.place} ({destination.tile.x}, {destination.tile.y})"
 
 
 def describe_task_events(rows: Sequence[Mapping[str, object]]) -> str:
@@ -259,7 +282,37 @@ def describe_task_events(rows: Sequence[Mapping[str, object]]) -> str:
         dropped                             「- t=<t> 足せなかった (<DROP_REASON_TEXTS[reason]>) 「<text>」」
                                             (例: 「- t=12.345 足せなかった (同じ文がある) 「宿屋に入っている」」)
     """
-    raise NotImplementedError
+    if not rows:
+        return EMPTY_TEXT
+    lines: list[str] = []
+    for row in rows:
+        when = format_frame_label(_row_float(row["t"]))
+        event = row["event"]
+        if event == "dropped":
+            reason = DROP_REASON_TEXTS[_drop_reason(row["reason"])]
+            lines.append(
+                f"- {when} {TASK_EVENT_TEXTS['dropped']} ({reason}) 「{row['text']}」"
+            )
+        else:
+            lines.append(
+                f"- {when} {TASK_EVENT_TEXTS[str(event)]} {row['id']} 「{row['text']}」"
+            )
+    return "\n".join(lines)
+
+
+def _row_float(value: object) -> float:
+    """tasks.jsonl の行の数の値 value を float にする。数 (bool を除く) でなければ ValueError。"""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    raise ValueError(f"'t' in tasks.jsonl must be a number: {value!r}")
+
+
+def _drop_reason(value: object) -> DropReason:
+    """tasks.jsonl の dropped の行の reason の値 value を DropReason にする。DROP_REASON_TEXTS に無ければ ValueError。"""
+    for reason in DROP_REASON_TEXTS:
+        if value == reason:
+            return reason
+    raise ValueError(f"unknown drop reason in tasks.jsonl: {value!r}")
 
 
 def describe_call_reasons(reasons: Sequence[MiddleCallReason]) -> str:
@@ -268,7 +321,11 @@ def describe_call_reasons(reasons: Sequence[MiddleCallReason]) -> str:
     理由ごとに 1 行「- <理由>: <CALL_REASON_TEXTS[理由]>」を、middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順に
     改行 1 つでつなぐ (末尾に改行を付けない)。例: 「- interval: 前回から一定の間隔がたった」
     """
-    raise NotImplementedError
+    return "\n".join(
+        f"- {reason}: {CALL_REASON_TEXTS[reason]}"
+        for reason in MIDDLE_CALL_REASON_ORDER
+        if reason in reasons
+    )
 
 
 def build_user_sections(middle_input: MiddleInput) -> list[str]:

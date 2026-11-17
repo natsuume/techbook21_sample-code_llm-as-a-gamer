@@ -57,4 +57,26 @@ class TaskAnswerStreak:
         4. 数が TASK_ANSWER_STREAK に達した問いを成立にし、その数を 0 に戻す
         5. 両方が成立したら、done だけを True にし、両方の数を 0 にする
         """
-        raise NotImplementedError
+        if task_id != self._task_id:
+            self._done_count = 0
+            self._cancel_count = 0
+            self._task_id = task_id
+        if task_id is None:
+            return TaskAnswerDecision(done=False, cancel=False)
+        self._done_count = _next_count(self._done_count, done_p, threshold)
+        self._cancel_count = _next_count(self._cancel_count, cancel_p, threshold)
+        done = self._done_count >= TASK_ANSWER_STREAK
+        cancel = self._cancel_count >= TASK_ANSWER_STREAK
+        if done:
+            self._done_count = 0
+        if cancel:
+            self._cancel_count = 0
+        # 同じ要求で両方が成立したら、完了だけにする (両方の数は上で 0 に戻している)
+        return TaskAnswerDecision(done=done, cancel=cancel and not done)
+
+
+def _next_count(count: int, probability: float | None, threshold: float) -> int:
+    """確率 probability がしきい値 threshold を超えたら (>) count + 1、超えなければ (None を含む) 0 を返す。"""
+    if probability is not None and probability > threshold:
+        return count + 1
+    return 0

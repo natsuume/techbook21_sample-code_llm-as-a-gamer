@@ -534,7 +534,22 @@ def build_task_questions(task_text: str) -> list[SurfaceQuestion]:
     {task} を task_text に置き換えたもの。
     どちらも target は空文字列、型は noul。
     """
-    raise NotImplementedError
+    return [
+        SurfaceQuestion(
+            name=TASK_DONE_QUESTION_NAME,
+            instructions=TASK_DONE_QUESTION_TEXT.format(task=task_text),
+            kind=QuestionKind.TASK_DONE,
+            target="",
+            question_type=QuestionType.NOUL,
+        ),
+        SurfaceQuestion(
+            name=TASK_CANCEL_QUESTION_NAME,
+            instructions=TASK_CANCEL_QUESTION_TEXT.format(task=task_text),
+            kind=QuestionKind.TASK_CANCEL,
+            target="",
+            question_type=QuestionType.NOUL,
+        ),
+    ]
 
 
 def _target_text(template: str, target: BoxTarget, frame_path: str) -> str:

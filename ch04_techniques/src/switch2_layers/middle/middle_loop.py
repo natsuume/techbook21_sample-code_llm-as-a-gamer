@@ -40,6 +40,15 @@ from switch2_layers.middle.map_records import build_map_record
 from switch2_layers.middle.middle_call_record import (
     MiddleCallRecord,
     middle_call_row_with_details,
+    take_analyzer_call_details,
+)
+from switch2_layers.middle.middle_input_builder import (
+    build_middle_input,
+    has_recorded_frame,
+)
+from switch2_layers.middle.middle_output_writer import (
+    NEW_SCENE_DEEP_KINDS,
+    write_middle_output,
 )
 from switch2_layers.middle.middle_trigger import MiddleCallReason, MiddleTrigger
 from switch2_layers.middle.middle_types import (
@@ -139,7 +148,90 @@ def run_middle_step(
     行を書かない。書く順は変えず、それまでに書いたものは戻さない。analyze が戻ったときに立っていたら、何も書かず
     deep も呼ばない。
     """
-    raise NotImplementedError
+    now_t = clock.now()
+    t_sent = now_t
+    middle_input: MiddleInput | None = None
+    # analyze の 1 回の記録 (usage など)。入力を作れずに analyze を呼ばなかった回は空のまま
+    call_details: dict[str, object] = {}
+    try:
+        middle_input = build_middle_input(paths, now_t, window_s, board, reasons)
+        t_sent = clock.now()
+        try:
+            output = analyzer.analyze(middle_input)
+        finally:
+            # analyze が戻った直後 (例外を含む) に、その回の記録を受け取る
+            call_details = take_analyzer_call_details(analyzer)
+    except Exception as error:
+        t_received = clock.now()
+        if _is_stopped(stop):
+            return STOPPED_STEP_RESULT
+        logger.debug("middle analyze failed", exc_info=True)
+        return _record_failure(
+            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
+        )
+    t_received = clock.now()
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
+    try:
+        # キューの部品の操作の前と、middle/state.json・notes/scene_labels.json のそれぞれを書く直前に stop を確かめる
+        write_result = write_middle_output(
+            paths,
+            middle_input,
+            output,
+            generated_t=t_received,
+            board=board,
+            reasons=reasons,
+            trigger_notify=trigger_notify,
+            stop=stop,
+        )
+    except Exception as error:
+        logger.debug("writing the middle output failed", exc_info=True)
+        return _record_failure(
+            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
+        )
+    if write_result is None:
+        return STOPPED_STEP_RESULT
+    if not _append_map_record(
+        paths, middle_input, write_result.state.scene_id, output, stop
+    ):
+        return STOPPED_STEP_RESULT
+    new_scene = write_result.new_scene
+    deep_kinds = NEW_SCENE_DEEP_KINDS if new_scene is not None else ()
+    request_errors: list[tuple[DocumentKind, str]] = []
+    requests_sent = False
+    if new_scene is not None and deep_requests is not None:
+        requests_sent = True
+        for kind in deep_kinds:
+            if _is_stopped(stop):
+                return STOPPED_STEP_RESULT
+            try:
+                deep_requests.request(kind, DeepTrigger.NEW_SCENE, new_scene.id)
+            except Exception as error:
+                logger.debug("middle deep request failed", exc_info=True)
+                request_errors.append((kind, describe_exception(error)))
+    record = MiddleCallRecord(
+        t_sent=t_sent,
+        t_received=t_received,
+        middle_input=middle_input,
+        write_result=write_result,
+        deep_requests=deep_kinds,
+        deep_requests_sent=requests_sent,
+        error=None,
+        reasons=reasons,
+    )
+    if _is_stopped(stop):
+        return STOPPED_STEP_RESULT
+    append_json_line(
+        paths.middle_calls, middle_call_row_with_details(record, call_details)
+    )
+    return MiddleStepResult(
+        ok=True,
+        state=write_result.state,
+        new_scene=new_scene,
+        deep_requests=tuple(deep_kinds),
+        error=None,
+        deep_request_errors=tuple(request_errors),
+    )
 
 
 def _append_map_record(
@@ -342,7 +434,19 @@ class MiddleLoop:
         run_once の想定外の例外 (Exception) は外に出さず、on_stop(説明を含む理由) を呼んでから戻る。
         run_once の結果の stopped が True なら、待たずに戻る。
         """
-        raise NotImplementedError
+        parts = self.parts
+        try:
+            while not stop.is_set() and not has_recorded_frame(parts.paths):
+                stop.wait(FIRST_FRAME_POLL_S)
+            reasons: tuple[MiddleCallReason, ...] | None = parts.trigger.first_reasons()
+            while reasons is not None and not stop.is_set():
+                result = self.run_once(reasons, stop)
+                if result.stopped:
+                    return
+                reasons = parts.trigger.wait_next(stop, parts.clock.now())
+        except Exception as error:
+            logger.warning("middle loop failed", exc_info=True)
+            parts.on_stop(f"middle loop failed: {describe_exception(error)}")
 
 
 def run_middle_once(

@@ -19,10 +19,18 @@ after)。直した内容は middle/calls.jsonl の destination_fixes に destina
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
-from switch2_layers.notes.map_document import GridMapDocument, MapDocument
+from switch2_layers.notes.grid_route import connection_from_tiles
+from switch2_layers.notes.map_document import (
+    GridMapDocument,
+    GridMapPlace,
+    MapDocument,
+    MapPlace,
+    TilePosition,
+)
+from switch2_layers.tasks.task_files import destination_to_json
 from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 # 行き先を直した理由:
@@ -60,7 +68,15 @@ def fix_new_tasks(
     (直した後の new_tasks (new_tasks と同じ順・同じ数。文はそのまま), 直した内容 (new_tasks の順。1 つの行き先の中は
     alias_place → tile_not_listed / free_map_tile の順)) を返す。直したものが無ければ、直した内容は空のタプル。
     """
-    raise NotImplementedError
+    fixed: list[NewTask] = []
+    fixes: list[DestinationFix] = []
+    for index, new_task in enumerate(new_tasks):
+        destination, task_fixes = _fix_destination(
+            index, new_task.destination, map_document
+        )
+        fixed.append(replace(new_task, destination=destination))
+        fixes.extend(task_fixes)
+    return tuple(fixed), tuple(fixes)
 
 
 def destination_fix_to_json(fix: DestinationFix) -> dict[str, object]:
@@ -68,4 +84,72 @@ def destination_fix_to_json(fix: DestinationFix) -> dict[str, object]:
 
     before と after は tasks.task_files.destination_to_json の形 (after が None なら null)。
     """
-    raise NotImplementedError
+    return {
+        "index": fix.index,
+        "before": destination_to_json(fix.before),
+        "after": destination_to_json(fix.after),
+        "reason": fix.reason,
+    }
+
+
+def _fix_destination(
+    index: int,
+    destination: TaskDestination | None,
+    map_document: MapDocument | GridMapDocument | None,
+) -> tuple[TaskDestination | None, list[DestinationFix]]:
+    """new_tasks の index 番目のタスクの行き先 destination を、規則 (モジュールの docstring) で直す。
+
+    (直した後の行き先, 直した内容 (alias_place → tile_not_listed / free_map_tile の順)) を返す。
+    """
+    if destination is None:
+        return None, []
+    if map_document is None:
+        return None, [DestinationFix(index, destination, None, "no_map")]
+    matched = _matched_place(map_document, destination.place)
+    if matched is None:
+        return None, [DestinationFix(index, destination, None, "unknown_place")]
+    place, by_alias = matched
+    fixes: list[DestinationFix] = []
+    current = destination
+    if by_alias:
+        renamed = TaskDestination(place=place.name, tile=current.tile)
+        fixes.append(DestinationFix(index, current, renamed, "alias_place"))
+        current = renamed
+    if current.tile is None:
+        return current, fixes
+    if isinstance(map_document, GridMapDocument) and isinstance(place, GridMapPlace):
+        if current.tile in _listed_tiles(map_document, place):
+            return current, fixes
+        reason: DestinationFixReason = "tile_not_listed"
+    else:
+        reason = "free_map_tile"
+    without_tile = TaskDestination(place=current.place, tile=None)
+    fixes.append(DestinationFix(index, current, without_tile, reason))
+    return without_tile, fixes
+
+
+def _matched_place(
+    map_document: MapDocument | GridMapDocument, place_name: str
+) -> tuple[MapPlace | GridMapPlace, bool] | None:
+    """place_name に当たるマップの場所と、aliases で当たったかを返す。どれにも当たらなければ None。
+
+    前後の空白を除いて、まず全場所の name、次に全場所の aliases の順に、マップの場所の並びで比べる。
+    """
+    target = place_name.strip()
+    for place in map_document.places:
+        if place.name.strip() == target:
+            return place, False
+    for place in map_document.places:
+        if any(alias.strip() == target for alias in place.aliases):
+            return place, True
+    return None
+
+
+def _listed_tiles(
+    map_document: GridMapDocument, place: GridMapPlace
+) -> frozenset[TilePosition]:
+    """マス目型の場所 place の、行き先のマスとして残せる座標 (exits・landmarks・出るつながりの from_tile) を返す。"""
+    marks = (*place.exits, *place.landmarks)
+    return frozenset(mark.position for mark in marks) | connection_from_tiles(
+        map_document, place
+    )
