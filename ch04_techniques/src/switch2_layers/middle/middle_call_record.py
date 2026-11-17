@@ -88,6 +88,7 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
     return {
         "t_sent": record.t_sent,
         "t_received": record.t_received,
+        "request": record.request,
         "based_on_t": None if middle_input is None else middle_input.t,
         "frames": []
         if middle_input is None
@@ -184,4 +185,12 @@ def middle_request_row(
     リスト、sections は request.sections のリスト (文はそのまま)、frames は request.frames の [{"t", "file"}]
     (jpeg は入れない)。
     """
-    raise NotImplementedError
+    return {
+        "request": request_number,
+        "t_sent": t_sent,
+        "model": request.model,
+        "reasoning_effort": request.reasoning_effort,
+        "reasons": list(request.reasons),
+        "sections": list(request.sections),
+        "frames": [{"t": frame.t, "file": frame.file} for frame in request.frames],
+    }

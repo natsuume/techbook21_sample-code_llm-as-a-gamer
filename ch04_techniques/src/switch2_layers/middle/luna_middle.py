@@ -31,7 +31,12 @@ from switch2_layers.middle.luna_client import (
     read_output_text,
 )
 from switch2_layers.middle.luna_output_schema import parse_middle_output
-from switch2_layers.middle.luna_request import REASONING_EFFORT, build_luna_payload
+from switch2_layers.middle.luna_request import (
+    LUNA_MODEL,
+    REASONING_EFFORT,
+    build_luna_payload,
+    build_user_sections,
+)
 from switch2_layers.middle.luna_usage import (
     estimate_cost_usd,
     read_usage,
@@ -51,7 +56,13 @@ def build_middle_request(
     middle_input.reasons、sections は luna_request.build_user_sections(middle_input) をタプルにしたもの
     (build_luna_payload が user メッセージに置く input_text の文と同じ)、frames は middle_input.frames。
     """
-    raise NotImplementedError
+    return MiddleRequest(
+        model=LUNA_MODEL,
+        reasoning_effort=reasoning_effort,
+        reasons=middle_input.reasons,
+        sections=tuple(build_user_sections(middle_input)),
+        frames=middle_input.frames,
+    )
 
 
 def build_call_details(
@@ -116,6 +127,11 @@ class LunaMiddleAnalyzer:
         payload = build_luna_payload(
             middle_input, reasoning_effort=self.reasoning_effort
         )
+        if middle_input.request_sink is not None:
+            # 送った後に失敗する回も記録に残すため、送る前に渡す
+            middle_input.request_sink(
+                build_middle_request(middle_input, self.reasoning_effort)
+            )
         try:
             body = post_responses(self.client, self.api_key, payload, self.timeout_s)
             # 出力を読めなくても (スキーマに合わない出力を含む)、費用のかかった応答を記録に残す

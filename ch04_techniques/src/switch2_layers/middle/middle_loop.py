@@ -34,17 +34,18 @@ notes/scene_labels.json)・middle/map_records.jsonl・middle/calls.jsonl のそ�
 import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from switch2_layers.deep.deep_types import DeepRequestSink, DeepTrigger, DocumentKind
 from switch2_layers.error_text import describe_exception
-from switch2_layers.file_io import append_json_line
+from switch2_layers.file_io import append_json_line, read_json_lines
 from switch2_layers.frames.frame_store import latest_frame_t
 from switch2_layers.middle.map_records import build_map_record
 from switch2_layers.middle.middle_call_record import (
     MiddleCallRecord,
     middle_call_row_with_details,
+    middle_request_row,
     take_analyzer_call_details,
 )
 from switch2_layers.middle.middle_input_builder import (
@@ -131,7 +132,15 @@ class MiddleRequestLog:
         追記が例外 (Exception) を出したら、外に出さずに logging で警告を書き、増やした番号を返す (middle の失敗に
         数えず、run.jsonl にも書かない。requests.jsonl にはその番号の行が無くなる)。
         """
-        raise NotImplementedError
+        # 追記に失敗した回も番号を進める (calls.jsonl の行には、この番号を書く)
+        self.last_request += 1
+        try:
+            append_json_line(
+                self.path, middle_request_row(self.last_request, t_sent, request)
+            )
+        except Exception:
+            logger.warning("failed to append to %s", self.path, exc_info=True)
+        return self.last_request
 
 
 class MiddleRequestWriter:
@@ -152,7 +161,7 @@ class MiddleRequestWriter:
     def __call__(self, request: MiddleRequest) -> None:
         """log.append(t_sent, request) を呼び、返った番号を self.request にする。例外は出さない (追記の失敗は
         MiddleRequestLog.append が警告にする)。"""
-        raise NotImplementedError
+        self.request = self.log.append(self.t_sent, request)
 
 
 def read_last_request_number(path: Path) -> int:
@@ -160,7 +169,11 @@ def read_last_request_number(path: Path) -> int:
 
     行は file_io.read_json_lines で読む。ファイルが無いか、行が無ければ 0 を返す。
     """
-    raise NotImplementedError
+    rows = read_json_lines(path)
+    if not rows:
+        return 0
+    last = rows[-1].get("request")
+    return last if isinstance(last, int) else 0
 
 
 def run_middle_step(
@@ -219,9 +232,14 @@ def run_middle_step(
     middle_input: MiddleInput | None = None
     # analyze の 1 回の記録 (usage など)。入力を作れずに analyze を呼ばなかった回は空のまま
     call_details: dict[str, object] = {}
+    # その回の middle/requests.jsonl の書き込み先。入力を作れなかった回と、request_log が None の回は None のまま
+    writer: MiddleRequestWriter | None = None
     try:
         middle_input = build_middle_input(paths, now_t, window_s, board, reasons)
         t_sent = clock.now()
+        if request_log is not None:
+            writer = MiddleRequestWriter(request_log, t_sent)
+            middle_input = replace(middle_input, request_sink=writer)
         try:
             output = analyzer.analyze(middle_input)
         finally:
@@ -233,7 +251,15 @@ def run_middle_step(
             return STOPPED_STEP_RESULT
         logger.debug("middle analyze failed", exc_info=True)
         return _record_failure(
-            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
+            paths,
+            t_sent,
+            t_received,
+            middle_input,
+            error,
+            stop,
+            call_details,
+            reasons,
+            _sent_request(writer),
         )
     t_received = clock.now()
     if _is_stopped(stop):
@@ -253,7 +279,15 @@ def run_middle_step(
     except Exception as error:
         logger.debug("writing the middle output failed", exc_info=True)
         return _record_failure(
-            paths, t_sent, t_received, middle_input, error, stop, call_details, reasons
+            paths,
+            t_sent,
+            t_received,
+            middle_input,
+            error,
+            stop,
+            call_details,
+            reasons,
+            _sent_request(writer),
         )
     if write_result is None:
         return STOPPED_STEP_RESULT
@@ -284,6 +318,7 @@ def run_middle_step(
         deep_requests_sent=requests_sent,
         error=None,
         reasons=reasons,
+        request=_sent_request(writer),
     )
     if _is_stopped(stop):
         return STOPPED_STEP_RESULT
@@ -336,9 +371,10 @@ def _record_failure(
     stop: threading.Event | None,
     call_details: Mapping[str, object],
     reasons: Sequence[MiddleCallReason],
+    request: int | None,
 ) -> MiddleStepResult:
-    """失敗した回の行 (理由 reasons と、analyze の記録 call_details を足したもの) を calls.jsonl に書き、ok=False の
-    結果を返す。
+    """失敗した回の行 (理由 reasons と、analyze の記録 call_details と、送った要求の番号 request を足したもの) を
+    calls.jsonl に書き、ok=False の結果を返す。
 
     書く直前に stop を確かめ、立っていれば書かずに STOPPED_STEP_RESULT を返す。
     """
@@ -354,6 +390,7 @@ def _record_failure(
         deep_requests_sent=False,
         error=description,
         reasons=reasons,
+        request=request,
     )
     append_json_line(
         paths.middle_calls, middle_call_row_with_details(record, call_details)
@@ -361,6 +398,12 @@ def _record_failure(
     return MiddleStepResult(
         ok=False, state=None, new_scene=None, deep_requests=(), error=description
     )
+
+
+def _sent_request(writer: MiddleRequestWriter | None) -> int | None:
+    """その回に送った要求の番号 (writer.request) を返す。writer が None (要求を記録しない回と、入力を作れなかった回)
+    なら None。"""
+    return None if writer is None else writer.request
 
 
 def _is_stopped(stop: threading.Event | None) -> bool:
@@ -427,6 +470,7 @@ class MiddleLoop:
         self.parts = parts
         self.settings = settings
         self._consecutive_errors = 0
+        self._request_log = MiddleRequestLog(parts.paths.middle_requests)
 
     @property
     def consecutive_errors(self) -> int:
@@ -462,6 +506,7 @@ class MiddleLoop:
             reasons,
             parts.trigger.notify,
             stop,
+            request_log=self._request_log,
         )
         if result.stopped:
             return result
@@ -546,4 +591,7 @@ def run_middle_once(
         board=restore_task_board(paths),
         reasons=("interval",),
         trigger_notify=None,
+        request_log=MiddleRequestLog(
+            paths.middle_requests, read_last_request_number(paths.middle_requests)
+        ),
     )
