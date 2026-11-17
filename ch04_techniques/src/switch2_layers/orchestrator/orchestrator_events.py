@@ -1,7 +1,11 @@
-"""主ループが次の入力を作るときに取り出す出来事の型 (OrchestratorController.take_events の戻り値)。
+"""主ループが操作の実行と監視の部品 (OrchestratorController) から受け取る型。
 
-前回の取り出し以降に起きたこと (case_hits・monitor_ends・discarded_action_count・blocked_buttons) と、取り出した時点の
-値 (running・remaining_action_count・macros・monitor) を持つ。作った後は、Mapping の欄 (macros) の中身を書き換えない。
+OrchestratorEvents (take_events の戻り値): 主ループが次の入力を作るときに取り出す出来事。前回の取り出し以降に起きたこと
+(case_hits・monitor_ends・discarded_action_count・blocked_buttons) と、取り出した時点の値 (running・
+remaining_action_count・macros・monitor) を持つ。作った後は、Mapping の欄 (macros) の中身を書き換えない。
+MainActionsRun (main_actions_run の戻り値): 主ループの空でない actions の操作の列 1 つの、始めた・最後に離した・終えた
+時刻。主ループは、これと frames/latest/ の最新のフレームの時刻を見て、前のターンの操作の列が終わり、その後に撮った
+フレームが届くのを待つ (orchestrator.action_settle)。
 """
 
 from collections.abc import Mapping
@@ -71,3 +75,19 @@ class OrchestratorEvents:
     remaining_action_count: int = 0
     macros: Mapping[str, tuple[Action, ...]] = field(default_factory=dict)
     monitor: MonitorCreate | None = None
+
+
+@dataclass(frozen=True)
+class MainActionsRun:
+    """主ループの空でない actions の操作の列 1 つの時刻 (procedure と macro を展開した後の列。時刻は実行の経過秒)。
+
+    started_t    操作の実行と監視の部品が、列を始めた時刻 (まだ始めていなければ None)
+    released_t   列の操作が、最後にボタンかスティックを離した時刻 (列を途中で捨てたときに中立に戻した時刻を含む)。
+                 まだ離していないか、押す操作の無い列なら None
+    ended_t      列が終わった時刻 (最後の操作を終えた時刻か、途中で捨てた時刻)。まだ終わっていなければ None
+    ended_t が None でなければ、started_t も None でない。
+    """
+
+    started_t: float | None
+    released_t: float | None
+    ended_t: float | None

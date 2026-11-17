@@ -19,7 +19,15 @@ from switch2_layers.frames.frame_store import (
     latest_frame_t,
     read_frame_records,
 )
-from switch2_layers.frames.image_encoding import EncodedImage
+from switch2_layers.frames.image_encoding import (
+    DEFAULT_JPEG_QUALITY,
+    EncodedImage,
+    encode_jpeg,
+    nv12_to_bgr,
+    shrink_to_width,
+)
+from switch2_layers.frames.latest_frames import LatestFrames
+from switch2_layers.frames.surface_frames import draw_frame_time
 from switch2_layers.run_directory import RunPaths
 
 
@@ -199,6 +207,177 @@ def test_no_row_is_added_when_image_write_fails(tmp_path):
     assert store.dropped == 1
     rows = frames_rows(root)
     assert [row["kind"] for row in rows] == ["surface"]
+
+
+# --- 最新のフレームの置き換え (frames/latest/) ---
+
+
+def latest_names(root: Path) -> list[str]:
+    """frames/latest/ のファイルの名前 (名前の順)。ディレクトリーが無ければ空。"""
+    directory = root / "frames" / "latest"
+    if not directory.is_dir():
+        return []
+    return sorted(path.name for path in directory.iterdir())
+
+
+def stamped_jpeg(frame: CapturedFrame, width: int) -> bytes:
+    """frame を幅 width に縮小し、左上に時刻を書き込んだ JPEG (frames/latest/ の画像の期待値)。"""
+    shrunk = shrink_to_width(nv12_to_bgr(frame.nv12), width)
+    return encode_jpeg(draw_frame_time(shrunk, frame.t), DEFAULT_JPEG_QUALITY).jpeg
+
+
+def test_interval_frames_replace_the_latest_frames_with_the_time_written(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    latest = LatestFrames(paths)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=320,
+        start_thread=False,
+        latest_frames=latest,
+    )
+    frames = [
+        captured(t, width=640, height=360) for t in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    ]
+    for frame in frames:
+        assert store.offer_interval(frame) is True
+    assert store.write_queued() == 6
+    # 6 枚目で最も古い t=0.0 が外れ、1.jpg が最新 (t=1.0)、5.jpg が t=0.2
+    assert latest_names(root) == ["1.jpg", "2.jpg", "3.jpg", "4.jpg", "5.jpg"]
+    newest_first = list(reversed(frames[1:]))
+    for number, frame in enumerate(newest_first, start=1):
+        # 左上に時刻を書き込み、幅は frames/interval/ と同じ (--interval-width)
+        image = (root / "frames" / "latest" / f"{number}.jpg").read_bytes()
+        assert image == stamped_jpeg(frame, 320)
+    decoded = cv2.imread(str(root / "frames" / "latest" / "1.jpg"))
+    assert decoded.shape[1] == 320
+    # 主ループには、同じ時点の 5 枚を、元の frames/interval/ のファイル名と時刻と一緒に渡す
+    assert [(item.t, item.source_file) for item in latest.snapshot()] == [
+        (frame.t, f"frames/interval/{round(frame.t * 1000):09d}.jpg")
+        for frame in newest_first
+    ]
+
+
+def test_fewer_than_five_interval_frames_fill_only_their_numbers(tmp_path):
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=64,
+        start_thread=False,
+        latest_frames=LatestFrames(paths),
+    )
+    for t in [0.0, 0.2]:
+        store.offer_interval(captured(t))
+    store.write_queued()
+    assert latest_names(root) == ["1.jpg", "2.jpg"]
+    assert (root / "frames" / "latest" / "1.jpg").read_bytes() == stamped_jpeg(
+        captured(0.2), 64
+    )
+
+
+def test_latest_frames_do_not_change_the_interval_images_and_rows(tmp_path):
+    def save(root: Path, with_latest: bool) -> None:
+        paths = RunPaths(root)
+        store = FrameStore(
+            paths,
+            interval_fps=5.0,
+            interval_width=64,
+            start_thread=False,
+            latest_frames=LatestFrames(paths) if with_latest else None,
+        )
+        for t in [0.0, 0.2, 0.4]:
+            store.offer_interval(captured(t))
+        store.save_surface(0.3, jpeg_image())
+        store.write_queued()
+
+    plain = make_run(tmp_path / "plain")
+    with_latest = make_run(tmp_path / "with-latest")
+    save(plain, with_latest=False)
+    save(with_latest, with_latest=True)
+    assert frames_rows(with_latest) == frames_rows(plain)
+    for row in frames_rows(plain):
+        assert (with_latest / row["file"]).read_bytes() == (
+            plain / row["file"]
+        ).read_bytes()
+
+
+def test_without_latest_frames_frames_latest_is_not_written(tmp_path):
+    # advisor 型の run は LatestFrames を渡さない
+    root = make_run(tmp_path)
+    store = FrameStore(
+        RunPaths(root), interval_fps=5.0, interval_width=64, start_thread=False
+    )
+    for t in [0.0, 0.2]:
+        store.offer_interval(captured(t))
+    store.write_queued()
+    assert not (root / "frames" / "latest").exists()
+
+
+def test_failure_to_replace_the_latest_frames_does_not_stop_saving(tmp_path, caplog):
+    class FailOnceLatestFrames(LatestFrames):
+        """最初の add_image だけ、cv2 の例外 (OSError ではない) を出す。"""
+
+        def __init__(self, paths: RunPaths) -> None:
+            super().__init__(paths)
+            self.failed = False
+
+        def add_image(self, t, source_file, image, jpeg_quality=DEFAULT_JPEG_QUALITY):
+            if not self.failed:
+                self.failed = True
+                raise cv2.error("drawing the time failed")
+            super().add_image(t, source_file, image, jpeg_quality)
+
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    latest = FailOnceLatestFrames(paths)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=64,
+        start_thread=False,
+        latest_frames=latest,
+    )
+    for t in [0.0, 0.2]:
+        assert store.offer_interval(captured(t)) is True
+    assert store.write_queued() == 2
+    # 置き換えに失敗した 1 件も、frames/interval/ と frames.jsonl には書けているので written に数える
+    assert (store.written, store.dropped) == (2, 0)
+    assert [row["file"] for row in frames_rows(root)] == [
+        "frames/interval/000000000.jpg",
+        "frames/interval/000000200.jpg",
+    ]
+    assert all((root / row["file"]).is_file() for row in frames_rows(root))
+    # 次のフレームからは、frames/latest/ の置き換えを続ける
+    assert latest_names(root) == ["1.jpg"]
+    assert [item.t for item in latest.snapshot()] == [0.2]
+    assert "failed to replace the latest frames" in caplog.text
+
+
+def test_writer_thread_keeps_saving_when_replacing_the_latest_frames_fails(tmp_path):
+    class FailingLatestFrames(LatestFrames):
+        """add_image のたびに、cv2 の例外 (OSError ではない) を出す。"""
+
+        def add_image(self, t, source_file, image, jpeg_quality=DEFAULT_JPEG_QUALITY):
+            raise cv2.error("drawing the time failed")
+
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=64,
+        latest_frames=FailingLatestFrames(paths),
+    )
+    for t in [0.0, 0.2, 0.4]:
+        assert store.offer_interval(captured(t)) is True
+    # 書き出しスレッドが止まっていなければ、close はキューの分を書き終えるのを待てる
+    store.close()
+    assert (store.written, store.dropped) == (3, 0)
+    assert [row["t"] for row in frames_rows(root)] == [0.0, 0.2, 0.4]
+    assert all((root / row["file"]).is_file() for row in frames_rows(root))
 
 
 # --- surface の画像の保存 ---

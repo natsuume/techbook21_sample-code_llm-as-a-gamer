@@ -101,6 +101,35 @@ def test_instructions_describe_skills_notes_and_old_frames():
     assert "frames/interval/" in text
 
 
+def test_instructions_describe_the_latest_frames():
+    text = orchestrator_instructions()
+    # frames/latest/1.jpg〜5.jpg は最新の 5 枚で、1.jpg が最新
+    assert sentences_with(text, ("frames/latest/1.jpg", "5.jpg"))
+    assert sentences_with(text, ("1.jpg", "最新"))
+    # いつ Read しても、その時点の最新の画面が読める
+    assert sentences_with(text, ("Read", "最新"), any_of=("いつ",))
+
+
+def test_instructions_say_older_frames_are_in_interval_named_by_milliseconds():
+    assert sentences_with(orchestrator_instructions(), ("frames/interval/", "ミリ秒"))
+
+
+def test_instructions_do_not_say_to_read_frames_only_when_needed():
+    assert (
+        sentences_with(
+            orchestrator_instructions(), ("必要なときだけ",), any_of=("読", "Read")
+        )
+        == []
+    )
+
+
+def test_instructions_and_handoff_request_have_no_game_title():
+    # どちらの文にもゲーム名を書かない (ゲーム名を渡すのは、人の初期指示に書かれている場合だけ)
+    for text in (orchestrator_instructions(), handoff_request_text()):
+        for title in ("ロックマン", "エグゼ"):
+            assert title not in text
+
+
 def test_instructions_state_the_role_of_playing_from_the_screen_only():
     assert sentences_with(orchestrator_instructions(), ("画面", "ゲームを進め"))
 
@@ -119,16 +148,31 @@ def test_instructions_say_new_actions_replace_the_rest_of_the_previous_actions()
     )
 
 
-def test_instructions_say_empty_actions_let_the_previous_actions_continue():
-    assert sentences_with(orchestrator_instructions(), ("空", "actions", "続"))
+def test_instructions_say_the_next_input_comes_after_the_actions_end_and_settle():
+    # actions の操作の列が終わり、最後にボタンとスティックを離してから 0.3 秒たってから次の画面と出来事が届く
+    assert sentences_with(
+        orchestrator_instructions(), ("離", "0.3"), any_of=("届", "次")
+    )
 
 
-def test_instructions_say_when_to_answer_with_empty_actions():
-    text = orchestrator_instructions()
-    # 操作の実行中で続けさせたいとき
-    assert sentences_with(text, ("空", "actions", "実行中"))
-    # 監視に任せて待つとき
-    assert sentences_with(text, ("空", "actions", "監視", "待"))
+def test_instructions_say_the_next_input_comes_at_once_only_for_empty_actions():
+    # 「答えを返すと、すぐ次が届く」とは書かない (すぐ届くのは、空の actions のときだけ)
+    at_once = sentences_with(orchestrator_instructions(), ("すぐ", "届"))
+    assert [sentence for sentence in at_once if "空" not in sentence] == []
+
+
+def test_instructions_say_empty_actions_mean_doing_nothing():
+    assert sentences_with(
+        orchestrator_instructions(), ("空", "actions"), any_of=("何もしない",)
+    )
+
+
+def test_instructions_do_not_say_empty_actions_let_the_previous_actions_continue():
+    assert sentences_with(orchestrator_instructions(), ("空", "actions", "続")) == []
+
+
+def test_instructions_say_to_answer_with_empty_actions_to_wait_for_the_monitor():
+    assert sentences_with(orchestrator_instructions(), ("空", "actions", "監視", "待"))
 
 
 def test_instructions_say_monitor_conditions_describe_only_the_screen():

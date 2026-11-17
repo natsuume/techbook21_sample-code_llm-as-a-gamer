@@ -1,4 +1,4 @@
-"""フレームの画像の保存 (frames/interval/・frames/surface/) と、保存した画像の一覧 frames.jsonl。
+"""フレームの画像の保存 (frames/interval/・frames/surface/・frames/latest/) と、保存した画像の一覧 frames.jsonl。
 
 - 一定間隔の保存: キャプチャーのフレームを interval_fps のフレームレートで間引き、幅 interval_width に縮小して
   frames/interval/<tミリ秒9桁>.jpg に保存する。保存の予定時刻を 1 / interval_fps 秒ずつ進め (advance_interval_schedule)、
@@ -11,6 +11,14 @@
   <tミリ秒9桁>-2.jpg・<tミリ秒9桁>-3.jpg … (内容ごとの番号は、保存に失敗しても変えない)
 - 画像は置き換えの書き込み (file_io.write_bytes_atomic) で書き、画像を書き終えた後に frames.jsonl に
   {"t", "kind": "interval" | "surface", "file": 実行ディレクトリーからの相対パス, "width", "height"} の 1 行を足す
+- 最新のフレームの置き換え: latest_frames (frames.latest_frames.LatestFrames) を渡したときだけ (Orchestrator 型の run)、
+  一定間隔のフレームの画像を frames/interval/ に書いて frames.jsonl に行を足した後に、
+  latest_frames.add_image(t, frames/interval/ の相対パス, 縮小した同じ画像 (BGR), jpeg_quality) を呼ぶ (時刻の
+  書き込みと frames/latest/ の置き換えは LatestFrames が行う)。行を足さなかったフレーム (書き込みの失敗・close が
+  あきらめた後) は渡さない。latest_frames を渡さなければ (advisor 型) frames/latest/ を書かない。
+  frames/interval/ の画像と frames.jsonl の行は、latest_frames の有無で変わらない。
+  add_image が例外を出しても、logging で警告を書いて次の件に進み (書き出しスレッドを止めない)、written と dropped の
+  数は変えない (その 1 件は frames/interval/ と frames.jsonl に書けているため written に数えたまま)
 
 書き込み (縮小・JPEG 化・ファイルの書き込み) は専用の書き出しスレッドで行い、受け付けは上限付きのキューで行う。
 キューが満杯のときは保存を捨て、捨てた件数を dropped に数える (終了時に run.jsonl の frames_dropped に記録する)。
@@ -26,7 +34,7 @@ import threading
 from collections import deque
 from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -41,6 +49,11 @@ from switch2_layers.frames.image_encoding import (
 )
 from switch2_layers.run_clock import t_to_milliseconds
 from switch2_layers.run_directory import RunPaths
+
+if TYPE_CHECKING:
+    # 型注釈のためだけに読む (frames.latest_frames は frames.surface_frames を読み、その先の deep.deep_scheduler が
+    # このモジュールを読むため、実行時に読むと循環する)
+    from switch2_layers.frames.latest_frames import LatestFrames
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -82,6 +95,18 @@ class _SaveItem:
     image: EncodedImage | None = None
     content: Hashable = ()
     number: int = 1
+
+
+@dataclass(frozen=True)
+class _WrittenImage:
+    """書いた画像 1 件。
+
+    record           frames.jsonl に足す行
+    interval_image   一定間隔のフレームなら、縮小した画像 (BGR。frames/latest/ の画像の元)。surface の画像なら None
+    """
+
+    record: FrameRecord
+    interval_image: np.ndarray | None
 
 
 def _record_from_row(row: dict[str, object]) -> FrameRecord | None:
@@ -175,8 +200,10 @@ class FrameStore:
     interval_fps     一定間隔の保存のフレームレート
     interval_width   一定間隔のフレームを縮小する幅 (image_encoding.shrink_to_width)
     capacity         キューに入れておける件数の上限 (書いている途中の 1 件は含めない)
-    jpeg_quality     一定間隔のフレームの JPEG の品質
+    jpeg_quality     一定間隔のフレームの JPEG の品質 (frames/latest/ の画像にも使う)
     start_thread     True (既定) なら書き出しスレッド (daemon) を起動する。False ならテストから write_queued を呼ぶ
+    latest_frames    一定間隔のフレームの最新の数枚の置き場 (Orchestrator 型の run)。None (既定。advisor 型) なら
+                     frames/latest/ を書かない (モジュールの docstring の「最新のフレームの置き換え」)
     """
 
     def __init__(
@@ -187,6 +214,7 @@ class FrameStore:
         capacity: int = DEFAULT_QUEUE_CAPACITY,
         jpeg_quality: int = DEFAULT_JPEG_QUALITY,
         start_thread: bool = True,
+        latest_frames: "LatestFrames | None" = None,
     ) -> None:
         """空のキューで作る。"""
         self.paths = paths
@@ -194,6 +222,7 @@ class FrameStore:
         self.interval_width = interval_width
         self.capacity = capacity
         self.jpeg_quality = jpeg_quality
+        self.latest_frames = latest_frames
         # 受け付け・キュー・件数と、行を足すか close があきらめるかを決めるロック。
         # 受け付ける側と close が待たないよう、この中では I/O をしない
         self._condition = threading.Condition()
@@ -286,7 +315,8 @@ class FrameStore:
     def write_queued(self) -> int:
         """キューにある分を古い順にすべて書き、書けた件数を返す (start_thread が False のときにテストから呼ぶ)。
 
-        1 件ごとに、画像を置き換えの書き込みで書いてから、frames.jsonl に 1 行足す。
+        1 件ごとに、画像を置き換えの書き込みで書いてから、frames.jsonl に 1 行足す。latest_frames があれば、一定間隔の
+        フレームは行を足した後に latest_frames.add_image に渡す (モジュールの docstring の「最新のフレームの置き換え」)。
         書き込みに失敗した 1 件 (OSError・ValueError) は dropped に数え、surface の画像なら予約から外して、次の件に進む。
         書き出しスレッドも、1 件ごとに同じ処理をする。
         """
@@ -361,9 +391,13 @@ class FrameStore:
         3. ロックの外で行を足し、written に数えて True を返す。追記に失敗したら (OSError・ValueError) dropped に数え、
            surface の画像なら予約から外して False を返す。2 で行を足すと決めた 1 件は close が数えないので、
            close があきらめた後でも、ここで written か dropped に数える
+        4. 行を足して written に数えた一定間隔のフレームは、latest_frames があれば、縮小した画像を
+           latest_frames.add_image に渡す。add_image が例外を出したら logging で警告を書き、written と dropped の数は
+           変えずに True を返す (その 1 件は frames/interval/ と frames.jsonl に書けている)
         """
         try:
-            record = self._write_image(item)
+            written = self._write_image(item)
+            record = written.record
         except (OSError, ValueError):
             logger.warning("failed to save a %s frame", item.kind, exc_info=True)
             with self._condition:
@@ -390,17 +424,26 @@ class FrameStore:
             self._written += 1
             self._appending = False
             self._writing = False
+        if self.latest_frames is not None and written.interval_image is not None:
+            try:
+                self.latest_frames.add_image(
+                    record.t, record.file, written.interval_image, self.jpeg_quality
+                )
+            except Exception:
+                # 時刻の書き込みと JPEG 化の失敗 (cv2.error) は OSError ではないため、Exception で受ける
+                logger.warning("failed to replace the latest frames", exc_info=True)
         return True
 
-    def _write_image(self, item: _SaveItem) -> FrameRecord:
-        """item の画像を書き、frames.jsonl に足す FrameRecord を返す。"""
+    def _write_image(self, item: _SaveItem) -> _WrittenImage:
+        """item の画像を書き、frames.jsonl に足す FrameRecord と、一定間隔のフレームなら縮小した画像 (BGR) を返す。"""
+        interval_image: np.ndarray | None = None
         if item.kind == "interval":
             if item.nv12 is None:
                 raise ValueError("interval frame without NV12 data")
-            image = encode_jpeg(
-                shrink_to_width(nv12_to_bgr(item.nv12), self.interval_width),
-                self.jpeg_quality,
+            interval_image = shrink_to_width(
+                nv12_to_bgr(item.nv12), self.interval_width
             )
+            image = encode_jpeg(interval_image, self.jpeg_quality)
             path = self.paths.interval_frame(item.t)
         else:
             if item.image is None:
@@ -408,13 +451,14 @@ class FrameStore:
             image = item.image
             path = self.paths.surface_frame(item.t, item.number)
         write_bytes_atomic(path, image.jpeg)
-        return FrameRecord(
+        record = FrameRecord(
             t=item.t,
             kind=item.kind,
             file=self.paths.relative(path),
             width=image.width,
             height=image.height,
         )
+        return _WrittenImage(record=record, interval_image=interval_image)
 
     def _release_reservation_locked(self, item: _SaveItem) -> None:
         """surface の画像なら、その t と内容の組の予約を外す (組の番号は残す)。呼び出し側が _condition を持つ。"""

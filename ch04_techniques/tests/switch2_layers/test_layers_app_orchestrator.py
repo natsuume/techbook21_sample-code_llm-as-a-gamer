@@ -7,8 +7,10 @@
 
 import dataclasses
 import io
+import itertools
 import json
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -16,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from switch2_remote.controller_state import BUTTON_BITS, NEUTRAL_REPORT
@@ -321,6 +324,21 @@ def input_text(message: dict) -> str:
     return message["message"]["content"][0]["text"]
 
 
+# 画像の前の時刻のラベルの、元の frames/interval/ のファイル
+LABEL_FILE_PATTERN = re.compile(r"\((frames/interval/\d{9}\.jpg)\)$")
+
+
+def labeled_image_files(message: dict) -> list[str]:
+    """claude に送った入力の、画像の前の時刻のラベルに書いた frames/interval/ のファイル (古い順)。"""
+    content = message["message"]["content"]
+    files: list[str] = []
+    for block, following in itertools.pairwise(content):
+        if block["type"] == "text" and following["type"] == "image":
+            match = LABEL_FILE_PATTERN.search(block["text"])
+            files.append(match.group(1) if match else block["text"])
+    return files
+
+
 # --- 組み立てと実行 ---
 
 
@@ -514,6 +532,41 @@ def test_macro_registered_in_one_turn_is_called_in_the_next_turn(tmp_path):
     presses = [row for row in orchestrator_operations(root) if row["held"] == ["X"]]
     assert len(presses) == 1
     assert presses[0]["source"] == "orchestrator"
+
+
+def test_latest_frames_are_replaced_and_sent_with_the_input(tmp_path):
+    sender = FakeSender()
+    claude = FakeClaude()
+    reason, root = run_orchestrator(
+        orchestrator_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude),
+        stop_when=lambda: len(claude.first_inputs()) >= 1,
+    )
+    assert reason == REASON_INTERRUPTED
+    # 一定間隔のフレームを保存するたびに、frames/latest/1.jpg〜 を置き換える (5 枚に満たなければ、ある分だけ)
+    latest_dir = root / "frames" / "latest"
+    names = (
+        sorted(path.name for path in latest_dir.iterdir())
+        if latest_dir.is_dir()
+        else []
+    )
+    interval_rows = [
+        row for row in read_rows(root / "frames.jsonl") if row["kind"] == "interval"
+    ]
+    assert interval_rows
+    assert names == [f"{n}.jpg" for n in range(1, min(len(interval_rows), 5) + 1)]
+    # 幅は frames/interval/ と同じ (--interval-width)
+    for name in names:
+        image = cv2.imread(str(latest_dir / name))
+        assert image is not None
+        assert image.shape[1] == 160
+    # 入力には、その時点の最新のフレーム (最大 5 枚) を、元の frames/interval/ のファイルのラベル付きで添える
+    files = labeled_image_files(claude.first_inputs()[0])
+    assert 1 <= len(files) <= 5
+    assert all((root / file).is_file() for file in files)
+    # turns.jsonl の images は、添えた画像の元の frames/interval/ のファイル
+    turn = read_rows(root / "orchestrator" / "turns.jsonl")[0]
+    assert turn["images"] == files
 
 
 def test_without_initial_instruction_the_main_loop_is_told_there_is_none(tmp_path):

@@ -15,6 +15,7 @@ import pytest
 
 from switch2_layers.file_io import append_json_line, write_bytes_atomic
 from switch2_layers.frames.frame_store import FrameRecord, frame_record_row
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.orchestrator.claude_session_command import (
     ClaudeSessionOptions,
     build_session_command,
@@ -37,6 +38,7 @@ from switch2_layers.orchestrator.main_loop import (
 )
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    MainActionsRun,
     OrchestratorEvents,
 )
 from switch2_layers.orchestrator.orchestrator_instructions import (
@@ -44,6 +46,7 @@ from switch2_layers.orchestrator.orchestrator_instructions import (
     orchestrator_instructions,
 )
 from switch2_layers.orchestrator.parent_skill_names import find_parent_skill_names
+from switch2_layers.orchestrator.turn_input import describe_previous_actions
 from switch2_layers.progress.progress_state import ProgressState, write_progress_state
 from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.records.run_log import RunLog
@@ -64,12 +67,14 @@ VALID_TEXT = (
 VALID_JSON = '{"actions": [{"type": "press", "buttons": ["A"]}]}'
 INVALID_TEXT = "INVALID: JSON のブロックを書き忘れた"
 HANDOFF_REPLY_TEXT = '引き継ぎを書いた。\n\n```json\n{"actions": []}\n```'
+EMPTY_ACTIONS_TEXT = '今は何もしない。\n\n```json\n{"actions": []}\n```'
 DECISION = Decision(
     actions=(PressAction(buttons=("A",), sticks={}, seconds=None),),
     macros_set={},
     macros_delete=(),
     monitor=None,
 )
+EMPTY_DECISION = Decision(actions=(), macros_set={}, macros_delete=(), monitor=None)
 INIT_ROW = {"type": "system", "subtype": "init", "skills": ["switch-select-user"]}
 COMPACT_ROW = {
     "type": "system",
@@ -416,12 +421,25 @@ def no_events() -> OrchestratorEvents:
     )
 
 
+# 既定の主ループの操作の列の時刻: 偽の時計の最初の時刻 (START_T) より前に終わって落ち着いた列。t=1.5 より後に撮った
+# フレームがあれば待たない (既定の最新のフレームは t=6〜10、ほかのテストのフレームも t=1.5 より後)
+SETTLED_RUN = MainActionsRun(started_t=1.0, released_t=1.2, ended_t=1.2)
+# 終わっていない列 (テストが FakeController.run を書き換えるまで、主ループは待ち続ける)
+RUNNING_RUN = MainActionsRun(started_t=START_T, released_t=None, ended_t=None)
+# 主ループが main_actions_run を読み直すのを待ち合わせる上限 (秒)。主ループは READ_POLL_S 秒ごとに読む
+READS_LIMIT_S = 2.0
+
+
 class FakeController:
-    """apply・take_events・run・set_started を持つフェイク。
+    """apply・main_actions_run・take_events・run・set_started を持つフェイク。
 
     events      取り出すたびに返す出来事 (sequence が無いとき)
     sequence    取り出すたびに、前から 1 つずつ返す出来事の並び。使い切ったら no_events() を返す
     error       取り出すときに出す例外
+    runs        空でない actions を apply するたびに、前から 1 つずつ main_actions_run の値にする列の時刻。
+                使い切ったら SETTLED_RUN にする
+    run         main_actions_run が返す値 (テストが書き換えてよい)
+    main_actions_run が読まれた回数を数え、wait_reads で待ち合わせられる (主ループが待ち続けていることの確かめに使う)。
     """
 
     def __init__(
@@ -429,15 +447,40 @@ class FakeController:
         events: OrchestratorEvents | None = None,
         error: Exception | None = None,
         sequence: list[OrchestratorEvents] | None = None,
+        runs: list[MainActionsRun] | None = None,
+        run: MainActionsRun | None = None,
     ):
         self.events = events if events is not None else no_events()
         self.error = error
         self.sequence = list(sequence) if sequence is not None else None
+        self.runs = list(runs) if runs is not None else []
+        self.run = run
         self.applied: list[Decision] = []
         self.take_count = 0
+        self._reads = 0
+        self._reads_changed = threading.Condition()
 
     def apply(self, decision: Decision) -> None:
         self.applied.append(decision)
+        if decision.actions:
+            self.run = self.runs.pop(0) if self.runs else SETTLED_RUN
+
+    def main_actions_run(self) -> MainActionsRun | None:
+        with self._reads_changed:
+            self._reads += 1
+            self._reads_changed.notify_all()
+        return self.run
+
+    def read_count(self) -> int:
+        with self._reads_changed:
+            return self._reads
+
+    def wait_reads(self, count: int) -> bool:
+        """main_actions_run が count 回以上読まれるまで、最大 READS_LIMIT_S 秒待つ。読まれたら True。"""
+        with self._reads_changed:
+            return self._reads_changed.wait_for(
+                lambda: self._reads >= count, READS_LIMIT_S
+            )
 
     def take_events(self) -> OrchestratorEvents:
         self.take_count += 1
@@ -455,7 +498,8 @@ class FakeController:
 
 
 class FakeParser:
-    """parse_decision のフェイク。```json を含み INVALID を含まない文なら DECISION、そうでなければ誤りを返す。"""
+    """parse_decision のフェイク。```json を含み INVALID を含まない文なら DECISION (空の actions の JSON なら
+    EMPTY_DECISION)、そうでなければ誤りを返す。"""
 
     def __init__(self):
         self.calls: list[str] = []
@@ -467,6 +511,8 @@ class FakeParser:
             self.on_call()
         if "INVALID" in text or "```json" not in text:
             return DecisionError(messages=(f"invalid #{len(self.calls)}",))
+        if '{"actions": []}' in text:
+            return EMPTY_DECISION
         return DECISION
 
 
@@ -500,6 +546,42 @@ def frame_bytes(t: float) -> bytes:
     return f"jpeg-{t:.3f}".encode()
 
 
+def latest_bytes(t: float) -> bytes:
+    """frames/latest/ に置いた、時刻を書き込んだ画像の代わりのバイト列 (frames/interval/ の画像とは違う)。"""
+    return f"latest-{t:.3f}".encode()
+
+
+def latest_frame(t: float) -> LatestFrame:
+    return LatestFrame(t=t, source_file=interval_record(t).file, jpeg=latest_bytes(t))
+
+
+def newest_first(*times: float) -> tuple[LatestFrame, ...]:
+    """times の最新のフレームの画像を、新しい順に並べたもの (LatestFrames.snapshot の形)。"""
+    return tuple(latest_frame(t) for t in sorted(times, reverse=True))
+
+
+def label(t: float) -> str:
+    """時刻 t の画像の前に置く時刻のラベル (元の frames/interval/ のファイルを書く)。"""
+    return f"t={t:.3f} の画面 ({interval_record(t).file})"
+
+
+class FakeLatestFrames:
+    """latest_frames (LatestFrames.snapshot) のフェイク。
+
+    frames      呼ばれるたびに返す、新しい順の最新のフレームの画像 (テストが書き換えて、新しいフレームが入ったことにする)
+    """
+
+    def __init__(self, frames: tuple[LatestFrame, ...]):
+        self.frames = frames
+
+    def snapshot(self) -> tuple[LatestFrame, ...]:
+        return self.frames
+
+
+# 既定の最新のフレーム: make_run の t=1〜10 のうち、最新の 5 枚 (t=6〜10)
+DEFAULT_LATEST = newest_first(6.0, 7.0, 8.0, 9.0, 10.0)
+
+
 def make_run(tmp_path: Path) -> Path:
     """t=1〜10 の一定間隔のフレームと notes/ の文書がある実行ディレクトリーを作る (パッケージのコードは使わない)。"""
     root = tmp_path / "runs" / "20261116-120000"
@@ -524,6 +606,7 @@ class Harness:
     root: Path
     parser: FakeParser
     controller: FakeController
+    latest: FakeLatestFrames
     thread: threading.Thread | None = field(default=None)
 
     def start(self, started: bool = True) -> None:
@@ -549,6 +632,7 @@ def make_harness(
     fake: FakeClaude,
     *,
     controller: FakeController | None = None,
+    latest: FakeLatestFrames | None = None,
     settings: OrchestratorMainLoopSettings | None = None,
     initial_instruction: str | None = None,
     environ: dict[str, str] | None = None,
@@ -568,12 +652,14 @@ def make_harness(
 
     parser = FakeParser()
     controller = controller if controller is not None else FakeController()
+    latest = latest if latest is not None else FakeLatestFrames(DEFAULT_LATEST)
     parts = OrchestratorMainLoopParts(
         paths=RunPaths(root),
         clock=run_clock,
         claude=claude if claude is not None else ClaudeSessionOptions(),
         parse_decision=parser,
         controller=controller,
+        latest_frames=latest.snapshot,
         initial_instruction=initial_instruction,
         run_log=RunLog(root / "run.jsonl", run_clock),
         on_stop=on_stop,
@@ -594,7 +680,7 @@ def make_harness(
         if settings is not None
         else OrchestratorMainLoopSettings(close_grace_s=0.01),
     )
-    return Harness(loop, stop, reasons, clock, root, parser, controller)
+    return Harness(loop, stop, reasons, clock, root, parser, controller, latest)
 
 
 def wait_until(predicate: Callable[[], bool], limit: float = WAIT_LIMIT_S) -> bool:
@@ -614,6 +700,18 @@ def advance_after_send(harness: Harness, seconds: float) -> None:
     """入力を送り終えた主ループの時計を seconds 秒進める。"""
     time.sleep(AFTER_SEND_S)
     harness.clock.advance(seconds)
+
+
+def main_loop_reads_again(harness: Harness, times: int = 3) -> None:
+    """待っている主ループが、今からさらに times 回 main_actions_run を読むまで待つ。
+
+    主ループは、前のターンの操作の列を待つ間、時計を読み直しながら main_actions_run を繰り返し読む。読み直したことを
+    待ち合わせてから「まだ次の入力を送っていない」を確かめる (実時間の長さに頼らない)。
+    """
+    target = harness.controller.read_count() + times
+    assert harness.controller.wait_reads(target), (
+        "the main loop is not waiting for the actions (main_actions_run was not read)"
+    )
 
 
 def inputs_of(fake: FakeClaude, number: int) -> list[dict]:
@@ -834,7 +932,9 @@ def test_game_skills_are_copied_after_each_result(tmp_path):
 # --- 入力 ---
 
 
-def test_first_input_has_the_opening_the_turn_text_and_the_latest_frame(tmp_path):
+def test_first_input_has_the_opening_the_turn_text_and_the_latest_five_frames(
+    tmp_path,
+):
     fake = FakeClaude([[Hang()]])
     harness = make_harness(
         tmp_path, fake, initial_instruction="主人公の名前は自由に決めてよい"
@@ -857,8 +957,22 @@ def test_first_input_has_the_opening_the_turn_text_and_the_latest_frame(tmp_path
     assert "今の目標: 町に入る" in text
     assert "t=10.000" in text
     assert text.index("## 人の初期指示") < text.index("## 時刻")
-    assert labels_of(message) == ["t=10.000 の画面 (frames/interval/000010000.jpg)"]
-    assert images_of(message) == [frame_bytes(10.0)]
+    # セッションの最初のターンも、frames/latest/ の最新の 5 枚 (時刻を書き込んだ画像) を古い順に添える
+    assert labels_of(message) == [label(t) for t in (6.0, 7.0, 8.0, 9.0, 10.0)]
+    assert images_of(message) == [latest_bytes(t) for t in (6.0, 7.0, 8.0, 9.0, 10.0)]
+
+
+def test_input_has_only_the_frames_there_are_when_fewer_than_five(tmp_path):
+    fake = FakeClaude([[Hang()]])
+    harness = make_harness(
+        tmp_path, fake, latest=FakeLatestFrames(newest_first(1.0, 2.0))
+    )
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
+    harness.finish()
+    message = inputs_of(fake, 0)[0]
+    assert labels_of(message) == [label(1.0), label(2.0)]
+    assert images_of(message) == [latest_bytes(1.0), latest_bytes(2.0)]
 
 
 def test_first_input_without_initial_instruction_says_there_is_none(tmp_path):
@@ -872,38 +986,38 @@ def test_first_input_without_initial_instruction_says_there_is_none(tmp_path):
     assert "## notes/ のファイル" in text
 
 
-def test_next_input_has_up_to_three_frames_since_the_previous_input(tmp_path):
-    fake = FakeClaude([[Hang(), Hang()]])
-    harness = make_harness(tmp_path, fake, now=5.0)
+def test_next_input_has_the_latest_five_frames_at_that_time(tmp_path):
+    # 入力を作るたびに、その時点の最新の 5 枚をまとめて受け取る
+    first_set = newest_first(1.0, 2.0, 3.0, 4.0, 5.0)
+    second_set = newest_first(7.0, 8.0, 9.0, 10.0, 11.0)
+    latest = FakeLatestFrames(first_set)
+
+    def new_frames_arrive(process: FakeClaudeProcess) -> None:
+        # 1 つ目の入力を作った後に、新しいフレームが入る
+        latest.frames = second_set
+
+    fake = FakeClaude([[Reply(before=new_frames_arrive), Hang()]])
+    harness = make_harness(tmp_path, fake, latest=latest)
     harness.start()
-    assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
-    assert labels_of(inputs_of(fake, 0)[0]) == [
-        "t=5.000 の画面 (frames/interval/000005000.jpg)"
-    ]
-    advance_after_send(harness, 5.0)
-    fake.processes[0].respond(Reply())
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
     harness.finish()
-    second = inputs_of(fake, 0)[1]
-    assert labels_of(second) == [
-        "t=6.000 の画面 (frames/interval/000006000.jpg)",
-        "t=8.000 の画面 (frames/interval/000008000.jpg)",
-        "t=10.000 の画面 (frames/interval/000010000.jpg)",
-    ]
-    assert images_of(second) == [frame_bytes(6.0), frame_bytes(8.0), frame_bytes(10.0)]
+    first, second = inputs_of(fake, 0)
+    assert labels_of(first) == [label(t) for t in (1.0, 2.0, 3.0, 4.0, 5.0)]
+    assert labels_of(second) == [label(t) for t in (7.0, 8.0, 9.0, 10.0, 11.0)]
+    assert images_of(second) == [latest_bytes(t) for t in (7.0, 8.0, 9.0, 10.0, 11.0)]
     # 2 つ目の入力には、セッションの開始の節を付けない
     assert "## notes/ のファイル" not in text_of(second)
     assert "## 時刻" in text_of(second)
 
 
-def test_without_new_frames_the_latest_frame_is_sent_again(tmp_path):
+def test_without_new_frames_the_same_latest_frames_are_sent_again(tmp_path):
     fake = FakeClaude([[Reply(), Hang()]])
     harness = make_harness(tmp_path, fake)
     harness.start()
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
     harness.finish()
     assert labels_of(inputs_of(fake, 0)[1]) == [
-        "t=10.000 の画面 (frames/interval/000010000.jpg)"
+        label(t) for t in (6.0, 7.0, 8.0, 9.0, 10.0)
     ]
 
 
@@ -1175,7 +1289,7 @@ def test_handoff_then_a_new_session_starts_with_the_handoff(tmp_path):
     assert "冒険を始める" in opening
     assert "今の目標: 町に入る" in opening
     assert "- handoff.md" in opening
-    assert len(images_of(second.inputs[0])) == 1
+    assert len(images_of(second.inputs[0])) == 5
     sessions = sessions_rows(harness.root)
     assert [(row["event"], row["session"]) for row in sessions] == [
         ("start", 1),
@@ -1477,11 +1591,15 @@ def test_records_of_sessions_turns_and_stream(tmp_path):
         "session": 1,
         "turn": 1,
         "kind": "turn",
+        # セッションの最初のターンは待たない
+        "t_wait_start": START_T,
+        "wait_s": 0.0,
         "t_sent": START_T,
         "t_result": START_T,
         "duration_s": 0.0,
         "input_text": text_of(first_input),
-        "images": ["frames/interval/000010000.jpg"],
+        # 添えた画像 (frames/latest/ の画像) の元になった、frames/interval/ のファイル
+        "images": [interval_record(t).file for t in (6.0, 7.0, 8.0, 9.0, 10.0)],
         "response_json": VALID_JSON,
         "errors": None,
         "outcome": "applied",
@@ -1515,6 +1633,222 @@ def test_invalid_turn_records_the_errors(tmp_path):
     assert turn["outcome"] == "invalid"
     assert turn["errors"] == ["invalid #1"]
     assert turn["response_json"] is None
+
+
+# --- 次のターンを始める時点 (前のターンの操作の列を待つ) ---
+
+
+def wait_fields(row: dict) -> tuple[object, object, object]:
+    """turns.jsonl の行の (t_wait_start, wait_s, t_sent)。"""
+    return (row.get("t_wait_start"), row.get("wait_s"), row.get("t_sent"))
+
+
+def test_next_input_waits_for_the_actions_to_end_and_a_frame_after_them(tmp_path):
+    controller = FakeController(runs=[RUNNING_RUN])
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: controller.applied == [DECISION])
+    # 操作の列 (マクロとコードの手順を含む) が終わるまでは、次の入力を作らない
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # 列は t=11.0 に終わり、最後に離したのも t=11.0。離してから 0.3 秒たつまでは作らない
+    controller.run = MainActionsRun(started_t=START_T, released_t=11.0, ended_t=11.0)
+    harness.clock.now = 11.299
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # 0.3 秒たっても、t=11.3 より後に撮ったフレームが frames/latest/ に無いうちは作らない
+    # (最新のフレームは t=10.0 のまま)
+    harness.clock.now = 11.35
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # ちょうど t=11.3 に撮ったフレームでも、まだ作らない (厳密に後だけ通す)
+    harness.latest.frames = newest_first(9.0, 10.0, 11.0, 11.2, 11.3)
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # t=11.4 のフレームが入ったら作る。そのフレームも添える 5 枚に入る
+    harness.clock.now = 11.5
+    harness.latest.frames = newest_first(10.0, 11.0, 11.2, 11.3, 11.4)
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    second = inputs_of(fake, 0)[1]
+    assert "## 時刻\nt=11.500" in text_of(second)
+    assert labels_of(second) == [label(t) for t in (10.0, 11.0, 11.2, 11.3, 11.4)]
+    # 待ち始めた時刻 (result を当てた時刻) と、次の入力を作った時刻 (t_sent) を書く。最初のターンは待たない
+    assert [wait_fields(row) for row in turns_rows(harness.root)] == [
+        (START_T, 0.0, START_T),
+        (START_T, 1.5, 11.5),
+    ]
+
+
+def test_actions_without_a_press_do_not_wait_for_a_new_frame(tmp_path):
+    # wait だけの列 (押す操作が無い) は、フレームの条件を使わず、列が終わったら次の入力を作る
+    wait_only = MainActionsRun(started_t=8.0, released_t=None, ended_t=9.0)
+    controller = FakeController(runs=[wait_only])
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(
+        tmp_path,
+        fake,
+        controller=controller,
+        latest=FakeLatestFrames(newest_first(4.0, 5.0, 6.0, 7.0, 8.0)),
+    )
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)
+
+
+def test_handoff_request_also_waits_for_the_actions_and_a_frame_after_them(
+    tmp_path,
+):
+    controller = FakeController(runs=[RUNNING_RUN])
+    fake = FakeClaude([[Reply(calls=(130_000,)), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: controller.applied == [DECISION])
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # 列は t=10.5 に終わった。t=10.8 より後に撮ったフレームが入るまで、引き継ぎの依頼も送らない
+    controller.run = MainActionsRun(started_t=START_T, released_t=10.5, ended_t=10.5)
+    harness.clock.now = 10.9
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    harness.clock.now = 11.0
+    harness.latest.frames = newest_first(7.0, 8.0, 9.0, 10.0, 10.9)
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert text_of(inputs_of(fake, 0)[1]) == handoff_request_text()
+    handoff = turns_rows(harness.root)[1]
+    assert handoff["kind"] == "handoff"
+    assert wait_fields(handoff) == (START_T, 1.0, 11.0)
+
+
+def test_empty_actions_send_the_next_input_without_waiting(tmp_path):
+    # 終わっていない列があっても、空の actions の後は待たない
+    controller = FakeController(run=RUNNING_RUN)
+    fake = FakeClaude([[Reply(EMPTY_ACTIONS_TEXT), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert controller.applied == [EMPTY_DECISION]
+    second = text_of(inputs_of(fake, 0)[1])
+    assert "## 時刻\nt=10.000" in second
+    # 操作が無かったので、前の操作の列の時刻は書かない
+    assert "## 前の操作の列" not in second
+    assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)
+
+
+def test_invalid_json_sends_the_next_input_without_waiting(tmp_path):
+    controller = FakeController(run=RUNNING_RUN)
+    fake = FakeClaude([[Reply(INVALID_TEXT), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert controller.applied == []
+    assert "## 前の操作の列" not in text_of(inputs_of(fake, 0)[1])
+    assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)
+
+
+def test_first_input_after_the_handoff_is_sent_without_waiting(tmp_path):
+    controller = FakeController()
+
+    def keep_actions_running(process: FakeClaudeProcess) -> None:
+        # 引き継ぎの依頼の間に、終わっていない列があることにする (次のセッションの最初の入力は待たない)
+        controller.run = RUNNING_RUN
+
+    fake = FakeClaude(
+        [
+            [
+                Reply(calls=(130_000,)),
+                Reply(HANDOFF_REPLY_TEXT, before=keep_actions_running),
+            ],
+            [Hang()],
+        ]
+    )
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 1)) == 1)
+    harness.finish()
+    assert "## 前の操作の列" not in text_of(inputs_of(fake, 1)[0])
+    [first_of_second_session] = [
+        row for row in turns_rows(harness.root) if row["session"] == 2
+    ]
+    assert wait_fields(first_of_second_session) == (START_T, 0.0, START_T)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        RUNNING_RUN,
+        # 列は終わって時計も過ぎたが、その後に撮ったフレーム (t=9.3 より後) が来ない。最新のフレームは t=9.0
+        MainActionsRun(started_t=8.0, released_t=9.0, ended_t=9.0),
+    ],
+    ids=["actions_running", "no_frame_after_the_actions"],
+)
+def test_stop_while_waiting_for_the_actions_ends_without_the_next_input(tmp_path, run):
+    controller = FakeController(runs=[run])
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(
+        tmp_path,
+        fake,
+        controller=controller,
+        latest=FakeLatestFrames(newest_first(5.0, 6.0, 7.0, 8.0, 9.0)),
+    )
+    harness.start()
+    assert wait_until(lambda: controller.applied == [DECISION])
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # 待っている間に止まる理由が起きたら、待つのをやめて止まる
+    harness.finish()
+    assert len(inputs_of(fake, 0)) == 1
+    assert [row["reason"] for row in end_rows(harness.root)] == ["close"]
+    # 次の入力は作らないので、その行も書かない
+    assert [row["turn"] for row in turns_rows(harness.root)] == [1]
+    assert harness.reasons == []
+
+
+def test_turn_timeout_does_not_count_the_wait_for_the_actions(tmp_path):
+    controller = FakeController(runs=[RUNNING_RUN])
+    fake = FakeClaude([[Reply(), Reply(), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(controller.applied) >= 1)
+    main_loop_reads_again(harness)
+    # 待っている間に --turn-timeout (120 秒) より長い時間がたつ
+    controller.run = MainActionsRun(started_t=START_T, released_t=199.0, ended_t=199.0)
+    harness.clock.now = 200.0
+    harness.latest.frames = newest_first(199.0, 199.2, 199.4, 199.6, 199.8)
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 3)
+    harness.finish()
+    turns = turns_rows(harness.root)
+    # 1 ターンは入力を作ってから result までなので、2 ターン目は時間切れにならない
+    assert [(row["turn"], row["outcome"]) for row in turns] == [
+        (1, "applied"),
+        (2, "applied"),
+        (3, "stopped"),
+    ]
+    assert wait_fields(turns[1]) == (START_T, 190.0, 200.0)
+    assert turns[1]["duration_s"] == 0.0
+    assert len(fake.processes) == 1
+
+
+def test_input_text_has_the_start_and_end_of_the_previous_actions(tmp_path):
+    # 偽の時計の最初の時刻より前に終わって落ち着き、その後に撮ったフレーム (既定の最新は t=10.0) もある列
+    # (待たずに次の入力を作る)
+    run = MainActionsRun(started_t=8.0, released_t=9.25, ended_t=9.25)
+    controller = FakeController(runs=[run])
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    first, second = (text_of(message) for message in inputs_of(fake, 0))
+    # 最初のターンには前の操作が無いので書かない
+    assert "## 前の操作の列" not in first
+    assert "## 前の操作の列" in second
+    assert describe_previous_actions(run) in second
 
 
 # --- 届かなかった出来事の繰り越し ---
@@ -1701,6 +2035,7 @@ def test_settings_that_cannot_be_used_are_rejected(tmp_path, settings):
         claude=ClaudeSessionOptions(),
         parse_decision=FakeParser(),
         controller=FakeController(),
+        latest_frames=FakeLatestFrames(DEFAULT_LATEST).snapshot,
         initial_instruction=None,
         run_log=RunLog(root / "run.jsonl", clock),
         on_stop=lambda reason: None,

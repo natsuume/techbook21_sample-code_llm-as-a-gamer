@@ -48,9 +48,13 @@ from switch2_layers.orchestrator.orchestrator_controller import (
     OrchestratorParts,
     OrchestratorSettings,
 )
-from switch2_layers.orchestrator.orchestrator_events import CaseHit, OrchestratorEvents
+from switch2_layers.orchestrator.orchestrator_events import (
+    CaseHit,
+    MainActionsRun,
+    OrchestratorEvents,
+)
 from switch2_layers.records.operation_log import OperationLog
-from switch2_layers.run_clock import RunClock
+from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.surface.jev_client import JevAnswers, JevError, JevImage
 from switch2_layers.surface.surface_questions import (
@@ -1753,6 +1757,127 @@ def test_take_events_returns_happenings_once_and_current_values_every_time(
     )
     second = h.controller.take_events()
     assert second == OrchestratorEvents(macros={"m": (tap("B"),)}, monitor=created)
+
+
+# --- 主ループの操作の列の時刻 (main_actions_run) ---
+
+
+def main_actions_ended(h: Harness) -> bool:
+    """main_actions_run が、終わった主ループの列の時刻を返していれば True。"""
+    run = h.controller.main_actions_run()
+    return run is not None and run.ended_t is not None
+
+
+def run_time(sent_at: float) -> float:
+    """送信先が受け取った偽の時計の時刻を、部品の時刻 (RunClock.now。ミリ秒に丸めた値) にする。"""
+    return round_to_milliseconds(sent_at)
+
+
+def test_no_main_actions_run_before_any_actions(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    assert h.controller.main_actions_run() is None
+    # actions の無い Decision (マクロだけ) では、列の時刻を作らない
+    h.controller.apply(Decision(macros_set={"next": (tap("A"),)}))
+    h.wait_rounds()
+    assert h.controller.main_actions_run() is None
+
+
+def test_main_actions_run_is_not_ended_as_soon_as_apply_returns(tmp_path, cleanups):
+    # set_started の前なので、run のループはまだ列を始めない
+    h = make_harness(tmp_path, cleanups, started=False)
+    h.controller.apply(act(tap("A")))
+    assert h.controller.main_actions_run() == MainActionsRun(
+        started_t=None, released_t=None, ended_t=None
+    )
+
+
+def test_main_actions_run_has_the_start_and_the_last_release(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.set_time(2.0)
+    h.controller.apply(act(tap("A"), tap("B")))
+    h.wait_pressed({"A"})
+    assert h.controller.main_actions_run() == MainActionsRun(
+        started_t=2.0, released_t=None, ended_t=None
+    )
+    h.set_time(2.0 + TAP_PRESS_S + 0.001)
+    h.wait_pressed({"B"})
+    h.set_time(h.sender.press_starts("B")[0] + TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: main_actions_ended(h), "the main actions end")
+    released_b = run_time(h.sender.release_times("B")[0])
+    # 最後の操作 (B) を離した時刻に終わる
+    assert h.controller.main_actions_run() == MainActionsRun(
+        started_t=2.0, released_t=released_b, ended_t=released_b
+    )
+
+
+def test_main_actions_run_ends_after_a_trailing_wait(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(tap("A"), WaitAction(seconds=0.5)))
+    h.wait_pressed({"A"})
+    h.set_time(TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: h.sender.release_times("A"), "A is released")
+    released_at = h.sender.release_times("A")[0]
+    h.set_time(released_at + 0.49)
+    h.wait_rounds()
+    assert h.controller.main_actions_run() == MainActionsRun(
+        started_t=0.0, released_t=run_time(released_at), ended_t=None
+    )
+    h.set_time(released_at + 0.501)
+    h.wait_until(lambda: main_actions_ended(h), "the main actions end")
+    run = h.controller.main_actions_run()
+    assert run is not None
+    assert run.released_t == run_time(released_at)
+    assert run.ended_t is not None
+    # 最後の wait を終えた時刻 (待ちの期限か、それを見つけた回りの時刻) に終わる
+    assert (
+        run_time(released_at + 0.5) - 1e-9
+        <= run.ended_t
+        <= run_time(released_at + 0.501) + 1e-9
+    )
+
+
+def test_monitor_actions_do_not_change_the_main_actions_run(tmp_path, cleanups):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(tap("A")))
+    h.wait_pressed({"A"})
+    h.set_time(TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: main_actions_ended(h), "the main actions end")
+    finished = h.controller.main_actions_run()
+    # 主ループの列が終わった後に、監視の条件に当たって監視の列 (B) を実行する
+    h.controller.apply(monitor(case("c0", tap("B"))))
+    h.jev.respond(hit(h.wait_request(1), 0))
+    h.wait_pressed({"B"})
+    assert h.controller.main_actions_run() == finished
+    h.set_time(h.monotonic.now + TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: h.sender.release_times("B"), "B is released")
+    h.wait_rounds()
+    # 監視の操作は、主ループの列の時刻を変えない (主ループは監視の操作の終わりを待たない)
+    assert h.controller.main_actions_run() == finished
+
+
+def test_new_actions_replace_the_main_actions_run_and_discard_the_rest(
+    tmp_path, cleanups
+):
+    h = make_harness(tmp_path, cleanups)
+    h.controller.apply(act(hold(1.0, "A")))
+    h.wait_pressed({"A"})
+    h.set_time(0.5)
+    h.controller.apply(act(tap("B")))
+    replaced = h.controller.main_actions_run()
+    # apply が戻った時点で、新しい列 (まだ終わっていない) の時刻になる
+    assert replaced is not None
+    assert replaced.started_t in (None, 0.5)
+    assert (replaced.released_t, replaced.ended_t) == (None, None)
+    h.wait_pressed({"B"})
+    h.set_time(0.5 + TAP_PRESS_S + 0.001)
+    h.wait_until(lambda: main_actions_ended(h), "the new actions end")
+    released_b = run_time(h.sender.release_times("B")[0])
+    # 前の列 (A) を捨てて中立に戻した時刻は、新しい列の時刻に入れない
+    assert h.controller.main_actions_run() == MainActionsRun(
+        started_t=0.5, released_t=released_b, ended_t=released_b
+    )
+    # 新しい actions は、前の操作の残り (実行中の A) を捨てて、捨てた数を知らせる
+    assert h.controller.take_events().discarded_action_count == 1
 
 
 # --- 止める ---

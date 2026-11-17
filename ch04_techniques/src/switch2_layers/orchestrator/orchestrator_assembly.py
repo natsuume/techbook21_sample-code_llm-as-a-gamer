@@ -8,12 +8,13 @@ app.LayersApp が Orchestrator 型の start で使う。共有の部品 (実行�
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.claude_session_command import ClaudeSessionOptions
 from switch2_layers.orchestrator.claude_stream_session import StreamProcessStarter
@@ -49,6 +50,8 @@ class OrchestratorLoopParts:
     run_log                run.jsonl (主ループがセッションの開始・終了と JSON の誤りを書く)
     pad_output             操作の送信 (HOME を含む 17 個のボタンで作ったもの。operations.jsonl に書く on_operation 付き)
     latest_frame           キャプチャーの最新のフレームを返す関数 (FrameBuffer.latest)
+    latest_frames          最新の一定間隔のフレームの画像を新しい順にまとめて返す関数
+                           (frames.latest_frames.LatestFrames.snapshot。主ループの入力の画像に使う)
     monitor                監視の要求の送り先 (run では surface.jev_client.JevClient)
     initial_instruction    人の初期指示。無ければ None
     on_stop                実行全体を止める関数 (止まる理由の文字列を受け取る。app.LayersApp.request_stop)
@@ -63,6 +66,7 @@ class OrchestratorLoopParts:
     run_log: RunLog
     pad_output: PadOutput
     latest_frame: Callable[[], CapturedFrame | None]
+    latest_frames: Callable[[], Sequence[LatestFrame]]
     monitor: MonitorAsker
     initial_instruction: str | None
     on_stop: Callable[[str], None]
@@ -112,8 +116,9 @@ def build_orchestrator_loops(
                      OrchestratorSettings(monitor_threshold, max_monitor_errors))
         main_loop    OrchestratorMainLoop(OrchestratorMainLoopParts(paths, clock,
                      claude = ClaudeSessionOptions(effort = orchestrator_effort),
-                     parse_decision = registered_macro_parser(controller), controller, initial_instruction, run_log,
-                     on_stop, start_process, signal_process_group, environ, switch_skills_dir),
+                     parse_decision = registered_macro_parser(controller), controller, latest_frames,
+                     initial_instruction, run_log, on_stop, start_process, signal_process_group, environ,
+                     switch_skills_dir),
                      OrchestratorMainLoopSettings(rotate_tokens, turn_timeout_s, max_decision_errors))
     値は settings の Orchestrator 型の 6 つの値。範囲は cli が settings.run_settings_errors で確かめてある
     (主ループが受け付けない値なら、OrchestratorMainLoop が ValueError にする)。
@@ -138,6 +143,7 @@ def build_orchestrator_loops(
             claude=ClaudeSessionOptions(effort=settings.orchestrator_effort),
             parse_decision=registered_macro_parser(controller),
             controller=controller,
+            latest_frames=parts.latest_frames,
             initial_instruction=parts.initial_instruction,
             run_log=parts.run_log,
             on_stop=parts.on_stop,

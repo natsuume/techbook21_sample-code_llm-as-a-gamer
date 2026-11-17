@@ -1,12 +1,10 @@
 import base64
 import json
 import os
-from pathlib import Path
 
 import pytest
 
-from switch2_layers.file_io import write_bytes_atomic
-from switch2_layers.frames.frame_store import FrameRecord
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.orchestrator.decision_types import (
     DecisionError,
     MacroAction,
@@ -18,6 +16,7 @@ from switch2_layers.orchestrator.decision_types import (
 )
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    MainActionsRun,
     MonitorEnd,
     OrchestratorEvents,
 )
@@ -38,12 +37,12 @@ from switch2_layers.orchestrator.turn_input import (
     describe_events,
     describe_macros,
     describe_monitor,
+    describe_previous_actions,
     describe_progress_for_turn,
     describe_running,
     describe_skipped_skills,
     image_label,
     list_note_files,
-    read_turn_images,
     select_turn_frames,
 )
 from switch2_layers.progress.progress_state import ProgressState
@@ -51,7 +50,6 @@ from switch2_layers.progress.progress_text import (
     NO_PROGRESS_TEXT,
     describe_progress_values,
 )
-from switch2_layers.run_directory import RunPaths
 
 PRESS_A = PressAction(buttons=("A",), sticks={}, seconds=None)
 HOLD_LEFT = PressAction(buttons=("B", "LEFT"), sticks={}, seconds=0.5)
@@ -94,113 +92,52 @@ def events(**changes: object) -> OrchestratorEvents:
     return OrchestratorEvents(**values)  # type: ignore[arg-type]
 
 
-def interval(t: float) -> FrameRecord:
-    milliseconds = round(t * 1000)
-    return FrameRecord(
+def latest(t: float) -> LatestFrame:
+    """frames/latest/ に置いた時刻 t の画像 (JPEG の代わりに、t の分かるバイト列)。"""
+    return LatestFrame(
         t=t,
-        kind="interval",
-        file=f"frames/interval/{milliseconds:09d}.jpg",
-        width=640,
-        height=360,
+        source_file=f"frames/interval/{round(t * 1000):09d}.jpg",
+        jpeg=f"stamped-{t:.3f}".encode(),
     )
 
 
-def surface(t: float) -> FrameRecord:
-    milliseconds = round(t * 1000)
-    return FrameRecord(
+def turn_image(t: float) -> TurnImage:
+    """latest(t) から作る入力の画像 (file は元の frames/interval/ のファイル)。"""
+    return TurnImage(
         t=t,
-        kind="surface",
-        file=f"frames/surface/{milliseconds:09d}.jpg",
-        width=1280,
-        height=720,
+        file=f"frames/interval/{round(t * 1000):09d}.jpg",
+        jpeg=f"stamped-{t:.3f}".encode(),
     )
 
 
 # --- 画像の選び方 ---
 
 
-def test_first_turn_of_a_session_gets_the_latest_frame_only():
-    records = [interval(1.0), interval(2.0), surface(2.5), interval(3.0), interval(9.0)]
-    assert select_turn_frames(records, None, now_t=5.0) == [interval(3.0)]
-
-
-def test_frames_since_the_previous_input_are_picked_evenly_up_to_three():
-    records = [interval(float(t)) for t in range(1, 11)]
-    # 前の入力は t=5 に送った。範囲は 5 < t <= 10 の 5 枚
-    assert select_turn_frames(records, 5.0, now_t=10.0) == [
-        interval(6.0),
-        interval(8.0),
-        interval(10.0),
+def test_turn_gets_the_latest_five_frames_oldest_first():
+    # 最新のフレームは新しい順 (frames/latest/1.jpg が先頭) に受け取る
+    newest_first = [latest(t) for t in (10.0, 9.8, 9.6, 9.4, 9.2)]
+    assert select_turn_frames(newest_first) == [
+        turn_image(t) for t in (9.2, 9.4, 9.6, 9.8, 10.0)
     ]
-    assert TURN_MAX_IMAGES == 3
+    assert TURN_MAX_IMAGES == 5
 
 
-def test_frame_at_the_previous_send_time_is_not_sent_again():
-    records = [interval(5.0), interval(6.0), interval(7.0)]
-    assert select_turn_frames(records, 5.0, now_t=7.0) == [interval(6.0), interval(7.0)]
+def test_fewer_than_five_frames_are_all_sent():
+    assert select_turn_frames([latest(2.0), latest(1.0)]) == [
+        turn_image(1.0),
+        turn_image(2.0),
+    ]
 
 
-def test_frames_after_now_and_surface_frames_are_not_picked():
-    records = [interval(6.0), surface(6.5), interval(7.0), interval(12.0)]
-    assert select_turn_frames(records, 5.0, now_t=7.0) == [interval(6.0), interval(7.0)]
-
-
-def test_without_new_frames_the_latest_frame_is_sent_again():
-    records = [interval(1.0), interval(4.0)]
-    assert select_turn_frames(records, 5.0, now_t=6.0) == [interval(4.0)]
+def test_only_the_newest_five_frames_are_sent():
+    newest_first = [latest(float(t)) for t in range(10, 3, -1)]
+    assert select_turn_frames(newest_first) == [
+        turn_image(float(t)) for t in range(6, 11)
+    ]
 
 
 def test_no_frames_gives_no_images():
-    assert select_turn_frames([], None, now_t=5.0) == []
-    assert select_turn_frames([surface(1.0)], 0.5, now_t=5.0) == []
-
-
-def test_records_out_of_order_are_sorted_by_time():
-    records = [interval(8.0), interval(6.0), interval(7.0)]
-    assert select_turn_frames(records, 5.0, now_t=8.0) == [
-        interval(6.0),
-        interval(7.0),
-        interval(8.0),
-    ]
-
-
-# --- 画像を読む ---
-
-
-def make_run(tmp_path: Path) -> RunPaths:
-    paths = RunPaths(tmp_path / "runs" / "20261116-120000")
-    paths.interval_frames_dir.mkdir(parents=True)
-    return paths
-
-
-def test_images_are_read_as_saved(tmp_path):
-    paths = make_run(tmp_path)
-    write_bytes_atomic(paths.interval_frame(6.0), b"jpeg-6")
-    write_bytes_atomic(paths.interval_frame(7.0), b"jpeg-7")
-    images = read_turn_images(paths, [interval(6.0), interval(7.0)])
-    assert images == [
-        TurnImage(t=6.0, file="frames/interval/000006000.jpg", jpeg=b"jpeg-6"),
-        TurnImage(t=7.0, file="frames/interval/000007000.jpg", jpeg=b"jpeg-7"),
-    ]
-
-
-def test_missing_images_and_links_outside_interval_frames_are_left_out(tmp_path):
-    paths = make_run(tmp_path)
-    secret = tmp_path / "secret.jpg"
-    secret.write_bytes(b"secret")
-    os.symlink(secret, paths.interval_frame(6.0))
-    write_bytes_atomic(paths.interval_frame(8.0), b"jpeg-8")
-    # frames.jsonl の行が実行ディレクトリーの外を指していても読まない
-    (paths.root.parent / "secret.jpg").write_bytes(b"secret")
-    outside = FrameRecord(
-        t=9.0, kind="interval", file="../secret.jpg", width=1, height=1
-    )
-    images = read_turn_images(
-        paths, [interval(6.0), interval(7.0), interval(8.0), outside]
-    )
-    assert images == [
-        TurnImage(t=8.0, file="frames/interval/000008000.jpg", jpeg=b"jpeg-8")
-    ]
+    assert select_turn_frames([]) == []
 
 
 # --- 操作の JSON ---
@@ -286,6 +223,30 @@ def test_running_state_and_remaining_actions():
         "実行中: はい\n残りの操作: 5 個"
     )
     assert describe_running(events()) == "実行中: いいえ\n残りの操作: 0 個"
+
+
+# --- 前の操作の列の時刻 ---
+
+
+def test_previous_actions_are_written_with_the_start_and_the_last_release():
+    run = MainActionsRun(started_t=10.0, released_t=11.25, ended_t=11.25)
+    assert describe_previous_actions(run) == (
+        "始めた時刻: t=10.000\n終えた時刻 (最後に離した時刻): t=11.250"
+    )
+
+
+def test_previous_actions_ending_with_a_wait_use_the_last_release():
+    run = MainActionsRun(started_t=10.0, released_t=11.25, ended_t=12.0)
+    assert describe_previous_actions(run).endswith(
+        "終えた時刻 (最後に離した時刻): t=11.250"
+    )
+
+
+def test_previous_actions_without_a_release_use_the_end_time():
+    run = MainActionsRun(started_t=10.0, released_t=None, ended_t=10.5)
+    assert describe_previous_actions(run) == (
+        "始めた時刻: t=10.000\n終えた時刻 (最後に離した時刻): t=10.500"
+    )
 
 
 # --- 画面の停滞 ---
@@ -418,6 +379,44 @@ def test_turn_text_without_anything_to_report():
     text = build_turn_text(context)
     assert NO_PROGRESS_TEXT in text
     assert text.count(NONE_TEXT) >= 5
+
+
+def test_turn_text_has_the_previous_actions_after_the_main_loop_actions():
+    run = MainActionsRun(started_t=10.0, released_t=11.25, ended_t=11.25)
+    context = TurnContext(
+        now_t=11.55,
+        events=events(),
+        progress=None,
+        previous_error=None,
+        previous_actions=run,
+    )
+    text = build_turn_text(context)
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "## 時刻",
+        "## 前の判断の後の出来事",
+        "## 主ループの操作",
+        "## 前の操作の列",
+        "## 画面の停滞 (コードの計測)",
+        "## 前の JSON の誤り",
+        "## 写さなかったスキル",
+        "## 今の監視",
+        "## 今のマクロ",
+        "## 古いフレーム",
+    ]
+    assert f"## 前の操作の列\n{describe_previous_actions(run)}\n" in text
+
+
+def test_turn_text_without_previous_actions_has_no_action_times():
+    # 前のターンに操作が無かった (actions が空・JSON の誤り・最初のターン) ときは、時刻を書かない
+    context = TurnContext(
+        now_t=1.0, events=events(), progress=None, previous_error=None
+    )
+    assert context.previous_actions is None
+    text = build_turn_text(context)
+    assert "## 前の操作の列" not in text
+    assert "始めた時刻" not in text
+    assert "終えた時刻" not in text
 
 
 # --- 写さなかったスキル ---
