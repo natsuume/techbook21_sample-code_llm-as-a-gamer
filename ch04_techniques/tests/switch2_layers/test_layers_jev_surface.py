@@ -22,11 +22,16 @@ from switch2_layers.deep.deep_scheduler import (
 )
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.run_directory import RunPaths
-from switch2_layers.settings import DEFAULT_HOLD_MARGIN
+from switch2_layers.settings import (
+    DEFAULT_HOLD_MARGIN,
+    DEFAULT_SURFACE_MAP,
+    SurfaceMapMode,
+)
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS
 from switch2_layers.surface.box_tracker import NormalizedBox, TrackingFrame, TrackResult
 from switch2_layers.surface.box_tracking_state import BoxTrackingState
@@ -73,6 +78,7 @@ from switch2_layers.surface.surface_types import (
     SurfaceInput,
     SurfaceRequest,
 )
+from switch2_layers.tasks.task_queue import TaskDestination
 
 FRAME_TIMES = (9.0, 9.5, 10.0)
 REQUEST_T = 10.0
@@ -103,6 +109,39 @@ ALLOWED = allowed_buttons()
 FAKE_MODEL = "jev-test"
 # FRAME_TIMES の画像の保存を予約したファイル (2 枚目は保存を捨てた)
 FILES = ("frames/surface/000009000.jpg", None, "frames/surface/000010000-2.jpg")
+# notes/map/map.json に書く grid のマップ (家の図は 3 × 3 で、左上は x=0, y=0。扉は (1, 2))
+MAP_JSON = {
+    "layout": "grid",
+    "places": [
+        {
+            "name": "家",
+            "aliases": ["自宅"],
+            "description": "主人公の家",
+            "state": "訪問済み",
+            "changes_on_entry": False,
+            "origin": {"x": 0, "y": 0},
+            "tiles": ["###", "#.#", "#E#"],
+            "exits": [{"x": 1, "y": 2, "description": "扉"}],
+            "blocked": [],
+            "landmarks": [],
+        }
+    ],
+    "connections": [],
+}
+# MAP_JSON で、現在地を「自宅」(家の別の名前) のマス (1, 1)・その時刻を t=8.0、先頭のタスクの行き先を家の扉 (1, 2)
+# にしたときの state の map の行
+MAP_LINES = [
+    "場所: 家",
+    "主人公 (P): x=1, y=1 (t=8.000 の画面での位置。その後に動いていることがある)",
+    "目標 (G): x=1, y=2 扉",
+    "凡例: # 通れない / . 通れる / E 出口 / ? 未確認 / P 主人公 / G 目標",
+    "図の左上のマスは x=0, y=0。x は右へ、y は下へ増える",
+    "###",
+    "#P#",
+    "#G#",
+    "出口: x=1, y=2 扉",
+]
+MAP_TEXT = "\n".join(MAP_LINES)
 
 
 class FakeAsker:
@@ -197,10 +236,14 @@ def surface_input(
     request_sink: Callable[[SurfaceRequest], None] | None = None,
     advisor_statuses: Mapping[DocumentKind, DeepDocumentStatus | None] | None = None,
     progress: ProgressState | None = None,
+    place_name: str | None = None,
+    current_tile: TilePosition | None = None,
+    location_based_on_t: float | None = None,
 ) -> SurfaceInput:
     """files は times と同じ順の、画像の保存を予約したファイル (None なら、どの画像も file を持たない)。
 
     advisor_statuses が None なら、SurfaceInput の既定 (空) のままにする。
+    place_name・current_tile・location_based_on_t は現在地 (既定はどれも None)。
     """
     frame_files = files if files is not None else [None] * len(times)
     frames = tuple(
@@ -216,6 +259,9 @@ def surface_input(
         recent_actions=recent_actions,
         request_sink=request_sink,
         progress=progress,
+        place_name=place_name,
+        current_tile=current_tile,
+        location_based_on_t=location_based_on_t,
     )
     if advisor_statuses is None:
         return value
@@ -230,6 +276,7 @@ def make_decider(
     threshold: float = 0.5,
     with_notes: bool = True,
     hold_margin: float = DEFAULT_HOLD_MARGIN,
+    surface_map: SurfaceMapMode = DEFAULT_SURFACE_MAP,
 ) -> tuple[JevSurfaceDecider, BoxTrackingState]:
     tracking = BoxTrackingState(tracker_factory=StillTracker)
     notes_dir = tmp_path / "notes"
@@ -242,6 +289,7 @@ def make_decider(
             threshold_advisor=threshold,
             box_requery_every=requery_every,
             hold_margin=hold_margin,
+            surface_map=surface_map,
         ),
         notes_dir=notes_dir if with_notes else None,
         make_reference=references(),
@@ -660,10 +708,11 @@ def test_build_surface_state_has_keys_in_order():
         surface_input(timeline="系列", timeline_generated_t=8.5, progress=progress),
         ["a", "b", "c"],
     )
-    # advisor は recent_actions の直後、frames の前
+    # map は documents の直後。advisor は recent_actions の直後、frames の前
     assert list(state) == [
         "instructions",
         "documents",
+        "map",
         "timeline",
         "progress",
         "recent_actions",
@@ -672,6 +721,8 @@ def test_build_surface_state_has_keys_in_order():
     ]
     assert state["instructions"] == SURFACE_INSTRUCTIONS
     assert state["documents"] == documents_to_state(DOCUMENTS)
+    # マップを渡さない呼び出しでは空文字列
+    assert state["map"] == ""
     assert state["timeline"] == {"created": "t=8.500 秒 (1.5 秒前)", "text": "系列"}
     assert state["progress"] == progress_to_state(progress, REQUEST_T)
     assert state["recent_actions"] == []
@@ -688,6 +739,28 @@ def test_build_surface_state_has_keys_in_order():
         {"label": "t=9.500 秒 (0.5 秒前)", "image": "b"},
         {"label": "t=10.000 秒 (0.0 秒前)", "image": "c"},
     ]
+
+
+def map_of(state: Mapping[str, object]) -> object:
+    """state の "map" の値を返す (キーが無ければテストを失敗させる)。"""
+    assert "map" in state, list(state)
+    return state["map"]
+
+
+def test_sent_and_recorded_states_put_the_map_text_as_it_is():
+    surface = surface_input(files=FILES)
+    sent = build_surface_state(surface, ["a", "b", "c"], map_text=MAP_TEXT)
+    recorded = build_recorded_state(surface, map_text=MAP_TEXT)
+    for state in [sent, recorded]:
+        assert map_of(state) == MAP_TEXT
+        assert list(state)[:3] == ["instructions", "documents", "map"]
+    assert without_frames(recorded) == without_frames(sent)
+
+
+def test_sent_and_recorded_states_have_an_empty_map_by_default():
+    surface = surface_input(files=FILES)
+    assert map_of(build_surface_state(surface, ["a", "b", "c"])) == ""
+    assert map_of(build_recorded_state(surface)) == ""
 
 
 def test_build_surface_state_says_when_there_is_no_progress():
@@ -1407,3 +1480,106 @@ def test_recorded_request_through_mock_transport(tmp_path):
     assert output.exchange is not None
     assert output.exchange.request == request
     assert output.exchange.answers.usage == {"input_tokens": 7, "images": [1, 2, 3]}
+
+
+# --- 現在地の場所のマップ (state の map と出力の map_place) ---
+
+# 先頭のタスクの行き先が家の扉 (1, 2) の文書
+DOCUMENTS_TO_THE_DOOR = replace(
+    DOCUMENTS_WITH_TASK, task_destination=TaskDestination("家", TilePosition(1, 2))
+)
+
+
+def write_map_json(tmp_path: Path, content: str) -> None:
+    """make_decider の notes/ (tmp_path / "notes") の map/map.json に content を書く。"""
+    map_dir = tmp_path / "notes" / "map"
+    map_dir.mkdir(parents=True, exist_ok=True)
+    (map_dir / "map.json").write_text(content, encoding="utf-8")
+
+
+def located_input(
+    place_name: str | None = "自宅",
+    request_sink: Callable[[SurfaceRequest], None] | None = None,
+) -> SurfaceInput:
+    """現在地が place_name のマス (1, 1) (その時刻 t=8.0) で、先頭のタスクの行き先が家の扉の入力。"""
+    return surface_input(
+        documents=DOCUMENTS_TO_THE_DOOR,
+        files=FILES,
+        request_sink=request_sink,
+        place_name=place_name,
+        current_tile=TilePosition(1, 1),
+        location_based_on_t=8.0,
+    )
+
+
+def test_surface_map_defaults_to_text():
+    assert JevSurfaceSettings(allowed_buttons=ALLOWED).surface_map is (
+        SurfaceMapMode.TEXT
+    )
+    assert DEFAULT_SURFACE_MAP is SurfaceMapMode.TEXT
+
+
+def test_decide_sends_and_records_the_map_of_the_current_place(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    write_map_json(tmp_path, json.dumps(MAP_JSON, ensure_ascii=False))
+    sink = RequestSink(asker)
+    output = decider.decide(located_input(request_sink=sink))
+    state, _, _ = asker.calls[0]
+    # map.json と、現在地の場所・マス・時刻と、先頭のタスクの行き先から作る
+    assert map_of(state) == MAP_TEXT
+    assert list(state)[:3] == ["instructions", "documents", "map"]
+    # surface_requests.jsonl に書く state にも、送った state と同じ map が入る
+    assert map_of(sink.requests[0].state) == MAP_TEXT
+    # 出力の map_place は、渡したマップの場所の name (現在地は別の名前で書かれていた)
+    assert output.map_place == "家"
+
+
+def test_decide_sends_an_empty_map_with_surface_map_none(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker, surface_map=SurfaceMapMode.NONE)
+    write_map_json(tmp_path, json.dumps(MAP_JSON, ensure_ascii=False))
+    sink = RequestSink(asker)
+    output = decider.decide(located_input(request_sink=sink))
+    state, _, _ = asker.calls[0]
+    assert map_of(state) == ""
+    assert map_of(sink.requests[0].state) == ""
+    assert output.map_place is None
+
+
+# map.json を書かない (無い)
+NO_MAP_JSON = None
+
+
+@pytest.mark.parametrize(
+    "map_json, place_name",
+    [
+        (NO_MAP_JSON, "自宅"),
+        ("{broken", "自宅"),
+        # 形に合わない (場所の要素にキーが足りない)
+        (
+            json.dumps(
+                {"layout": "grid", "places": [{"name": "家"}], "connections": []},
+                ensure_ascii=False,
+            ),
+            "自宅",
+        ),
+        (json.dumps(MAP_JSON, ensure_ascii=False), None),
+        (json.dumps(MAP_JSON, ensure_ascii=False), "城"),
+    ],
+    ids=["no_map_json", "broken_json", "wrong_shape", "no_place_name", "unknown_place"],
+)
+def test_decide_sends_an_empty_map_when_the_map_cannot_be_made(
+    tmp_path, map_json, place_name
+):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    if map_json is not NO_MAP_JSON:
+        write_map_json(tmp_path, map_json)
+    sink = RequestSink(asker)
+    # マップを作れないことは失敗にしない (要求は送る)
+    output = decider.decide(located_input(place_name=place_name, request_sink=sink))
+    state, _, _ = asker.calls[0]
+    assert map_of(state) == ""
+    assert map_of(sink.requests[0].state) == ""
+    assert output.map_place is None

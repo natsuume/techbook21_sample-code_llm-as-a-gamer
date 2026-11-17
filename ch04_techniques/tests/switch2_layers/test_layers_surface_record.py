@@ -44,6 +44,7 @@ SURFACE_KEYS = [
     "frames",
     "scene_id",
     "task_id",
+    "map_place",
     "uses_common",
     "middle_generated_t",
     "action",
@@ -123,6 +124,7 @@ def test_surface_row_has_the_keys_of_the_issue():
         ],
         "scene_id": "scene-001",
         "task_id": "task-003",
+        "map_place": None,
         "uses_common": {"controls": False, "tips": True},
         "middle_generated_t": 8.5,
         "action": {
@@ -197,6 +199,54 @@ def test_surface_row_without_head_task_has_null_task_id():
         error=None,
     )
     assert surface_row(record)["task_id"] is None
+
+
+# --- 渡したマップの場所 (map_place) ---
+
+
+def test_surface_row_writes_the_map_place_after_the_task_id():
+    record = SurfaceRecord(
+        t_sent=1.0,
+        t_received=1.2,
+        frames=[],
+        documents=DOCUMENTS,
+        middle_generated_t=None,
+        action=PadAction(),
+        blocked_buttons=[],
+        deep_requests=[],
+        info_labels=[],
+        boxes=[],
+        scene_changed=False,
+        wait_s=1.0,
+        error=None,
+        map_place="家の 1 階",
+    )
+    row = surface_row(record)
+    keys = list(row)
+    assert keys[keys.index("task_id") + 1] == "map_place"
+    assert row["map_place"] == "家の 1 階"
+
+
+def test_surface_row_without_map_place_has_null():
+    # 既定 (マップを渡さなかった要求と、decide が失敗した要求) は null
+    record = SurfaceRecord(
+        t_sent=1.0,
+        t_received=1.2,
+        frames=[],
+        documents=DOCUMENTS,
+        middle_generated_t=None,
+        action=None,
+        blocked_buttons=[],
+        deep_requests=[],
+        info_labels=[],
+        boxes=[],
+        scene_changed=False,
+        wait_s=1.0,
+        error="RuntimeError: model failed",
+    )
+    row = surface_row(record)
+    assert "map_place" in row
+    assert row["map_place"] is None
 
 
 # --- 答えと usage・送った要求 ---

@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pytest
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.surface_documents import is_blank, read_surface_documents
 from switch2_layers.surface.surface_types import SurfaceDocuments
+from switch2_layers.tasks.task_queue import TaskDestination
 
 COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n"
 COMMON_TIPS = "# 攻略情報 (共通)\n"
@@ -119,6 +121,7 @@ def test_scene_documents_are_used_when_present(tmp_path):
         scene_id="scene-001",
         uses_common_controls=False,
         uses_common_tips=False,
+        task_destination=TaskDestination("町", TilePosition(3, 4)),
     )
 
 
@@ -184,6 +187,48 @@ def test_empty_scene_queue_has_no_head_task(tmp_path):
     documents = read_surface_documents(notes, "scene-001")
     assert documents.tasks == ""
     assert documents.task_id is None
+
+
+# 先頭のタスクの項目に destination のキーを書かないことを表す値
+NO_DESTINATION_KEY = "no-key"
+
+
+@pytest.mark.parametrize(
+    "destination, expected",
+    [
+        (
+            {"place": "宿屋", "tile": {"x": 5, "y": -1}},
+            TaskDestination("宿屋", TilePosition(5, -1)),
+        ),
+        ({"place": "宿屋", "tile": None}, TaskDestination("宿屋", None)),
+        (None, None),
+        (NO_DESTINATION_KEY, None),
+    ],
+    ids=["with_tile", "null_tile", "null", "no_key"],
+)
+def test_head_task_destination(tmp_path, destination, expected):
+    head = {**SCENE_TASK_ITEMS[0]}
+    if destination == NO_DESTINATION_KEY:
+        del head["destination"]
+    else:
+        head["destination"] = destination
+    # 2 つ目のタスクの行き先は使わない
+    second = {**SCENE_TASK_ITEMS[1], "destination": {"place": "港", "tile": None}}
+    notes = make_notes(tmp_path)
+    write_tasks_json(notes, "scene-001", [head, second])
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.task_destination == expected
+    assert documents.task_id == "task-003"
+
+
+def test_no_head_task_has_no_destination(tmp_path):
+    notes = make_notes(tmp_path)
+    write_tasks_json(notes, "scene-001", [])
+    write_tasks_json(notes, "scene-002", SCENE_TASK_ITEMS)
+    # キューが空
+    assert read_surface_documents(notes, "scene-001").task_destination is None
+    # 場面が無い (ほかの場面のキューは読まない)
+    assert read_surface_documents(notes, None).task_destination is None
 
 
 def test_tasks_markdown_is_not_read(tmp_path):

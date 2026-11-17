@@ -3,6 +3,7 @@ from collections.abc import Iterator, Mapping
 
 from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.pad_action import NEUTRAL_ACTION
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.surface_types import (
@@ -64,6 +65,18 @@ def test_fake_surface_does_not_use_advisor_statuses():
         surface_input(), advisor_statuses=UntouchableStatuses()
     )
     assert FakeSurfaceDecider().decide(surface) == SurfaceOutput(action=NEUTRAL_ACTION)
+
+
+def test_fake_surface_makes_no_map():
+    surface = dataclasses.replace(
+        surface_input(),
+        place_name="家の 1 階",
+        current_tile=TilePosition(1, 1),
+        location_based_on_t=0.5,
+    )
+    output = FakeSurfaceDecider().decide(surface)
+    # マップを作らないので、渡したマップの場所も無い
+    assert output.map_place is None
 
 
 def test_fake_surface_records_no_request():

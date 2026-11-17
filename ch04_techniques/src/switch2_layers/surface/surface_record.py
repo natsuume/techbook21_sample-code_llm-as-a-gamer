@@ -64,6 +64,9 @@ class SurfaceRecord:
     request              surface の要求の番号 (SurfaceRequest.request_index)。Jev を呼ばない要求 (フェイク) と、
                          要求を送る前に失敗した要求は None
     answers              受け取った答え (usage を含む)。応答を読めなかった要求 (decide の失敗) とフェイクの要求は None
+    map_place            要求の state の map に入れたマップの場所の name (SurfaceOutput.map_place)。マップを渡さなかった
+                         要求と、decide が失敗した要求は None
+    request・answers・map_place の既定値の None は、値の無い記録 (フェイクやテストなど) のため。
     """
 
     t_sent: float
@@ -81,6 +84,7 @@ class SurfaceRecord:
     error: str | None
     request: int | None = None
     answers: JevAnswers | None = None
+    map_place: str | None = None
 
 
 def info_label_to_json(label: InfoLabel) -> dict[str, object]:

@@ -20,6 +20,7 @@ from switch2_layers.settings import (
     DEFAULT_SAFETY,
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_SURFACE,
+    DEFAULT_SURFACE_MAP,
     DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
@@ -37,6 +38,7 @@ from switch2_layers.settings import (
     RunSettings,
     SafetyKind,
     SurfaceKind,
+    SurfaceMapMode,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
@@ -527,6 +529,36 @@ def test_run_settings_to_json_has_the_hold_margin():
     value = run_settings_to_json(RunSettings(hold_margin=0.25))
     assert value["hold_margin"] == 0.25
     assert json.loads(json.dumps(value)) == value
+
+
+# --- surface に渡すマップ (--surface-map) ---
+
+
+def test_surface_map_values_and_default():
+    assert [mode.value for mode in SurfaceMapMode] == ["text", "none"]
+    assert DEFAULT_SURFACE_MAP is SurfaceMapMode.TEXT
+    assert RunSettings().surface_map is SurfaceMapMode.TEXT
+
+
+def test_surface_map_follows_the_hold_margin():
+    names = [field.name for field in dataclasses.fields(RunSettings)]
+    assert names[names.index("hold_margin") + 1] == "surface_map"
+
+
+@pytest.mark.parametrize("mode", list(SurfaceMapMode))
+def test_surface_map_does_not_affect_range_errors(mode):
+    assert run_settings_errors(RunSettings(surface_map=mode)) == []
+
+
+@pytest.mark.parametrize(
+    "mode, expected", [(SurfaceMapMode.TEXT, "text"), (SurfaceMapMode.NONE, "none")]
+)
+def test_run_settings_to_json_writes_surface_map_as_string(mode, expected):
+    value = run_settings_to_json(RunSettings(surface_map=mode))
+    # run.jsonl の start の args に、値の文字列で書く
+    assert value["surface_map"] == expected
+    assert type(value["surface_map"]) is str
+    assert json.loads(json.dumps(value))["surface_map"] == expected
 
 
 # --- 先頭のタスクの問いのしきい値と、詰まりのきっかけの秒数 (--threshold-task・--task-stuck-seconds) ---

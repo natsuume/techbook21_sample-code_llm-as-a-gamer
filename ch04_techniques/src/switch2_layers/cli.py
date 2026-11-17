@@ -5,7 +5,8 @@
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
-                       [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
+                       [--hold-margin P] [--surface-map text|none] [--deep claude|fake] [--safety jev|fake]
+                       [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
                        [--threshold-task P] [--task-stuck-seconds S]
         実機で 3 層を動かす (advisor 型。--mode の既定)。準備 (コントローラーの登録・指定のソフト (--software) を
@@ -120,6 +121,7 @@ from switch2_layers.settings import (
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
+    DEFAULT_SURFACE_MAP,
     DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
@@ -144,6 +146,7 @@ from switch2_layers.settings import (
     RunSettings,
     SafetyKind,
     SurfaceKind,
+    SurfaceMapMode,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
@@ -245,6 +248,7 @@ def add_run_parser(
     Namespace の software と user に入る (無ければ None)。
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
     --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
+    --surface-map は settings.SurfaceMapMode の値 (text / none) から選ぶ (既定 text)。
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
     --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
     --threshold-task は float (既定 0.5)、--task-stuck-seconds は float (既定 30)。
@@ -403,6 +407,15 @@ def add_run_parser(
         help=(
             "surface のボタンと十字キーで、hold の確率が tap の確率をこの値より大きく上回ったときだけ押し続けにする "
             f"(0〜1。既定 {DEFAULT_HOLD_MARGIN:g})"
+        ),
+    )
+    parser.add_argument(
+        "--surface-map",
+        choices=[mode.value for mode in SurfaceMapMode],
+        default=DEFAULT_SURFACE_MAP.value,
+        help=(
+            "surface に現在地の場所のマップを渡すか。text は文字で渡し、none は渡さない "
+            f"(既定 {DEFAULT_SURFACE_MAP.value})"
         ),
     )
     add_deep_runner_argument(parser)
@@ -686,8 +699,9 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
     --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator では
-    使わないため無くてよい)。--middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice に、
-    --safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値は、--mode に依らず写す。
+    使わないため無くてよい)。--middle は MiddleKind に、--surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
+    --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値は、
+    --mode に依らず写す。
     --instruction と --instruction-file は写さない (run_command が orchestrator のときだけ読む)。
     """
     return RunSettings(
@@ -708,6 +722,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
         hold_margin=args.hold_margin,
+        surface_map=SurfaceMapMode(args.surface_map),
         deep=DeepRunnerChoice(args.deep),
         safety=SafetyKind(args.safety),
         safety_interval_s=args.safety_interval,

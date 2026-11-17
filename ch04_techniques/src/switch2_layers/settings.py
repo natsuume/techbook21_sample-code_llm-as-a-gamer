@@ -96,6 +96,16 @@ DEFAULT_SURFACE = SurfaceKind.JEV
 TYPESAFE_API_KEY_ENV = JEV_API_KEY_ENV
 
 
+class SurfaceMapMode(StrEnum):
+    """surface に渡すマップ (--surface-map の値)。"""
+
+    TEXT = "text"  # 現在地の場所のマップを文字で渡す (notes.surface_map_text)
+    NONE = "none"  # 渡さない
+
+
+DEFAULT_SURFACE_MAP = SurfaceMapMode.TEXT
+
+
 class DeepRunnerChoice(StrEnum):
     """deep のジョブを実行するもの (run と deep-once の --deep)。値は --deep に書く名前。
 
@@ -172,6 +182,8 @@ class RunSettings:
                                 (--box-requery-every、既定 5。1 以上)
     hold_margin                 surface のボタンと十字キーで、hold の確率が tap の確率をこの値より大きく上回ったときだけ
                                 押し続けにする (--hold-margin、既定 0.1。0 以上 1 以下)
+    surface_map                 surface に現在地の場所のマップを渡すか (--surface-map、既定 text。text は文字で渡し、
+                                none は渡さない)。jev の surface だけで使う
     deep                        deep のジョブを実行するもの (--deep、既定 claude。claude か fake)
     safety                      安全の監視の実装 (--safety、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
                                 (safety_api_key_errors)
@@ -226,6 +238,7 @@ class RunSettings:
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
     hold_margin: float = DEFAULT_HOLD_MARGIN
+    surface_map: SurfaceMapMode = DEFAULT_SURFACE_MAP
     deep: DeepRunnerChoice = DEFAULT_DEEP_RUNNER
     safety: SafetyKind = DEFAULT_SAFETY
     safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S
@@ -282,7 +295,7 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
     --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
-    surface は値の型 (SurfaceKind) で決まるため確かめない。
+    surface は値の型 (SurfaceKind) で、surface_map は値の型 (SurfaceMapMode) で決まるため確かめない。
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
@@ -544,9 +557,9 @@ def orchestrator_api_key_errors(environ: Mapping[str, str]) -> list[str]:
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety・mode は値の
-    文字列。middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake"、
-    mode は "advisor" / "orchestrator") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・surface_map・deep・safety・
+    mode は値の文字列。middle は "fake" / "luna"、surface は "jev" / "fake"、surface_map は "text" / "none"、deep は
+    "claude" / "fake"、safety は "jev" / "fake"、mode は "advisor" / "orchestrator") にする。
     software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値は、
     mode に依らず入れる。
     """
@@ -554,6 +567,7 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
     value["surface"] = settings.surface.value
+    value["surface_map"] = settings.surface_map.value
     value["deep"] = settings.deep.value
     value["safety"] = settings.safety.value
     value["mode"] = settings.mode.value

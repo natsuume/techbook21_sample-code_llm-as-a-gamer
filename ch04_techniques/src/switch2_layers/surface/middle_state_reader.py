@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.notes.note_paths import is_scene_id
 
 SURFACE_WAIT_MIN_S = 0.2
@@ -27,12 +28,20 @@ class SurfaceContext:
     timeline      系列情報。無ければ空文字列
     generated_t   系列情報を作った時刻 (middle/state.json の generated_t)。無ければ None
     wait_s        次の要求までの待ち時間 (秒。SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S)
+    place_name    現在地の場所の名前 (middle/state.json の place_name。書かれたまま)。無ければ None
+    current_tile  現在地のマス (middle/state.json の current_tile)。無ければ None
+    based_on_t    place_name と current_tile を出した middle の出力がもとにした画面の時刻 (middle/state.json の
+                  based_on_t)。無ければ None
+    place_name・current_tile・based_on_t の既定値は、値の無い SurfaceContext (EMPTY_SURFACE_CONTEXT やテストなど) のため。
     """
 
     scene_id: str | None
     timeline: str
     generated_t: float | None
     wait_s: float
+    place_name: str | None = None
+    current_tile: TilePosition | None = None
+    based_on_t: float | None = None
 
 
 # middle/state.json が無いか読めないときの値

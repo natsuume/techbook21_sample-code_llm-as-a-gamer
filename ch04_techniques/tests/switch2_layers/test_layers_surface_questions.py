@@ -243,6 +243,26 @@ def test_instructions_describe_tasks_as_one_running_task_with_a_state():
     assert "短期タスクリスト" not in SURFACE_INSTRUCTIONS
 
 
+def test_instructions_explain_the_map_and_its_marks():
+    for phrase in [
+        "`map` は、上位の層がまとめた現在地の場所のマップ",
+        "現在地の場所のマップです (無ければ空です)",
+        "`P` は少し前の画面での主人公の位置",
+        "ずれていることがある",
+        "画面と見比べて",
+        "`G` は今実行中のタスクの行き先",
+        "`?` のマスは、まだ確かめていないマス",
+    ]:
+        assert phrase in SURFACE_INSTRUCTIONS, phrase
+    # documents.tasks の説明の後、timeline の説明の前に置く
+    map_position = SURFACE_INSTRUCTIONS.index("`map`")
+    assert (
+        SURFACE_INSTRUCTIONS.index("`documents.tasks` は今実行中のタスク 1 つ")
+        < map_position
+        < SURFACE_INSTRUCTIONS.index("`timeline`")
+    )
+
+
 def test_strategy_advisor_question_refers_to_the_running_task():
     assert (
         "実行中のタスク (`documents.tasks`)"

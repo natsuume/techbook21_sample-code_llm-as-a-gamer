@@ -70,7 +70,9 @@ from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_HOLD_MARGIN,
+    DEFAULT_SURFACE_MAP,
     DEFAULT_THRESHOLD_ADVISOR,
+    SurfaceMapMode,
 )
 from switch2_layers.surface.action_rules import (
     decide_deep_kinds,
@@ -154,12 +156,15 @@ class JevSurfaceSettings:
     box_requery_every   前回の問い直しからこの回数の要求がたった対象の box を問い直す (--box-requery-every)
     hold_margin         押し方の選び方の差の値 (--hold-margin)。hold の確率が tap の確率をこの値より大きく上回ったときだけ
                         押し続けにする (surface.action_rules.decide_pad_action に渡す)
+    surface_map         要求の state の map に現在地の場所のマップを入れるか (--surface-map)。TEXT なら
+                        notes.surface_map_text.build_surface_map_text の文字列を入れ、NONE なら空文字列にする
     """
 
     allowed_buttons: frozenset[str]
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
     hold_margin: float = DEFAULT_HOLD_MARGIN
+    surface_map: SurfaceMapMode = DEFAULT_SURFACE_MAP
 
 
 @dataclass(frozen=True)
@@ -357,21 +362,26 @@ def advisor_to_state(
 
 
 def build_surface_state(
-    surface_input: SurfaceInput, references: Sequence[str]
+    surface_input: SurfaceInput, references: Sequence[str], map_text: str = ""
 ) -> dict[str, object]:
     """要求の state (モジュールの docstring の形) を返す。
 
     references は surface_input.frames と同じ順・同じ数の画像の参照文字列。frames の各要素は
     {"label": relative_time_label(frame.t, surface_input.t), "image": 参照文字列}。数が合わなければ ValueError。
+    map_text は state の "map" (documents の直後のキー) にそのまま入れる文字列 (現在地の場所のマップ。渡さなければ
+    空文字列)。既定値の空文字列は、マップを渡さない呼び出し (テストなど) のため。
     """
     return _state_with_images(surface_input, references)
 
 
-def build_recorded_state(surface_input: SurfaceInput) -> dict[str, object]:
+def build_recorded_state(
+    surface_input: SurfaceInput, map_text: str = ""
+) -> dict[str, object]:
     """記録に書く state (SurfaceRequest.state) を返す。
 
-    build_surface_state と同じキー・同じ内容で、frames の各要素の image だけを、画像の参照文字列ではなく
-    そのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    build_surface_state(surface_input, 参照文字列, map_text) と同じキー・同じ内容で、frames の各要素の image だけを、
+    画像の参照文字列ではなくそのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    map_text は build_surface_state と同じく state の "map" にそのまま入れる (既定値の空文字列も同じ)。
     """
     return _state_with_images(
         surface_input, [frame.file for frame in surface_input.frames]

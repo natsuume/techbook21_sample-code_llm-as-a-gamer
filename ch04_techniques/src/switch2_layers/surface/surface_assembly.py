@@ -57,9 +57,10 @@ def build_surface_assembly(
       何もしない関数。api_key は使わない
     - jev: tracking = BoxTrackingState()、client = JevClient(api_key, http_client)、
       decider = JevSurfaceDecider(client, tracking, JevSurfaceSettings(buttons.allowed_buttons() (HOME を除く 16 個),
-      settings.threshold_advisor, settings.box_requery_every, settings.hold_margin))。on_frame は tracking.on_frame、boxes_at は
-      tracking.boxes_at、on_run_directory は decider.use_run_directory、plan_boxes は decider.plan_boxes、close は
-      client.close。api_key が None か空なら ValueError (HTTP のクライアントを作る前)
+      settings.threshold_advisor, settings.box_requery_every, settings.hold_margin, settings.surface_map))。
+      on_frame は tracking.on_frame、boxes_at は tracking.boxes_at、on_run_directory は decider.use_run_directory、
+      plan_boxes は decider.plan_boxes、close は client.close。api_key が None か空なら ValueError (HTTP のクライアントを
+      作る前)
     HTTP の要求は送らない (Jev を呼ぶのは decide のとき)。
     """
     if settings.surface is SurfaceKind.FAKE:
@@ -82,6 +83,7 @@ def build_surface_assembly(
             threshold_advisor=settings.threshold_advisor,
             box_requery_every=settings.box_requery_every,
             hold_margin=settings.hold_margin,
+            surface_map=settings.surface_map,
         ),
     )
     return SurfaceAssembly(

@@ -7,10 +7,12 @@ from typing import Protocol
 
 from switch2_layers.deep.deep_scheduler import DeepDocumentStatus
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.surface.jev_client import JevAnswers
 from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.tasks.task_queue import TaskDestination
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,9 @@ class SurfaceDocuments:
     uses_common_tips       攻略情報に共通の文書を使ったら True
     game                   ゲームの性質 (notes/game.md。場面に依らない)。読んだまま (前後の空白も除かない) で、
                            無いか読めなければ空文字列。既定値の空文字列は、ゲームの性質を渡さない入力 (テストなど) のため
+    task_destination       先頭のタスクの行き先 (tasks.json の先頭の項目の destination)。場面が無いか、キューが空か、
+                           先頭のタスクの destination が null か、destination のキーが無ければ None。既定値の None は、
+                           行き先を渡さない入力 (テストなど) のため
     """
 
     tasks: str
@@ -57,6 +62,7 @@ class SurfaceDocuments:
     uses_common_controls: bool
     uses_common_tips: bool
     game: str = ""
+    task_destination: TaskDestination | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +128,11 @@ class SurfaceInput:
                            None なら何も書かない。Jev を呼ばない実装 (フェイク) は呼ばない
     progress               画面の停滞の計測の最新の値 (progress/state.json)。ファイルが無いか読めなければ None。
                            既定値の None は、値を渡さない入力 (フェイクやテストなど) のため
+    place_name             現在地の場所の名前 (middle_state_reader.SurfaceContext.place_name)。無ければ None
+    current_tile           現在地のマス (SurfaceContext.current_tile)。無ければ None
+    location_based_on_t    place_name と current_tile を出した middle の出力がもとにした画面の時刻
+                           (SurfaceContext.based_on_t)。無ければ None
+    place_name・current_tile・location_based_on_t の既定値の None は、値を渡さない入力 (フェイクやテストなど) のため。
     """
 
     t: float
@@ -135,6 +146,9 @@ class SurfaceInput:
     )
     request_sink: Callable[[SurfaceRequest], None] | None = None
     progress: ProgressState | None = None
+    place_name: str | None = None
+    current_tile: TilePosition | None = None
+    location_based_on_t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -190,7 +204,9 @@ class SurfaceOutput:
     exchange        記録のための情報 (送った要求と受け取った答え)。Jev を呼ばない実装 (フェイク) では None
     task_done_p     先頭のタスクを達成したかの問い (task_done) の確率。問いを送らなかったら None
     task_cancel_p   先頭のタスクが達成できないか状況に合わないかの問い (task_cancel) の確率。問いを送らなかったら None
-    task_done_p・task_cancel_p の既定値は、問いを送らない出力 (フェイクやテストなど) のため。
+    map_place       要求の state の map に入れたマップの場所の name。マップを渡さなかった (map を空文字列にした)
+                    要求と、Jev を呼ばない実装 (フェイク) では None
+    task_done_p・task_cancel_p・map_place の既定値は、問いやマップを送らない出力 (フェイクやテストなど) のため。
     """
 
     action: PadAction
@@ -201,6 +217,7 @@ class SurfaceOutput:
     exchange: SurfaceExchange | None = None
     task_done_p: float | None = None
     task_cancel_p: float | None = None
+    map_place: str | None = None
 
 
 class DeepStatusReader(Protocol):
