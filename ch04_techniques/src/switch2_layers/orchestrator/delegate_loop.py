@@ -15,20 +15,36 @@ Jev の送り先は、監視と同じく monitor_loop.MonitorAsker の形 (run �
     DelegateSettings.jpeg_quality) で JPEG にする (時刻や枠は書き込まない。幅が image_width より大きければ縮小する)。
     時刻は state の frames のラベルで伝える (orchestrator.delegate_questions)。
 委任の通し番号 (serial):
-    OrchestratorController は、委任の指示 (start・update・stop) を当てるたびと、委任を終えるたびに通し番号を 1 進める。
+    OrchestratorController は、委任を始めるたび (start を受け付けた後、実際に始めたとき)、update を当てるたび
+    (委任中か始める前)、委任を終えるたびに通し番号を 1 進める。当てなかった update・stop と、始める前に取り消した start
+    では進めない。
     要求の結果 (DelegateRequestResult.serial) は要求を送ったときの番号を持ち、今の番号と同じときだけ答えと失敗を使う
     (違えば、要求を送った後に委任を始め直した・置き換えた・終えたので、応答を使わない)。
 ActiveDelegation は I/O・スレッド・時刻を扱わない (ループのロックの中で使う)。
 """
 
+import logging
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
 from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.orchestrator.decision_types import DelegateStart, DelegateUpdate
+from switch2_layers.orchestrator.delegate_questions import (
+    DELEGATE_QUESTION_NAME,
+    MAX_RECENT_PICKS,
+    NONE_OPTION,
+    RETURN_CONTROL_OPTION,
+    DelegateStateFrame,
+    build_delegate_question,
+    build_delegate_state,
+    choose_option,
+    delegate_option_names,
+)
 from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_events import (
     DelegateEnd,
@@ -36,7 +52,11 @@ from switch2_layers.orchestrator.orchestrator_events import (
     DelegationStatus,
 )
 from switch2_layers.run_clock import RunClock
-from switch2_layers.surface.jev_client import JevAnswers
+from switch2_layers.safety.safety_monitor import build_safety_image
+from switch2_layers.surface.jev_client import JevAnswers, JevImage
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # Jev に送る画像の幅の既定値と範囲 (--delegate-image-width)。下限は、Jev が受け付ける画像の各辺の下限 280 ピクセルを、
 # 16:9 の高さで満たす幅
@@ -127,7 +147,14 @@ def select_delegate_frames(
     フレーム (古い順。FrameBuffer.frames の値)。latest の各フレームと時刻 (t) がちょうど同じフレームを buffered から
     選ぶ。buffered に無い時刻は飛ばす。latest か buffered が空なら空のリスト。
     """
-    raise NotImplementedError("select_delegate_frames")
+    by_time = {frame.t: frame for frame in buffered}
+    selected: list[CapturedFrame] = []
+    # latest は新しい順なので、逆にたどって古い順にする
+    for latest_frame in reversed(latest):
+        frame = by_time.get(latest_frame.t)
+        if frame is not None:
+            selected.append(frame)
+    return selected
 
 
 def ask_delegate(
@@ -156,7 +183,59 @@ def ask_delegate(
     error_text.describe_exception(例外) にした結果を返す。ask を呼ぶ前に失敗したときは、t_sent と t_received を、
     失敗したときの clock.now() にする。frames が空なら ValueError を出す (呼び出し側は空なら要求を送らない)。
     """
-    raise NotImplementedError("ask_delegate")
+    if not frames:
+        raise ValueError("a delegate request needs at least one frame")
+    option_names = delegate_option_names(values.choices)
+    frame_ts = tuple(frame.t for frame in frames)
+
+    def failure(t_sent: float, error: Exception) -> DelegateRequestResult:
+        return DelegateRequestResult(
+            serial=serial,
+            frame_ts=frame_ts,
+            option_names=option_names,
+            t_sent=t_sent,
+            t_received=clock.now(),
+            probabilities=None,
+            usage=None,
+            error=describe_exception(error),
+        )
+
+    try:
+        images: list[JevImage] = []
+        state_frames: list[DelegateStateFrame] = []
+        for frame in frames:
+            jpeg = build_safety_image(frame, image_width, jpeg_quality)
+            reference = make_reference()
+            images.append(JevImage(reference, jpeg))
+            state_frames.append(DelegateStateFrame(frame.t, reference))
+        state = build_delegate_state(
+            values.tasks, values.cautions, recent_picks, state_frames
+        )
+        question = build_delegate_question(values.choices)
+    except Exception as error:
+        logger.debug("building the delegate request failed", exc_info=True)
+        return failure(clock.now(), error)
+    t_sent = clock.now()
+    try:
+        answers = asker.ask(state, [question], images)
+    except Exception as error:
+        logger.debug("delegate request failed", exc_info=True)
+        return failure(t_sent, error)
+    t_received = clock.now()
+    try:
+        probabilities = read_delegate_probabilities(answers, option_names)
+    except (ValueError, TypeError) as error:
+        return failure(t_sent, error)
+    return DelegateRequestResult(
+        serial=serial,
+        frame_ts=frame_ts,
+        option_names=option_names,
+        t_sent=t_sent,
+        t_received=t_received,
+        probabilities=probabilities,
+        usage=answers.usage,
+        error=None,
+    )
 
 
 def read_delegate_probabilities(
@@ -166,19 +245,27 @@ def read_delegate_probabilities(
 
     問いの答え (choices[delegate_questions.DELEGATE_QUESTION_NAME]) が無いか、どれかの選択肢の確率が無ければ ValueError。
     """
-    raise NotImplementedError("read_delegate_probabilities")
+    choices = answers.choices.get(DELEGATE_QUESTION_NAME)
+    if choices is None:
+        raise ValueError(f"jev answer has no choice for {DELEGATE_QUESTION_NAME}")
+    probabilities: dict[str, float] = {}
+    for name in option_names:
+        if name not in choices:
+            raise ValueError(f"jev answer has no probability for {name}")
+        probabilities[name] = float(choices[name])
+    return probabilities
 
 
 def delegate_return_detail(count: int) -> str:
     """Jev が「操作を返す」を count 回続けて選んで委任を終えたときの DelegateEnd.detail
     `jev chose return_control <count> times in a row` を返す。"""
-    raise NotImplementedError("delegate_return_detail")
+    return f"jev chose {RETURN_CONTROL_OPTION} {count} times in a row"
 
 
 def delegate_failure_detail(count: int, last_error: str) -> str:
     """Jev の失敗が count 回続いて委任を終えたときの DelegateEnd.detail `jev failed <count> times in a row: <last_error>`
     を返す。"""
-    raise NotImplementedError("delegate_failure_detail")
+    return f"jev failed {count} times in a row: {last_error}"
 
 
 class ActiveDelegation:
@@ -193,25 +280,32 @@ class ActiveDelegation:
         self, values: DelegateStart, started_t: float, max_errors: int
     ) -> None:
         """直近の行動なし、「操作を返す」と失敗の回数 0 で作る。max_errors が 1 未満なら ValueError。"""
-        raise NotImplementedError("ActiveDelegation")
+        if max_errors < 1:
+            raise ValueError(f"max errors must be 1 or more: {max_errors}")
+        self._values = values
+        self._started_t = started_t
+        self._max_errors = max_errors
+        self._picks: deque[DelegatePick] = deque(maxlen=MAX_RECENT_PICKS)
+        self._return_streak = 0
+        self._errors_in_a_row = 0
 
     @property
     def values(self) -> DelegateStart:
         """今の委任の値 (update を当てた後の値)。"""
-        raise NotImplementedError("ActiveDelegation.values")
+        return self._values
 
     @property
     def started_t(self) -> float:
         """委任を始めた時刻。"""
-        raise NotImplementedError("ActiveDelegation.started_t")
+        return self._started_t
 
     def update(self, update: DelegateUpdate) -> None:
         """update の None でない欄で、委任の値を置き換える。直近の行動と回数は変えない (実行中の行動も止めない)。"""
-        raise NotImplementedError("ActiveDelegation.update")
+        self._values = apply_delegate_update(self._values, update)
 
     def recent_picks(self) -> tuple[DelegatePick, ...]:
         """今の委任で直近に選んで始めた行動を、古い順に返す (最大 delegate_questions.MAX_RECENT_PICKS 件)。"""
-        raise NotImplementedError("ActiveDelegation.recent_picks")
+        return tuple(self._picks)
 
     def record_answer(
         self, probabilities: Mapping[str, float], t: float
@@ -230,7 +324,23 @@ class ActiveDelegation:
         probabilities にどれかの選択肢の名前が無ければ KeyError。呼び出し側は、今の委任と同じ通し番号で送った要求の
         確率だけを渡す (そのとき、要求で送った選択肢の名前は、今の値の選択肢の名前と同じ)。
         """
-        raise NotImplementedError("ActiveDelegation.record_answer")
+        chosen = choose_option(
+            probabilities, delegate_option_names(self._values.choices)
+        )
+        self._errors_in_a_row = 0
+        if chosen == RETURN_CONTROL_OPTION:
+            self._return_streak += 1
+            if self._return_streak < RETURN_CONTROL_STREAK:
+                return DelegateAnswer(chosen=chosen, start_action=None, end=None)
+            end = DelegateEnd(
+                reason="jev_return", detail=delegate_return_detail(self._return_streak)
+            )
+            return DelegateAnswer(chosen=chosen, start_action=None, end=end)
+        self._return_streak = 0
+        if chosen == NONE_OPTION:
+            return DelegateAnswer(chosen=chosen, start_action=None, end=None)
+        self._picks.append(DelegatePick(name=chosen, t=t))
+        return DelegateAnswer(chosen=chosen, start_action=chosen, end=None)
 
     def record_failure(self, error: str) -> DelegateEnd | None:
         """失敗した要求を記録する。失敗の回数を 1 足し、max_errors 回になったら
@@ -238,9 +348,32 @@ class ActiveDelegation:
 
         「操作を返す」の回数は変えない (失敗は選択肢を選んだことにしない)。
         """
-        raise NotImplementedError("ActiveDelegation.record_failure")
+        self._errors_in_a_row += 1
+        if self._errors_in_a_row < self._max_errors:
+            return None
+        return DelegateEnd(
+            reason="errors",
+            detail=delegate_failure_detail(self._errors_in_a_row, error),
+        )
 
     def status(self) -> DelegationStatus:
         """DelegationStatus(active=True, started_t, values, last_pick=直近の行動の最も新しいもの (無ければ None),
         return_streak=「操作を返す」の続いた回数) を返す。"""
-        raise NotImplementedError("ActiveDelegation.status")
+        return DelegationStatus(
+            active=True,
+            started_t=self._started_t,
+            values=self._values,
+            last_pick=self._picks[-1] if self._picks else None,
+            return_streak=self._return_streak,
+        )
+
+
+def apply_delegate_update(
+    values: DelegateStart, update: DelegateUpdate
+) -> DelegateStart:
+    """委任の値 values の、update の None でない欄を置き換えた値を返す (I/O なし)。"""
+    return DelegateStart(
+        tasks=values.tasks if update.tasks is None else update.tasks,
+        cautions=values.cautions if update.cautions is None else update.cautions,
+        choices=values.choices if update.choices is None else update.choices,
+    )

@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from switch2_layers.file_io import append_json_line
 from switch2_layers.orchestrator.delegate_loop import DelegateHandling
 
 
@@ -41,7 +42,18 @@ def delegate_row(record: DelegateRecord) -> dict[str, object]:
 
     frame_ts は配列、probabilities は record の順のままの新しい辞書 (None なら null) にする。
     """
-    raise NotImplementedError("delegate_row")
+    return {
+        "t_sent": record.t_sent,
+        "t_received": record.t_received,
+        "frame_ts": list(record.frame_ts),
+        "probabilities": (
+            None if record.probabilities is None else dict(record.probabilities)
+        ),
+        "chosen": record.chosen,
+        "handling": record.handling,
+        "usage": record.usage,
+        "error": record.error,
+    }
 
 
 class DelegateLog:
@@ -60,4 +72,5 @@ class DelegateLog:
 
         親のディレクトリー (orchestrator/) が無ければ、先に作る。追記の例外はそのまま出す。
         """
-        raise NotImplementedError("DelegateLog.write")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        append_json_line(self.path, delegate_row(record))

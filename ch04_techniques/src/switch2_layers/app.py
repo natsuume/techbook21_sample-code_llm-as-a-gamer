@@ -110,6 +110,7 @@ from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_assembly import (
     OrchestratorLoopParts,
     build_orchestrator_loops,
+    run_delegate_loop,
     run_monitor_loop,
 )
 from switch2_layers.orchestrator.skill_copy import DEFAULT_SWITCH_SKILLS_DIR
@@ -295,7 +296,7 @@ def monitor_loop_failure_reason(description: str) -> str:
 def delegate_loop_failure_reason(description: str) -> str:
     """委任型の委任のループ (委任型の OrchestratorController.run) が想定外の例外で終わるときの理由
     `delegate loop failed: <description>` を返す (description は error_text.describe_exception(例外) の値)。"""
-    raise NotImplementedError("delegate_loop_failure_reason")
+    return f"delegate loop failed: {description}"
 
 
 @dataclass(frozen=True)
@@ -996,6 +997,7 @@ class LayersApp:
                 signal_process_group=parts.signal_process_group,
                 environ=parts.environ,
                 switch_skills_dir=parts.switch_skills_dir,
+                buffered_frames=shared.frame_buffer.frames,
             ),
             settings,
         )
@@ -1026,8 +1028,20 @@ class LayersApp:
             name="orchestrator-main-loop",
             daemon=True,
         )
-        loop_threads = (
-            threading.Thread(
+        # 監視型は監視のループ、委任型は委任のループ (どちらも 6 の run を包む)
+        if settings.mode is RunMode.DELEGATE:
+            controller_thread = threading.Thread(
+                target=run_delegate_loop,
+                args=(
+                    loops.controller,
+                    self._stop_event,
+                    self._stop_for_delegate_loop_failure,
+                ),
+                name="orchestrator-delegate-loop",
+                daemon=True,
+            )
+        else:
+            controller_thread = threading.Thread(
                 target=run_monitor_loop,
                 args=(
                     loops.controller,
@@ -1036,7 +1050,9 @@ class LayersApp:
                 ),
                 name="orchestrator-monitor-loop",
                 daemon=True,
-            ),
+            )
+        loop_threads = (
+            controller_thread,
             main_loop_thread,
             threading.Thread(
                 target=safety_monitor.run,
@@ -1076,6 +1092,13 @@ class LayersApp:
         request_stop(monitor_loop_failure_reason(description)) で全体を止める。
         """
         self.request_stop(monitor_loop_failure_reason(description))
+
+    def _stop_for_delegate_loop_failure(self, description: str) -> None:
+        """委任型の委任のループが想定外の例外で終わったときに呼ぶ (委任のループのスレッド)。
+
+        request_stop(delegate_loop_failure_reason(description)) で全体を止める。
+        """
+        self.request_stop(delegate_loop_failure_reason(description))
 
     def _is_play(self) -> bool:
         """段階が play なら True を返す (段階のロックを持っているときに呼ぶ)。prepare に入る前は False。"""

@@ -23,9 +23,15 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.orchestrator.decision_types import DelegateChoice
 from switch2_layers.orchestrator.orchestrator_events import DelegatePick
-from switch2_layers.surface.surface_questions import SurfaceQuestion
+from switch2_layers.surface.surface_questions import (
+    Choice,
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
 
 # 問いの ID (要求の questions のキー、応答の answers のキー)
 DELEGATE_QUESTION_NAME = "delegate"
@@ -79,7 +85,9 @@ def delegate_option_names(choices: Sequence[DelegateChoice]) -> tuple[str, ...]:
 
     choices が空なら ValueError。
     """
-    raise NotImplementedError("delegate_option_names")
+    if not choices:
+        raise ValueError("delegate choices must not be empty")
+    return (NONE_OPTION, *(choice.name for choice in choices), RETURN_CONTROL_OPTION)
 
 
 def build_delegate_question(choices: Sequence[DelegateChoice]) -> SurfaceQuestion:
@@ -89,7 +97,21 @@ def build_delegate_question(choices: Sequence[DelegateChoice]) -> SurfaceQuestio
     NONE_OPTION_DESCRIPTION、行動の説明は DelegateChoice.description、RETURN_CONTROL_OPTION の説明は
     RETURN_CONTROL_OPTION_DESCRIPTION。choices が空なら ValueError。
     """
-    raise NotImplementedError("build_delegate_question")
+    if not choices:
+        raise ValueError("delegate choices must not be empty")
+    options = (
+        Choice(NONE_OPTION, NONE_OPTION_DESCRIPTION),
+        *(Choice(choice.name, choice.description) for choice in choices),
+        Choice(RETURN_CONTROL_OPTION, RETURN_CONTROL_OPTION_DESCRIPTION),
+    )
+    return SurfaceQuestion(
+        name=DELEGATE_QUESTION_NAME,
+        instructions=DELEGATE_QUESTION_TEXT,
+        kind=QuestionKind.DELEGATE,
+        target="",
+        question_type=QuestionType.CHOICE,
+        choices=options,
+    )
 
 
 def build_delegate_state(
@@ -103,7 +125,20 @@ def build_delegate_state(
     recent_picks と frames は古い順に受け取り、その順に並べる。recent_picks が MAX_RECENT_PICKS 件を超えれば、
     新しいものから MAX_RECENT_PICKS 件だけを入れる。
     """
-    raise NotImplementedError("build_delegate_state")
+    newest_picks = list(recent_picks)[-MAX_RECENT_PICKS:] if recent_picks else []
+    return {
+        "instructions": DELEGATE_INSTRUCTIONS,
+        "tasks": list(tasks),
+        "cautions": list(cautions),
+        "recent_actions": [
+            {"name": pick.name, "t": format_frame_label(pick.t)}
+            for pick in newest_picks
+        ],
+        FRAMES_STATE_KEY: [
+            {"t": format_frame_label(frame.t), "image": frame.reference}
+            for frame in frames
+        ],
+    }
 
 
 def choose_option(
@@ -115,4 +150,11 @@ def choose_option(
     option_names の順に比べる。probabilities にどれかの選択肢の名前が無ければ KeyError、option_names が空なら
     ValueError。
     """
-    raise NotImplementedError("choose_option")
+    if not option_names:
+        raise ValueError("option names must not be empty")
+    best = option_names[0]
+    for name in option_names:
+        # 同じ確率なら、選択肢の順で先のものを残す
+        if probabilities[name] > probabilities[best]:
+            best = name
+    return best

@@ -131,13 +131,20 @@ from dataclasses import dataclass
 
 from switch2_remote.controller_state import BUTTON_ORDER, DPAD_DIRECTIONS
 
+from switch2_layers.buttons import HOME_BUTTON
 from switch2_layers.error_text import describe_exception
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
+from switch2_layers.orchestrator.action_executor import expand_actions
 from switch2_layers.orchestrator.decision_types import (
     Action,
     Decision,
     DecisionError,
+    DelegateChoice,
     DelegateContext,
+    DelegateInstruction,
+    DelegateStart,
+    DelegateStop,
+    DelegateUpdate,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -148,6 +155,7 @@ from switch2_layers.orchestrator.decision_types import (
     StickName,
     WaitAction,
 )
+from switch2_layers.orchestrator.delegate_questions import RESERVED_OPTION_NAMES
 from switch2_layers.orchestrator.json_values import (
     finite_float,
     is_number,
@@ -197,6 +205,9 @@ _MACROS_KEYS = ("set", "delete")
 _MONITOR_CREATE_KEYS = ("action", "name", "cases")
 _MONITOR_STOP_KEYS = ("action",)
 _CASE_KEYS = ("condition", "actions", "repeat")
+_DELEGATE_VALUE_KEYS = ("action", "tasks", "cautions", "choices")
+_DELEGATE_STOP_KEYS = ("action",)
+_DELEGATE_CHOICE_KEYS = ("name", "description")
 _STICK_AXES = ("x", "y")
 # コードブロックの開きの行と閉じの行 (行の末尾の \r は、行に分けるときに外す)
 _OPEN_FENCE = re.compile(r"```json[ \t]*")
@@ -273,8 +284,6 @@ def parse_decision(
     誤りが 1 つでもあれば DecisionError を返し、Decision は返さない (操作・マクロ・監視・委任のどれも変えないため)。
     例外は出さない (どんな text でも Decision か DecisionError を返す)。
     """
-    if delegate is not None:
-        raise NotImplementedError("parse_decision for --mode delegate")
     scanned = _scan_json_blocks(text)
     if scanned.unclosed_tail:
         return DecisionError((UNCLOSED_BLOCK_MESSAGE,))
@@ -286,7 +295,11 @@ def parse_decision(
         return DecisionError((f"the ```json block is not valid JSON: {error}",))
     if not isinstance(value, dict):
         return DecisionError((NOT_OBJECT_MESSAGE,))
-    reader = _DecisionReader(frozenset(registered_macros))
+    reader = (
+        _DecisionReader(frozenset(registered_macros))
+        if delegate is None
+        else _DelegateDecisionReader(frozenset(registered_macros), delegate)
+    )
     try:
         decision = reader.read(value)
     except Exception as error:
@@ -616,3 +629,270 @@ class _DecisionReader:
         if not isinstance(condition, str) or repeat_mode is None:
             return None
         return MonitorCase(condition=condition, actions=actions, repeat=repeat_mode)
+
+
+def _presses_home(actions: tuple[Action, ...]) -> bool:
+    """マクロの操作の列 actions を action_executor.expand_actions で展開した列に、buttons に HOME を含む press が
+    あれば True を返す。
+
+    展開できない列 (引数の誤った手順や、マクロの中の macro。どちらも別の誤りとして返す) は False にする。
+    """
+    try:
+        expanded = expand_actions(actions, {})
+    except (ValueError, TypeError, KeyError):
+        return False
+    return any(
+        HOME_BUTTON in action.buttons
+        for action in expanded
+        if isinstance(action, PressAction)
+    )
+
+
+class _DelegateDecisionReader(_DecisionReader):
+    """--mode delegate の JSON の object を、モジュールの docstring の規則で確かめながら Decision にする。
+
+    最上位のキーを DELEGATE_TOP_LEVEL_KEYS にし、monitor の代わりに delegate を読む。操作とマクロの読み方は
+    _DecisionReader と同じ。
+    """
+
+    def __init__(
+        self, registered_macros: frozenset[str], context: DelegateContext
+    ) -> None:
+        super().__init__(registered_macros)
+        self.context = context
+        # この JSON の macros.set を読んだ値 (read の中で決める)
+        self.macros_set: dict[str, tuple[Action, ...]] = {}
+
+    def read(self, value: Mapping[str, object]) -> Decision:
+        self.reject_unknown_keys(value, DELEGATE_TOP_LEVEL_KEYS, "")
+        set_value, delete_names = self.read_macro_names(value)
+        self.available_macros = (
+            self.registered_macros | frozenset(set_value or {})
+        ) - frozenset(delete_names)
+        if set_value is not None:
+            for name, actions in set_value.items():
+                self.macros_set[name] = self.read_actions(
+                    actions, f"macros.set.{name}", in_macro=True
+                )
+        actions: tuple[Action, ...] = ()
+        if "actions" in value:
+            actions = self.read_actions(value["actions"], "actions", in_macro=False)
+        delegate = self.read_delegate(value)
+        if self.context.active:
+            self.check_macros_of_the_delegation(value, delegate)
+        return Decision(
+            actions=actions,
+            macros_set=dict(self.macros_set),
+            macros_delete=tuple(delete_names),
+            delegate=delegate,
+        )
+
+    def macro_body(self, name: str) -> tuple[Action, ...] | None:
+        """この JSON の macros を当てた後の、マクロ name の操作の列 (macros.set にあればそれ、無ければ今の登録)。"""
+        if name in self.macros_set:
+            return self.macros_set[name]
+        body = self.context.macros.get(name)
+        return None if body is None else tuple(body)
+
+    def read_delegate(self, value: Mapping[str, object]) -> DelegateInstruction | None:
+        raw = value.get("delegate")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            self.error("delegate", "must be an object or null")
+            return None
+        if "action" not in raw:
+            self.error("delegate.action", "missing")
+            return None
+        action = raw["action"]
+        if action == DELEGATE_STOP:
+            self.reject_unknown_keys(raw, _DELEGATE_STOP_KEYS, "delegate.")
+            return DelegateStop()
+        if action != DELEGATE_START and action != DELEGATE_UPDATE:
+            self.error(
+                "delegate.action",
+                f"must be one of {DELEGATE_START}, {DELEGATE_UPDATE}, {DELEGATE_STOP}",
+            )
+            return None
+        self.reject_unknown_keys(raw, _DELEGATE_VALUE_KEYS, "delegate.")
+        if action == DELEGATE_START and self.context.active:
+            self.error(
+                "delegate.action",
+                "start is not allowed while delegating (use update to change it)",
+            )
+        tasks = self.read_texts(raw, "tasks", 1, MAX_DELEGATE_TASKS)
+        cautions = self.read_texts(raw, "cautions", 0, MAX_DELEGATE_CAUTIONS)
+        choices = self.read_choices(raw)
+        if action == DELEGATE_UPDATE:
+            return DelegateUpdate(tasks=tasks, cautions=cautions, choices=choices)
+        return self.complete_start(raw, tasks, cautions, choices)
+
+    def complete_start(
+        self,
+        raw: Mapping[str, object],
+        tasks: tuple[str, ...] | None,
+        cautions: tuple[str, ...] | None,
+        choices: tuple[DelegateChoice, ...] | None,
+    ) -> DelegateStart | None:
+        """start の省いたキーを前の委任の値で埋める。前の委任が無いのに省いたキーは誤りにする。"""
+        previous = self.context.previous
+        for key in ("tasks", "cautions", "choices"):
+            if key not in raw and previous is None:
+                self.error(
+                    f"delegate.{key}", "missing (there is no previous delegation)"
+                )
+        if previous is not None:
+            if "choices" not in raw:
+                self.check_choices_in_use(previous.choices, "previous choice")
+            tasks = previous.tasks if "tasks" not in raw else tasks
+            cautions = previous.cautions if "cautions" not in raw else cautions
+            choices = previous.choices if "choices" not in raw else choices
+        if tasks is None or cautions is None or choices is None:
+            return None
+        return DelegateStart(tasks=tasks, cautions=cautions, choices=choices)
+
+    def check_choices_in_use(
+        self, choices: tuple[DelegateChoice, ...], label: str
+    ) -> None:
+        """省いて前の委任から使う choices の行動が、登録にあり HOME を押さないことを確かめる (誤りは delegate.choices)。"""
+        for choice in choices:
+            if choice.name not in self.available_macros:
+                self.error(
+                    "delegate.choices", f"{label} {choice.name!r} is not registered"
+                )
+                continue
+            body = self.macro_body(choice.name)
+            if body is not None and _presses_home(body):
+                self.error("delegate.choices", f"{label} {choice.name!r} presses HOME")
+
+    def read_texts(
+        self, raw: Mapping[str, object], key: str, minimum: int, maximum: int
+    ) -> tuple[str, ...] | None:
+        """tasks か cautions を読む。キーが無ければ None。"""
+        if key not in raw:
+            return None
+        path = f"delegate.{key}"
+        items = raw[key]
+        if not isinstance(items, list):
+            self.error(path, "must be an array of strings")
+            return None
+        if not minimum <= len(items) <= maximum:
+            self.error(path, f"must have {minimum} to {maximum} items")
+        texts: list[str] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, str):
+                self.error(f"{path}[{index}]", "must be a string")
+            elif not item.strip():
+                self.error(f"{path}[{index}]", "must not be empty")
+            else:
+                texts.append(item)
+        return tuple(texts)
+
+    def read_choices(
+        self, raw: Mapping[str, object]
+    ) -> tuple[DelegateChoice, ...] | None:
+        """choices を読む。キーが無ければ None。"""
+        if "choices" not in raw:
+            return None
+        path = "delegate.choices"
+        items = raw["choices"]
+        if not isinstance(items, list):
+            self.error(path, "must be an array of choices")
+            return None
+        if not 1 <= len(items) <= MAX_DELEGATE_CHOICES:
+            self.error(path, f"must have 1 to {MAX_DELEGATE_CHOICES} choices")
+        seen: set[str] = set()
+        choices: list[DelegateChoice] = []
+        for index, item in enumerate(items):
+            item_path = f"{path}[{index}]"
+            if not isinstance(item, dict):
+                self.error(item_path, "must be an object")
+                continue
+            self.reject_unknown_keys(item, _DELEGATE_CHOICE_KEYS, f"{item_path}.")
+            name = self.read_choice_name(item, item_path, seen)
+            description = item.get("description")
+            if "description" not in item:
+                self.error(f"{item_path}.description", "missing")
+            elif not isinstance(description, str):
+                self.error(f"{item_path}.description", "must be a string")
+            elif not description.strip():
+                self.error(f"{item_path}.description", "must not be empty")
+            if name is not None and isinstance(description, str):
+                choices.append(DelegateChoice(name=name, description=description))
+        return tuple(choices)
+
+    def read_choice_name(
+        self, item: Mapping[str, object], item_path: str, seen: set[str]
+    ) -> str | None:
+        """行動の name を確かめる (モジュールの docstring の「行動の name の誤り」)。文字列なら返す。"""
+        path = f"{item_path}.name"
+        if "name" not in item:
+            self.error(path, "missing")
+            return None
+        name = item["name"]
+        if not isinstance(name, str):
+            self.error(path, "must be a string")
+            return None
+        if name in RESERVED_OPTION_NAMES:
+            self.error(path, f"{name!r} is a reserved option name")
+        elif name in seen:
+            self.error(path, f"choice {name!r} appears twice")
+        elif name not in self.available_macros:
+            self.error(path, f"macro {name!r} is not registered")
+        else:
+            body = self.macro_body(name)
+            if body is not None and _presses_home(body):
+                self.error(path, f"macro {name!r} presses HOME")
+        seen.add(name)
+        return name
+
+    def check_macros_of_the_delegation(
+        self, value: Mapping[str, object], delegate: DelegateInstruction | None
+    ) -> None:
+        """委任中に、委任の行動のマクロを消すことと、HOME を押す操作の列に置き換えることを誤りにする。
+
+        委任中の update が choices を省いたときは、今の委任の choices が登録にあることも確かめる。
+        """
+        previous = self.context.previous
+        current_names = (
+            frozenset() if previous is None else {c.name for c in previous.choices}
+        )
+        for index, name in self.raw_delete_names(value):
+            if name in current_names:
+                self.error(
+                    f"macros.delete[{index}]",
+                    f"macro {name!r} is used by the delegate choices",
+                )
+        delegation_names = set(current_names)
+        if isinstance(delegate, DelegateUpdate) and delegate.choices is not None:
+            delegation_names = {choice.name for choice in delegate.choices}
+        for name, body in self.macros_set.items():
+            if name in delegation_names and _presses_home(body):
+                self.error(
+                    f"macros.set.{name}",
+                    "a macro used by the delegate choices must not press HOME",
+                )
+        if (
+            isinstance(delegate, DelegateUpdate)
+            and delegate.choices is None
+            and previous is not None
+        ):
+            for choice in previous.choices:
+                if choice.name not in self.available_macros:
+                    self.error(
+                        "delegate.choices",
+                        f"current choice {choice.name!r} is not registered",
+                    )
+
+    @staticmethod
+    def raw_delete_names(value: Mapping[str, object]) -> list[tuple[int, str]]:
+        """macros.delete の、文字列の名前とその位置の並び (形の誤りは read_macro_names が返す)。"""
+        macros = value.get("macros")
+        if not isinstance(macros, dict):
+            return []
+        names = macros.get("delete")
+        if not isinstance(names, list):
+            return []
+        return [
+            (index, name) for index, name in enumerate(names) if isinstance(name, str)
+        ]

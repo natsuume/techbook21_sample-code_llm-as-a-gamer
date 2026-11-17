@@ -556,7 +556,7 @@ class OrchestratorMainLoop:
         run_dir = paths.root.resolve()
         command = build_session_command(
             RunPaths(run_dir),
-            orchestrator_instructions(),
+            parts.instructions,
             find_parent_skill_names(run_dir),
             parts.claude,
             self.settings.rotate_tokens,

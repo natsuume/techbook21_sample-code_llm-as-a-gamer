@@ -22,6 +22,7 @@ from switch2_layers.orchestrator.claude_session_command import ClaudeSessionOpti
 from switch2_layers.orchestrator.claude_stream_session import StreamProcessStarter
 from switch2_layers.orchestrator.decision_parser import parse_decision
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
+from switch2_layers.orchestrator.delegate_loop import DelegateSettings
 from switch2_layers.orchestrator.main_loop import (
     DecisionParser,
     OrchestratorMainLoop,
@@ -33,6 +34,10 @@ from switch2_layers.orchestrator.orchestrator_controller import (
     OrchestratorController,
     OrchestratorParts,
     OrchestratorSettings,
+)
+from switch2_layers.orchestrator.orchestrator_instructions import (
+    delegate_instructions,
+    orchestrator_instructions,
 )
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
@@ -118,7 +123,13 @@ def delegate_decision_parser(controller: OrchestratorController) -> DecisionPars
     返す関数は text を decision_parser.parse_decision(text, controller.macro_names(), controller.delegate_context())
     で読む (呼ぶたびに今の値を読む)。
     """
-    raise NotImplementedError("delegate_decision_parser")
+
+    def parse(text: str) -> Decision | DecisionError:
+        return parse_decision(
+            text, controller.macro_names(), controller.delegate_context()
+        )
+
+    return parse
 
 
 def build_orchestrator_loops(
@@ -147,26 +158,52 @@ def build_orchestrator_loops(
     委任型で parts.buffered_frames が None なら ValueError。
     """
     if settings.mode is RunMode.DELEGATE:
-        raise NotImplementedError("build_orchestrator_loops for --mode delegate")
-    controller = OrchestratorController(
-        OrchestratorParts(
-            pad_output=parts.pad_output,
-            jev=parts.monitor,
-            latest_frame=parts.latest_frame,
-            clock=parts.clock,
-            paths=parts.paths,
-        ),
-        OrchestratorSettings(
-            monitor_threshold=settings.monitor_threshold,
-            max_monitor_errors=settings.max_monitor_errors,
-        ),
-    )
+        if parts.buffered_frames is None:
+            raise ValueError("the delegate mode needs buffered_frames")
+        controller = OrchestratorController(
+            OrchestratorParts(
+                pad_output=parts.pad_output,
+                jev=parts.monitor,
+                latest_frame=parts.latest_frame,
+                clock=parts.clock,
+                paths=parts.paths,
+                latest_frames=parts.latest_frames,
+                buffered_frames=parts.buffered_frames,
+                run_log=parts.run_log,
+            ),
+            OrchestratorSettings(
+                monitor_threshold=settings.monitor_threshold,
+                max_monitor_errors=settings.max_monitor_errors,
+                delegate=DelegateSettings(
+                    image_width=settings.delegate_image_width,
+                    max_errors=settings.max_delegate_errors,
+                ),
+            ),
+        )
+        parse = delegate_decision_parser(controller)
+        instructions = delegate_instructions()
+    else:
+        controller = OrchestratorController(
+            OrchestratorParts(
+                pad_output=parts.pad_output,
+                jev=parts.monitor,
+                latest_frame=parts.latest_frame,
+                clock=parts.clock,
+                paths=parts.paths,
+            ),
+            OrchestratorSettings(
+                monitor_threshold=settings.monitor_threshold,
+                max_monitor_errors=settings.max_monitor_errors,
+            ),
+        )
+        parse = registered_macro_parser(controller)
+        instructions = orchestrator_instructions()
     main_loop = OrchestratorMainLoop(
         OrchestratorMainLoopParts(
             paths=parts.paths,
             clock=parts.clock,
             claude=ClaudeSessionOptions(effort=settings.orchestrator_effort),
-            parse_decision=registered_macro_parser(controller),
+            parse_decision=parse,
             controller=controller,
             latest_frames=parts.latest_frames,
             initial_instruction=parts.initial_instruction,
@@ -176,6 +213,7 @@ def build_orchestrator_loops(
             signal_process_group=parts.signal_process_group,
             environ=parts.environ,
             switch_skills_dir=parts.switch_skills_dir,
+            instructions=instructions,
         ),
         OrchestratorMainLoopSettings(
             rotate_tokens=settings.rotate_tokens,
@@ -217,4 +255,8 @@ def run_delegate_loop(
     (app.delegate_loop_failure_reason) を作って全体を止める関数を渡す)。押下状態は controller.run が中立に戻してから
     例外を出す。
     """
-    raise NotImplementedError("run_delegate_loop")
+    try:
+        controller.run(stop)
+    except Exception as error:
+        logger.warning("orchestrator delegate loop failed", exc_info=True)
+        on_failure(describe_exception(error))

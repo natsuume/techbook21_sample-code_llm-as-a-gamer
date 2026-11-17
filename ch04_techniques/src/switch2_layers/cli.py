@@ -171,6 +171,7 @@ from switch2_layers.settings import (
     SurfaceKind,
     SurfaceMapMode,
     deep_once_settings_errors,
+    delegate_api_key_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
     orchestrator_api_key_errors,
@@ -1058,7 +1059,36 @@ def _run_delegate_command(settings: RunSettings, args: argparse.Namespace) -> in
     create_monitor_client(os.environ) で作ったクライアントを、委任の要求の送り先として OrchestratorLayersParts の
     monitor に渡す。終了コードは advisor と同じ。
     """
-    raise NotImplementedError("_run_delegate_command")
+    try:
+        instruction = load_initial_instruction(args.instruction, args.instruction_file)
+    except InitialInstructionError as error:
+        _print_errors([str(error)])
+        return EXIT_USAGE
+    key_errors = delegate_api_key_errors(os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
+    safety = build_safety_assembly(
+        settings.safety, _typesafe_api_key(settings.safety is SafetyKind.JEV)
+    )
+    try:
+        jev = create_monitor_client(os.environ)
+        try:
+            return _run_with_hardware(
+                settings,
+                lambda frame_reader, supervisor: OrchestratorLayersParts(
+                    frame_reader=frame_reader,
+                    report_sender=supervisor,
+                    bridge_state=lambda: supervisor.state,
+                    safety=safety.checker,
+                    monitor=jev,
+                    initial_instruction=instruction,
+                ),
+            )
+        finally:
+            jev.close()
+    finally:
+        safety.close()
 
 
 def _typesafe_api_key(needed: bool) -> str | None:

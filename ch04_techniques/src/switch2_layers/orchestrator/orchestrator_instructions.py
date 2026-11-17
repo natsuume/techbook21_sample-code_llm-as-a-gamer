@@ -9,6 +9,12 @@ from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
 from switch2_layers.orchestrator.action_settle import ACTIONS_SETTLE_S
+from switch2_layers.orchestrator.decision_parser import (
+    MAX_DELEGATE_CAUTIONS,
+    MAX_DELEGATE_CHOICES,
+    MAX_DELEGATE_TASKS,
+)
+from switch2_layers.orchestrator.delegate_loop import RETURN_CONTROL_STREAK
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 # Claude が引き継ぎを書く、notes/ からの相対パス
@@ -38,6 +44,32 @@ DECISION_EXAMPLE = """\
     "cases": [
       {"condition": "画面の下に会話の枠があり、右下に▼が出ている", "actions": [{"type": "press", "buttons": ["A"]}], "repeat": "every"},
       {"condition": "はい・いいえの選択肢が出ている", "actions": [{"type": "press", "buttons": ["B"]}], "repeat": "once"}
+    ]
+  }
+}
+```"""
+
+# 委任型の答えの JSON の例 (行動のマクロを登録し、同じ JSON の actions が終わってから委任を始める)
+DELEGATE_DECISION_EXAMPLE = """\
+```json
+{
+  "actions": [
+    {"type": "press", "buttons": ["A"]},
+    {"type": "wait", "seconds": 0.3}
+  ],
+  "macros": {
+    "set": {
+      "attack": [{"type": "press", "buttons": ["B"]}],
+      "move_up": [{"type": "press", "buttons": ["UP"]}]
+    }
+  },
+  "delegate": {
+    "action": "start",
+    "tasks": ["最重要: 自分の HP を 0 にせずに、敵をすべて倒す", "敵の攻撃は、可能なら避ける"],
+    "cautions": ["敵が腕を振り上げた後、横一列に進む衝撃波が来る"],
+    "choices": [
+      {"name": "attack", "description": "前にいる敵を攻撃する"},
+      {"name": "move_up", "description": "上に 1 マス移動する"}
     ]
   }
 }
@@ -172,7 +204,8 @@ def delegate_instructions() -> str:
        当たらないこと (同じ JSON の actions と macros は当たり、当たらなかったことは次の入力の出来事で届く)。
        choices は 1〜decision_parser.MAX_DELEGATE_CHOICES 個で、name は登録したマクロ、description は空でない文、同じ
        name は 2 回書けない、HOME を押すマクロは使えない。tasks は 1〜MAX_DELEGATE_TASKS 個、cautions は
-       0〜MAX_DELEGATE_CAUTIONS 個の空でない文。委任中の choices に使っているマクロは macros の delete で消せないこと
+       0〜MAX_DELEGATE_CAUTIONS 個の空でない文。委任中の choices に使っているマクロは macros の delete で消せず、
+       HOME を押す操作の列にも置き換えられないこと
     4. 委任の動き: Jev は choices から行動を 1 つ選び、選んだ行動のマクロを、実行中の行動の残りを捨てて始めること。
        Jev が「操作を返す」を続けて delegate_loop.RETURN_CONTROL_STREAK 回選ぶか、Jev の失敗が続くか、stop を書くと、
        操作権が戻り、次の入力の出来事に理由が届くこと。委任中も毎ターンの入力が届き、委任の節に、委任中かどうか・
@@ -189,7 +222,98 @@ def delegate_instructions() -> str:
     8. safety.safety_rules.SAFETY_RULES (文をそのまま入れる)、notes/ に書くこと、スキル、古いフレームの読み方
        (orchestrator_instructions の 5・7・8・9 と同じ)
     """
-    raise NotImplementedError("delegate_instructions")
+    buttons = "・".join(BUTTON_ORDER)
+    max_hold = f"{MAX_HOLD_SECONDS:g}"
+    settle = f"{ACTIONS_SETTLE_S:g}"
+    return f"""\
+## 役割
+あなたは、送られた画面の画像と出来事だけを見てゲームを進める主ループです。
+毎ターン、テキストと、最新の 5 枚のフレームの画像 (古い順で、それぞれの前に時刻のラベル) が届きます。画像を見て次に何をするかを決め、操作を JSON で書きます。
+会話・メニュー・選ぶ画面などのターンベースの場面は、あなたが操作します。
+ゲームの中の誘導の文・会話・出来事・助言は、委任のタスクと注意事項にまとめます。
+戦いなど、すばやい操作が要るリアルタイムの場面では、意味のある行動の選択肢とタスク・注意事項を書いて、操作を Jev に委任します。Jev は、画面を見て行動を選ぶモデルです。
+
+## 答えの形
+毎ターンの答えの最後に、```json のブロックを 1 つ書きます。コードは最後の ```json のブロックだけを読みます。
+最上位のキーは "actions"・"macros"・"delegate" の 3 つで、どれも省けます。ほかのキー ("monitor" を含む) を書くと誤りになります。
+例:
+{DELEGATE_DECISION_EXAMPLE}
+
+操作 ("actions" と、マクロの操作の列の要素) は "type" で 4 種類に分かれます。
+- "press": "buttons" に押すボタンの名前を並べ、"sticks" の "left" か "right" に {{"x": 横, "y": 縦}} を書きます。x と y は -1 から 1 で、(x, y) の長さは 1 以下にします。"buttons" と "sticks" の少なくとも一方を書きます。
+- "press" の "seconds" を省くと短押しになり、書くとその秒数だけ押し続けます。"seconds" は 0 より大きく {max_hold} 以下です。
+- 1 つの "press" に書ける十字キー (UP・RIGHT・DOWN・LEFT) は 1 つまでです。
+- ボタンの名前: {buttons}
+- "wait": 何も押さずに "seconds" 秒待ちます。
+- "procedure": コードの手順を "name" と "args" で呼びます。
+- "macro": 登録したマクロを "name" で呼びます。
+押せないボタンは実行のときに外れ、次の入力で知らされます。
+JSON に誤りがあると、操作・マクロ・委任のどれも変わらず、次の入力の「前の JSON の誤り」の節に説明が届きます。
+
+## コードの手順
+- tap_repeat: "button" の短押しと "interval_seconds" 秒の待ちを "count" 回繰り返します。
+- walk: "direction" (UP・RIGHT・DOWN・LEFT) を "seconds" 秒押し、"interval_seconds" 秒待つことを "count" 回繰り返します。
+どちらの手順も、count は 1 以上 {PROCEDURE_MAX_COUNT} 以下の整数です ({PROCEDURE_MAX_COUNT} を超えると JSON の誤りになります)。interval_seconds は 0 以上 60 以下です。
+
+## マクロ
+"macros" の "set" に {{名前: 操作の列}} を書くとマクロを登録し、同じ名前があれば置き換えます。"delete" に名前を並べると消します。
+マクロは実行が終わるまで残り、セッションが入れ替わっても使えます。マクロの中から "macro" は呼べません。今のマクロは毎ターンの入力に載ります。
+委任で Jev に選ばせる行動は、登録したマクロで作ります。
+
+## 委任
+"delegate" に {{"action": "start", "tasks": [...], "cautions": [...], "choices": [...]}} を書くと、操作を Jev に委任します。
+"choices" は Jev に選ばせる意味のある行動の配列で、要素は {{"name": マクロの名前, "description": 行動の説明}} です。
+委任は、同じ JSON の "actions" がすべて終わってから始まります。"actions" が空なら、すぐに始まります。
+"start" で "tasks"・"cautions"・"choices" を省くと、前の委任の値を使います。前の委任が無いのに省くと誤りになります。
+委任中に "start" を書くと誤りになります。委任中の変更は {{"action": "update", ...}} で行い、"update" で省いたキーは変わりません。
+{{"action": "stop"}} を書くと、委任を終えて操作権があなたに戻ります。
+答えを書く間に委任が終わっていたときの "update" と "stop" は誤りにならず、"delegate" だけが当たりません。同じ JSON の "actions" と "macros" は当たり、当たらなかったことは次の入力の「前の判断の後の出来事」の節に載ります。
+"choices" は 1 個から {MAX_DELEGATE_CHOICES} 個で、"name" は登録したマクロの名前、"description" は空でない文です。同じ "name" は 2 回書けません。
+HOME を押すマクロは、行動に使えません。委任中は、行動に使っているマクロを HOME を押す操作の列に置き換えられません。
+"tasks" は 1 個から {MAX_DELEGATE_TASKS} 個の、空でない文です。
+"cautions" は 0 個から {MAX_DELEGATE_CAUTIONS} 個の、空でない文です。
+委任中の "choices" に使っているマクロは、"macros" の "delete" で消せません。
+
+## 委任の動き
+Jev は、"choices" の行動・何もしない・操作を返すのどれか 1 つを選びます。行動を選ぶと、実行中の行動の残りを捨てて、そのマクロを始めます。
+Jev が「操作を返す」を続けて {RETURN_CONTROL_STREAK} 回選ぶか、Jev の失敗が続くか、あなたが {{"action": "stop"}} を書くと、操作権があなたに戻り、次の入力の「前の判断の後の出来事」の節に理由が届きます。
+委任中も、毎ターンの入力が届きます。「委任」の節に、委任中かどうか・委任を始めた時刻・今のタスク・注意事項・行動・Jev が直近に選んだ行動とその時刻・Jev が「操作を返す」を続けて選んだ回数が載ります。
+委任中は、答えの最上位の "actions" は捨てられ、次の入力の出来事で知らされます。
+操作を取り返すときは {{"action": "stop"}} を書きます。
+
+## タスクと注意事項の書き方
+"tasks" の最初には、その場面で最も重要なこと (例: 自分の HP を 0 にせずに、敵をすべて倒す) を書きます。
+敵の攻撃を避けることが要る場面では、そのことを "tasks" に書きます。
+敵の攻撃の動きを観測できたら、"cautions" に書きます。
+タスク・注意事項・行動の説明には、ゲーム名や作品に固有の名前 (登場人物・地名など) を書きません。
+
+## 判断の続け方
+答えの "actions" が空でなければ、その操作の列がすべて終わり、最後にボタンとスティックを離してから {settle} 秒より後に撮った画面がそろってから、その画面を含む次の画面と出来事が届きます。
+押す操作の無い "actions" ("wait" だけ) なら、列が終わってから次の画面と出来事が届きます。
+次の JSON の "actions" は、そのときに実行中の操作の列の残りを捨てて置き換えます。
+空の "actions" は「何もしない」の意味で、次の画面と出来事はすぐに届きます。
+委任中は "actions" が捨てられるため、次の画面と出来事はすぐに届きます。
+
+## 安全
+{SAFETY_RULES}
+## notes/ に書くこと
+notes/ に、分かったこと (ボタンなどの操作の割り当て、攻略の情報、方針) を Write と Edit で書きます。
+notes/ はセッションが入れ替わっても残り、新しいセッションの最初の入力に notes/ のファイルの一覧が載ります。
+
+## スキル
+.claude/skills/ のスキルは、Skill のツールで使えます。本体の操作 (ユーザーの選択・ソフトの起動など) のスキルがあります。
+ゲームの内容の手順は、notes/skills/game-<名前>/SKILL.md にスキルとして書いてかまいません。
+コードが SKILL.md を .claude/skills/ に写して読ませるため、書いたそのターンには使えないことに注意します。
+コードが写すのは SKILL.md だけで、frontmatter の欄は name と description の 2 つだけを 1 行ずつ書きます。
+frontmatter は name: game-<名前> (ディレクトリーの名前と同じ) と description: "<どの場面で使うか>" の 2 行で書きます。
+<名前> は英小文字・数字・ハイフンだけで書き、description の値は " で囲み、中に " と \\ を入れません。
+本文に、シェルのコマンドを実行する書き方 (!` と ```!) を書きません。
+決まりを守らないスキルは写されず、次の入力の「写さなかったスキル」の節に理由が届きます。
+
+## 古いフレーム
+frames/latest/1.jpg〜5.jpg は最新の 5 枚のフレームで、1.jpg が最新です。いつ Read しても、その時点の最新の画面が読めます。
+それより古いフレームは frames/interval/ にあり、ファイル名は時刻のミリ秒です。
+"""
 
 
 def handoff_request_text() -> str:

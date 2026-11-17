@@ -36,6 +36,8 @@ from switch2_layers.orchestrator.claude_session_command import (
 from switch2_layers.orchestrator.delegate_loop import (
     DEFAULT_DELEGATE_IMAGE_WIDTH,
     DEFAULT_MAX_DELEGATE_ERRORS,
+    DELEGATE_IMAGE_WIDTH_MAX,
+    DELEGATE_IMAGE_WIDTH_MIN,
 )
 from switch2_layers.orchestrator.main_loop import (
     DEFAULT_MAX_DECISION_ERRORS,
@@ -447,6 +449,26 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
             f"{settings.system_advice_seconds}"
         )
     errors += _orchestrator_errors(settings)
+    errors += _delegate_errors(settings)
+    return errors
+
+
+def _delegate_errors(settings: RunSettings) -> list[str]:
+    """委任型の 2 つの値の範囲の誤りを、RunSettings の属性の順のメッセージのリストにする。"""
+    errors: list[str] = []
+    if (
+        not DELEGATE_IMAGE_WIDTH_MIN
+        <= settings.delegate_image_width
+        <= DELEGATE_IMAGE_WIDTH_MAX
+    ):
+        errors.append(
+            f"--delegate-image-width must be {DELEGATE_IMAGE_WIDTH_MIN}.."
+            f"{DELEGATE_IMAGE_WIDTH_MAX}: {settings.delegate_image_width}"
+        )
+    if settings.max_delegate_errors < 1:
+        errors.append(
+            f"--max-delegate-errors must be 1 or more: {settings.max_delegate_errors}"
+        )
     return errors
 
 
@@ -614,7 +636,15 @@ def delegate_api_key_errors(environ: Mapping[str, str]) -> list[str]:
     キーがあれば空のリスト。メッセージに API キーの値は含めない。OPENAI_API_KEY は確かめない。cli は --mode delegate
     のとき、実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば終了コード 2 で終わる。
     """
-    raise NotImplementedError("delegate_api_key_errors")
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--mode {RunMode.DELEGATE.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV} for the delegation, which always uses Jev "
+            "(even with --safety fake)"
+        )
+    ]
 
 
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
