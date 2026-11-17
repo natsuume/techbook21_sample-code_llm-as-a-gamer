@@ -111,6 +111,9 @@ def test_read_treats_a_symlink_outside_notes_as_missing(tmp_path):
         ("\n- 段階: recover (t=8.000)\n- 再開する", "recover", True),
         ("- 段階: prepare (t=5.000)\n- 一覧を開く", "recover", False),
         ("- 段階: prepare (t=5.000)\n- 一覧を開く", "clean_up", False),
+        # 書式のずれ (全角のコロン・強調の記号・段階の行の前の小見出し) は許す
+        ("- **段階**：prepare (t=5.000)\n- 一覧を開く", "prepare", True),
+        ("### 今の状況\n- 段階: `recover` (t=8.000)\n- 再開する", "recover", True),
         # 段階の行が無い助言は、どの段階のものか分からないので渡さない
         ("- 一覧を開く", "prepare", False),
         ("", "prepare", False),

@@ -12,6 +12,7 @@
 「- 段階: <prepare か recover> (…)」の形で書く。
 """
 
+import re
 from pathlib import Path
 
 from switch2_layers.notes.note_paths import ADVICE_NOTE
@@ -42,13 +43,14 @@ def parse_system_screen_advice(text: str) -> str:
 def advice_for_phase(section: str, phase_name: str) -> str:
     """節の本文 section が段階 phase_name (目的の値) のために書かれたものなら section を、そうでなければ空文字列を返す。
 
-    最初の空でない行に「段階: <phase_name>」があるかで決める。I/O を扱わない。準備のときに書かれた助言を、復帰や
-    片付けの middle に渡さないために使う (deep は prepare・recover のときだけ書くため、clean_up ではいつも空になる)。
+    「段階」を含む最初の行で決める。その行から空白と強調の記号 (`*`・`` ` ``) を除き、全角のコロンを半角にした文に
+    「段階:<phase_name>」があれば section を返す。「段階」を含む行が無ければ空文字列を返す。I/O を扱わない。
+    準備のときに書かれた助言を、復帰や片付けの middle に渡さないために使う (deep は prepare・recover のときだけ書く
+    ため、clean_up ではいつも空になる)。
     """
-    first_line = next(
-        (line.strip() for line in section.splitlines() if line.strip()), ""
-    )
-    return section if f"段階: {phase_name}" in first_line else ""
+    phase_line = next((line for line in section.splitlines() if "段階" in line), "")
+    compact = re.sub(r"[\s*`]", "", phase_line).replace("：", ":")
+    return section if f"段階:{phase_name}" in compact else ""
 
 
 def read_system_screen_advice(notes_dir: Path) -> str:
