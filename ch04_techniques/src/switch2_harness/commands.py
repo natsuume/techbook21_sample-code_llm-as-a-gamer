@@ -1,7 +1,7 @@
 """switch2-harness の各サブコマンド (init / look / press / status / finish / report / run) の処理本体。
 
 デーモンへの送信 (send)・時計 (clock / now)・待機 (sleep)・プロセスの起動 (start_process)・
-テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed) は引数で受け取る。
+テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed)・画面の記録 (screen_recording) は引数で受け取る。
 各処理は表示する行と終了コードを CommandResult で返し、表示は cli が行う。
 
 表示の規則:
@@ -48,6 +48,7 @@ from switch2_harness.harness_config import (
 from switch2_harness.instructions import ReadTemplate, render_instructions
 from switch2_harness.press_args import press_args_error, split_press_args
 from switch2_harness.screen_change import load_sample
+from switch2_harness.screen_recorder import ScreenRecording
 from switch2_harness.session_report import (
     format_summary,
     summarize_session,
@@ -338,11 +339,15 @@ def handle_run(
     send: SendCommand,
     base_env: Mapping[str, str],
     available: tuple[Feature, ...] = FEATURES,
+    screen_recording: ScreenRecording | None = None,
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
 
     clock は記録の時刻、deadline_clock は期限と経過時間を計る時計 (本番はどちらも time.time) で、
     どちらもそのまま run_agent_until に渡す。
+    screen_recording は、停滞の知らせの要素 (stagnation-alert) が有効なときに使う、画面の記録を始めて終える
+    コンテキストマネージャーを作る関数 (screen_recorder.ScreenRecording)。None なら
+    screen_recorder.recording_screens(paths, send=send, clock=clock) を使う (本番は None。テストで本物の撮影の代わりを渡す)。
 
     1. agent_launcher.validate_minutes(minutes) と agent_launcher.validate_max_budget_usd(options.max_budget_usd) を
        この順に呼ぶ。ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1
@@ -353,7 +358,14 @@ def handle_run(
        agent_commands=features.agent_commands(config.features, available)、
        writable_files=<features.agent_writable_files(config.features, available) の各 name のタプル>、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で、
-       with signal_guard.interrupts_as_exceptions(): の中で呼ぶ。後片付けは run_agent_until の finally で済んでいるので、
+       with signal_guard.interrupts_as_exceptions(): の中で呼ぶ。
+       設定の features に features.STAGNATION_ALERT_FEATURE があれば、interrupts_as_exceptions の with の内側で
+       画面の記録 (screen_recording(paths)。None なら screen_recorder.recording_screens(paths, send=send, clock=clock)) の
+       with に入り、その中で run_agent_until を呼ぶ。無ければ記録の代わりに contextlib.nullcontext() に入る。
+       記録は records/screen-samples/run-<NNN>/ に、裏で一定の間隔で撮った画面の縮小画像と時刻を書く
+       (エージェントには何も知らせない)。記録は最初の起動の前に始まり、run_agent_until が返った後
+       (後片付けの up ALL の後) か、例外で抜けるときに止まる。
+       後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら
        RUN_INTERRUPTED_MESSAGE を stderr に出し、終了コード 1 (例外は外に出さない)
     4. `ok run finished reason=<理由> launches=<起動した回数> log=<paths.agent_log_file>` を stdout に出し、終了コード 0。

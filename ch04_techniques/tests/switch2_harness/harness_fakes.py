@@ -30,6 +30,15 @@ FAKE_NOTES = Feature(
 )
 FAKE_FEATURES: tuple[Feature, ...] = (FAKE_HISTORY, FAKE_NOTES)
 
+# テスト用の、CLAUDE.md に節を足さない要素 (instruction_file が None)。名前は本物の停滞の知らせと同じで、
+# run が画面を記録するかの判定 (要素の名前で決まる) にも使う。FAKE_FEATURES には含めず、使うテストで available に足す
+FAKE_STAGNATION_ALERT = Feature(
+    name="stagnation-alert",
+    title="停滞の知らせ",
+    instruction_file=None,
+    commands=(),
+)
+
 # テスト用のテンプレート (instructions/ の下のファイル名 → 本文)
 # memo-initial.md の $goal は、書き換えられるファイルの最初の内容が置換されないことを確かめるため
 FAKE_TEMPLATES: dict[str, str] = {
