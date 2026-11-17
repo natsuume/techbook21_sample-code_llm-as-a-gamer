@@ -11,11 +11,13 @@ middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キー�
 同じ環境変数 TYPESAFE_API_KEY_ENV から読む (safety_api_key_errors で有無を確かめる)。
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 run の型は --mode (RunMode) で選ぶ。advisor は surface・middle・deep の 3 層、orchestrator は主ループ
-(orchestrator.main_loop) と、操作の実行と監視 (orchestrator.orchestrator_controller) を動かす。orchestrator の監視は
-常に Jev を使うため、--safety に依らず環境変数 TYPESAFE_API_KEY_ENV が要る (orchestrator_api_key_errors で有無を確かめる)。
+(orchestrator.main_loop) と、操作の実行と監視 (orchestrator.orchestrator_controller) を動かす。delegate は主ループと、
+操作の実行と委任のループ (orchestrator_controller の委任型と orchestrator.delegate_loop) を動かす。orchestrator の監視と
+delegate の委任は常に Jev を使うため、--safety に依らず環境変数 TYPESAFE_API_KEY_ENV が要る
+(orchestrator_api_key_errors と delegate_api_key_errors で有無を確かめる)。
 run の指定のソフトの名前 (--software) と指定のユーザーの名前 (--user) は、advisor では cli が必須の引数にして、空か
-空白だけの値を引数の誤りにする。orchestrator では使わず、無ければ空文字列にする (RunSettings の既定値の空文字列は、
-テストで作るときと orchestrator のため)。
+空白だけの値を引数の誤りにする。orchestrator と delegate では使わず、無ければ空文字列にする (RunSettings の既定値の
+空文字列は、テストで作るときと orchestrator・delegate のため)。
 """
 
 import dataclasses
@@ -30,6 +32,12 @@ from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.orchestrator.claude_session_command import (
     AUTOCOMPACT_MAX_TOKENS,
     ORCHESTRATOR_EFFORT,
+)
+from switch2_layers.orchestrator.delegate_loop import (
+    DEFAULT_DELEGATE_IMAGE_WIDTH,
+    DEFAULT_MAX_DELEGATE_ERRORS,
+    DELEGATE_IMAGE_WIDTH_MAX,
+    DELEGATE_IMAGE_WIDTH_MIN,
 )
 from switch2_layers.orchestrator.main_loop import (
     DEFAULT_MAX_DECISION_ERRORS,
@@ -165,6 +173,8 @@ class RunMode(StrEnum):
     ADVISOR = "advisor"  # surface・middle・deep の 3 層 (app.LayersParts を組み立てる)
     # 主ループと、操作の実行と監視 (app.OrchestratorLayersParts を組み立てる)
     ORCHESTRATOR = "orchestrator"
+    # 主ループと、操作の実行と委任のループ (app.OrchestratorLayersParts を組み立てる)
+    DELEGATE = "delegate"
 
 
 DEFAULT_RUN_MODE = RunMode.ADVISOR
@@ -228,7 +238,7 @@ class RunSettings:
     system_advice_seconds       本体の画面の段階 (prepare・recover) がこの秒数を超えて続いたら、advice の deep を
                                 きっかけ system で求める。超えたまま続く間は、この秒数ごとに求める
                                 (--system-advice-seconds、既定 90。0 より大きい有限の値)
-    mode                     run の型 (--mode、既定 advisor。advisor か orchestrator)
+    mode                        run の型 (--mode、既定 advisor。advisor・orchestrator・delegate のどれか)
     orchestrator_effort         主ループの Claude Code の --effort の値 (--orchestrator-effort、既定
                                 claude_session_command.ORCHESTRATOR_EFFORT の medium。ORCHESTRATOR_EFFORTS のどれか)
     rotate_tokens               主ループのセッションの使用量がこれを超えたら、引き継ぎを書かせてセッションを入れ替える
@@ -242,8 +252,14 @@ class RunSettings:
                                 orchestrator_controller.DEFAULT_MONITOR_THRESHOLD の 0.5。0 より大きく 1 未満)
     max_monitor_errors          監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors、既定
                                 orchestrator_controller.DEFAULT_MAX_MONITOR_ERRORS の 5。1 以上)
-    orchestrator_effort から max_monitor_errors までの 6 つは orchestrator だけで使う。advisor では使わないが、範囲は
-    mode に依らず確かめる。
+    delegate_image_width        委任のループが Jev に送る画像の幅 (--delegate-image-width、既定
+                                delegate_loop.DEFAULT_DELEGATE_IMAGE_WIDTH の 1280。
+                                delegate_loop.DELEGATE_IMAGE_WIDTH_MIN (498)〜DELEGATE_IMAGE_WIDTH_MAX (1280) の整数)
+    max_delegate_errors         委任のループの Jev の失敗がこの回数続いたら、操作権を主ループに返す
+                                (--max-delegate-errors、既定 delegate_loop.DEFAULT_MAX_DELEGATE_ERRORS の 5。1 以上)
+    orchestrator_effort から max_decision_errors までの 4 つは orchestrator と delegate で使い、monitor_threshold と
+    max_monitor_errors は orchestrator だけ、delegate_image_width と max_delegate_errors は delegate だけで使う。
+    使わない型でも、範囲は mode に依らず確かめる。
     """
 
     software_name: str = ""
@@ -282,6 +298,8 @@ class RunSettings:
     max_decision_errors: int = DEFAULT_MAX_DECISION_ERRORS
     monitor_threshold: float = DEFAULT_MONITOR_THRESHOLD
     max_monitor_errors: int = DEFAULT_MAX_MONITOR_ERRORS
+    delegate_image_width: int = DEFAULT_DELEGATE_IMAGE_WIDTH
+    max_delegate_errors: int = DEFAULT_MAX_DELEGATE_ERRORS
 
 
 @dataclass(frozen=True)
@@ -333,6 +351,9 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     ORCHESTRATOR_EFFORTS のどれか、--rotate-tokens は 1 以上で AUTOCOMPACT_MAX_TOKENS 未満、--turn-timeout は 0 より
     大きい有限の値、--max-decision-errors と --max-monitor-errors は 1 以上、--monitor-threshold は 0 より大きく 1 より
     小さい値 (0・1・nan は誤り)。mode は値の型 (RunMode) で決まるため確かめない。
+    委任型の 2 つの値も、mode に依らず確かめる: --delegate-image-width は delegate_loop.DELEGATE_IMAGE_WIDTH_MIN 以上
+    delegate_loop.DELEGATE_IMAGE_WIDTH_MAX 以下、--max-delegate-errors は 1 以上。メッセージは Orchestrator 型の
+    6 つの値の後に、この順に並べる。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -428,6 +449,26 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
             f"{settings.system_advice_seconds}"
         )
     errors += _orchestrator_errors(settings)
+    errors += _delegate_errors(settings)
+    return errors
+
+
+def _delegate_errors(settings: RunSettings) -> list[str]:
+    """委任型の 2 つの値の範囲の誤りを、RunSettings の属性の順のメッセージのリストにする。"""
+    errors: list[str] = []
+    if (
+        not DELEGATE_IMAGE_WIDTH_MIN
+        <= settings.delegate_image_width
+        <= DELEGATE_IMAGE_WIDTH_MAX
+    ):
+        errors.append(
+            f"--delegate-image-width must be {DELEGATE_IMAGE_WIDTH_MIN}.."
+            f"{DELEGATE_IMAGE_WIDTH_MAX}: {settings.delegate_image_width}"
+        )
+    if settings.max_delegate_errors < 1:
+        errors.append(
+            f"--max-delegate-errors must be 1 or more: {settings.max_delegate_errors}"
+        )
     return errors
 
 
@@ -587,15 +628,34 @@ def orchestrator_api_key_errors(environ: Mapping[str, str]) -> list[str]:
     ]
 
 
+def delegate_api_key_errors(environ: Mapping[str, str]) -> list[str]:
+    """--mode delegate に要る API キーが環境変数 environ にあるかを確かめ、無ければメッセージのリストを返す。
+
+    environ の TYPESAFE_API_KEY_ENV が無いか、空か空白だけなら、--mode delegate と TYPESAFE_API_KEY を含む
+    メッセージを 1 つ返す (委任は常に Jev を使うため、--safety fake でも要る。キーなしで動かす方法は示さない)。
+    キーがあれば空のリスト。メッセージに API キーの値は含めない。OPENAI_API_KEY は確かめない。cli は --mode delegate
+    のとき、実機と実行ディレクトリーに触れる前にこれを確かめ、誤りがあれば終了コード 2 で終わる。
+    """
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--mode {RunMode.DELEGATE.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV} for the delegation, which always uses Jev "
+            "(even with --safety fake)"
+        )
+    ]
+
+
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
     キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・middle_effort・surface・surface_map・
     deep・safety・mode は値の文字列 (型も str)。middle は "fake" / "luna"、middle_effort は "none" / "low"、surface は
     "jev" / "fake"、surface_map は "text" / "none"、deep は "claude" / "fake"、safety は "jev" / "fake"、mode は
-    "advisor" / "orchestrator") にする。middle_effort は --middle fake でも入れる。
-    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値は、
-    mode に依らず入れる。
+    "advisor" / "orchestrator" / "delegate") にする。middle_effort は --middle fake でも入れる。
+    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値と
+    委任型の 2 つの値 (delegate_image_width・max_delegate_errors) は、mode に依らず入れる。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)

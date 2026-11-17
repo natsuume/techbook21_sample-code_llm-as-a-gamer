@@ -1,7 +1,7 @@
 """実行の記録 run.jsonl。1 件を {"t": 秒, "event": 名前, ...} の 1 行で追記する。
 
-surface・middle・deep のスケジューラー・deep のジョブ・Orchestrator 型の主ループ・終了処理の各スレッドから書くため、
-追記は 1 つのロックの中で行う。
+surface・middle・deep のスケジューラー・deep のジョブ・Orchestrator 型の主ループ・委任型の委任のループ・終了処理の
+各スレッドから書くため、追記は 1 つのロックの中で行う。
 """
 
 import threading
@@ -40,6 +40,10 @@ EVENT_ORCHESTRATOR_SESSION_START = "orchestrator_session_start"
 EVENT_ORCHESTRATOR_SESSION_END = "orchestrator_session_end"
 # 主ループの JSON の誤り。session・count (続けて誤った回数)・errors (誤りの説明) を含む
 EVENT_ORCHESTRATOR_DECISION_ERROR = "orchestrator_decision_error"
+# 委任型の委任の始まり。tasks・cautions・choices ([{"name", "description"}, ...]) を含む
+EVENT_DELEGATE_START = "delegate_start"
+# 委任型の委任の終わり。reason (jev_return・main_stop・errors・stop) と detail (理由の説明) を含む
+EVENT_DELEGATE_END = "delegate_end"
 
 
 class RunLog:

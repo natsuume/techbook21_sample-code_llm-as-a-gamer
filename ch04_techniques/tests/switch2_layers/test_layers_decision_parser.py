@@ -7,10 +7,21 @@ import json
 
 import pytest
 
-from switch2_layers.orchestrator.decision_parser import parse_decision
+from switch2_layers.orchestrator.decision_parser import (
+    MAX_DELEGATE_CAUTIONS,
+    MAX_DELEGATE_CHOICES,
+    MAX_DELEGATE_TASKS,
+    parse_decision,
+)
 from switch2_layers.orchestrator.decision_types import (
+    Action,
     Decision,
     DecisionError,
+    DelegateChoice,
+    DelegateContext,
+    DelegateStart,
+    DelegateStop,
+    DelegateUpdate,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -1027,3 +1038,280 @@ HUGE_INTEGER = "1" + "0" * 400
 def test_huge_integer_is_an_error_without_raising(body, path):
     result = parse_decision(json_block(body.replace("HUGE", HUGE_INTEGER)))
     assert_error_at(result, path)
+
+
+# --- --mode delegate の委任の指示 (parse_decision の delegate に DelegateContext を渡す) ---
+
+# 今登録しているマクロ (go_home は HOME を押す)
+DELEGATE_MACROS: dict[str, tuple[Action, ...]] = {
+    "attack": (PressAction(buttons=("A",)),),
+    "move_up": (PressAction(buttons=("UP",)),),
+    "go_home": (PressAction(buttons=("HOME",)),),
+    **{f"m{index}": (PressAction(buttons=("B",)),) for index in range(13)},
+}
+PREVIOUS_DELEGATION = DelegateStart(
+    tasks=("最重要: HP を 0 にせずに敵をすべて倒す",),
+    cautions=("衝撃波は横一列に進む",),
+    choices=(DelegateChoice(name="attack", description="前の敵を攻撃する"),),
+)
+# JSON のキーを省くことを表す値
+OMIT = object()
+
+
+def delegate_context(
+    active: bool = False, previous: DelegateStart | None = None
+) -> DelegateContext:
+    return DelegateContext(active=active, previous=previous, macros=DELEGATE_MACROS)
+
+
+def parse_delegate(value: object, context: DelegateContext | None = None):
+    """value を JSON にして、--mode delegate の parse_decision に渡す (今のマクロは DELEGATE_MACROS)。"""
+    context = context if context is not None else delegate_context()
+    return parse_decision(
+        json_block(json.dumps(value, ensure_ascii=False)),
+        frozenset(DELEGATE_MACROS),
+        context,
+    )
+
+
+def choice(
+    name: object = "attack", description: object = "前の敵を攻撃する"
+) -> dict[str, object]:
+    return {"name": name, "description": description}
+
+
+def delegate_with(action: str, **fields: object) -> dict[str, object]:
+    """{"delegate": {"action": action, ...}}。start の既定は 1 つずつのタスクと行動、注意事項なし。OMIT のキーは省く。"""
+    values: dict[str, object] = {"action": action}
+    if action == "start":
+        values.update(
+            {"tasks": ["敵をすべて倒す"], "cautions": [], "choices": [choice()]}
+        )
+    values.update(fields)
+    return {"delegate": {key: item for key, item in values.items() if item is not OMIT}}
+
+
+def test_delegate_key_is_unknown_in_orchestrator_mode():
+    assert_error_at(parse_value({"delegate": {"action": "stop"}}), "delegate")
+
+
+def test_delegate_monitor_is_an_unknown_key_in_delegate_mode():
+    assert_error_at(parse_delegate(create_monitor([case()])), "monitor")
+
+
+def test_delegate_start_is_read_into_the_types():
+    value = delegate_with(
+        "start",
+        tasks=["最重要: HP を 0 にせずに敵をすべて倒す", "敵の攻撃は、可能なら避ける"],
+        cautions=["衝撃波は横一列に進む"],
+        choices=[choice(), choice("move_up", "上に 1 マス移動する")],
+    )
+    assert assert_decision(parse_delegate(value)) == Decision(
+        delegate=DelegateStart(
+            tasks=(
+                "最重要: HP を 0 にせずに敵をすべて倒す",
+                "敵の攻撃は、可能なら避ける",
+            ),
+            cautions=("衝撃波は横一列に進む",),
+            choices=(
+                DelegateChoice(name="attack", description="前の敵を攻撃する"),
+                DelegateChoice(name="move_up", description="上に 1 マス移動する"),
+            ),
+        )
+    )
+
+
+def test_delegate_start_while_delegating_is_an_error():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    assert_error_at(parse_delegate(delegate_with("start"), context), "delegate.action")
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (
+            delegate_with("update", tasks=["前に出すぎない"]),
+            DelegateUpdate(tasks=("前に出すぎない",)),
+        ),
+        (delegate_with("stop"), DelegateStop()),
+    ],
+    ids=["update", "stop"],
+)
+def test_delegate_update_or_stop_while_not_delegating_is_read_with_the_actions_and_macros(
+    value, expected
+):
+    # JSON を書く間に委任が終わっていても誤りにせず、同じ JSON の操作とマクロを当てられるようにする
+    context = delegate_context(active=False, previous=PREVIOUS_DELEGATION)
+    json_value = {
+        "actions": [press(buttons=["A"])],
+        "macros": {"set": {"dash": [press(buttons=["B"])]}},
+        **value,
+    }
+    decision = assert_decision(parse_delegate(json_value, context))
+    assert decision.delegate == expected
+    assert decision.actions == (PressAction(buttons=("A",)),)
+    assert set(decision.macros_set) == {"dash"}
+
+
+@pytest.mark.parametrize(
+    "value, path",
+    [
+        (delegate_with("update", tasks=[]), "delegate.tasks"),
+        (
+            delegate_with("update", choices=[choice("jump", "ジャンプする")]),
+            "delegate.choices[0].name",
+        ),
+        (delegate_with("stop", tasks=["敵を倒す"]), "delegate.tasks"),
+    ],
+    ids=["update_without_tasks", "update_with_unregistered_choice", "stop_with_tasks"],
+)
+def test_delegate_update_or_stop_while_not_delegating_still_follows_the_value_rules(
+    value, path
+):
+    context = delegate_context(active=False, previous=PREVIOUS_DELEGATION)
+    assert_error_at(parse_delegate(value, context), path)
+
+
+def test_delegate_start_without_the_keys_uses_the_previous_values():
+    context = delegate_context(active=False, previous=PREVIOUS_DELEGATION)
+    value = delegate_with("start", tasks=OMIT, cautions=OMIT, choices=OMIT)
+    decision = assert_decision(parse_delegate(value, context))
+    assert decision.delegate == PREVIOUS_DELEGATION
+
+
+@pytest.mark.parametrize("key", ["tasks", "cautions", "choices"])
+def test_delegate_start_without_a_key_and_no_previous_delegation_is_an_error(key):
+    value = delegate_with("start", **{key: OMIT})
+    assert_error_at(parse_delegate(value), f"delegate.{key}")
+
+
+def test_delegate_update_keeps_the_omitted_keys():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value = delegate_with("update", tasks=["敵をすべて倒す", "前に出すぎない"])
+    decision = assert_decision(parse_delegate(value, context))
+    assert decision.delegate == DelegateUpdate(
+        tasks=("敵をすべて倒す", "前に出すぎない"), cautions=None, choices=None
+    )
+
+
+def test_delegate_stop_is_read_while_delegating():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    decision = assert_decision(parse_delegate(delegate_with("stop"), context))
+    assert decision.delegate == DelegateStop()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"choices": [choice()]},
+        {"choices": [choice(f"m{index}", f"行動 {index}") for index in range(12)]},
+        {"tasks": ["敵を倒す"]},
+        {"tasks": [f"タスク {index}" for index in range(10)]},
+        {"cautions": []},
+        {"cautions": [f"注意 {index}" for index in range(10)]},
+    ],
+    ids=["1_choice", "12_choices", "1_task", "10_tasks", "0_cautions", "10_cautions"],
+)
+def test_delegate_counts_at_the_limits_are_valid(fields):
+    assert MAX_DELEGATE_CHOICES == 12
+    assert MAX_DELEGATE_TASKS == 10
+    assert MAX_DELEGATE_CAUTIONS == 10
+    assert_decision(parse_delegate(delegate_with("start", **fields)))
+
+
+@pytest.mark.parametrize(
+    "fields, path",
+    [
+        ({"choices": []}, "delegate.choices"),
+        (
+            {"choices": [choice(f"m{index}", f"行動 {index}") for index in range(13)]},
+            "delegate.choices",
+        ),
+        ({"tasks": []}, "delegate.tasks"),
+        ({"tasks": [f"タスク {index}" for index in range(11)]}, "delegate.tasks"),
+        ({"cautions": [f"注意 {index}" for index in range(11)]}, "delegate.cautions"),
+    ],
+    ids=["0_choices", "13_choices", "0_tasks", "11_tasks", "11_cautions"],
+)
+def test_delegate_counts_out_of_the_limits_are_errors(fields, path):
+    assert_error_at(parse_delegate(delegate_with("start", **fields)), path)
+
+
+@pytest.mark.parametrize(
+    "fields, path",
+    [
+        ({"tasks": [""]}, "delegate.tasks[0]"),
+        ({"tasks": ["敵を倒す", "  "]}, "delegate.tasks[1]"),
+        ({"cautions": [""]}, "delegate.cautions[0]"),
+        ({"choices": [choice(description="")]}, "delegate.choices[0].description"),
+        ({"choices": [choice(description=" \n")]}, "delegate.choices[0].description"),
+    ],
+    ids=[
+        "empty_task",
+        "blank_task",
+        "empty_caution",
+        "empty_description",
+        "blank_description",
+    ],
+)
+def test_delegate_empty_texts_are_errors(fields, path):
+    assert_error_at(parse_delegate(delegate_with("start", **fields)), path)
+
+
+def test_delegate_choice_of_a_macro_that_is_not_registered_is_an_error():
+    value = delegate_with("start", choices=[choice("jump", "ジャンプする")])
+    assert_error_at(parse_delegate(value), "delegate.choices[0].name")
+
+
+def test_delegate_same_choice_name_twice_is_an_error():
+    value = delegate_with(
+        "start",
+        choices=[choice("attack", "攻撃する"), choice("attack", "もう一度攻撃する")],
+    )
+    assert_error_at(parse_delegate(value), "delegate.choices[1].name")
+
+
+def test_delegate_choice_of_a_macro_pressing_home_is_an_error():
+    value = delegate_with("start", choices=[choice("go_home", "HOME メニューを開く")])
+    assert_error_at(parse_delegate(value), "delegate.choices[0].name")
+
+
+def test_delegate_deleting_a_macro_used_by_the_current_choices_is_an_error():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value = {"macros": {"delete": ["attack"]}}
+    assert_error_at(parse_delegate(value, context), "macros.delete[0]")
+
+
+@pytest.mark.parametrize(
+    "delegate_value",
+    [OMIT, None, {"action": "stop"}],
+    ids=["no_delegate", "null_delegate", "stop"],
+)
+def test_delegate_replacing_a_macro_of_the_current_choices_with_home_is_an_error(
+    delegate_value,
+):
+    # 委任中は、delegate のキーの有無と値に依らず、行動のマクロを HOME を押す列に置き換えられない
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value: dict[str, object] = {
+        "macros": {"set": {"attack": [press(buttons=["HOME"])]}}
+    }
+    if delegate_value is not OMIT:
+        value["delegate"] = delegate_value
+    assert_error_at(parse_delegate(value, context), "macros.set.attack")
+
+
+def test_delegate_registering_a_home_macro_not_used_by_the_choices_is_valid():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value = {"macros": {"set": {"open_home": [press(buttons=["HOME"])]}}}
+    decision = assert_decision(parse_delegate(value, context))
+    assert set(decision.macros_set) == {"open_home"}
+
+
+def test_delegate_error_changes_nothing_of_the_actions_and_macros():
+    # 委任の指示に誤りがあれば、同じ JSON の操作とマクロも当てない (Decision を返さない)
+    value = {
+        "actions": [press(buttons=["A"])],
+        "macros": {"set": {"dash": [press(buttons=["B"])]}},
+        **delegate_with("start", tasks=[]),
+    }
+    assert isinstance(parse_delegate(value), DecisionError)

@@ -11,13 +11,16 @@
     ## 画面の停滞 (コードの計測)       describe_progress_for_turn
     ## 前の JSON の誤り               describe_decision_error
     ## 写さなかったスキル              describe_skipped_skills
-    ## 今の監視                       describe_monitor
+    ## 今の監視                       describe_monitor (--mode orchestrator のとき)
+    ## 委任                           describe_delegation (--mode delegate のとき。今の監視の節の代わりに置く)
     ## 今のマクロ                     describe_macros
     ## 古いフレーム                   FRAMES_GUIDE_TEXT
+--mode delegate のときは、出来事の OrchestratorEvents.delegation が None でない (それで委任の節を置くかを決める)。
 セッションの最初の入力では、この前に build_session_opening_text の節を置く (人の初期指示・notes/ のファイルの一覧・
 notes/handoff.md の中身)。人の初期指示が無いときも節は省かず、本文を NONE_TEXT にして、初期指示が無いことを伝える。
 出来事の繰り越し (carry_over_events): result を受け取れなかった入力に載せた一度だけの出来事 (条件の当たり・監視の
-終わり・捨てた操作の数・外したボタン) は、次の入力で新しく取り出した出来事と合わせて渡す。
+終わり・委任の終わり・捨てた操作の数・委任中のため捨てた操作の数・当てなかった delegate の action・外したボタン) は、
+次の入力で新しく取り出した出来事と合わせて渡す。
 画像 (select_turn_frames): 入力を作る時点の最新の一定間隔のフレームのうち、新しいものから最大 TURN_MAX_IMAGES 枚を
 古い順に並べたもの。主ループが入力を作るときに 1 回受け取った、同じ時点の frames/latest/ の画像
 (frames.latest_frames.LatestFrames.snapshot。時刻を書き込んだ JPEG) を使う。セッションの最初のターンも同じ。
@@ -46,6 +49,7 @@ from switch2_layers.orchestrator.decision_types import (
     WaitAction,
 )
 from switch2_layers.orchestrator.orchestrator_events import (
+    DelegationStatus,
     MainActionsRun,
     OrchestratorEvents,
 )
@@ -176,7 +180,12 @@ def describe_events(events: OrchestratorEvents) -> str:
         条件の当たりごとに   監視 <monitor> の条件 C<case_index> (<condition>) に <count> 回当たり、操作 <actions を
                              action_to_json の JSON の配列にしたもの> を実行した
         監視の終わりごとに   監視 <name> が終わった (<reason>): <detail>
+        委任の終わりごとに   委任が終わり、操作権が主ループに戻った (<reason>): <detail>
+        当てなかった delegate の action ごとに (delegate_skipped_actions の順)
+                             委任はすでに終わっていたため、delegate の <action (stop か update)> を当てなかった
         捨てた操作が 1 以上   新しい actions で捨てた前の操作: <discarded_action_count> 個
+        委任中のため捨てた操作が 1 以上
+                             委任中のため、操作を捨てた: <delegate_discarded_action_count> 個
         外したボタンがあれば  押せずに外したボタン: <blocked_buttons を ", " でつないだもの>
     JSON は json.dumps(…, ensure_ascii=False)。
     """
@@ -189,9 +198,21 @@ def describe_events(events: OrchestratorEvents) -> str:
         f"監視 {end.name} が終わった ({end.reason}): {end.detail}"
         for end in events.monitor_ends
     ]
+    lines += [
+        f"委任が終わり、操作権が主ループに戻った ({end.reason}): {end.detail}"
+        for end in events.delegate_ends
+    ]
+    lines += [
+        f"委任はすでに終わっていたため、delegate の {action} を当てなかった"
+        for action in events.delegate_skipped_actions
+    ]
     if events.discarded_action_count >= 1:
         lines.append(
             f"新しい actions で捨てた前の操作: {events.discarded_action_count} 個"
+        )
+    if events.delegate_discarded_action_count >= 1:
+        lines.append(
+            f"委任中のため、操作を捨てた: {events.delegate_discarded_action_count} 個"
         )
     if events.blocked_buttons:
         lines.append(f"押せずに外したボタン: {', '.join(events.blocked_buttons)}")
@@ -262,9 +283,13 @@ def carry_over_events(
     carried が None なら taken をそのまま返す。そうでなければ次の値の OrchestratorEvents を返す:
         case_hits                carried の後に taken を並べる (古い順)
         monitor_ends             carried の後に taken を並べる (古い順)
+        delegate_ends            carried の後に taken を並べる (古い順)
+        delegate_skipped_actions carried の後に taken を並べる (古い順。同じ名前も重ねて並べる)
         discarded_action_count   carried と taken の和
+        delegate_discarded_action_count
+                                 carried と taken の和
         blocked_buttons          carried の後に taken を並べ、2 回目以降に出てきたボタンを除く (重ねない)
-        running・remaining_action_count・macros・monitor
+        running・remaining_action_count・macros・monitor・delegation
                                  taken の値 (取り出した時点の値のため)
     """
     if carried is None:
@@ -280,6 +305,14 @@ def carry_over_events(
         remaining_action_count=taken.remaining_action_count,
         macros=taken.macros,
         monitor=taken.monitor,
+        delegate_ends=(*carried.delegate_ends, *taken.delegate_ends),
+        delegate_discarded_action_count=carried.delegate_discarded_action_count
+        + taken.delegate_discarded_action_count,
+        delegate_skipped_actions=(
+            *carried.delegate_skipped_actions,
+            *taken.delegate_skipped_actions,
+        ),
+        delegation=taken.delegation,
     )
 
 
@@ -305,6 +338,52 @@ def describe_monitor(monitor: MonitorCreate | None) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def describe_delegation(status: DelegationStatus) -> str:
+    """委任の状況 status を、次の 7 行の文にする (改行でつなぐ):
+
+        委任中: はい                                         (委任中でなければ `委任中: いいえ`)
+        委任を始めた時刻: <format_frame_label(started_t)>       (started_t が None なら NONE_TEXT)
+        タスク: <values.tasks の JSON の配列>                   (values が None なら NONE_TEXT。以下の 2 行も同じ)
+        注意事項: <values.cautions の JSON の配列>
+        行動: <values.choices を [{"name": 名前, "description": 説明}, ...] にした JSON の配列>
+        Jev が直近に選んだ行動: <last_pick.name> (<format_frame_label(last_pick.t)>)   (last_pick が None なら NONE_TEXT)
+        Jev が「操作を返す」を続けて選んだ回数: <return_streak>
+    委任中でなければ、タスク・注意事項・行動は前の委任の値 (start で省いたキーに使う値) を書く。
+    JSON は json.dumps(…, ensure_ascii=False)。
+    """
+    values = status.values
+
+    def as_json(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    started = (
+        NONE_TEXT if status.started_t is None else format_frame_label(status.started_t)
+    )
+    pick = status.last_pick
+    last_pick = (
+        NONE_TEXT if pick is None else f"{pick.name} ({format_frame_label(pick.t)})"
+    )
+    lines = [
+        f"委任中: {'はい' if status.active else 'いいえ'}",
+        f"委任を始めた時刻: {started}",
+        f"タスク: {NONE_TEXT if values is None else as_json(list(values.tasks))}",
+        f"注意事項: {NONE_TEXT if values is None else as_json(list(values.cautions))}",
+    ]
+    if values is None:
+        lines.append(f"行動: {NONE_TEXT}")
+    else:
+        choices = [
+            {"name": choice.name, "description": choice.description}
+            for choice in values.choices
+        ]
+        lines.append(f"行動: {as_json(choices)}")
+    lines += [
+        f"Jev が直近に選んだ行動: {last_pick}",
+        f"Jev が「操作を返す」を続けて選んだ回数: {status.return_streak}",
+    ]
+    return "\n".join(lines)
+
+
 def describe_macros(macros: Mapping[str, Sequence[Action]]) -> str:
     """今のマクロを JSON の文にする。空なら NONE_TEXT。
 
@@ -319,7 +398,9 @@ def describe_macros(macros: Mapping[str, Sequence[Action]]) -> str:
 def build_turn_text(context: TurnContext) -> str:
     """ふつうのターンのテキスト (モジュールの docstring の節の並び) を返す。
 
-    context.previous_actions が None なら「## 前の操作の列」の節を置かない (ほかの節はいつも置く)。
+    context.previous_actions が None なら「## 前の操作の列」の節を置かない。context.events.delegation が None なら
+    「## 今の監視」の節を置き、None でなければ、同じ位置に「## 委任」の節 (describe_delegation) を置いて「## 今の監視」の
+    節を置かない。ほかの節はいつも置く。
     """
     sections = [
         ("## 時刻", format_frame_label(context.now_t)),
@@ -330,6 +411,7 @@ def build_turn_text(context: TurnContext) -> str:
         sections.append(
             ("## 前の操作の列", describe_previous_actions(context.previous_actions))
         )
+    delegation = context.events.delegation
     sections += [
         (
             "## 画面の停滞 (コードの計測)",
@@ -337,7 +419,11 @@ def build_turn_text(context: TurnContext) -> str:
         ),
         ("## 前の JSON の誤り", describe_decision_error(context.previous_error)),
         ("## 写さなかったスキル", describe_skipped_skills(context.skipped_skills)),
-        ("## 今の監視", describe_monitor(context.events.monitor)),
+        (
+            ("## 今の監視", describe_monitor(context.events.monitor))
+            if delegation is None
+            else ("## 委任", describe_delegation(delegation))
+        ),
         ("## 今のマクロ", describe_macros(context.events.macros)),
         ("## 古いフレーム", FRAMES_GUIDE_TEXT),
     ]

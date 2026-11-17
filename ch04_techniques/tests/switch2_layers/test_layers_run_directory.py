@@ -189,6 +189,13 @@ def test_orchestrator_instruction_path():
     )
 
 
+def test_delegate_log_is_delegate_jsonl_in_the_orchestrator_directory():
+    root = Path("/runs/20261118-120000")
+    assert RunPaths(root).orchestrator_delegate_log == (
+        root / "orchestrator" / "delegate.jsonl"
+    )
+
+
 def test_create_empty_notes_creates_only_an_empty_notes_directory(tmp_path):
     # Orchestrator 型の run は、write_initial_notes の初期ファイルを書かずに空の notes/ で始める
     paths = create_run_directory(tmp_path, STARTED_AT)

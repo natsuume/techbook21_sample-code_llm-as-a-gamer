@@ -1,10 +1,12 @@
 """Orchestrator 型の操作の実行と監視 (OrchestratorController)。主ループ (Claude Code) の Decision を当て、操作の列と
 「画面の条件 → 操作」の Jev の監視を 1 つのループ (run) で動かす。
 
+2 つの型を持つ。OrchestratorSettings.delegate が None なら監視型 (--mode orchestrator。このモジュールの docstring の
+「委任型」の節より前に書いた動き)、None でなければ委任型 (--mode delegate。「委任型」の節)。
 主ループのスレッドは、parse_decision の結果を apply で渡し、前のターンの操作の列が終わるのを main_actions_run で
 確かめてから、次の入力を作るときに take_events で出来事を取り出す。
-apply・take_events・main_actions_run・macro_names・set_started はどのスレッドから呼んでもよい (状態は 1 つのロックの
-中で変える)。
+apply・take_events・main_actions_run・macro_names・delegate_context・set_started はどのスレッドから呼んでもよい
+(状態は 1 つのロックの中で変える)。
 PadOutput への送信と orchestrator/monitor.jsonl への書き込みは、run のループのスレッドだけが行う。Jev への要求は、
 ループが別のスレッドで送る (要求の応答を待つ間も、主ループの操作をすぐ始めるため)。
 
@@ -91,19 +93,94 @@ take_events:
     case_hits は、監視の世代と条件の位置の組ごとに 1 つにまとめる。同じ名前の監視でも、世代が違えば別の CaseHit に
     する。CaseHit の condition と actions は、当たった世代の監視の条件のもの。
 操作の記録:
-    PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor を渡す (action_executor の
-    「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では OperationLog.write) が 1 回の送信に
-    つき 1 行書く。このクラスは記録の関数を受け取らず、operations.jsonl に行を書かない。
+    PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor、委任の行動の列なら delegate を
+    渡す (action_executor の「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では
+    OperationLog.write) が 1 回の送信につき 1 行書く。このクラスは記録の関数を受け取らず、operations.jsonl に行を
+    書かない。
+委任型 (OrchestratorSettings.delegate があるとき):
+    run のループが委任のループ (orchestrator.delegate_loop) で、監視は使わない (decision.monitor が None でなければ、
+    apply は何も変えずに ValueError を出す。delegate を渡した parse_decision が先に誤りにする)。主ループの列の扱い
+    (始め方・main_actions_run の時刻) とマクロの扱いは監視型と同じ。作るときに、OrchestratorParts の latest_frames・
+    buffered_frames・run_log が None なら ValueError にする。
+    委任の状態 (ロックの中で持つ):
+        委任なし        委任を始めていないか、終えた
+        始める前        start を受け付け、主ループの列の終わりを待っている (DelegationStatus.active は True、
+                        started_t は None)
+        委任中          delegate_loop.ActiveDelegation を持つ
+        前の委任の値    いちばん新しい委任の値 (DelegateContext.previous と DelegationStatus.values に使う)
+    apply (監視型の apply の 1〜4 のうち、3 (監視) の代わりに次を行い、4 (操作) では委任中かを確かめる。委任中かは、
+    この decision の delegate を当てる前の状態で決める):
+        - マクロの呼び出しの確かめ (1) は、委任の行動 (start・update の choices) の名前も含める
+        - この apply の前から委任中か始める前なら、空でない actions を列にせずに捨て、捨てた操作の数 (JSON の
+          actions の要素の数) を delegate_discarded_action_count に足し、main_actions_run を None にする (主ループは
+          待たずに次の入力を作る)。delegate の stop を同じ JSON で書いても、actions は捨てる。この apply の前に
+          委任していなければ、start と同じ JSON の actions も監視型と同じく受け付ける (その列が終わってから委任を始める)
+        - DelegateStart: 前の委任の値を start の値にし、始める前にする。始めたときの actions が空なら、その apply の後の
+          最初の回りで委任を始める。空でなければ、その主ループの列が終わった回り (最後まで実行し終えたか、途中で
+          捨てたか) で始める
+        - DelegateUpdate: 委任中ならその値を置き換え (ActiveDelegation.update)、始める前なら始める値を置き換える。
+          前の委任の値も置き換える。委任の通し番号を 1 進める。実行中の行動は止めない
+        - DelegateStop: 委任中なら操作権を返す (理由 main_stop、detail delegate_loop.MAIN_STOP_DETAIL)。始める前なら、
+          委任を始めずに取り消す (delegate_start も delegate_end も書かず、出来事にも入れない)
+        - 委任中でも始める前でもないときの update と stop (主ループが JSON を書く間か、読んだ後に、Jev の返却や失敗で
+          委任が終わっていたときに起きる): 委任を変えない (前の委任の値も通し番号も変えず、delegate_start・delegate_end
+          も書かない)。同じ JSON の macros と actions は、監視型と同じく当てる (委任していないので actions は捨てず、
+          主ループの列にして main_actions_run もその列のものにする)。当てなかった delegate の action の名前 ("update"
+          か "stop") を、一度だけの出来事として delegate_skipped_actions に足す
+        - 委任中か始める前の start は、何もしない (parse_decision が委任中かを確かめて誤りにし、委任が始まるのは apply
+          からだけなので、起きない)
+        - 委任の行動に使っているマクロの置き換え (macros.set) は、次に Jev がその行動を選んだときから使う。HOME を
+          押す操作の列への置き換えは、parse_decision が誤りにする (この apply には届かない)
+    委任を始める (run のループの回りの 1 で): ActiveDelegation(値, 今の時刻, settings.delegate.max_errors) を作り、委任の
+        通し番号を 1 進め、run.jsonl に delegate_start {"tasks", "cautions", "choices": [{"name", "description"}, ...]}
+        を書く。出力が止まっていれば (ActionExecutor.output_stopped) 始めない
+    委任の要求 (run のループの回りの 4 で、監視の要求の代わりに): 次のすべてに当たるとき、別のスレッド (daemon) で
+        delegate_loop.ask_delegate を 1 回呼ぶ (そのスレッドの例外の扱いは監視の要求と同じ。結果は失敗の
+        DelegateRequestResult に変える。その option_names は、送ろうとした値の delegate_option_names(choices))。
+        要求には、その時点の委任の通し番号と、ActiveDelegation の値と直近の行動を渡す
+        - 委任中で、出力が止まっていない。返っていない要求が無い (同時に送る要求は 1 つまで)
+        - 委任を始めてから最初の要求か、前の要求の t_received から settings.delegate.request_interval_s 秒たった
+        - delegate_loop.select_delegate_frames(latest_frames(), buffered_frames()) が 1 枚以上のフレームを返す
+        主ループの列や行動の列を実行している間も送る (フレームの新しさの条件は無い)
+    返った委任の要求の処理 (run のループの回りの 2 で、監視の代わりに。1 つごとに delegate.jsonl に 1 行書く
+    (delegate_record。handling は下の処理)):
+        delegate.jsonl の行の chosen は、どの結果 (ignored・失敗・答え) でも、確率があれば
+        delegate_questions.choose_option(結果の probabilities, 結果の option_names) で決める (その要求で送った選択肢の
+        名前で決め、今の委任の選択肢の名前は使わない。要求を送った後に update で choices を置き換えていても、応答の
+        確率に無い名前で選ばない)。確率が無ければ null
+        - 要求を送ったときの委任の通し番号が今の番号と違う (委任中でなくなったとき、update で値を置き換えたときを
+          含む): ignored。ほかに何もしない (委任は続ける)
+        - 失敗 (error がある): ActiveDelegation.record_failure。DelegateEnd が返ったら操作権を返し (理由 errors。実行全体は
+          止めない) returned、返らなければ continued
+        - 答えがあった: ActiveDelegation.record_answer(確率, 今の時刻) (通し番号が今と同じなので、結果の option_names と
+          今の委任の選択肢の名前は同じ)。start_action があれば、実行中の行動の列を捨てて
+          (ActionExecutor.start が中立に戻す)、そのマクロを今のマクロで展開した列 (action_executor.expand_actions) を
+          委任の行動の列 (source が delegate) として始め、その場で 1 回進めて started。end があれば操作権を返して
+          (理由 jev_return) returned。どちらも無ければ continued (実行中の行動の列はそのまま続ける)
+    操作権を返す (理由 jev_return・main_stop・errors): 委任の行動の列を実行していれば捨てて中立に戻し
+        (ActionExecutor.cancel。apply の stop で返したときは、送信を run のループのスレッドだけで行うため、次の回りの
+        1 で捨てる)、ActiveDelegation を捨て、委任の通し番号を 1 進め、DelegateEnd を出来事に入れ、run.jsonl に
+        delegate_end {"reason", "detail"} を書く。前の委任の値は残す
+    stop が立って run が戻るときに委任中なら、run.jsonl に delegate_end {"reason": "stop", "detail":
+        delegate_loop.RUN_STOP_DETAIL} を書く (出来事には入れない)
+    take_events: 監視型の値に加えて、前回の取り出し以降の delegate_ends・delegate_discarded_action_count・
+        delegate_skipped_actions を返して空にし、
+        delegation に取り出した時点の委任の状況 (委任中なら ActiveDelegation.status、始める前なら active が True で
+        started_t・last_pick が None、return_streak が 0 の値、委任なしなら active が False で values が前の委任の値の
+        値) を入れる。監視型では delegation は None
+    委任の行動の列は main_actions_run の時刻を変えない。主ループの新しい列を始めるときは、実行中の委任の行動の列も
+    捨てる (委任中は主ループの列を受け付けないので、起きるのは委任を終えた後の列だけ)。
 """
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.action_executor import (
     ActionExecutor,
@@ -113,9 +190,29 @@ from switch2_layers.orchestrator.action_executor import (
 from switch2_layers.orchestrator.decision_types import (
     Action,
     Decision,
+    DelegateContext,
+    DelegateInstruction,
+    DelegateStart,
+    DelegateUpdate,
     MacroAction,
     MonitorCreate,
 )
+from switch2_layers.orchestrator.delegate_loop import (
+    MAIN_STOP_DETAIL,
+    RUN_STOP_DETAIL,
+    ActiveDelegation,
+    DelegateHandling,
+    DelegateRequestResult,
+    DelegateSettings,
+    apply_delegate_update,
+    ask_delegate,
+    select_delegate_frames,
+)
+from switch2_layers.orchestrator.delegate_questions import (
+    choose_option,
+    delegate_option_names,
+)
+from switch2_layers.orchestrator.delegate_record import DelegateLog, DelegateRecord
 from switch2_layers.orchestrator.macro_registry import MacroRegistry
 from switch2_layers.orchestrator.monitor_loop import (
     ActiveMonitor,
@@ -126,11 +223,20 @@ from switch2_layers.orchestrator.monitor_loop import (
 from switch2_layers.orchestrator.monitor_record import MonitorLog, MonitorRecord
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    DelegateEnd,
+    DelegatePick,
+    DelegateSkippedAction,
+    DelegationStatus,
     MainActionsRun,
     MonitorEnd,
     OrchestratorEvents,
 )
 from switch2_layers.pad_action import sort_buttons
+from switch2_layers.records.run_log import (
+    EVENT_DELEGATE_END,
+    EVENT_DELEGATE_START,
+    RunLog,
+)
 from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.safety.safety_monitor import SAFETY_IMAGE_WIDTH
@@ -161,14 +267,19 @@ class OrchestratorParts:
 
     pad_output       操作の送信 (ボタンの制限を含む。押せるボタンの集合と、operations.jsonl に書く on_operation は
                      作った側が決める)
-    jev              監視の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
+    jev              監視 (委任型では委任) の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
     latest_frame     キャプチャーの最新のフレームを返す関数 (run では FrameBuffer.latest)。まだ無ければ None
-    clock            実行の経過秒の時計。操作の秒数と monitor.jsonl の時刻に使う (PadOutput の clock と同じ monotonic
-                     から作る)
-    paths            実行ディレクトリー (orchestrator/monitor.jsonl に書く)
+    clock            実行の経過秒の時計。操作の秒数と monitor.jsonl・delegate.jsonl の時刻に使う (PadOutput の clock と
+                     同じ monotonic から作る)
+    paths            実行ディレクトリー (orchestrator/monitor.jsonl か orchestrator/delegate.jsonl に書く)
     wait             run のループが回りの最後に待つ関数 (wake, timeout を受け取る)。既定 wait_for_wake。
                      テストでは、回りの数を数える関数を渡せる
     make_reference   画像の参照文字列を作る関数 (既定 jev_client.new_asset_reference。呼ぶたびに異なる文字列を返す)
+    latest_frames    frames/latest/ の最新の一定間隔のフレームを新しい順に返す関数 (run では LatestFrames.snapshot)。
+                     委任型だけで使い、委任型では要る
+    buffered_frames  キャプチャーの元のフレームを古い順に返す関数 (run では FrameBuffer.frames)。委任型だけで使い、
+                     委任型では要る
+    run_log          run.jsonl (delegate_start・delegate_end を書く)。委任型だけで使い、委任型では要る
     """
 
     pad_output: PadOutput
@@ -178,17 +289,22 @@ class OrchestratorParts:
     paths: RunPaths
     wait: Callable[[threading.Event, float], None] = wait_for_wake
     make_reference: Callable[[], str] = new_asset_reference
+    latest_frames: Callable[[], Sequence[LatestFrame]] | None = None
+    buffered_frames: Callable[[], Sequence[CapturedFrame]] | None = None
+    run_log: RunLog | None = None
 
 
 @dataclass(frozen=True)
 class OrchestratorSettings:
     """OrchestratorController の設定。
 
-    monitor_threshold    監視の当たりのしきい値 (--monitor-threshold。0 より大きく 1 未満)
-    max_monitor_errors   監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors。1 以上)
+    monitor_threshold    監視の当たりのしきい値 (--monitor-threshold。0 より大きく 1 未満)。委任型では使わない
+    max_monitor_errors   監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors。1 以上)。委任型では
+                         使わない
     poll_interval_s      run のループが 1 回の回りで待つ秒数の上限
     image_width          監視に送る画像の幅の上限 (安全の監視と同じ)
     jpeg_quality         監視に送る画像の JPEG の品質
+    delegate             委任のループの設定。None (既定) なら監視型、None でなければ委任型
     """
 
     monitor_threshold: float
@@ -196,6 +312,7 @@ class OrchestratorSettings:
     poll_interval_s: float = POLL_INTERVAL_S
     image_width: int = SAFETY_IMAGE_WIDTH
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
+    delegate: DelegateSettings | None = None
 
 
 @dataclass
@@ -227,7 +344,19 @@ class OrchestratorController:
     def __init__(
         self, parts: OrchestratorParts, settings: OrchestratorSettings
     ) -> None:
-        """マクロも監視も操作の列も無く、set_started の前の状態で作る。レポートは送らず、スレッドも起動しない。"""
+        """マクロも監視も委任も操作の列も無く、set_started の前の状態で作る。レポートは送らず、スレッドも起動しない。
+
+        委任型 (settings.delegate が None でない) で、parts の latest_frames・buffered_frames・run_log のどれかが None
+        なら ValueError。
+        """
+        if settings.delegate is not None and (
+            parts.latest_frames is None
+            or parts.buffered_frames is None
+            or parts.run_log is None
+        ):
+            raise ValueError(
+                "the delegate mode needs latest_frames, buffered_frames and run_log"
+            )
         self._parts = parts
         self._settings = settings
         # 下の状態は、すべてこのロックの中で読み書きする (run のループの 1 回の回りは、ロックを持ったまま行う)
@@ -259,22 +388,57 @@ class OrchestratorController:
         self._monitor_ends: list[MonitorEnd] = []
         self._discarded = 0
         self._blocked: set[str] = set()
+        # --- 委任型だけで使う状態 (モジュールの docstring の「委任型」) ---
+        self._delegate_log = DelegateLog(parts.paths.orchestrator_delegate_log)
+        # 委任中の状態。委任中でなければ None
+        self._delegation: ActiveDelegation | None = None
+        # start を受け付け、始めるのを待っている委任の値。無ければ None
+        self._pending_delegation: DelegateStart | None = None
+        # 始めるのを待っている委任が、同じ apply で受け付けた主ループの列の終わりを待つなら True
+        self._pending_waits_for_main = False
+        # いちばん新しい委任の値 (DelegateContext.previous と DelegationStatus.values)
+        self._previous_values: DelegateStart | None = None
+        # 委任の通し番号 (delegate_loop の「委任の通し番号」)
+        self._delegate_serial = 0
+        # 今の委任で送った要求の数と、最後に受け取った要求の t_received
+        self._delegate_requests_sent = 0
+        self._last_delegate_received_t: float | None = None
+        self._delegate_in_flight = False
+        self._delegate_returned: list[DelegateRequestResult] = []
+        # apply の stop で操作権を返したときに、次の回りで委任の行動の列を捨てる
+        self._discard_delegate_operations = False
+        # 主ループへの知らせ (take_events で取り出す)
+        self._delegate_ends: list[DelegateEnd] = []
+        self._delegate_discarded = 0
+        self._delegate_skipped: list[DelegateSkippedAction] = []
+
+    @property
+    def _delegate_mode(self) -> bool:
+        """委任型 (OrchestratorSettings.delegate がある) なら True。"""
+        return self._settings.delegate is not None
 
     def apply(self, decision: Decision) -> None:
-        """decision のマクロ・監視・操作を、この順に当てる (モジュールの docstring の apply)。
+        """decision のマクロ・監視 (委任型では委任)・操作を、この順に当てる (モジュールの docstring の apply)。
 
-        登録に無いマクロを呼んでいれば、何も変えずに ValueError を出す。
+        登録に無いマクロを呼んでいれば、何も変えずに ValueError を出す。委任型で decision.monitor が None でなければ、
+        何も変えずに ValueError を出す。
         """
         with self._lock:
+            if self._delegate_mode and decision.monitor is not None:
+                raise ValueError("the delegate mode does not use the monitor")
             # 1: 確かめと展開を、何も変える前に済ませる
             self._check_macro_calls_locked(decision)
             macros_after = self._macros.snapshot()
             macros_after.update(decision.macros_set)
             for name in decision.macros_delete:
                 macros_after.pop(name, None)
+            # 委任中か始める前なら、主ループの actions は列にせずに捨てる (この decision の delegate を当てる前の状態)
+            delegating_before = self._delegate_mode and (
+                self._delegation is not None or self._pending_delegation is not None
+            )
             main_operations = (
                 expand_actions(decision.actions, macros_after)
-                if decision.actions
+                if decision.actions and not delegating_before
                 else None
             )
             new_monitor: ActiveMonitor | None = None
@@ -297,7 +461,16 @@ class OrchestratorController:
             if new_monitor is not None:
                 self._monitor = new_monitor
                 self._next_generation += 1
+            # 3 (委任型): 委任
+            if self._delegate_mode and decision.delegate is not None:
+                self._apply_delegate_locked(
+                    decision.delegate, waits_for_main=main_operations is not None
+                )
             # 4: 操作
+            if delegating_before and decision.actions:
+                self._delegate_discarded += len(decision.actions)
+                # 主ループが待つ列は無い (待たずに次の入力を作る)
+                self._main_run = None
             if main_operations is not None:
                 self._discarded += self._main_remaining_locked()
                 self._pending_main = main_operations
@@ -330,11 +503,18 @@ class OrchestratorController:
                 remaining_action_count=remaining,
                 macros=self._macros.snapshot(),
                 monitor=None if self._monitor is None else self._monitor.monitor,
+                delegate_ends=tuple(self._delegate_ends),
+                delegate_discarded_action_count=self._delegate_discarded,
+                delegate_skipped_actions=tuple(self._delegate_skipped),
+                delegation=self._delegation_status_locked(),
             )
             self._case_hits = {}
             self._monitor_ends = []
             self._discarded = 0
             self._blocked = set()
+            self._delegate_ends = []
+            self._delegate_discarded = 0
+            self._delegate_skipped = []
             return events
 
     def main_actions_run(self) -> MainActionsRun | None:
@@ -351,6 +531,20 @@ class OrchestratorController:
         """
         with self._lock:
             return self._macros.names()
+
+    def delegate_context(self) -> DelegateContext:
+        """今の委任の状態を返す (decision_parser.parse_decision の delegate に渡す)。出来事は取り出さない。
+
+        active は委任中か始める前なら True、previous は前の委任の値 (モジュールの docstring の「委任の状態」)、macros は
+        今登録しているマクロ (MacroRegistry.snapshot)。監視型では、active が False で previous が None の値を返す。
+        """
+        with self._lock:
+            return DelegateContext(
+                active=self._delegation is not None
+                or self._pending_delegation is not None,
+                previous=self._previous_values,
+                macros=self._macros.snapshot(),
+            )
 
     def set_started(self) -> None:
         """実行を始めるときの安全の確かめが通ったことを伝える。これより前は、操作も監視の要求も送らない。
@@ -380,6 +574,9 @@ class OrchestratorController:
                 if stop.is_set():
                     break
                 self._parts.wait(self._wake, self._settings.poll_interval_s)
+            # stop が立って戻るときに委任中なら、委任の終わり (理由 stop) を run.jsonl に書く
+            with self._lock:
+                self._end_delegation_at_stop_locked()
         finally:
             with self._lock:
                 self._closed = True
@@ -391,7 +588,11 @@ class OrchestratorController:
         """モジュールの docstring の「run のループの 1 回の回り」の 1〜4 を行う。"""
         if self._started:
             self._apply_pending_changes_locked()
+            if self._delegate_mode:
+                self._apply_pending_delegate_changes_locked()
         self._handle_returned_requests_locked()
+        if self._delegate_mode:
+            self._handle_returned_delegate_requests_locked()
         if not self._started:
             return
         # 主ループの列の時刻 (released_t) には、主ループの列を進めている間に離した時刻だけを入れる
@@ -403,7 +604,10 @@ class OrchestratorController:
         self._update_main_run_locked(main_was_running, release_t_before)
         if finished_owner == "monitor":
             self._finish_running_case_locked()
-        self._start_request_if_possible_locked()
+        if self._delegate_mode:
+            self._start_delegate_request_if_possible_locked()
+        else:
+            self._start_request_if_possible_locked()
 
     def _apply_pending_changes_locked(self) -> None:
         """apply が受け付けた変更を送信に当てる (回りの 1)。"""
@@ -628,13 +832,14 @@ class OrchestratorController:
         if isinstance(decision.monitor, MonitorCreate):
             for case in decision.monitor.cases:
                 actions.extend(case.actions)
-        missing = sorted(
-            {
-                action.name
-                for action in actions
-                if isinstance(action, MacroAction) and action.name not in available
-            }
-        )
+        names = {action.name for action in actions if isinstance(action, MacroAction)}
+        delegate = decision.delegate
+        if (
+            isinstance(delegate, DelegateStart | DelegateUpdate)
+            and delegate.choices is not None
+        ):
+            names.update(choice.name for choice in delegate.choices)
+        missing = sorted(name for name in names if name not in available)
         if missing:
             raise ValueError(f"macro is not registered: {', '.join(missing)}")
 
@@ -645,3 +850,277 @@ class OrchestratorController:
         if self._executor.owner == "orchestrator":
             return self._executor.remaining_count
         return 0
+
+    # --- 委任型 (呼び出し側がロックを持つ) ---
+
+    def _apply_delegate_locked(
+        self, instruction: DelegateInstruction, waits_for_main: bool
+    ) -> None:
+        """apply の委任の指示を当てる (モジュールの docstring の「委任型」の apply)。
+
+        waits_for_main は、同じ apply で主ループの列を受け付けたなら True (start はその列の終わりを待つ)。
+        """
+        delegation = self._delegation
+        pending = self._pending_delegation
+        if isinstance(instruction, DelegateStart):
+            # 委任中か始める前の start は起きない (parse_decision が誤りにする)
+            if delegation is not None or pending is not None:
+                return
+            self._previous_values = instruction
+            self._pending_delegation = instruction
+            self._pending_waits_for_main = waits_for_main
+            return
+        if isinstance(instruction, DelegateUpdate):
+            if delegation is not None:
+                delegation.update(instruction)
+                self._previous_values = delegation.values
+            elif pending is not None:
+                self._pending_delegation = apply_delegate_update(pending, instruction)
+                self._previous_values = self._pending_delegation
+            else:
+                self._delegate_skipped.append("update")
+                return
+            self._delegate_serial += 1
+            return
+        # DelegateStop
+        if delegation is not None:
+            self._return_control_locked(
+                DelegateEnd(reason="main_stop", detail=MAIN_STOP_DETAIL),
+                from_loop=False,
+            )
+        elif pending is not None:
+            # 始める前なら、始めずに取り消す (delegate_start も delegate_end も書かない)
+            self._pending_delegation = None
+        else:
+            self._delegate_skipped.append("stop")
+
+    def _return_control_locked(self, end: DelegateEnd, from_loop: bool) -> None:
+        """委任を終えて操作権を主ループに返す (モジュールの docstring の「操作権を返す」)。
+
+        from_loop が True なら (run のループのスレッドから)、委任の行動の列をその場で捨てて中立に戻す。False なら
+        (apply から)、次の回りで捨てる。
+        """
+        self._delegation = None
+        self._delegate_serial += 1
+        self._delegate_ends.append(end)
+        self._write_run_log_locked(
+            EVENT_DELEGATE_END, reason=end.reason, detail=end.detail
+        )
+        if from_loop:
+            if self._executor.owner == "delegate":
+                self._executor.cancel()
+        else:
+            self._discard_delegate_operations = True
+
+    def _write_run_log_locked(self, event: str, **fields: object) -> None:
+        """run.jsonl に 1 行書く (委任型では OrchestratorParts.run_log がある)。"""
+        run_log = self._parts.run_log
+        if run_log is not None:
+            run_log.write(event, **fields)
+
+    def _apply_pending_delegate_changes_locked(self) -> None:
+        """回りの 1 (委任型): apply の stop で返した委任の行動の列を捨て、始めるのを待っている委任を始める。"""
+        if self._discard_delegate_operations:
+            self._discard_delegate_operations = False
+            if self._executor.owner == "delegate":
+                self._executor.cancel()
+        values = self._pending_delegation
+        if values is None:
+            return
+        if self._pending_waits_for_main:
+            # 同じ apply で受け付けた主ループの列が終わるまで待つ
+            if self._pending_main is not None:
+                return
+            run = self._main_run
+            if run is not None and run.ended_t is None:
+                return
+        if self._executor.output_stopped:
+            return
+        delegate_settings = self._settings.delegate
+        if delegate_settings is None:
+            return
+        self._pending_delegation = None
+        self._delegation = ActiveDelegation(
+            values, self._parts.clock.now(), delegate_settings.max_errors
+        )
+        self._delegate_serial += 1
+        self._delegate_requests_sent = 0
+        self._write_run_log_locked(
+            EVENT_DELEGATE_START,
+            tasks=list(values.tasks),
+            cautions=list(values.cautions),
+            choices=[
+                {"name": choice.name, "description": choice.description}
+                for choice in values.choices
+            ],
+        )
+
+    def _start_delegate_request_if_possible_locked(self) -> None:
+        """回りの 4 (委任型): 要求を出せるなら、別のスレッドで委任の要求を 1 回送る。"""
+        delegation = self._delegation
+        delegate_settings = self._settings.delegate
+        if (
+            delegation is None
+            or delegate_settings is None
+            or self._delegate_in_flight
+            or self._executor.output_stopped
+        ):
+            return
+        last_received = self._last_delegate_received_t
+        if self._delegate_requests_sent > 0 and last_received is not None:
+            next_t = round_to_milliseconds(
+                last_received + delegate_settings.request_interval_s
+            )
+            if self._parts.clock.now() < next_t:
+                return
+        latest_frames = self._parts.latest_frames
+        buffered_frames = self._parts.buffered_frames
+        if latest_frames is None or buffered_frames is None:
+            return
+        frames = select_delegate_frames(latest_frames(), buffered_frames())
+        if not frames:
+            return
+        self._delegate_in_flight = True
+        self._delegate_requests_sent += 1
+        thread = threading.Thread(
+            target=self._send_delegate_request,
+            args=(
+                delegation.values,
+                delegation.recent_picks(),
+                tuple(frames),
+                self._delegate_serial,
+                delegate_settings,
+            ),
+            name="orchestrator-delegate-request",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except BaseException:
+            self._delegate_in_flight = False
+            raise
+
+    def _send_delegate_request(
+        self,
+        values: DelegateStart,
+        recent_picks: tuple[DelegatePick, ...],
+        frames: tuple[CapturedFrame, ...],
+        serial: int,
+        delegate_settings: DelegateSettings,
+    ) -> None:
+        """委任の要求を 1 回送り、結果をループに返す (要求のスレッドの本体)。"""
+        result: DelegateRequestResult | None = None
+        try:
+            result = ask_delegate(
+                self._parts.jev,
+                values,
+                recent_picks,
+                frames,
+                serial,
+                self._parts.clock,
+                delegate_settings.image_width,
+                delegate_settings.jpeg_quality,
+                self._parts.make_reference,
+            )
+        except Exception as error:
+            logger.debug("delegate request thread failed", exc_info=True)
+            now = self._parts.clock.now()
+            result = DelegateRequestResult(
+                serial=serial,
+                frame_ts=tuple(frame.t for frame in frames),
+                option_names=delegate_option_names(values.choices),
+                t_sent=now,
+                t_received=now,
+                probabilities=None,
+                usage=None,
+                error=describe_exception(error),
+            )
+        finally:
+            with self._lock:
+                self._delegate_in_flight = False
+                if result is not None and not self._closed:
+                    self._delegate_returned.append(result)
+            self._wake.set()
+
+    def _handle_returned_delegate_requests_locked(self) -> None:
+        """回りの 2 (委任型): 返った委任の要求を処理し、1 つごとに delegate.jsonl に 1 行書く。"""
+        returned, self._delegate_returned = self._delegate_returned, []
+        for result in returned:
+            self._last_delegate_received_t = result.t_received
+            chosen = (
+                None
+                if result.probabilities is None
+                else choose_option(result.probabilities, result.option_names)
+            )
+            handling = self._judge_delegate_result_locked(result)
+            self._delegate_log.write(
+                DelegateRecord(
+                    t_sent=result.t_sent,
+                    t_received=result.t_received,
+                    frame_ts=result.frame_ts,
+                    probabilities=result.probabilities,
+                    chosen=chosen,
+                    handling=handling,
+                    usage=result.usage,
+                    error=result.error,
+                )
+            )
+
+    def _judge_delegate_result_locked(
+        self, result: DelegateRequestResult
+    ) -> DelegateHandling:
+        """委任の要求の結果で、行動を始めるか、続けるか、操作権を返すかを決めて行い、行った処理を返す。"""
+        delegation = self._delegation
+        if delegation is None or result.serial != self._delegate_serial:
+            return "ignored"
+        if result.error is not None or result.probabilities is None:
+            end = delegation.record_failure(
+                result.error or "jev returned no probabilities"
+            )
+            if end is None:
+                return "continued"
+            self._return_control_locked(end, from_loop=True)
+            return "returned"
+        answer = delegation.record_answer(result.probabilities, self._parts.clock.now())
+        if answer.start_action is not None:
+            macros = self._macros.snapshot()
+            operations = expand_actions((MacroAction(answer.start_action),), macros)
+            self._executor.start(operations, "delegate")
+            self._executor.advance()
+            return "started"
+        if answer.end is not None:
+            self._return_control_locked(answer.end, from_loop=True)
+            return "returned"
+        return "continued"
+
+    def _delegation_status_locked(self) -> DelegationStatus | None:
+        """take_events の delegation (モジュールの docstring の take_events)。監視型では None。"""
+        if not self._delegate_mode:
+            return None
+        if self._delegation is not None:
+            return self._delegation.status()
+        if self._pending_delegation is not None:
+            return DelegationStatus(
+                active=True,
+                started_t=None,
+                values=self._pending_delegation,
+                last_pick=None,
+                return_streak=0,
+            )
+        return DelegationStatus(
+            active=False,
+            started_t=None,
+            values=self._previous_values,
+            last_pick=None,
+            return_streak=0,
+        )
+
+    def _end_delegation_at_stop_locked(self) -> None:
+        """stop が立って run が戻るときに委任中なら、委任を終え、run.jsonl に delegate_end (理由 stop) を書く。"""
+        if self._delegation is None:
+            return
+        self._delegation = None
+        self._delegate_serial += 1
+        self._write_run_log_locked(
+            EVENT_DELEGATE_END, reason="stop", detail=RUN_STOP_DETAIL
+        )

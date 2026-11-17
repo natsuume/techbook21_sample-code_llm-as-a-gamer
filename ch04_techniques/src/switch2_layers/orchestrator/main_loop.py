@@ -1,9 +1,13 @@
-"""Orchestrator 型の主ループ (OrchestratorMainLoop)。
+"""Orchestrator 型の主ループ (OrchestratorMainLoop)。--mode orchestrator (監視型) と --mode delegate (委任型) で使う。
 
 主ループの Claude Code (claude -p) を stream-json の入出力で開いたままにし、前の判断の操作の列が終わって画面が
 落ち着き、操作の後に撮ったフレームが届いたら (actions が空なら、すぐ) 次の画面と出来事を渡し、各ターンの最後の
-JSON を、操作の実行と監視の部品 (OrchestratorController。parse_decision と apply) に渡す。
+JSON を、操作の実行と監視 (委任型では委任) の部品 (OrchestratorController。parse_decision と apply) に渡す。
 セッションの使用量がしきい値を超えたら、引き継ぎを書かせてからセッションを入れ替える。
+2 つの型の違いは、組み立て (orchestrator_assembly) が渡す部品だけで決まる: 変わらない指示の文
+(OrchestratorMainLoopParts.instructions)、JSON の読み方 (parse_decision)、出来事 (委任型では委任の状況を含む。
+turn_input が委任の節を置く)。委任中に主ループの actions を捨てたときは、controller の main_actions_run が None に
+なるため、待たずに次の入力を作る。
 
 使う部品:
     claude_session_command   起動の引数・--settings・権限のルール・環境変数
@@ -136,8 +140,9 @@ class DecisionParser(Protocol):
     """応答の本文から JSON を読み、検証した結果を返す関数。
 
     組み立て (app) は、今登録しているマクロの名前を decision_parser.parse_decision に渡す関数を渡す
-    (lambda text: parse_decision(text, controller.macro_names()))。parse_decision をそのまま渡すと、登録の照合に
-    空の集合を使うため、前のターンまでに登録したマクロを呼ぶ JSON がすべて誤りになる。
+    (lambda text: parse_decision(text, controller.macro_names())。--mode delegate では、さらに今の委任の状態
+    controller.delegate_context() も渡す)。parse_decision をそのまま渡すと、登録の照合に空の集合を使うため、前の
+    ターンまでに登録したマクロを呼ぶ JSON がすべて誤りになる。
     """
 
     def __call__(self, text: str) -> Decision | DecisionError:
@@ -153,13 +158,15 @@ class DecisionApplier(Protocol):
     """
 
     def apply(self, decision: Decision) -> None:
-        """マクロ・監視・操作を当てる。空でない actions なら、戻る前に main_actions_run をその列のものにする。"""
+        """マクロ・監視 (委任型では委任)・操作を当てる。空でない actions を受け付けたら、戻る前に main_actions_run を
+        その列のものにする。委任中のため actions を捨てたら、戻る前に main_actions_run を None にする。"""
         ...
 
     def main_actions_run(self) -> MainActionsRun | None:
         """最後に受け付けた主ループの空でない actions の操作の列の時刻を返す (無ければ None)。出来事は取り出さない。
 
         主ループは、前のターンの操作の列が終わるのを待つ間、READ_POLL_S 秒ごとに呼ぶ (action_settle.wait_for_settled_actions)。
+        None なら待たない。
         """
         ...
 
@@ -206,6 +213,9 @@ class OrchestratorMainLoopParts:
     signal_process_group   プロセスグループにシグナルを送る関数 (pgid, signal) (None なら os.killpg)
     environ                子プロセスの環境変数の元 (None ならセッションを始めるときの os.environ)
     switch_skills_dir      本体の操作のスキルを写す元 (既定 skill_copy.DEFAULT_SWITCH_SKILLS_DIR)
+    instructions           --append-system-prompt で渡す変わらない指示の文 (既定は
+                           orchestrator_instructions.orchestrator_instructions() の監視型の版。--mode delegate では
+                           orchestrator_instructions.delegate_instructions() の委任型の版を渡す)
     """
 
     paths: RunPaths
@@ -221,6 +231,7 @@ class OrchestratorMainLoopParts:
     signal_process_group: Callable[[int, int], None] | None = None
     environ: Mapping[str, str] | None = None
     switch_skills_dir: Path = field(default=DEFAULT_SWITCH_SKILLS_DIR)
+    instructions: str = field(default_factory=orchestrator_instructions)
 
 
 class _TurnEnd(Enum):
@@ -308,9 +319,9 @@ class OrchestratorMainLoop:
            copy_game_skills の結果の skipped を、写さなかったスキルとして覚える (copy_game_skills を呼ぶたびに
            置き換え、次の入力の TurnContext.skipped_skills に渡す)。
            run_dir = paths.root のシンボリックリンクを解決した絶対パスとして、
-           command = claude_session_command.build_session_command(RunPaths(run_dir),
-           orchestrator_instructions.orchestrator_instructions(), parent_skill_names.find_parent_skill_names(run_dir),
-           claude, settings.rotate_tokens)、env = build_session_env(environ, claude.hidden_env_names)、cwd = run_dir で、
+           command = claude_session_command.build_session_command(RunPaths(run_dir), parts.instructions,
+           parent_skill_names.find_parent_skill_names(run_dir), claude, settings.rotate_tokens)、
+           env = build_session_env(environ, claude.hidden_env_names)、cwd = run_dir で、
            claude_stream_session.ClaudeStreamSession(stream_path=paths.orchestrator_session_stream(番号)) を起動する。
            sessions.jsonl に開始の行 (stream は paths.relative(stream_path))、run.jsonl に
            orchestrator_session_start {"session"} を書く。起動できなければ (OSError)、開始の行は書かずに、終了の行
@@ -545,7 +556,7 @@ class OrchestratorMainLoop:
         run_dir = paths.root.resolve()
         command = build_session_command(
             RunPaths(run_dir),
-            orchestrator_instructions(),
+            parts.instructions,
             find_parent_skill_names(run_dir),
             parts.claude,
             self.settings.rotate_tokens,

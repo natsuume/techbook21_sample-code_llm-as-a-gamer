@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import io
 import itertools
 import json
@@ -2278,3 +2279,53 @@ def test_error_result_of_the_handoff_request_still_rotates(tmp_path):
     assert handoff["kind"] == "handoff"
     assert handoff["outcome"] == "error_result"
     assert harness.parser.calls == [VALID_TEXT]
+
+
+# --- 委任型 (主ループは、渡される部品だけが監視型と違う) ---
+
+DELEGATE_INSTRUCTIONS_TEXT = "委任型の変わらない指示 (テストの文)"
+
+
+def use_delegate_instructions(harness: Harness) -> None:
+    """harness の主ループを、変わらない指示の文だけを DELEGATE_INSTRUCTIONS_TEXT に変えて作り直す (start の前に呼ぶ)。"""
+    harness.loop = OrchestratorMainLoop(
+        dataclasses.replace(
+            harness.loop.parts, instructions=DELEGATE_INSTRUCTIONS_TEXT
+        ),
+        harness.loop.settings,
+    )
+
+
+class DelegatingController(FakeController):
+    """委任中の操作の実行と委任の部品のフェイク。空でない actions を受け付けずに捨て、main_actions_run を None にする。"""
+
+    def apply(self, decision: Decision) -> None:
+        self.applied.append(decision)
+        if decision.actions:
+            self.run = None
+
+
+def test_delegate_instructions_are_passed_to_the_session_command(tmp_path):
+    fake = FakeClaude([[Hang()]])
+    harness = make_harness(tmp_path, fake)
+    use_delegate_instructions(harness)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
+    harness.finish()
+    [process] = fake.processes
+    args = process.args
+    assert args[args.index("--append-system-prompt") + 1] == DELEGATE_INSTRUCTIONS_TEXT
+
+
+def test_delegate_discarded_actions_send_the_next_input_without_waiting(tmp_path):
+    # 委任中は主ループの操作が無いため、前のターンの直後に次のターンを始める
+    controller = DelegatingController(run=RUNNING_RUN)
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(tmp_path, fake, controller=controller)
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert controller.applied == [DECISION]
+    second = text_of(inputs_of(fake, 0)[1])
+    assert "## 前の操作の列" not in second
+    assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)

@@ -5,9 +5,15 @@ import pytest
 from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
+from switch2_layers.orchestrator.decision_parser import (
+    MAX_DELEGATE_CAUTIONS,
+    MAX_DELEGATE_CHOICES,
+    MAX_DELEGATE_TASKS,
+)
 from switch2_layers.orchestrator.orchestrator_instructions import (
     HANDOFF_NOTE,
     PROCEDURE_MAX_COUNT,
+    delegate_instructions,
     handoff_request_text,
     orchestrator_instructions,
 )
@@ -237,3 +243,82 @@ def test_handoff_request_asks_for_the_handoff_note_and_json_without_actions():
     assert "actions" in text
     for item in ("目標", "分かったこと", "効かなかったこと", "監視", "マクロ"):
         assert item in text
+
+
+# --- 委任型の版 (delegate_instructions) ---
+
+
+def test_delegate_instructions_contain_the_safety_rules_verbatim():
+    assert SAFETY_RULES in delegate_instructions()
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "```json",
+        '"actions"',
+        '"macros"',
+        '"delegate"',
+        '"start"',
+        '"update"',
+        '"stop"',
+        '"tasks"',
+        '"cautions"',
+        '"choices"',
+        '"name"',
+        '"description"',
+        '"press"',
+        '"wait"',
+        '"procedure"',
+        '"macro"',
+    ],
+)
+def test_delegate_instructions_describe_the_json_form(word):
+    assert word in delegate_instructions()
+
+
+def test_delegate_instructions_list_every_button_name():
+    # 主ループが押せるボタンは、監視型と同じ 17 個
+    text = delegate_instructions()
+    for button in BUTTON_ORDER:
+        assert button in text
+
+
+def test_delegate_instructions_state_the_limits_of_the_values():
+    text = delegate_instructions()
+    assert sentences_with(text, ("choices", f"{MAX_DELEGATE_CHOICES}"))
+    assert sentences_with(text, ("tasks", f"{MAX_DELEGATE_TASKS}"))
+    assert sentences_with(text, ("cautions", f"{MAX_DELEGATE_CAUTIONS}"))
+    assert sentences_with(text, ("HOME", "マクロ"))
+
+
+def test_delegate_instructions_say_the_first_task_is_the_most_important():
+    assert sentences_with(delegate_instructions(), ("tasks", "最初", "最も重要"))
+
+
+def test_delegate_instructions_say_to_write_avoiding_attacks_in_the_tasks():
+    assert sentences_with(delegate_instructions(), ("攻撃", "避け", "tasks"))
+
+
+def test_delegate_instructions_say_to_write_observed_attack_moves_in_the_cautions():
+    assert sentences_with(delegate_instructions(), ("攻撃", "動き", "cautions"))
+
+
+def test_delegate_instructions_say_not_to_write_proper_names():
+    assert sentences_with(
+        delegate_instructions(), ("固有", "名前"), any_of=("タスク", "tasks")
+    )
+
+
+def test_delegate_instructions_say_actions_are_discarded_while_delegating():
+    assert sentences_with(delegate_instructions(), ("委任中", "actions", "捨て"))
+
+
+def test_delegate_instructions_say_to_write_stop_to_take_control_back():
+    assert sentences_with(delegate_instructions(), ("取り返", '"stop"'))
+
+
+def test_delegate_instructions_have_no_game_title():
+    text = delegate_instructions()
+    for title in ("ロックマン", "エグゼ"):
+        assert title not in text

@@ -262,10 +262,11 @@ advisor 型の run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`reco
 |---|---|
 | `switch2-layers run [--mode advisor] --software NAME --user NAME [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで、指定のソフトを指定のユーザーで起動する準備から始め、3 層を動かします (advisor 型。`--mode` の既定)。Ctrl+C で止めると、HOME メニューに戻って指定のソフトを終了する片付けをしてから止まります |
 | `switch2-layers run --mode orchestrator [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、Claude Code の主ループと、操作の実行と監視を動かします (「Orchestrator 型」の節)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
+| `switch2-layers run --mode delegate [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、Claude Code の主ループと、操作の実行と委任のループを動かします (「Orchestrator 型」の節の「委任型」の項)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。タスクのキューは保存済みの `notes/scenes/<場面ID>/tasks.json` から作り直し、run と同じ規則で取り消しと追加を行って、`tasks.json`・`tasks.md`・`tasks.jsonl` に書き戻します。呼ばれた理由は `interval` です。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map`・`game` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
-middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。`run --mode orchestrator` が確かめる API キーは `TYPESAFE_API_KEY` だけで、`--safety fake` でも要ります (「Orchestrator 型」の節)。
+middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。`run --mode orchestrator` と `run --mode delegate` が確かめる API キーは `TYPESAFE_API_KEY` だけで、`--safety fake` でも要ります (「Orchestrator 型」の節)。
 
 run は、Switch 2 がスリープしておらず、コントローラーのブリッジ (Pico 2 W) を Windows とペアリングした状態で始めます (第2章の [README](../ch02_setup/README.md) の「2. Windows とのペアリング」)。Pico 2 W の入力ではスリープを解除できないため、スリープしていたら本体を操作して復帰させてください (第2章の README の「既知の問題」)。ブリッジを 1P に登録すること、指定のソフトを起動すること、ユーザー選択で指定のユーザーを選ぶことは、advisor 型では run が準備の段階で行い (「本体の画面の扱い」の節)、Orchestrator 型では主ループがスキルで行います。`--software` には HOME メニューでソフトの絵の上に出る名前を、`--user` にはユーザー選択に出る、AI に遊ばせるユーザーの名前を指定します。advisor 型ではどちらも必須です。Orchestrator 型では使わず、起動するソフトと遊ぶユーザーは人の初期指示に書きます。
 
@@ -982,7 +983,7 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 
 ### Orchestrator 型 (`--mode orchestrator`)
 
-`switch2-layers run --mode orchestrator` は、surface・middle・deep の 3 層の代わりに、Claude Code を主ループにしてゲームを遊びます (Orchestrator 型)。主ループの Claude Code が画面の画像と出来事を見て判断し、各ターンの答えの最後に、操作・マクロ・監視を JSON で書きます。コードはその JSON を読んで操作の列を送り、「画面の条件 → 操作」の監視を Jev で動かします。部品は [`src/switch2_layers/orchestrator/`](./src/switch2_layers/orchestrator/) にあります。`--mode` を省いたときと `--mode advisor` では、ここまでの節の 3 層で動きます (advisor 型)。
+`switch2-layers run --mode orchestrator` は、surface・middle・deep の 3 層の代わりに、Claude Code を主ループにしてゲームを遊びます (Orchestrator 型)。主ループの Claude Code が画面の画像と出来事を見て判断し、各ターンの答えの最後に、操作・マクロ・監視を JSON で書きます。コードはその JSON を読んで操作の列を送り、「画面の条件 → 操作」の監視を Jev で動かします。部品は [`src/switch2_layers/orchestrator/`](./src/switch2_layers/orchestrator/) にあります。`--mode` を省いたときと `--mode advisor` では、ここまでの節の 3 層で動きます (advisor 型)。Orchestrator 型には、監視の代わりにリアルタイムの場面の操作を Jev に委任する実装 (委任型。`--mode delegate`) もあります (この節の「委任型」の項)。この節の「委任型」の項より前は、監視型 (`--mode orchestrator`) の説明です。
 
 動かし方の例は次のとおりです。
 
@@ -1066,7 +1067,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 #### Orchestrator 型の起動引数
 
-次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。ただし、値の範囲は advisor 型でも確かめます (下の段落)。
+次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。ただし、値の範囲は advisor 型でも確かめます (下の段落)。`--monitor-threshold` と `--max-monitor-errors` は監視型だけで使い、委任型では使いません。委任型だけで使う引数は、「委任型の起動引数」の項にあります。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
@@ -1098,7 +1099,7 @@ advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs
 | `operations.jsonl` | advisor 型と同じファイルです。主ループの操作は `source` が `orchestrator`、監視の操作は `monitor` の行になります |
 | `.claude/skills/` | 主ループの Claude Code に読ませるスキル。本体の操作のスキルと、確かめて写したゲームの内容のスキルです |
 
-`run.jsonl` の `start` の行の `args` には、`mode` と 6 つの値を書きます。主ループのセッションの開始と終了 (`orchestrator_session_start`・`orchestrator_session_end`) と、JSON の誤り (`orchestrator_decision_error`) も `run.jsonl` に書きます。段階の行 (`phase`・`clean_up_end`) は書きません。
+`run.jsonl` の `start` の行の `args` には、`mode` と 6 つの値を書きます (委任型の 2 つの値も、`--mode` に依らず書きます)。主ループのセッションの開始と終了 (`orchestrator_session_start`・`orchestrator_session_end`) と、JSON の誤り (`orchestrator_decision_error`) も `run.jsonl` に書きます。段階の行 (`phase`・`clean_up_end`) は書きません。
 
 #### Orchestrator 型の止まる理由
 
@@ -1113,13 +1114,150 @@ advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs
 
 安全の監視は advisor 型と同じく、オンライン・購入・本体の設定の画面で止まり、HOME メニューとユーザー選択の画面では止まりません。
 
+#### 委任型 (`--mode delegate`)
+
+`switch2-layers run --mode delegate` は、Orchestrator 型のもう 1 つの実装です (委任型)。主ループの Claude Code は、ターンベースの場面を操作し、ゲームの中の誘導の文・会話・出来事・助言を、Jev に渡すタスクと注意事項にまとめます。リアルタイムの場面では、意味のある行動 (マクロ) の選択肢とタスク・注意事項を Jev に渡して、操作を委任します。Jev が操作を返すと判断したとき、または主ループが委任を終えたときに、操作権は主ループに戻ります。監視型 (`--mode orchestrator`) と並べて、どちらかを選んで動かします。
+
+動かし方の例は次のとおりです。
+
+```bash
+uv run --env-file .env switch2-layers run --mode delegate --instruction '<ソフトの名前> を <ユーザーの名前> で起動して、冒険を始めてください'
+uv run --env-file .env switch2-layers run --mode delegate --instruction-file instruction.md --delegate-image-width 640 --safety fake
+```
+
+1 つ目は、起動するソフトと遊ぶユーザーを、人の初期指示の文で渡します。2 つ目は、初期指示をファイルから読み、Jev に送る画像の幅を 640 にして、安全の監視をフェイクにします。
+
+起動するものは、監視型と同じ共有の部品 (キャプチャー、フレームの保存、キャプチャーの見張り、コントローラーへの送信、安全の監視、画面の停滞の計測)、主ループ、操作の実行と委任のループです。監視 (画面の条件 → 操作) は使えません。主ループのセッションと入れ替え、本体の操作のスキル、ゲームの内容のスキル、`notes/`、人の初期指示の扱いと、入力の画像と次の入力を作る時点は、監視型と同じです。主ループが押せるボタンも、監視型と同じ HOME を含む 17 個です。
+
+| 部品 | 受け持ち |
+|---|---|
+| 主ループ (`orchestrator/main_loop.py`) | 監視型と同じです。変わらない指示は委任型の版 ([`orchestrator/orchestrator_instructions.py`](./src/switch2_layers/orchestrator/orchestrator_instructions.py) の `delegate_instructions`) を渡し、JSON の `delegate` を読みます |
+| 操作の実行と委任のループ (`orchestrator/orchestrator_controller.py`・[`orchestrator/delegate_loop.py`](./src/switch2_layers/orchestrator/delegate_loop.py)) | JSON の操作の列を 1 つずつコントローラーに送り、マクロと委任を持ちます。委任中は、Jev に意味のある行動を選ばせ、選んだ行動のマクロを送ります |
+
+#### 委任型の JSON の `delegate`
+
+最上位のキーは `actions` (主ループの操作の列)・`macros`・`delegate` で、どれも省けます。`monitor` を書くと誤りです。操作とマクロの書き方は、監視型と同じです。Jev に選ばせる意味のある行動は、最上位の `actions` と区別するため、`delegate` の `choices` に書きます。
+
+```json
+{
+  "actions": [{"type": "press", "buttons": ["A"]}],
+  "macros": {"set": {
+    "attack": [{"type": "press", "buttons": ["B"]}],
+    "move_up": [{"type": "press", "buttons": ["UP"]}]
+  }},
+  "delegate": {"action": "start",
+    "tasks": ["最重要: 自分の HP を 0 にせずに、敵をすべて倒す", "敵の攻撃は、可能なら避ける"],
+    "cautions": ["敵が腕を振り上げた後、横一列に進む衝撃波が来る"],
+    "choices": [
+      {"name": "attack", "description": "前にいる敵を攻撃する"},
+      {"name": "move_up", "description": "上に 1 マス移動する"}
+    ]}
+}
+```
+
+`delegate` は次の 3 つの形をとります。
+
+| 形 | 内容 |
+|---|---|
+| `{"action": "start", "tasks": [...], "cautions": [...], "choices": [{"name": <マクロの名前>, "description": <意味のある行動の説明>}, ...]}` | 委任を始めます。同じ JSON の最上位の `actions` がすべて終わってから始めます (`actions` が空なら、すぐに始めます)。`tasks`・`cautions`・`choices` を省くと、前の委任の値を使います。前の委任が無いのに省くと誤りです。委任中に書くと誤りです (委任中の変更は `update` で行います) |
+| `{"action": "update", ...}` | 委任中に、タスク・注意事項・行動を置き換えます。省いたキーは変えません。実行中の行動は止めません |
+| `{"action": "stop"}` | 委任を終え、操作権を主ループに戻します |
+
+委任中でも、委任を始める前 (`start` と同じ JSON の最上位の `actions` が終わるのを待っている間) でもないときの `update`・`stop` は、誤りにせず、`delegate` だけを当てません。同じ JSON の `actions`・`macros` は当て、次の入力の出来事に「委任はすでに終わっていたため、delegate の stop を当てなかった」(`update` なら「delegate の update を当てなかった」) と書きます。主ループが考えている間に Jev が操作権を返したときに、1 ターンを失わないためです。`update`・`stop` の値の規則は、委任中かに依らず確かめます。
+
+値の規則は次のとおりです。どれかに反すると、ほかの JSON の誤りと同じく、操作・マクロ・委任のどれも変えずに、次の入力に誤りの説明を書きます。
+
+- `choices` は 1〜12 個で、`name` は登録済みのマクロの名前 (同じ JSON の `macros` を当てた後の登録)、`description` は空でない文です。同じ `name` を 2 回書けません。HOME を押すマクロ (手順を展開した操作の列に、HOME を押す `press` があるもの) は使えません。`none` と `return_control` は Jev の選択肢の名前に使うため、行動の名前にできません
+- `tasks` は 1〜10 個、`cautions` は 0〜10 個の、空でない文です
+- 委任中 (委任を始める前を含みます) は、`choices` に使っているマクロを、`macros` の `delete` で消せません。`macros` の `set` で HOME を押す操作の列に置き換えることもできません。どちらも、`delegate` を書かない JSON でも誤りです。行動に使っていないマクロは、HOME を押す列でも登録できます
+
+主ループへの変わらない指示 (委任型の版) には、次のことを書いています。
+
+- `tasks` の最初に、その場面で最も重要なこと (例: 自分の HP を 0 にせずに、敵をすべて倒す) を書く
+- 敵の攻撃を避けることが要る場面では、そのことを `tasks` に書く
+- 敵の攻撃の動きを観測できたら、`cautions` に書く
+- タスク・注意事項・行動の説明に、ゲーム名や作品に固有の名前 (登場人物・地名など) を書かない
+- 委任中は、最上位の `actions` が捨てられる。取り返すときは `{"action": "stop"}` を書く
+
+#### 委任中の主ループ
+
+委任中も、主ループのターンは監視型と同じ規則で続けます。委任中の JSON の最上位の `actions` は捨て、次の入力の出来事に「委任中のため、操作を捨てた: <個数> 個」と書きます。主ループの操作が無いため、前のターンの直後に次のターンを始めます。同じ JSON の `delegate` の `update`・`stop` と `macros` は当てます。
+
+入力のテキストには、監視型の「今の監視」の節の代わりに「委任」の節を置き、委任の状況を書きます。委任中でなければ、タスク・注意事項・行動は前の委任の値 (`start` で省いたキーに使う値) です。
+
+| 項目 | 内容 |
+|---|---|
+| 委任中 | `はい` か `いいえ` (委任を始める前も `はい`) |
+| 委任を始めた時刻 | 委任を始めた時刻。委任中でないときと、まだ始めていないときは「無し」 |
+| タスク・注意事項・行動 | 今のタスク・注意事項・行動 (JSON の配列) |
+| Jev が直近に選んだ行動 | 行動の名前と、その行動を始めた時刻 |
+| Jev が「操作を返す」を続けて選んだ回数 | 回数 |
+
+操作権が主ループに戻ったときは、次の入力の出来事に、戻った理由 (`jev_return`・`main_stop`・`errors`) と説明を書きます。
+
+#### 委任のループの動き
+
+委任を始めたら、Jev への要求を 1 つずつ送ります。委任を始めた後の最初の要求はすぐに送り、その後は、前の要求の応答 (または失敗) を受け取った時刻から 0.2 秒たったら、次の要求を送ります。主ループの操作や、Jev が選んだ行動を実行している間も送ります。
+
+要求の state には、役割の説明、`tasks`、`cautions`、今の委任で直近に選んで始めた行動 (最大 5 件。行動の名前と始めた時刻)、最新の 5 枚の画像を入れます。画像は、一定間隔のフレーム (`--interval-fps`) の直近 5 枚と同じ時刻のフレームを、元のフレームから幅 `--delegate-image-width` で作ります。時刻や枠は書き込まず、古い順に並べて、時刻のラベルを付けます。元のフレームは直近の 3 秒分だけを持つため、`--interval-fps` を下げて 5 枚が 3 秒より前にさかのぼると、残っている分だけを送ります。
+
+問いは Choice の 1 問で、選択肢は `none` (何もしない)、主ループが書いた行動 (書いた順。選択肢の名前はマクロの名前)、`return_control` (操作を返す) の順です。Jev は先頭の選択肢に寄ることがあるため、先頭を何もしない `none` にしています。答えは、確率がいちばん高い選択肢 (同じ確率なら先の選択肢) で決めます。
+
+| 選んだ選択肢 | 動き |
+|---|---|
+| 行動 | 実行中の行動の残りを捨て、そのマクロを始めます |
+| `none` | 実行中の行動を続けます |
+| `return_control` | 2 回続けて選んだら、操作権を主ループに返します。1 回目は `none` と同じく、実行中の行動を続けます。ほかの選択肢を選んだら、数え直します |
+
+Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate-errors` 回 (既定 5) 続いたら、操作権を主ループに返します。実行は続けます。答えがあれば、失敗の回数は 0 に戻ります。操作権を返すとき (Jev が返す、主ループの `stop`、失敗が続いた) は、実行中の行動を捨てて操作を中立にします。要求を送った後に委任を終えたときと、`update` で値を置き換えたときは、その要求の応答を使いません。委任中も安全の監視は動き、止める画面なら実行全体を止めます。
+
+#### 委任型の起動引数
+
+次の 2 つの引数は、委任型だけで使います。値の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型と監視型でも、実機に触れずに終了します (終了コード 2)。
+
+| 引数 | 内容 | 既定値 | 範囲 |
+|---|---|---|---|
+| `--delegate-image-width N` | 委任のループが Jev に送る画像の幅。下限は、Jev が受け付ける画像の各辺の下限 280 ピクセルを、16:9 の高さで満たす幅です | 1280 | 498〜1280 の整数 |
+| `--max-delegate-errors N` | 委任のループの Jev の失敗がこの回数続いたら、操作権を主ループに返します | 5 | 1 以上の整数 |
+
+`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors` と、advisor 型と共通の引数の使い方は、監視型と同じです (「Orchestrator 型の起動引数」の項)。監視型だけで使う `--monitor-threshold`・`--max-monitor-errors` は使いません。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめます。委任に Jev を使うため、`--safety fake` でも要ります。
+
+#### 委任型の記録
+
+監視型の記録 (「Orchestrator 型の記録」の項) のうち、`orchestrator/monitor.jsonl` は書かず、次の記録を書きます。
+
+| ファイル | 内容 |
+|---|---|
+| `orchestrator/delegate.jsonl` | 委任のループが Jev に送った要求ごとに 1 行。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、送った画像の時刻 (`frame_ts`。古い順)、選択肢ごとの確率 (`probabilities`)、選んだ選択肢 (`chosen`)、そのとき行った処理 (`handling`)、Jev の応答の `usage`、失敗の説明 (`error`) を書きます。`handling` は、行動を始めた `started`、続けた `continued`、操作権を返した `returned`、応答を使わなかった `ignored` です。`chosen` は、その要求で送った選択肢の名前から決めます。失敗した要求では、`probabilities`・`chosen`・`usage` を null にします |
+| `run.jsonl` | 委任の始まり (`delegate_start`。`tasks`・`cautions`・`choices`) と終わり (`delegate_end`。`reason` と `detail`) の行を書きます。`reason` は、Jev が操作を返した `jev_return`、主ループの `stop` の `main_stop`、Jev の失敗が続いた `errors`、実行全体を止めた `stop` です。`start` の行の `args` には、`mode` と 2 つの値 (`delegate_image_width`・`max_delegate_errors`) も書きます |
+| `operations.jsonl` | Jev が選んだ行動の操作は、`source` が `delegate` の行になります。主ループの操作は、監視型と同じく `orchestrator` です |
+
+#### 委任型の止まる理由
+
+止まる理由は、監視型と同じです (「Orchestrator 型の止まる理由」の項)。ただし、監視のループの代わりに委任のループが動くため、`monitor loop failed` の代わりに次の理由があります。Jev の失敗が続いたときは、操作権を主ループに返すだけで、実行全体は止めません。
+
+| 条件 | `stop` の理由 |
+|---|---|
+| 委任のループのスレッドが想定外の例外で終わった (`orchestrator/delegate.jsonl` に書けないときなど) | `delegate loop failed: <例外の説明>` |
+
+#### 委任型の事前検証
+
+実装の前に、保存済みのバトルのフレーム (幅 640、各場面の直近 5 枚) で、Jev に意味のある行動を選ばせる検証を行いました (2026-11-17、22 場面)。
+
+- 操作を返すべき画面 (会話・選ぶ画面・結果の表示) で「操作を返す」を選んだのは 6/6、ゲージが満タンのときに「選び直す画面を開く」を選んだのは 3/3 でした。「リアルタイムの戦いの画面か」を Noul で問うと 15/15 でした
+- 衝撃波を避ける場面は 0/7 でした。タスクに「最重要: HP を 0 にせずに敵をすべて倒す」「敵の攻撃は、可能なら避ける」、注意事項に衝撃波の動きを書くと 2/7 になりましたが、上下の移動の確率の和は、衝撃波が来ている場面で平均 0.24、来ていない場面で 0.22 と差がありませんでした
+- リアルタイムの戦いの画面では、「前へ 1 マス」に寄りました
+- 幅 1280 の画像で位置の判断が変わるかは、確かめていません
+
+敵の攻撃を避けるなどの位置の判断を Jev に任せられるかは、未検証です。
+
 ### run の起動引数
 
 `switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、advisor 型では run が準備の段階で行います。Orchestrator 型では、コントローラーの持ちかたと順番を変える画面が出たときに、主ループが本体の操作のスキル (`switch-controller-order`) でコントローラーを認識させます。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--mode {advisor,orchestrator}` | run の型。`advisor` は surface・middle・deep の 3 層、`orchestrator` は Claude Code の主ループと、操作の実行と監視を動かします (「Orchestrator 型」の節) | `advisor` | `advisor`、`orchestrator` |
+| `--mode {advisor,orchestrator,delegate}` | run の型。`advisor` は surface・middle・deep の 3 層、`orchestrator` は Claude Code の主ループと、操作の実行と監視、`delegate` は Claude Code の主ループと、操作の実行と委任のループを動かします (「Orchestrator 型」の節) | `advisor` | `advisor`、`orchestrator`、`delegate` |
 | `--software NAME` | 起動するソフトの名前 (advisor 型では必須。Orchestrator 型では使いません)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--user NAME` | ソフトを遊ぶユーザーの名前 (advisor 型では必須。Orchestrator 型では使いません)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
@@ -1150,7 +1288,7 @@ advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs
 | `--task-stuck-seconds S` | 現在の場面の最も古いタスクの続いた秒数がこれを超えたら、間隔を待たずに middle を呼びます (きっかけ `stuck`)。超えたまま続く間は、この秒数ごとに呼びます | 30 | 0 より大きい有限の値 |
 | `--system-advice-seconds S` | 準備・復帰の段階がこの秒数を超えて続いたら、助言の deep をきっかけ `system` で求めます。超えたまま続く間は、この秒数ごとに求めます (「本体の画面の扱い」の節の「本体の画面の助言」の項) | 90 | 0 より大きい有限の値 |
 
-Orchestrator 型だけで使う引数 (`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors`・`--monitor-threshold`・`--max-monitor-errors`) は、「Orchestrator 型」の節の「Orchestrator 型の起動引数」の項にあります。
+Orchestrator 型だけで使う引数 (`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors`・`--monitor-threshold`・`--max-monitor-errors`) は、「Orchestrator 型」の節の「Orchestrator 型の起動引数」の項にあります。委任型だけで使う引数 (`--delegate-image-width`・`--max-delegate-errors`) は、同じ節の「委任型の起動引数」の項にあります。
 
 範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。advisor 型で `--software` か `--user` が無いときと、値が空か空白だけのときも、引数の誤りとして使い方を表示し、実機に触れずに終了します (終了コード 2)。2 つの名前は、書かれたまま本体の画面の middle の入力に入れ、`run.jsonl` の `start` の行の `args` (`software_name`・`user_name`) にも書きます。Orchestrator 型で 2 つの名前を渡さなかったときは、`args` に空文字列を書きます。advisor 型で、`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
@@ -1182,11 +1320,11 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです。`args` の `mode` は run の型 (`advisor` か `orchestrator`) で、Orchestrator 型の 6 つの値も `--mode` に依らず入ります)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節。advisor 型だけ)、Orchestrator 型の主ループのセッションの開始・終了と JSON の誤り (「Orchestrator 型」の節)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです。`args` の `mode` は run の型 (`advisor`・`orchestrator`・`delegate` のどれか) で、Orchestrator 型の 6 つの値と委任型の 2 つの値も `--mode` に依らず入ります)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節。advisor 型だけ)、Orchestrator 型の主ループのセッションの開始・終了と JSON の誤り (「Orchestrator 型」の節)、委任型の委任の始まりと終わり (`delegate_start`・`delegate_end`。「Orchestrator 型」の節の「委任型の記録」の項)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、その要求の先頭のタスクの ID (`task_id`。先頭のタスクが無ければ null。失敗の行にも書きます)、state の `map` に入れたマップの場所の `name` (`map_place`。マップを渡さなかった行、`--surface fake` の行、失敗の行では null)、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
 | `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、確かめの種類 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
-| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`system`・`orchestrator`・`monitor`・`neutral`・`stop`。`apply` は surface の操作、`system` は本体の画面の操作と `press_home` の HOME、`orchestrator` と `monitor` は Orchestrator 型の主ループと監視の操作)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
+| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`system`・`orchestrator`・`monitor`・`delegate`・`neutral`・`stop`。`apply` は surface の操作、`system` は本体の画面の操作と `press_home` の HOME、`orchestrator` と `monitor` は Orchestrator 型の主ループと監視の操作、`delegate` は委任型の Jev が選んだ行動の操作)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
 | `tasks.jsonl` | 短期のタスクのキューの出来事の記録 (「middle の実装」の節の「短期のタスクのキュー」)。キューの部品が、出来事ごとに 1 行 `{"t", "event", "scene_id", "id", "text", "reason", "active_s", "destination"}` を追記します。`event` は `added` (足した)・`dropped` (足せなかった)・`done` (完了)・`cancel_requested` (取り消しの要求)・`canceled` (取り消し) です。`id` はタスクの ID (`dropped` では null)、`text` は整えた後の文、`reason` は `dropped` の理由 (`empty`・`duplicate`・`limit`。ほかでは null)、`active_s` は `done`・`cancel_requested`・`canceled` のときの続いた秒数 (ほかでは null)、`destination` は `added` のときの行き先 (`tasks.json` と同じ形。ほかでは null) です。middle は、前回読んだ位置より後の行を次の入力に使います |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
@@ -1199,7 +1337,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `middle/map_records.jsonl` | middle のマップの記録。現在地の場所の名前とマス、新しく分かった場所のつながりと観察 (マス目型のマップではマスの座標を含みます) を、判断に使った画像の時刻と場面 ID とともに、1 行 1 回の JSON で足します (「middle の実装」の節)。deep の `map` のジョブが読みます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書の `notes/` からのパス、`map` のジョブで書くマップの型 `map_layout`) を置きます。Claude Code で動かしたジョブには、`stream.jsonl` (Claude Code の stream-json の出力。1 行に、起動からの秒と出力の 1 行) と `result.json` (終了コード、所要時間、費用、最後のメッセージ、エラーで終わったか、拒まれたツールの呼び出し、停止・強制終了したか、標準エラー出力) も置きます。起動前に止めたときは、`result.json` の `error` に理由を書きます |
 | `notes/` | 文書 (次の表) |
-| `orchestrator/` | Orchestrator 型の記録 (「Orchestrator 型」の節の「Orchestrator 型の記録」の項)。人の初期指示の写し (`instruction.md`。初期指示を渡さなければ無い)、主ループのセッションとターンの記録 (`sessions.jsonl`・`turns.jsonl`・`session-<NNN>/stream.jsonl`)、監視の要求の記録 (`monitor.jsonl`) を置きます。advisor 型では作りません |
+| `orchestrator/` | Orchestrator 型の記録 (「Orchestrator 型」の節の「Orchestrator 型の記録」の項)。人の初期指示の写し (`instruction.md`。初期指示を渡さなければ無い)、主ループのセッションとターンの記録 (`sessions.jsonl`・`turns.jsonl`・`session-<NNN>/stream.jsonl`)、監視の要求の記録 (`monitor.jsonl`。監視型だけ)、委任の要求の記録 (`delegate.jsonl`。委任型だけ) を置きます。advisor 型では作りません |
 
 `surface.jsonl` に書く画像のファイル名は、その要求で送った画像の保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
 
@@ -1221,7 +1359,7 @@ advisor 型では、`notes/` に起動時に次の文書を作ります。Orches
 
 ### 押せるボタン
 
-surface が決めた操作は、コントローラーに送る直前に、surface の押せるボタンに制限し、段階が play のときだけ送ります。surface の押せるボタンは HOME を除く 16 個で、surface は HOME を押しません (起動時の `notes/common/controls.md` のボタンの並びも 16 個です。Jev へのボタンの問いは、このうち十字キーの 4 方向を除いた 12 個で、十字キーは方向と押し方の 2 問にしています)。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。本体の画面の操作と、middle のゲーム用の出力の `press_home` で押す HOME は、HOME を含む 17 個を押せます (「本体の画面の扱い」の節)。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーの方向を 1 つの問いで選ぶため、相反する方向を同時に押す指示を出しません。これは、ほかの実装から来る操作のための処理です)。Orchestrator 型では、主ループと監視の操作を、surface の制限を通さずに HOME を含む 17 個のボタンで送ります (段階は使わないため、play の確かめもしません)。
+surface が決めた操作は、コントローラーに送る直前に、surface の押せるボタンに制限し、段階が play のときだけ送ります。surface の押せるボタンは HOME を除く 16 個で、surface は HOME を押しません (起動時の `notes/common/controls.md` のボタンの並びも 16 個です。Jev へのボタンの問いは、このうち十字キーの 4 方向を除いた 12 個で、十字キーは方向と押し方の 2 問にしています)。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。本体の画面の操作と、middle のゲーム用の出力の `press_home` で押す HOME は、HOME を含む 17 個を押せます (「本体の画面の扱い」の節)。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーの方向を 1 つの問いで選ぶため、相反する方向を同時に押す指示を出しません。これは、ほかの実装から来る操作のための処理です)。Orchestrator 型では、主ループと監視 (委任型では Jev が選んだ行動) の操作を、surface の制限を通さずに HOME を含む 17 個のボタンで送ります (段階は使わないため、play の確かめもしません)。
 
 短押しは 120 ミリ秒押して離します。秒数の無い押し続けは、次の操作まで押したままにします。Jev の surface が `hold` を選んだボタンには秒数を付けず (`hold_seconds` は空の object です)、次の判断でも `hold` を選ぶと離さずに続けます。秒数を指定した押し続けは、押したレポートの送信が戻ってからその秒数がたったら、次の操作を待たずに離します。押し続けているボタンを次の操作でも押し続けにすると、離さずに、その操作の送信が戻った時刻から新しい秒数を数え直します。秒数が 0 以下・nan・無限大の押し続けは、押さずに外します (`blocked_buttons` には書きません)。秒数の上限は 60 秒で、超えた値は 60 秒として扱います。スティックは次の操作まで倒したままにします。
 
@@ -1231,7 +1369,7 @@ surface が決めた操作は、コントローラーに送る直前に、surfac
 
 次のどれかが起きると止まり、`run.jsonl` の `stop` に理由を書きます。片付けの列に ○ を付けた理由では、準備・プレイ・復帰のどれかの段階に入っていれば、すぐには止まらずに片付け (「本体の画面の扱い」の節) をしてから止まります。ほかの理由では、すぐに操作を中立に戻して以後の操作を送らないようにし、3 層を止めます。
 
-Orchestrator 型では段階に入らないため、どの理由でも片付けをせずにすぐ止まります。次の表のうち、surface・middle の失敗の行は advisor 型だけの理由です。Orchestrator 型だけの理由 (主ループと、操作の実行と監視のループの理由) は、「Orchestrator 型」の節の「Orchestrator 型の止まる理由」の項にあります。
+Orchestrator 型では段階に入らないため、どの理由でも片付けをせずにすぐ止まります。次の表のうち、surface・middle の失敗の行は advisor 型だけの理由です。Orchestrator 型だけの理由 (主ループと、操作の実行と監視のループの理由) は、「Orchestrator 型」の節の「Orchestrator 型の止まる理由」の項に、委任型の委任のループの理由は「委任型の止まる理由」の項にあります。
 
 | 条件 | `stop` の理由 | 片付け |
 |---|---|---|
@@ -1252,7 +1390,7 @@ Orchestrator 型では段階に入らないため、どの理由でも片付け�
 
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
-止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、claude のセッションを閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
+止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視 (委任型では委任) のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、claude のセッションを閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
 
 ## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
 

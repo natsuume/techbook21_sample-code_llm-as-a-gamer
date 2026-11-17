@@ -7,6 +7,8 @@ import pytest
 from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.orchestrator.decision_types import (
     DecisionError,
+    DelegateChoice,
+    DelegateStart,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -16,6 +18,9 @@ from switch2_layers.orchestrator.decision_types import (
 )
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    DelegateEnd,
+    DelegatePick,
+    DelegationStatus,
     MainActionsRun,
     MonitorEnd,
     OrchestratorEvents,
@@ -34,6 +39,7 @@ from switch2_layers.orchestrator.turn_input import (
     build_turn_text,
     carry_over_events,
     describe_decision_error,
+    describe_delegation,
     describe_events,
     describe_macros,
     describe_monitor,
@@ -584,3 +590,116 @@ def test_content_has_text_then_a_label_and_image_for_each_frame():
 
 def test_content_without_images_is_the_text_only():
     assert build_turn_content("引き継ぎ", []) == [{"type": "text", "text": "引き継ぎ"}]
+
+
+# --- 委任型の委任の状況と出来事 ---
+
+DELEGATION_VALUES = DelegateStart(
+    tasks=("最重要: HP を 0 にせずに敵をすべて倒す", "敵の攻撃は、可能なら避ける"),
+    cautions=("衝撃波は横一列に進む",),
+    choices=(DelegateChoice(name="attack", description="前の敵を攻撃する"),),
+)
+DELEGATING = DelegationStatus(
+    active=True,
+    started_t=12.5,
+    values=DELEGATION_VALUES,
+    last_pick=DelegatePick(name="attack", t=13.25),
+    return_streak=1,
+)
+NOT_DELEGATING = DelegationStatus(
+    active=False, started_t=None, values=None, last_pick=None, return_streak=0
+)
+JEV_RETURN = DelegateEnd(
+    reason="jev_return", detail="jev chose return_control 2 times in a row"
+)
+MAIN_STOP = DelegateEnd(
+    reason="main_stop", detail="the main loop wrote the delegate stop"
+)
+
+
+def test_delegate_status_while_delegating_has_the_values_the_last_pick_and_the_count():
+    assert describe_delegation(DELEGATING).splitlines() == [
+        "委任中: はい",
+        "委任を始めた時刻: t=12.500",
+        'タスク: ["最重要: HP を 0 にせずに敵をすべて倒す", "敵の攻撃は、可能なら避ける"]',
+        '注意事項: ["衝撃波は横一列に進む"]',
+        '行動: [{"name": "attack", "description": "前の敵を攻撃する"}]',
+        "Jev が直近に選んだ行動: attack (t=13.250)",
+        "Jev が「操作を返す」を続けて選んだ回数: 1",
+    ]
+
+
+def test_delegate_status_without_any_delegation_says_none():
+    assert describe_delegation(NOT_DELEGATING).splitlines() == [
+        "委任中: いいえ",
+        f"委任を始めた時刻: {NONE_TEXT}",
+        f"タスク: {NONE_TEXT}",
+        f"注意事項: {NONE_TEXT}",
+        f"行動: {NONE_TEXT}",
+        f"Jev が直近に選んだ行動: {NONE_TEXT}",
+        "Jev が「操作を返す」を続けて選んだ回数: 0",
+    ]
+
+
+def test_delegate_turn_text_has_the_delegation_section_instead_of_the_monitor():
+    context = TurnContext(
+        now_t=14.0,
+        events=events(delegation=DELEGATING),
+        progress=None,
+        previous_error=None,
+    )
+    text = build_turn_text(context)
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "## 時刻",
+        "## 前の判断の後の出来事",
+        "## 主ループの操作",
+        "## 画面の停滞 (コードの計測)",
+        "## 前の JSON の誤り",
+        "## 写さなかったスキル",
+        "## 委任",
+        "## 今のマクロ",
+        "## 古いフレーム",
+    ]
+    assert f"## 委任\n{describe_delegation(DELEGATING)}\n" in text
+
+
+def test_delegate_events_tell_the_return_of_control_and_the_discarded_actions():
+    lines = describe_events(
+        events(delegate_ends=(JEV_RETURN,), delegate_discarded_action_count=3)
+    ).splitlines()
+    assert (
+        "委任が終わり、操作権が主ループに戻った (jev_return): "
+        "jev chose return_control 2 times in a row"
+    ) in lines
+    assert "委任中のため、操作を捨てた: 3 個" in lines
+
+
+def test_delegate_one_time_events_are_carried_over():
+    carried = events(delegate_ends=(MAIN_STOP,), delegate_discarded_action_count=2)
+    taken = events(
+        delegate_ends=(JEV_RETURN,),
+        delegate_discarded_action_count=1,
+        delegation=NOT_DELEGATING,
+    )
+    merged = carry_over_events(carried, taken)
+    assert merged.delegate_ends == (MAIN_STOP, JEV_RETURN)
+    assert merged.delegate_discarded_action_count == 3
+    assert merged.delegation == NOT_DELEGATING
+
+
+def test_delegate_events_tell_the_delegate_action_not_applied():
+    lines = describe_events(
+        events(delegate_skipped_actions=("stop", "update"))
+    ).splitlines()
+    assert lines == [
+        "委任はすでに終わっていたため、delegate の stop を当てなかった",
+        "委任はすでに終わっていたため、delegate の update を当てなかった",
+    ]
+
+
+def test_delegate_actions_not_applied_are_carried_over():
+    carried = events(delegate_skipped_actions=("stop",))
+    taken = events(delegate_skipped_actions=("update",))
+    merged = carry_over_events(carried, taken)
+    assert merged.delegate_skipped_actions == ("stop", "update")

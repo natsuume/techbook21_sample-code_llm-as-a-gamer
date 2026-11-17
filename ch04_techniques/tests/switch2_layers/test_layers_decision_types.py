@@ -7,6 +7,11 @@ import pytest
 from switch2_layers.orchestrator.decision_types import (
     Decision,
     DecisionError,
+    DelegateChoice,
+    DelegateContext,
+    DelegateStart,
+    DelegateStop,
+    DelegateUpdate,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -76,5 +81,26 @@ def test_field_names_follow_the_io_contract():
     assert names(MacroAction) == ["name"]
     assert names(MonitorCase) == ["condition", "actions", "repeat"]
     assert names(MonitorCreate) == ["name", "cases"]
-    assert names(Decision) == ["actions", "macros_set", "macros_delete", "monitor"]
+    assert names(Decision) == [
+        "actions",
+        "macros_set",
+        "macros_delete",
+        "monitor",
+        "delegate",
+    ]
     assert names(DecisionError) == ["messages"]
+
+
+def test_delegate_field_names_and_defaults_follow_the_io_contract():
+    def names(cls: type) -> list[str]:
+        return [field.name for field in dataclasses.fields(cls)]
+
+    assert names(DelegateChoice) == ["name", "description"]
+    assert names(DelegateStart) == ["tasks", "cautions", "choices"]
+    assert names(DelegateUpdate) == ["tasks", "cautions", "choices"]
+    assert dataclasses.fields(DelegateStop) == ()
+    assert names(DelegateContext) == ["active", "previous", "macros"]
+    # 委任の指示が無い Decision は、今の委任を変えない
+    assert Decision().delegate is None
+    # update で省いたキーは None (変えない)
+    assert DelegateUpdate() == DelegateUpdate(tasks=None, cautions=None, choices=None)

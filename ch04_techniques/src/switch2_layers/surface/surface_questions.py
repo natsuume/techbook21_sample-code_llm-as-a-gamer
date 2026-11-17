@@ -120,10 +120,11 @@ class QuestionType(StrEnum):
 
 
 class QuestionKind(StrEnum):
-    """Jev に送る問いの種類。SAFETY と MONITOR のほかは surface の問い (モジュールの docstring の表)。
+    """Jev に送る問いの種類。SAFETY・MONITOR・DELEGATE のほかは surface の問い (モジュールの docstring の表)。
 
     SAFETY は安全の監視の問い (safety.safety_questions)、MONITOR は Orchestrator 型の監視の問い
-    (orchestrator.monitor_questions) で、どちらも surface の要求には入れない。
+    (orchestrator.monitor_questions)、DELEGATE は委任型の委任のループの問い (orchestrator.delegate_questions) で、
+    どれも surface の要求には入れない。
     """
 
     BUTTON = "button"
@@ -140,6 +141,7 @@ class QuestionKind(StrEnum):
     TASK_CANCEL = "task_cancel"
     SAFETY = "safety"
     MONITOR = "monitor"
+    DELEGATE = "delegate"
 
 
 @dataclass(frozen=True)
@@ -166,11 +168,12 @@ class SurfaceQuestion:
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
                     scene_change・task_done・task_cancel は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
                     safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素か
-                    SYSTEM_SCREEN_QUESTION_NAME)、monitor は監視の名前
-    question_type   Jev の問いの型。button・dpad_direction・dpad_press・stick_direction・monitor と、safety の
+                    SYSTEM_SCREEN_QUESTION_NAME)、monitor は監視の名前、delegate は空文字列
+    question_type   Jev の問いの型。button・dpad_direction・dpad_press・stick_direction・monitor・delegate と、safety の
                     SYSTEM_SCREEN_QUESTION_NAME は choice、box は box、ほかは noul
     choices         選択肢の問いの選択肢 (先頭は NONE_CHOICE。ただし dpad_press には none が無く、先頭は TAP_CHOICE。
-                    押さないかは dpad_direction で決まるため)。ほかの型では空のタプル
+                    押さないかは dpad_direction で決まるため。monitor と delegate の先頭は、それぞれのモジュールの
+                    何もしない選択肢)。ほかの型では空のタプル
     """
 
     name: str
