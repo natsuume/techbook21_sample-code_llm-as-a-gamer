@@ -6,9 +6,10 @@
     t_sent          ask を呼んだ時刻 (実行の経過秒)
     t_received      ask が戻った (または例外を出した) 時刻
     frame_ts        送った画像の元のフレームの時刻の配列 (古い順)
-    probabilities   選択肢ごとの確率 (delegate_questions.delegate_option_names の順)。失敗した要求では null
-    chosen          選んだ選択肢の名前 (delegate_questions.choose_option。応答を使わなかった要求でも、確率があれば
-                    書く)。失敗した要求では null
+    probabilities   選択肢ごとの確率 (その要求で送った選択肢の順。delegate_loop.DelegateRequestResult.option_names)。
+                    失敗した要求では null
+    chosen          選んだ選択肢の名前 (delegate_questions.choose_option(確率, その要求で送った選択肢の名前)。
+                    応答を使わなかった要求でも、確率があれば書く)。失敗した要求では null
     handling        そのとき行った処理 (delegate_loop.DelegateHandling の値: started・continued・returned・ignored)
     usage           Jev の応答の usage (受け取った値のまま)。無いか、失敗した要求では null
     error           失敗の説明 (error_text.describe_exception)。答えがあれば null

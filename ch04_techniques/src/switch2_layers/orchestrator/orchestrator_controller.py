@@ -122,25 +122,37 @@ take_events:
           前の委任の値も置き換える。委任の通し番号を 1 進める。実行中の行動は止めない
         - DelegateStop: 委任中なら操作権を返す (理由 main_stop、detail delegate_loop.MAIN_STOP_DETAIL)。始める前なら、
           委任を始めずに取り消す (delegate_start も delegate_end も書かず、出来事にも入れない)
-        - 委任中でないときの update と stop、委任中か始める前の start は、何もしない (JSON を読んだ後に Jev が操作権を
-          返したときに起きる。parse_decision が委任中かを確かめて誤りにするため、ほかでは起きない)
+        - 委任中でも始める前でもないときの update と stop (主ループが JSON を書く間か、読んだ後に、Jev の返却や失敗で
+          委任が終わっていたときに起きる): 委任を変えない (前の委任の値も通し番号も変えず、delegate_start・delegate_end
+          も書かない)。同じ JSON の macros と actions は、監視型と同じく当てる (委任していないので actions は捨てず、
+          主ループの列にして main_actions_run もその列のものにする)。当てなかった delegate の action の名前 ("update"
+          か "stop") を、一度だけの出来事として delegate_skipped_actions に足す
+        - 委任中か始める前の start は、何もしない (parse_decision が委任中かを確かめて誤りにし、委任が始まるのは apply
+          からだけなので、起きない)
         - 委任の行動に使っているマクロの置き換え (macros.set) は、次に Jev がその行動を選んだときから使う
     委任を始める (run のループの回りの 1 で): ActiveDelegation(値, 今の時刻, settings.delegate.max_errors) を作り、委任の
         通し番号を 1 進め、run.jsonl に delegate_start {"tasks", "cautions", "choices": [{"name", "description"}, ...]}
         を書く。出力が止まっていれば (ActionExecutor.output_stopped) 始めない
     委任の要求 (run のループの回りの 4 で、監視の要求の代わりに): 次のすべてに当たるとき、別のスレッド (daemon) で
         delegate_loop.ask_delegate を 1 回呼ぶ (そのスレッドの例外の扱いは監視の要求と同じ。結果は失敗の
-        DelegateRequestResult に変える)。要求には、その時点の委任の通し番号と、ActiveDelegation の値と直近の行動を渡す
+        DelegateRequestResult に変える。その option_names は、送ろうとした値の delegate_option_names(choices))。
+        要求には、その時点の委任の通し番号と、ActiveDelegation の値と直近の行動を渡す
         - 委任中で、出力が止まっていない。返っていない要求が無い (同時に送る要求は 1 つまで)
         - 委任を始めてから最初の要求か、前の要求の t_received から settings.delegate.request_interval_s 秒たった
         - delegate_loop.select_delegate_frames(latest_frames(), buffered_frames()) が 1 枚以上のフレームを返す
         主ループの列や行動の列を実行している間も送る (フレームの新しさの条件は無い)
     返った委任の要求の処理 (run のループの回りの 2 で、監視の代わりに。1 つごとに delegate.jsonl に 1 行書く
-    (delegate_record。chosen は確率があれば delegate_questions.choose_option の値、handling は下の処理)):
-        - 要求を送ったときの委任の通し番号が今の番号と違う (委任中でなくなったときを含む): ignored。ほかに何もしない
+    (delegate_record。handling は下の処理)):
+        delegate.jsonl の行の chosen は、どの結果 (ignored・失敗・答え) でも、確率があれば
+        delegate_questions.choose_option(結果の probabilities, 結果の option_names) で決める (その要求で送った選択肢の
+        名前で決め、今の委任の選択肢の名前は使わない。要求を送った後に update で choices を置き換えていても、応答の
+        確率に無い名前で選ばない)。確率が無ければ null
+        - 要求を送ったときの委任の通し番号が今の番号と違う (委任中でなくなったとき、update で値を置き換えたときを
+          含む): ignored。ほかに何もしない (委任は続ける)
         - 失敗 (error がある): ActiveDelegation.record_failure。DelegateEnd が返ったら操作権を返し (理由 errors。実行全体は
           止めない) returned、返らなければ continued
-        - 答えがあった: ActiveDelegation.record_answer(確率, 今の時刻)。start_action があれば、実行中の行動の列を捨てて
+        - 答えがあった: ActiveDelegation.record_answer(確率, 今の時刻) (通し番号が今と同じなので、結果の option_names と
+          今の委任の選択肢の名前は同じ)。start_action があれば、実行中の行動の列を捨てて
           (ActionExecutor.start が中立に戻す)、そのマクロを今のマクロで展開した列 (action_executor.expand_actions) を
           委任の行動の列 (source が delegate) として始め、その場で 1 回進めて started。end があれば操作権を返して
           (理由 jev_return) returned。どちらも無ければ continued (実行中の行動の列はそのまま続ける)
@@ -150,7 +162,8 @@ take_events:
         delegate_end {"reason", "detail"} を書く。前の委任の値は残す
     stop が立って run が戻るときに委任中なら、run.jsonl に delegate_end {"reason": "stop", "detail":
         delegate_loop.RUN_STOP_DETAIL} を書く (出来事には入れない)
-    take_events: 監視型の値に加えて、前回の取り出し以降の delegate_ends・delegate_discarded_action_count を返して空にし、
+    take_events: 監視型の値に加えて、前回の取り出し以降の delegate_ends・delegate_discarded_action_count・
+        delegate_skipped_actions を返して空にし、
         delegation に取り出した時点の委任の状況 (委任中なら ActiveDelegation.status、始める前なら active が True で
         started_t・last_pick が None、return_streak が 0 の値、委任なしなら active が False で values が前の委任の値の
         値) を入れる。監視型では delegation は None

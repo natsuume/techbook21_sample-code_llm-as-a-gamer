@@ -19,8 +19,8 @@
 セッションの最初の入力では、この前に build_session_opening_text の節を置く (人の初期指示・notes/ のファイルの一覧・
 notes/handoff.md の中身)。人の初期指示が無いときも節は省かず、本文を NONE_TEXT にして、初期指示が無いことを伝える。
 出来事の繰り越し (carry_over_events): result を受け取れなかった入力に載せた一度だけの出来事 (条件の当たり・監視の
-終わり・委任の終わり・捨てた操作の数・委任中のため捨てた操作の数・外したボタン) は、次の入力で新しく取り出した出来事と
-合わせて渡す。
+終わり・委任の終わり・捨てた操作の数・委任中のため捨てた操作の数・当てなかった delegate の action・外したボタン) は、
+次の入力で新しく取り出した出来事と合わせて渡す。
 画像 (select_turn_frames): 入力を作る時点の最新の一定間隔のフレームのうち、新しいものから最大 TURN_MAX_IMAGES 枚を
 古い順に並べたもの。主ループが入力を作るときに 1 回受け取った、同じ時点の frames/latest/ の画像
 (frames.latest_frames.LatestFrames.snapshot。時刻を書き込んだ JPEG) を使う。セッションの最初のターンも同じ。
@@ -181,6 +181,8 @@ def describe_events(events: OrchestratorEvents) -> str:
                              action_to_json の JSON の配列にしたもの> を実行した
         監視の終わりごとに   監視 <name> が終わった (<reason>): <detail>
         委任の終わりごとに   委任が終わり、操作権が主ループに戻った (<reason>): <detail>
+        当てなかった delegate の action ごとに (delegate_skipped_actions の順)
+                             委任はすでに終わっていたため、delegate の <action (stop か update)> を当てなかった
         捨てた操作が 1 以上   新しい actions で捨てた前の操作: <discarded_action_count> 個
         委任中のため捨てた操作が 1 以上
                              委任中のため、操作を捨てた: <delegate_discarded_action_count> 個
@@ -270,6 +272,7 @@ def carry_over_events(
         case_hits                carried の後に taken を並べる (古い順)
         monitor_ends             carried の後に taken を並べる (古い順)
         delegate_ends            carried の後に taken を並べる (古い順)
+        delegate_skipped_actions carried の後に taken を並べる (古い順。同じ名前も重ねて並べる)
         discarded_action_count   carried と taken の和
         delegate_discarded_action_count
                                  carried と taken の和

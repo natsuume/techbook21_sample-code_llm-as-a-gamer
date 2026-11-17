@@ -57,6 +57,7 @@ def test_field_names_follow_the_io_contract():
         "monitor",
         "delegate_ends",
         "delegate_discarded_action_count",
+        "delegate_skipped_actions",
         "delegation",
     ]
 
@@ -78,4 +79,5 @@ def test_delegate_event_field_names_and_defaults_follow_the_io_contract():
     events = OrchestratorEvents()
     assert events.delegate_ends == ()
     assert events.delegate_discarded_action_count == 0
+    assert events.delegate_skipped_actions == ()
     assert events.delegation is None

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 
 import cv2
 import numpy as np
+import pytest
 
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
@@ -236,6 +237,17 @@ def test_ask_delegate_answer_without_the_question_is_a_failure():
     result, _ = ask(wrong, [frame_at(10.2)])
     assert result.probabilities is None
     assert result.error is not None
+
+
+@pytest.mark.parametrize(
+    "jev_result",
+    [answers(none=1.0), JevError("HTTP 500")],
+    ids=["answer", "failure"],
+)
+def test_ask_delegate_result_has_the_option_names_it_sent(jev_result):
+    # 答えでも失敗でも、その要求で送った選択肢の名前を結果に入れる (delegate.jsonl の chosen を決めるため)
+    result, _ = ask(jev_result, [frame_at(10.2)])
+    assert result.option_names == ("none", "attack", "move_up", "return_control")
 
 
 # --- 今の委任の状態 ---

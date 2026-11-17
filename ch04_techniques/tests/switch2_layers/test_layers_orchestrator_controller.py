@@ -2397,6 +2397,77 @@ def test_delegate_answer_after_the_delegation_ends_is_not_used(tmp_path, cleanup
     assert delegate_rows(h)[0]["handling"] == "ignored"
 
 
+DODGE = DelegateChoice(name="dodge", description="上に動いて衝撃波をよける")
+
+
+def test_delegate_answer_to_choices_replaced_by_an_update_is_ignored_and_the_delegation_continues(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    first = h.wait_request(1)
+    # 要求を送った後に、update で行動を置き換える (応答の確率には、置き換える前の選択肢の名前しか無い)
+    h.controller.apply(
+        Decision(
+            macros_set={"dodge": (tap("UP"),)},
+            delegate=DelegateUpdate(choices=(DODGE,)),
+        )
+    )
+    h.jev.respond(answer(first, guard=0.9))
+    wait_delegate_rows(h, 1)
+    [row] = delegate_rows(h)
+    assert row["handling"] == "ignored"
+    # chosen は、その要求で送った選択肢の名前から決める
+    assert row["chosen"] == "guard"
+    assert list(row["probabilities"]) == ["none", "attack", "guard", "return_control"]
+    assert h.sender.press_starts("B") == []
+    # 例外で止まらず、委任を続ける (次の要求は、置き換えた後の行動で問う)
+    h.set_time(0.3)
+    second = h.wait_request(2)
+    assert [choice.name for choice in second.question.choices] == [
+        "none",
+        "dodge",
+        "return_control",
+    ]
+    assert h.run_errors == []
+
+
+@pytest.mark.parametrize(
+    "instruction, name",
+    [(DelegateUpdate(tasks=("前に出すぎない",)), "update"), (DelegateStop(), "stop")],
+    ids=["update", "stop"],
+)
+def test_delegate_update_or_stop_after_the_delegation_ended_applies_only_the_actions_and_macros(
+    tmp_path, cleanups, instruction, name
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.controller.apply(stop_delegation())
+    h.controller.take_events()
+    # 主ループが委任中と思って書いた delegate を、委任が終わった後に当てる
+    h.controller.apply(
+        Decision(
+            actions=(tap("X"),),
+            macros_set={"dodge": (tap("UP"),)},
+            delegate=instruction,
+        )
+    )
+    # 委任していないので、同じ JSON の actions は捨てずに主ループの列にする
+    assert h.controller.main_actions_run() is not None
+    h.wait_pressed({"X"})
+    assert "dodge" in h.controller.macro_names()
+    events = h.controller.take_events()
+    assert events.delegate_skipped_actions == (name,)
+    assert events.delegate_discarded_action_count == 0
+    assert events.delegate_ends == ()
+    # 委任は変えない (前の委任の値も、run.jsonl の委任の終わりの行も増えない)
+    context = h.controller.delegate_context()
+    assert context.active is False
+    assert context.previous == delegate_start()
+    assert [row["reason"] for row in run_rows_of(h, "delegate_end")] == ["main_stop"]
+
+
 def test_delegate_status_is_in_the_events(tmp_path, cleanups):
     h = make_delegate_harness(tmp_path, cleanups)
     h.controller.apply(start_delegation())

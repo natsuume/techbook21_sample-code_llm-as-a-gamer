@@ -132,7 +132,10 @@ class DelegateStart:
 
 @dataclass(frozen=True)
 class DelegateUpdate:
-    """委任中に、タスク・注意事項・行動を置き換える指示。None の欄は変えない (JSON で省いたキー)。"""
+    """委任中に、タスク・注意事項・行動を置き換える指示。None の欄は変えない (JSON で省いたキー)。
+
+    当てる時点で委任中でも委任を始める前でもなければ、当てない (orchestrator_controller が出来事で知らせる)。
+    """
 
     tasks: tuple[str, ...] | None = None
     cautions: tuple[str, ...] | None = None
@@ -141,7 +144,10 @@ class DelegateUpdate:
 
 @dataclass(frozen=True)
 class DelegateStop:
-    """委任を終え、操作権を主ループに戻す指示。"""
+    """委任を終え、操作権を主ループに戻す指示。
+
+    当てる時点で委任中でも委任を始める前でもなければ、当てない (orchestrator_controller が出来事で知らせる)。
+    """
 
 
 # 主ループが書く委任の指示 1 つ

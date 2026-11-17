@@ -31,6 +31,9 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         {"name": <マクロの名前>, "description": <文>}
     start と update の tasks・cautions・choices は、どれも省ける。start で省いたキーは前の委任 (DelegateContext.previous)
     の値で埋め、update で省いたキーは変えない (DelegateUpdate の None)。delegate の null は None (委任を変えない)。
+    委任中でも、委任を始める前でもない (DelegateContext.active が False) ときの update と stop は誤りにせず、そのまま
+    DelegateUpdate・DelegateStop にする (JSON を書く間に委任が終わっていることがあるため。当てるかどうかは
+    orchestrator_controller が決める)。update と stop の値の規則は、委任中かに依らず確かめる。
     delegate を渡さないとき (--mode orchestrator) は、最上位の delegate は知らないキーの誤り。渡したときは、最上位の
     monitor が知らないキーの誤り。
 誤りにするもの:
@@ -60,7 +63,7 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
 委任の指示の誤り (delegate に DelegateContext を渡したとき):
     - delegate が object でも null でもない。action が無いか、start・update・stop のどれでもない。stop に action の
       ほかのキーがある。start・update に action・tasks・cautions・choices のほかのキーがある
-    - 委任中 (DelegateContext.active) に start を書いた。委任中でないのに update か stop を書いた
+    - 委任中 (DelegateContext.active) に start を書いた (委任中でないときの update と stop は誤りにしない)
     - start で tasks・cautions・choices のどれかを省いたのに、前の委任 (DelegateContext.previous) が無い
     - tasks が配列でないか、要素が 1〜MAX_DELEGATE_TASKS 個でない。cautions が配列でないか、要素が
       0〜MAX_DELEGATE_CAUTIONS 個でない。tasks・cautions の要素が文字列でないか、空か空白だけ
@@ -70,8 +73,8 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
       delegate_questions.RESERVED_OPTION_NAMES の名前、同じ choices の前の行動と同じ名前、または HOME を押すマクロ
       (マクロの操作の列を action_executor.expand_actions で展開した列に、buttons に HOME を含む press がある。マクロの
       操作の列は、この JSON の macros.set にあればそれ、無ければ DelegateContext.macros のもの)
-    - start で省いて前の委任から使う choices と、update で省いて今の委任から使う choices の行動が、この JSON の macros
-      を当てた後の登録に無いか、HOME を押すマクロ
+    - start で省いて前の委任から使う choices と、委任中の update で省いて今の委任から使う choices の行動が、この JSON
+      の macros を当てた後の登録に無いか、HOME を押すマクロ (委任中でないときの update で省いた choices は確かめない)
     - 委任中に、今の委任 (DelegateContext.previous) の choices の name を macros.delete に書いた (同じ JSON に update
       や stop があっても誤り)
 値の直し方:
@@ -96,8 +99,7 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
                                              `actions[0].args`)
         委任の指示の形の誤り                  その値のパス (`delegate`・`delegate.action`・`delegate.tasks[0]`・
                                              `delegate.choices[1].description` など)
-        委任中の start・委任中でない update と stop
-                                             `delegate.action`
+        委任中の start                        `delegate.action`
         前の委任が無いのに省いたキー          そのキーのパス (例: `delegate.tasks`)
         tasks・cautions・choices の数         その配列のパス (例: `delegate.choices`)
         行動の name の誤り (登録に無い・予約の名前・重複・HOME を押すマクロ)

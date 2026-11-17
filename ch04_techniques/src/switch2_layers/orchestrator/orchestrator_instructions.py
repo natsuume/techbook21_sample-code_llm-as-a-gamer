@@ -168,7 +168,8 @@ def delegate_instructions() -> str:
        意味のある行動の説明} の配列) は、同じ JSON の actions がすべて終わってから委任を始めること (actions が空なら
        すぐ)。start で省いたキーは前の委任の値を使い、前の委任が無いのに省くと誤りであること。委任中の start は誤りで、
        委任中の変更は update で行うこと。update で省いたキーは変わらないこと。stop ({"action": "stop"}) は委任を終えて
-       操作権を戻すこと。update と stop は委任中でなければ誤りであること。
+       操作権を戻すこと。答えを書く間に委任が終わっていたときの update と stop は誤りにならず、delegate だけが
+       当たらないこと (同じ JSON の actions と macros は当たり、当たらなかったことは次の入力の出来事で届く)。
        choices は 1〜decision_parser.MAX_DELEGATE_CHOICES 個で、name は登録したマクロ、description は空でない文、同じ
        name は 2 回書けない、HOME を押すマクロは使えない。tasks は 1〜MAX_DELEGATE_TASKS 個、cautions は
        0〜MAX_DELEGATE_CAUTIONS 個の空でない文。委任中の choices に使っているマクロは macros の delete で消せないこと

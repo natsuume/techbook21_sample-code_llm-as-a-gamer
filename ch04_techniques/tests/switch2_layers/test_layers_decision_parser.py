@@ -1126,10 +1126,50 @@ def test_delegate_start_while_delegating_is_an_error():
     assert_error_at(parse_delegate(delegate_with("start"), context), "delegate.action")
 
 
-@pytest.mark.parametrize("action", ["update", "stop"])
-def test_delegate_update_or_stop_while_not_delegating_is_an_error(action):
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (
+            delegate_with("update", tasks=["前に出すぎない"]),
+            DelegateUpdate(tasks=("前に出すぎない",)),
+        ),
+        (delegate_with("stop"), DelegateStop()),
+    ],
+    ids=["update", "stop"],
+)
+def test_delegate_update_or_stop_while_not_delegating_is_read_with_the_actions_and_macros(
+    value, expected
+):
+    # JSON を書く間に委任が終わっていても誤りにせず、同じ JSON の操作とマクロを当てられるようにする
     context = delegate_context(active=False, previous=PREVIOUS_DELEGATION)
-    assert_error_at(parse_delegate(delegate_with(action), context), "delegate.action")
+    json_value = {
+        "actions": [press(buttons=["A"])],
+        "macros": {"set": {"dash": [press(buttons=["B"])]}},
+        **value,
+    }
+    decision = assert_decision(parse_delegate(json_value, context))
+    assert decision.delegate == expected
+    assert decision.actions == (PressAction(buttons=("A",)),)
+    assert set(decision.macros_set) == {"dash"}
+
+
+@pytest.mark.parametrize(
+    "value, path",
+    [
+        (delegate_with("update", tasks=[]), "delegate.tasks"),
+        (
+            delegate_with("update", choices=[choice("jump", "ジャンプする")]),
+            "delegate.choices[0].name",
+        ),
+        (delegate_with("stop", tasks=["敵を倒す"]), "delegate.tasks"),
+    ],
+    ids=["update_without_tasks", "update_with_unregistered_choice", "stop_with_tasks"],
+)
+def test_delegate_update_or_stop_while_not_delegating_still_follows_the_value_rules(
+    value, path
+):
+    context = delegate_context(active=False, previous=PREVIOUS_DELEGATION)
+    assert_error_at(parse_delegate(value, context), path)
 
 
 def test_delegate_start_without_the_keys_uses_the_previous_values():

@@ -84,15 +84,19 @@ class DelegateRequestResult:
 
     serial          要求を送ったときの委任の通し番号 (モジュールの docstring の「委任の通し番号」)
     frame_ts        送った画像の元のフレームの時刻 (古い順)
+    option_names    その要求で送った (送ろうとした) 選択肢の名前 (delegate_questions.delegate_option_names(choices) の
+                    順)。失敗した要求でも入れる。delegate.jsonl の chosen は、この名前と probabilities で決める
+                    (要求を送った後に update で choices を置き換えても、応答の確率と食い違わないため)
     t_sent          ask を呼んだ時刻
     t_received      ask が戻った (または例外を出した) 時刻
-    probabilities   選択肢の名前 → 確率 (delegate_questions.delegate_option_names の順)。失敗したら None
+    probabilities   選択肢の名前 → 確率 (option_names の順)。失敗したら None
     usage           Jev の応答の usage。無いか、失敗したら None
     error           失敗の説明。答えがあれば None
     """
 
     serial: int
     frame_ts: tuple[float, ...]
+    option_names: tuple[str, ...]
     t_sent: float
     t_received: float
     probabilities: Mapping[str, float] | None
@@ -137,7 +141,8 @@ def ask_delegate(
     jpeg_quality: int,
     make_reference: Callable[[], str],
 ) -> DelegateRequestResult:
-    """委任の通し番号 serial の要求を 1 回送り、結果を返す (結果の serial は引数の値、frame_ts は frames の時刻)。
+    """委任の通し番号 serial の要求を 1 回送り、結果を返す (結果の serial は引数の値、frame_ts は frames の時刻、
+    option_names は delegate_questions.delegate_option_names(values.choices)。失敗した結果でも同じ)。
 
     1. frames (古い順) の各フレームについて、jpeg = safety.safety_monitor.build_safety_image(フレーム, image_width,
        jpeg_quality)、reference = make_reference() とする
@@ -145,7 +150,7 @@ def ask_delegate(
        recent_picks, [DelegateStateFrame(フレームの t, reference), ...]),
        [delegate_questions.build_delegate_question(values.choices)], [JevImage(reference, jpeg), ...]) を呼び
        (画像は frames の順)、戻ったら (例外でも) t_received = clock.now()
-    3. 答えから、read_delegate_probabilities で選択肢の順の確率を取り出す
+    3. 答えから、read_delegate_probabilities(答え, option_names) で選択肢の順の確率を取り出す
     1〜3 のどこで出た例外 (Exception。画像の作成と参照文字列の作成の失敗、jev_client.JevError、それ以外の ask の例外を
     含む) も、答えに問いか選択肢の確率が無いことも失敗とし、例外を出さずに、probabilities と usage を None、error を
     error_text.describe_exception(例外) にした結果を返す。ask を呼ぶ前に失敗したときは、t_sent と t_received を、
@@ -222,7 +227,8 @@ class ActiveDelegation:
              RETURN_CONTROL_OPTION  「操作を返す」の回数を 1 足す。RETURN_CONTROL_STREAK 回になったら
                                     DelegateAnswer(chosen, None, DelegateEnd("jev_return", delegate_return_detail(回数)))、
                                     ならなければ DelegateAnswer(chosen, None, None) を返す
-        probabilities にどれかの選択肢の名前が無ければ KeyError。
+        probabilities にどれかの選択肢の名前が無ければ KeyError。呼び出し側は、今の委任と同じ通し番号で送った要求の
+        確率だけを渡す (そのとき、要求で送った選択肢の名前は、今の値の選択肢の名前と同じ)。
         """
         raise NotImplementedError("ActiveDelegation.record_answer")
 

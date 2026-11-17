@@ -1,10 +1,10 @@
 """主ループが操作の実行と監視の部品 (OrchestratorController) から受け取る型。
 
 OrchestratorEvents (take_events の戻り値): 主ループが次の入力を作るときに取り出す出来事。前回の取り出し以降に起きたこと
-(case_hits・monitor_ends・discarded_action_count・blocked_buttons・delegate_ends・delegate_discarded_action_count) と、
-取り出した時点の値 (running・remaining_action_count・macros・monitor・delegation) を持つ。作った後は、Mapping の欄
-(macros) の中身を書き換えない。delegation は --mode delegate のときだけ None でない (turn_input が委任の節を置くかを
-これで決める)。
+(case_hits・monitor_ends・discarded_action_count・blocked_buttons・delegate_ends・delegate_discarded_action_count・
+delegate_skipped_actions) と、取り出した時点の値 (running・remaining_action_count・macros・monitor・delegation) を
+持つ。作った後は、Mapping の欄 (macros) の中身を書き換えない。delegation は --mode delegate のときだけ None でない
+(turn_input が委任の節を置くかをこれで決める)。
 MainActionsRun (main_actions_run の戻り値): 主ループの空でない actions の操作の列 1 つの、始めた・最後に離した・終えた
 時刻。主ループは、これと frames/latest/ の最新のフレームの時刻を見て、前のターンの操作の列が終わり、その後に撮った
 フレームが届くのを待つ (orchestrator.action_settle)。
@@ -25,6 +25,8 @@ MonitorEndReason = Literal["completed", "failed"]
 # 委任が終わって操作権が主ループに戻った理由: jev_return は Jev が「操作を返す」を続けて選んだ、main_stop は主ループが
 # delegate の stop を書いた、errors は Jev の失敗が続いた
 DelegateEndReason = Literal["jev_return", "main_stop", "errors"]
+# 委任中でも委任を始める前でもなかったため当てなかった、主ループの delegate の action の名前
+DelegateSkippedAction = Literal["update", "stop"]
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,9 @@ class OrchestratorEvents:
     delegate_discarded_action_count
                              前回の取り出し以降に、委任中のため捨てた主ループの actions の操作の数 (JSON の actions の
                              要素の数。procedure と macro は展開しない)
+    delegate_skipped_actions 前回の取り出し以降に、委任中でも委任を始める前でもなかったため当てなかった、主ループの
+                             delegate の action の名前 (update か stop。当てようとした順)。同じ JSON の actions・macros は
+                             当ててある
     delegation               取り出した時点の委任の状況 (--mode delegate のとき)。--mode orchestrator では None
     """
 
@@ -136,6 +141,7 @@ class OrchestratorEvents:
     monitor: MonitorCreate | None = None
     delegate_ends: tuple[DelegateEnd, ...] = ()
     delegate_discarded_action_count: int = 0
+    delegate_skipped_actions: tuple[DelegateSkippedAction, ...] = ()
     delegation: DelegationStatus | None = None
 
 

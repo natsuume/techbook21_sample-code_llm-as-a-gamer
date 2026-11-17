@@ -686,3 +686,20 @@ def test_delegate_one_time_events_are_carried_over():
     assert merged.delegate_ends == (MAIN_STOP, JEV_RETURN)
     assert merged.delegate_discarded_action_count == 3
     assert merged.delegation == NOT_DELEGATING
+
+
+def test_delegate_events_tell_the_delegate_action_not_applied():
+    lines = describe_events(
+        events(delegate_skipped_actions=("stop", "update"))
+    ).splitlines()
+    assert lines == [
+        "委任はすでに終わっていたため、delegate の stop を当てなかった",
+        "委任はすでに終わっていたため、delegate の update を当てなかった",
+    ]
+
+
+def test_delegate_actions_not_applied_are_carried_over():
+    carried = events(delegate_skipped_actions=("stop",))
+    taken = events(delegate_skipped_actions=("update",))
+    merged = carry_over_events(carried, taken)
+    assert merged.delegate_skipped_actions == ("stop", "update")
