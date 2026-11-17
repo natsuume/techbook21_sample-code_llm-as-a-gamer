@@ -800,7 +800,8 @@ LUNA_OUTPUT = {
     "press_home": False,
     "surface_wait_s": 1.5,
     "timeline": "## 操作のまとめ\n- まだ操作していない",
-    "tasks": "- A でゲームを始める\n",
+    "cancel_task_ids": [],
+    "new_tasks": [],
 }
 LUNA_USAGE = {
     "input_tokens": 3000,
