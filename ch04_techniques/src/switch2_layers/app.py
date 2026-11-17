@@ -1278,12 +1278,36 @@ class LayersApp:
         待っている間の KeyboardInterrupt (Ctrl+C) は外に出さずに確かめを続ける。1 回目は request_stop(REASON_INTERRUPTED)
         にし、片付けの間の 2 回目は片付けを interrupted で終える。前に数えた KeyboardInterrupt から
         INTERRUPT_REPEAT_WINDOW_S 秒以内 (parts.monotonic で測る) のものは、同じ割り込みとして数えない。
+        KeyboardInterrupt を数えたことがあれば、合図が立った後も、最後に数えた KeyboardInterrupt から
+        INTERRUPT_REPEAT_WINDOW_S 秒たつまで sleep で待ち、その間の KeyboardInterrupt を捨ててから戻る。片付けをしない
+        止まり方 (Orchestrator 型の Ctrl+C など) では、1 回の割り込みの 2 回目の SIGINT が close の途中に届き、後片付けを
+        途中で終わらせるため。
         start の前に呼んだら RuntimeError にする。
         """
         with self._lock:
             started = self._started
         if started is None:
             raise RuntimeError("LayersApp.wait must be called after start")
+        counted_interrupt_t = self._watch_until_stopped(started)
+        if counted_interrupt_t is not None:
+            self._absorb_repeated_interrupts(counted_interrupt_t)
+        return self._current_reason()
+
+    def _absorb_repeated_interrupts(self, counted_interrupt_t: float) -> None:
+        """counted_interrupt_t から INTERRUPT_REPEAT_WINDOW_S 秒たつまで sleep で待ち、届いた KeyboardInterrupt を捨てる。"""
+        while True:
+            remaining = (
+                counted_interrupt_t + INTERRUPT_REPEAT_WINDOW_S - self.parts.monotonic()
+            )
+            if remaining <= 0:
+                return
+            try:
+                self.sleep(min(remaining, MONITOR_INTERVAL_S))
+            except KeyboardInterrupt:
+                continue
+
+    def _watch_until_stopped(self, started: _StartedParts) -> float | None:
+        """wait の見張りのループ (wait の docstring)。最後に数えた KeyboardInterrupt の時刻を返す。数えていなければ None。"""
         counted_interrupt_t: float | None = None
         while not self._stop_event.is_set():
             try:
@@ -1307,7 +1331,7 @@ class LayersApp:
                     self._end_clean_up_by_interrupt()
                 else:
                     self.request_stop(REASON_INTERRUPTED)
-        return self._current_reason()
+        return counted_interrupt_t
 
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。

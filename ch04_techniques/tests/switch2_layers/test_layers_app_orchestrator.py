@@ -605,6 +605,45 @@ def test_exception_in_the_monitor_loop_stops_the_run(tmp_path):
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
+class InterruptTwice:
+    """LayersApp の sleep の代わり。uv run の下の Ctrl+C のように、1 回の割り込みで SIGINT が 2 回届くときを真似る。
+
+    condition() が真になるか、作ってから WAIT_LIMIT_S 秒たった後の最初の待ちと、その次の待ちで、KeyboardInterrupt を
+    1 回ずつ出す。それ以外は seconds 秒待つ。
+    """
+
+    def __init__(self, condition: Callable[[], bool]) -> None:
+        self.condition = condition
+        self.deadline = time.monotonic() + WAIT_LIMIT_S
+        self.raised = 0
+
+    def __call__(self, seconds: float) -> None:
+        if self.raised == 1 or (
+            self.raised == 0 and (self.condition() or time.monotonic() >= self.deadline)
+        ):
+            self.raised += 1
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+
+def test_interrupt_delivered_twice_is_absorbed_before_closing(tmp_path):
+    # 片付けをせずに止まった後も、wait が 2 回目の SIGINT を捨ててから戻り、close を最後まで行う
+    sender = FakeSender()
+    claude = FakeClaude([HOME_REPLY])
+    sleep = InterruptTwice(lambda: sender.pressed("HOME"))
+    app = LayersApp(
+        orchestrator_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude),
+        sleep=sleep,
+    )
+    reason = app.run()
+    assert reason == REASON_INTERRUPTED
+    assert sleep.raised == 2
+    assert app.paths is not None
+    assert_stopped_without_phases(app.paths.root, REASON_INTERRUPTED)
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
 def test_monitor_loop_failure_reason():
     assert (
         monitor_loop_failure_reason("RuntimeError: broken")
