@@ -1,10 +1,11 @@
 """Advisor 型の短期タスクを、場面ごとのキューで持つ計算 (SceneTaskQueues)。I/O を扱わない。時計を読まない。
 
 キューは場面 ID ごとに 1 本で、未完了のタスクをキューに入った順に並べる。先頭が実行中のタスク。
-    追加              文の配列を、指定した場面のキューの末尾に、配列の順に足す (先頭への割り込みは無い)。
-                      文は normalize_task_text で整える。空の文 (empty)、その場面の未完了のタスクと空白の違いを除いて
-                      同じ文 (duplicate)、上限に達した後の文 (limit) は足さず、理由とともに返す。上限は、1 回の追加で
-                      足せる数 MAX_ADDED_PER_CALL と、1 場面の未完了のタスクの数 MAX_OPEN_TASKS_PER_SCENE
+    追加              文と行き先の組 (NewTask) の配列を、指定した場面のキューの末尾に、配列の順に足す (先頭への
+                      割り込みは無い)。文は normalize_task_text で整える。行き先は中身を確かめず、受け取ったまま持つ。
+                      空の文 (empty)、その場面の未完了のタスクと空白の違いを除いて同じ文 (duplicate。行き先は比べない)、
+                      上限に達した後の文 (limit) は足さず、理由とともに返す。上限は、1 回の追加で足せる数
+                      MAX_ADDED_PER_CALL と、1 場面の未完了のタスクの数 MAX_OPEN_TASKS_PER_SCENE
     完了              その場面の先頭のタスクだけを完了にする (判定した後に先頭が変わっていたら何もしない)
     取り消しの要求    その場面の先頭のタスクに、要求の時刻を 1 回だけ付ける。要求は、完了か取り消しまで残る
     取り消し          ID で指定したタスクを、場面に依らず、キューのどの位置からでも外す
@@ -19,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.run_clock import round_to_milliseconds
 
 # 1 回の追加で足せるタスクの数
@@ -36,6 +38,32 @@ DropReason = Literal["empty", "duplicate", "limit"]
 
 
 @dataclass(frozen=True)
+class TaskDestination:
+    """タスクの行き先。
+
+    place   マップの場所の名前
+    tile    その場所の中のマス (マップの座標)。場所だけが分かっているときは None
+    キューの部品は中身を確かめず、受け取ったまま持つ (マップと照らして直すのは middle.task_destination_fix)。
+    """
+
+    place: str
+    tile: TilePosition | None
+
+
+@dataclass(frozen=True)
+class NewTask:
+    """追加するタスク 1 つ (文と行き先の組)。
+
+    text          タスクの文 (追加のときに normalize_task_text で整える)
+    destination   行き先。行き先が無ければ None
+    destination の既定値は、行き先の無いタスク (場所に関わらないタスクやテストなど) のため。
+    """
+
+    text: str
+    destination: TaskDestination | None = None
+
+
+@dataclass(frozen=True)
 class TaskView:
     """ある時刻 t でのタスクの見え方。
 
@@ -45,6 +73,8 @@ class TaskView:
     added_t              キューに入った時刻
     active_s             t までの続いた秒数 (run_clock.round_to_milliseconds で丸めた値)
     cancel_requested_t   取り消しの要求を付けた時刻。要求が無ければ None
+    destination          行き先 (追加のときに受け取ったまま)。行き先が無ければ None
+    destination の既定値は、行き先の無いタスク (テストなど) のため。
     """
 
     id: str
@@ -53,6 +83,7 @@ class TaskView:
     added_t: float
     active_s: float
     cancel_requested_t: float | None
+    destination: TaskDestination | None = None
 
 
 @dataclass(frozen=True)
@@ -71,8 +102,8 @@ class DroppedText:
 class AddResult:
     """追加の結果。
 
-    outcomes   入力の文ごとの結果を入力の順に並べたもの。足した文は、足したタスクの追加の時刻での見え方 (TaskView)、
-               足せなかった文は DroppedText
+    outcomes   入力の組ごとの結果を入力の順に並べたもの。足した組は、足したタスクの追加の時刻での見え方 (TaskView)、
+               足せなかった組は DroppedText
     """
 
     outcomes: tuple[TaskView | DroppedText, ...]
@@ -151,6 +182,7 @@ class _QueuedTask:
     added_t: float
     active_base: float
     cancel_requested_t: float | None
+    destination: TaskDestination | None
 
 
 def _drop_reason(
@@ -181,7 +213,7 @@ class SceneTaskQueues:
         """キューを作る。
 
         restored のタスクを、それぞれの scene_id のキューに restored の順で入れる。各タスクの続いた秒数は
-        restored の active_s から始め、added_t と cancel_requested_t もそのまま持つ。
+        restored の active_s から始め、added_t・cancel_requested_t・destination もそのまま持つ。
         現在の場面は場面なし (None)。次に振る ID の連番は next_number。
         """
         # 場面 ID → 未完了のタスク (キューの順)
@@ -201,6 +233,7 @@ class SceneTaskQueues:
                 added_t=task.added_t,
                 active_base=-task.active_s,
                 cancel_requested_t=task.cancel_requested_t,
+                destination=task.destination,
             )
             self._queues.setdefault(task.scene_id, []).append(queued)
 
@@ -209,24 +242,25 @@ class SceneTaskQueues:
         """現在の場面 ID。場面なしなら None。"""
         return self._current_scene_id
 
-    def add(self, scene_id: str, texts: Sequence[str], t: float) -> AddResult:
-        """文の配列 texts を、場面 scene_id のキューの末尾に、配列の順に時刻 t で足す。
+    def add(self, scene_id: str, new_tasks: Sequence[NewTask], t: float) -> AddResult:
+        """文と行き先の組の配列 new_tasks を、場面 scene_id のキューの末尾に、配列の順に時刻 t で足す。
 
-        各文を normalize_task_text で整えてから、次の順で判定する (理由が重なるときは最初に当たったもの):
+        各組の文を normalize_task_text で整えてから、次の順で判定する (理由が重なるときは最初に当たったもの):
             1. 空 (整えた後が空文字列) → empty
             2. その場面の未完了のタスク (同じ呼び出しで先に足したものを含む) に is_same_task_text で同じ文がある
-               → duplicate (ほかの場面のタスクとは比べない)
+               → duplicate (文だけで比べ、行き先は比べない。ほかの場面のタスクとは比べない)
             3. この呼び出しで足した数が MAX_ADDED_PER_CALL に達している、またはその場面の未完了のタスクが
                MAX_OPEN_TASKS_PER_SCENE に達している → limit
         どれにも当たらなければ、ID を task_id(次の連番) で振って連番を 1 進め、キューの末尾に足す
-        (added_t = t、cancel_requested_t = None、続いた秒数は 0 から)。足せなかった文は ID を使わない。
-        戻り値の outcomes は、入力の文ごとに、足したタスクの t での見え方か、足せなかった文と理由を、入力の順に並べたもの。
+        (added_t = t、cancel_requested_t = None、続いた秒数は 0 から、destination は組の行き先を中身を確かめずに
+        そのまま)。足せなかった組は ID を使わない。
+        戻り値の outcomes は、入力の組ごとに、足したタスクの t での見え方か、足せなかった文と理由を、入力の順に並べたもの。
         """
         queue = self._queues.setdefault(scene_id, [])
         outcomes: list[TaskView | DroppedText] = []
         added_count = 0
-        for raw_text in texts:
-            text = normalize_task_text(raw_text)
+        for new_task in new_tasks:
+            text = normalize_task_text(new_task.text)
             reason = _drop_reason(queue, text, added_count)
             if reason is not None:
                 outcomes.append(DroppedText(text=text, reason=reason))
@@ -238,6 +272,7 @@ class SceneTaskQueues:
                 added_t=t,
                 active_base=self._scene_total(scene_id, t),
                 cancel_requested_t=None,
+                destination=new_task.destination,
             )
             self._next_number += 1
             queue.append(queued)
@@ -326,6 +361,7 @@ class SceneTaskQueues:
                 self._scene_total(queued.scene_id, t) - queued.active_base
             ),
             cancel_requested_t=queued.cancel_requested_t,
+            destination=queued.destination,
         )
 
     def _head(self, scene_id: str, target: str) -> _QueuedTask | None:

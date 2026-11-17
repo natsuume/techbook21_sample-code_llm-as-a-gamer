@@ -15,7 +15,8 @@ from switch2_layers.surface.surface_types import (
 
 def surface_input() -> SurfaceInput:
     documents = SurfaceDocuments(
-        tasks="",
+        tasks="宿屋に入っている",
+        task_id="task-001",
         tips="",
         controls="",
         advice="",
@@ -40,6 +41,9 @@ def test_fake_surface_returns_neutral_action_without_deep_requests():
     assert output.info_labels == ()
     assert output.boxes == ()
     assert output.scene_changed is False
+    # 先頭のタスクがあっても、2 つの問いを送らない (完了も取り消しの要求もしない)
+    assert output.task_done_p is None
+    assert output.task_cancel_p is None
 
 
 class UntouchableStatuses(Mapping[DocumentKind, DeepDocumentStatus | None]):

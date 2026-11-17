@@ -3,9 +3,16 @@
 行の形:
     {"t_sent", "t_received", "based_on_t", "frames": [{"t", "file"}], "surface_rows": 行数, "operation_rows": 行数,
      "scene_change_reported", "scene_id", "scene_name", "new_scene", "surface_wait_s", "press_home",
-     "deep_requests": [種類...], "deep_requests_sent", "error"}
-失敗した回は scene_id・scene_name・surface_wait_s・press_home を null、new_scene を false、deep_requests を空にし、
-error に説明を書く。
+     "deep_requests": [種類...], "deep_requests_sent", "error",
+     "reasons": [理由...], "new_tasks": [{"text", "destination"}, ...], "destination_fixes": [直した内容, ...],
+     "cancel_task_ids": [ID...], "cancel_used": 真偽, "new_tasks_used": 真偽}
+reasons はその回に middle を呼んだ理由 (middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順。失敗した回も書く)。
+new_tasks は行き先を直した後の出力の new_tasks (destination は tasks.task_files.destination_to_json の形)、
+destination_fixes は直した内容 (middle.task_destination_fix.destination_fix_to_json の形。無ければ空の配列)、
+cancel_task_ids は出力の cancel_task_ids、cancel_used と new_tasks_used は取り消しと追加を行ったか
+(middle_output_writer.write_middle_output の 2b と 2c)。
+失敗した回は scene_id・scene_name・surface_wait_s・press_home・new_tasks・destination_fixes・cancel_task_ids・
+cancel_used・new_tasks_used を null、new_scene を false、deep_requests を空にし、error に説明を書く。
 MiddleAnalyzer が MiddleCallDetailsSource でもあれば (gpt-6-luna の実装)、その回の記録 (usage・概算の費用・応答など) を
 上のキーの後ろに足す (middle_call_row_with_details)。フェイクの MiddleAnalyzer では上のキーだけにする。
 """
@@ -16,7 +23,10 @@ from typing import Protocol, runtime_checkable
 
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.middle.middle_output_writer import MiddleWriteResult
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.middle.middle_types import MiddleInput
+from switch2_layers.middle.task_destination_fix import destination_fix_to_json
+from switch2_layers.tasks.task_files import destination_to_json
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,7 @@ class MiddleCallRecord:
     deep_requests        初めての場面のために deep を呼ぶ文書の種類 (無ければ空)
     deep_requests_sent   deep のスケジューラーに渡したら True (middle-once では渡さず False)
     error                失敗の説明。成功なら None
+    reasons              その回に middle を呼んだ理由 (入力を作れずに失敗した回も、呼んだ理由を持つ)
     """
 
     t_sent: float
@@ -40,6 +51,7 @@ class MiddleCallRecord:
     deep_requests: Sequence[DocumentKind]
     deep_requests_sent: bool
     error: str | None
+    reasons: Sequence[MiddleCallReason]
 
 
 def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
@@ -48,6 +60,11 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
     based_on_t は middle_input.t、frames は middle_input.frames の [{"t", "file"}]、surface_rows と operation_rows は
     行数、scene_id・scene_name・surface_wait_s・press_home は write_result.state の値、new_scene は write_result.new_scene が
     あれば True、deep_requests は種類の値 (文字列) のリスト。
+    reasons は record.reasons のリスト。new_tasks は write_result.new_tasks の [{"text": 文, "destination":
+    tasks.task_files.destination_to_json(行き先)}]、destination_fixes は write_result.destination_fixes の
+    middle.task_destination_fix.destination_fix_to_json のリスト、cancel_task_ids は write_result.cancel_task_ids の
+    リスト、cancel_used と new_tasks_used は write_result の同じ名前の値。write_result が None (失敗した回) なら、
+    この 5 つは null。
     """
     middle_input = record.middle_input
     state = None if record.write_result is None else record.write_result.state
@@ -74,6 +91,35 @@ def middle_call_row(record: MiddleCallRecord) -> dict[str, object]:
         "deep_requests": [kind.value for kind in record.deep_requests],
         "deep_requests_sent": record.deep_requests_sent,
         "error": record.error,
+        "reasons": list(record.reasons),
+        **_task_fields(record.write_result),
+    }
+
+
+def _task_fields(write_result: MiddleWriteResult | None) -> dict[str, object]:
+    """行の new_tasks・destination_fixes・cancel_task_ids・cancel_used・new_tasks_used (この順) を返す。
+
+    write_result が None (失敗した回) なら、どれも None。
+    """
+    if write_result is None:
+        return {
+            "new_tasks": None,
+            "destination_fixes": None,
+            "cancel_task_ids": None,
+            "cancel_used": None,
+            "new_tasks_used": None,
+        }
+    return {
+        "new_tasks": [
+            {"text": task.text, "destination": destination_to_json(task.destination)}
+            for task in write_result.new_tasks
+        ],
+        "destination_fixes": [
+            destination_fix_to_json(fix) for fix in write_result.destination_fixes
+        ],
+        "cancel_task_ids": list(write_result.cancel_task_ids),
+        "cancel_used": write_result.cancel_used,
+        "new_tasks_used": write_result.new_tasks_used,
     }
 
 

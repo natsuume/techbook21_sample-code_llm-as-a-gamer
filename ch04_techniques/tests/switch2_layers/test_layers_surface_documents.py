@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,25 @@ COMMON_TIPS = "# 攻略情報 (共通)\n"
 ADVICE = "# 助言\n\n扉の前で止まっている\n"
 SCENE_CONTROLS = "# 操作説明 (町)\n\n- A: 話しかける\n"
 SCENE_TIPS = "# 攻略情報 (町)\n\n宿屋は北\n"
-SCENE_TASKS = "- 宿屋に入る\n"
+# 場面のキューの状態 (tasks.json の tasks。キューの順)
+SCENE_TASK_ITEMS = [
+    {
+        "id": "task-003",
+        "text": "宿屋に入っている",
+        "added_t": 1.0,
+        "active_s": 2.5,
+        "cancel_requested_t": None,
+        "destination": {"place": "町", "tile": {"x": 3, "y": 4}},
+    },
+    {
+        "id": "task-004",
+        "text": "主人と話している",
+        "added_t": 1.5,
+        "active_s": 2.0,
+        "cancel_requested_t": None,
+        "destination": None,
+    },
+]
 
 
 def make_notes(tmp_path: Path) -> Path:
@@ -30,6 +49,15 @@ def write_scene(notes: Path, scene_id: str, files: dict[str, str]) -> None:
         (scene_dir / name).write_text(text, encoding="utf-8")
 
 
+def write_tasks_json(notes: Path, scene_id: str, items: list[dict]) -> None:
+    """場面の tasks.json に、items を tasks に持つキューの状態を書く。"""
+    write_scene(
+        notes,
+        scene_id,
+        {"tasks.json": json.dumps({"t": 3.0, "tasks": items}, ensure_ascii=False)},
+    )
+
+
 @pytest.mark.parametrize(
     "text, expected", [("", True), (" \n\t", True), ("# x", False)]
 )
@@ -41,6 +69,7 @@ def test_no_scene_uses_common_documents(tmp_path):
     notes = make_notes(tmp_path)
     assert read_surface_documents(notes, None) == SurfaceDocuments(
         tasks="",
+        task_id=None,
         tips=COMMON_TIPS,
         controls=COMMON_CONTROLS,
         advice=ADVICE,
@@ -54,6 +83,7 @@ def test_scene_without_scene_documents_uses_common_documents(tmp_path):
     notes = make_notes(tmp_path)
     assert read_surface_documents(notes, "scene-001") == SurfaceDocuments(
         tasks="",
+        task_id=None,
         tips=COMMON_TIPS,
         controls=COMMON_CONTROLS,
         advice=ADVICE,
@@ -66,29 +96,23 @@ def test_scene_without_scene_documents_uses_common_documents(tmp_path):
 @pytest.mark.parametrize("empty_text", ["", "  \n\n"])
 def test_empty_scene_documents_fall_back_to_common(tmp_path, empty_text):
     notes = make_notes(tmp_path)
-    write_scene(
-        notes,
-        "scene-001",
-        {"controls.md": empty_text, "tips.md": empty_text, "tasks.md": empty_text},
-    )
+    write_scene(notes, "scene-001", {"controls.md": empty_text, "tips.md": empty_text})
     documents = read_surface_documents(notes, "scene-001")
     assert documents.controls == COMMON_CONTROLS
     assert documents.tips == COMMON_TIPS
     assert documents.uses_common_controls is True
     assert documents.uses_common_tips is True
-    # 短期タスクリストには共通の文書が無い
-    assert documents.tasks == empty_text
 
 
 def test_scene_documents_are_used_when_present(tmp_path):
     notes = make_notes(tmp_path)
     write_scene(
-        notes,
-        "scene-001",
-        {"controls.md": SCENE_CONTROLS, "tips.md": SCENE_TIPS, "tasks.md": SCENE_TASKS},
+        notes, "scene-001", {"controls.md": SCENE_CONTROLS, "tips.md": SCENE_TIPS}
     )
+    write_tasks_json(notes, "scene-001", SCENE_TASK_ITEMS)
     assert read_surface_documents(notes, "scene-001") == SurfaceDocuments(
-        tasks=SCENE_TASKS,
+        tasks="宿屋に入っている",
+        task_id="task-003",
         tips=SCENE_TIPS,
         controls=SCENE_CONTROLS,
         advice=ADVICE,
@@ -110,12 +134,12 @@ def test_each_kind_falls_back_independently(tmp_path):
 
 def test_documents_of_another_scene_are_not_used(tmp_path):
     notes = make_notes(tmp_path)
-    write_scene(
-        notes, "scene-002", {"controls.md": SCENE_CONTROLS, "tasks.md": SCENE_TASKS}
-    )
+    write_scene(notes, "scene-002", {"controls.md": SCENE_CONTROLS})
+    write_tasks_json(notes, "scene-002", SCENE_TASK_ITEMS)
     documents = read_surface_documents(notes, "scene-001")
     assert documents.controls == COMMON_CONTROLS
     assert documents.tasks == ""
+    assert documents.task_id is None
 
 
 def test_invalid_scene_id_is_treated_as_no_scene(tmp_path):
@@ -124,6 +148,7 @@ def test_invalid_scene_id_is_treated_as_no_scene(tmp_path):
     assert documents.scene_id is None
     assert documents.uses_common_controls is True
     assert documents.tasks == ""
+    assert documents.task_id is None
 
 
 def test_missing_documents_are_empty(tmp_path):
@@ -131,6 +156,7 @@ def test_missing_documents_are_empty(tmp_path):
     notes.mkdir()
     assert read_surface_documents(notes, None) == SurfaceDocuments(
         tasks="",
+        task_id=None,
         tips="",
         controls="",
         advice="",
@@ -138,6 +164,35 @@ def test_missing_documents_are_empty(tmp_path):
         uses_common_controls=True,
         uses_common_tips=True,
     )
+
+
+# --- 今実行中のタスク (場面のキューの先頭) ---
+
+
+def test_head_task_of_the_scene_queue(tmp_path):
+    notes = make_notes(tmp_path)
+    write_tasks_json(notes, "scene-001", SCENE_TASK_ITEMS)
+    documents = read_surface_documents(notes, "scene-001")
+    # キューの先頭のタスクの文と ID だけ
+    assert documents.tasks == "宿屋に入っている"
+    assert documents.task_id == "task-003"
+
+
+def test_empty_scene_queue_has_no_head_task(tmp_path):
+    notes = make_notes(tmp_path)
+    write_tasks_json(notes, "scene-001", [])
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.tasks == ""
+    assert documents.task_id is None
+
+
+def test_tasks_markdown_is_not_read(tmp_path):
+    # 読むのはキューの状態 (tasks.json) で、一覧 (tasks.md) は読まない
+    notes = make_notes(tmp_path)
+    write_scene(notes, "scene-001", {"tasks.md": "- 宿屋に入っている\n"})
+    documents = read_surface_documents(notes, "scene-001")
+    assert documents.tasks == ""
+    assert documents.task_id is None
 
 
 # --- notes/ の外を指す文書 ---
@@ -170,12 +225,9 @@ def test_documents_symlinked_to_outside_are_empty(tmp_path):
     (notes / "advice.md").symlink_to(secret)
     (notes / "common" / "tips.md").unlink()
     (notes / "common" / "tips.md").symlink_to(secret)
-    write_scene(notes, "scene-001", {})
-    (notes / "scenes" / "scene-001" / "tasks.md").symlink_to(secret)
     documents = read_surface_documents(notes, "scene-001")
     assert documents.advice == ""
     assert documents.tips == ""
-    assert documents.tasks == ""
 
 
 def test_scene_directory_symlinked_to_outside_is_not_read(tmp_path):

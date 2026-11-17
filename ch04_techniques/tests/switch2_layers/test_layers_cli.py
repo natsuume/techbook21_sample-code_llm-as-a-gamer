@@ -50,6 +50,8 @@ from switch2_layers.settings import (
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_WINDOW_S,
+    DEFAULT_TASK_STUCK_SECONDS,
+    DEFAULT_THRESHOLD_TASK,
     DeepRunnerChoice,
     MiddleKind,
     RunSettings,
@@ -439,6 +441,8 @@ def test_middle_once_command_writes_middle_outputs(tmp_path, capsys):
     code = main(["middle-once", "--run-dir", str(run_dir), "--middle", "fake"])
     assert code == 0
     out = json.loads(capsys.readouterr().out)
+    # 出力の JSON の 1 行の形は変えない
+    assert list(out) == ["status", "scene_id", "new_scene", "deep_requests", "error"]
     assert out["status"] == "ok"
     assert out["new_scene"] is True
     assert (run_dir / "middle" / "state.json").is_file()
@@ -1535,3 +1539,60 @@ def test_run_passes_the_hold_margin_to_the_jev_surface(monkeypatch):
     [(_, parts)] = created
     assert isinstance(parts.surface, JevSurfaceDecider)
     assert parts.surface.settings.hold_margin == 0.3
+
+
+# --- 先頭のタスクの問いのしきい値と、詰まりのきっかけの秒数 (--threshold-task・--task-stuck-seconds) ---
+
+
+def test_run_task_defaults_follow_the_issue():
+    args = build_parser().parse_args(RUN)
+    assert args.threshold_task == DEFAULT_THRESHOLD_TASK == 0.5
+    assert args.task_stuck_seconds == DEFAULT_TASK_STUCK_SECONDS == 30.0
+    settings = run_settings_from_args(args)
+    assert settings.threshold_task == 0.5
+    assert settings.task_stuck_seconds == 30.0
+
+
+def test_run_accepts_task_options():
+    args = build_parser().parse_args(
+        [*RUN, "--threshold-task", "0.7", "--task-stuck-seconds", "12.5"]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.threshold_task == 0.7
+    assert settings.task_stuck_seconds == 12.5
+
+
+@pytest.mark.parametrize(
+    "extra, option",
+    [
+        (["--threshold-task", "-0.1"], "--threshold-task"),
+        (["--threshold-task", "1.5"], "--threshold-task"),
+        (["--threshold-task", "nan"], "--threshold-task"),
+        (["--task-stuck-seconds", "0"], "--task-stuck-seconds"),
+        (["--task-stuck-seconds", "-1"], "--task-stuck-seconds"),
+        (["--task-stuck-seconds", "inf"], "--task-stuck-seconds"),
+    ],
+)
+def test_run_task_range_errors_exit_before_hardware(
+    no_hardware, tmp_path, capsys, extra, option
+):
+    runs_dir = tmp_path / "runs"
+    code = main([*RUN, "--runs-dir", str(runs_dir), *ALL_FAKE, *extra])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert option in captured.err
+    assert not runs_dir.exists()
+
+
+def test_run_passes_the_task_arguments_in_settings(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    argv = [*RUN, *ALL_FAKE, "--threshold-task", "0.8", "--task-stuck-seconds", "45"]
+    assert main(argv) == 0
+    [(settings, _)] = created
+    assert settings.threshold_task == 0.8
+    assert settings.task_stuck_seconds == 45.0
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    args = run_settings_to_json(settings)
+    assert args["threshold_task"] == 0.8
+    assert args["task_stuck_seconds"] == 45.0

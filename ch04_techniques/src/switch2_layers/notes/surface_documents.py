@@ -2,7 +2,8 @@
 
 - 操作説明 (controls) と攻略情報 (tips): 場面が決まっていて、場面の文書があって空でなければ場面の文書。
   場面が決まっていない、または場面の文書が無いか空 (空白だけを含む) なら、notes/common/ の同じ種類の文書
-- 短期タスクリスト (tasks): 場面の文書 scenes/<場面ID>/tasks.md。共通の文書は無く、場面が無いか文書が無ければ空文字列
+- 今実行中のタスク (tasks と task_id): 場面のキューの状態 scenes/<場面ID>/tasks.json の tasks の最初の項目
+  (キューの先頭のタスク) の text と id。共通の文書は無く、場面が無いか、tasks.json が無いか、tasks が空なら空文字列と None
 - 助言 (advice): notes/advice.md
 - ゲームの性質 (game): notes/game.md (場面に依らない。場面が決まっていても、いなくても同じ文書)
 文書は notes.note_reader.read_note_text で読む。読めない文書 (無い・シンボリックリンクを解決した先が notes/ の中の
@@ -35,6 +36,8 @@ def read_surface_documents(notes_dir: Path, scene_id: str | None) -> SurfaceDocu
     scene_id が None、または場面 ID の形でない (notes.note_paths.is_scene_id が False) なら、場面が決まっていないものとして
     扱う (SurfaceDocuments.scene_id も None にする)。uses_common_controls と uses_common_tips は、それぞれ共通の文書を
     使ったら True (共通の文書が無くて空文字列になった場合も True)。
+    tasks と task_id は、場面が決まっていれば、その場面の tasks.json (notes.note_paths.tasks_json_note) の tasks の最初の
+    項目の text と id。場面が決まっていないか、tasks.json が無いか、tasks が空なら、空文字列と None。
     advice と game は読んだまま (前後の空白も除かない) にし、読めなければ空文字列にする。
     """
     if scene_id is not None and not is_scene_id(scene_id):
@@ -45,11 +48,12 @@ def read_surface_documents(notes_dir: Path, scene_id: str | None) -> SurfaceDocu
     tips, uses_common_tips = _read_scene_or_common(
         notes_dir, scene_id, DocumentKind.TIPS
     )
-    tasks = ""
+    tasks, task_id = "", None
     if scene_id is not None:
-        tasks = read_note_text(notes_dir, scene_note(scene_id, "tasks"))
+        tasks, task_id = _read_head_task(notes_dir, scene_id)
     return SurfaceDocuments(
         tasks=tasks,
+        task_id=task_id,
         tips=tips,
         controls=controls,
         advice=read_note_text(notes_dir, ADVICE_NOTE),
@@ -58,6 +62,11 @@ def read_surface_documents(notes_dir: Path, scene_id: str | None) -> SurfaceDocu
         uses_common_tips=uses_common_tips,
         game=read_note_text(notes_dir, GAME_NOTE),
     )
+
+
+def _read_head_task(notes_dir: Path, scene_id: str) -> tuple[str, str | None]:
+    """場面 scene_id の tasks.json の tasks の最初の項目の (text, id) を返す。無いか空なら ("", None)。"""
+    raise NotImplementedError
 
 
 def _read_scene_or_common(

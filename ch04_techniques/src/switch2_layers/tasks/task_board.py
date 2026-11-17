@@ -21,6 +21,7 @@ from switch2_layers.tasks.task_events import (
 from switch2_layers.tasks.task_files import read_saved_tasks, write_scene_task_files
 from switch2_layers.tasks.task_queue import (
     AddResult,
+    NewTask,
     SceneTaskQueues,
     TaskView,
     task_id_number,
@@ -39,16 +40,16 @@ class TaskBoard:
         self._queues = SceneTaskQueues() if queues is None else queues
         self._lock = threading.Lock()
 
-    def add(self, scene_id: str, texts: Sequence[str], t: float) -> AddResult:
-        """SceneTaskQueues.add(scene_id, texts, t) で足し、その結果を返す。
+    def add(self, scene_id: str, new_tasks: Sequence[NewTask], t: float) -> AddResult:
+        """SceneTaskQueues.add(scene_id, new_tasks, t) で足し、その結果を返す (行き先は中身を確かめずに持つ)。
 
-        1 つでも足したら、その場面のファイルを書く (時刻 t のキューの状態)。tasks.jsonl には入力の順に、足した文は
-        task_events.task_event_row(t, "added", 足したタスク)、足せなかった文は
+        1 つでも足したら、その場面のファイルを書く (時刻 t のキューの状態)。tasks.jsonl には入力の順に、足した組は
+        task_events.task_event_row(t, "added", 足したタスク)、足せなかった組は
         task_events.dropped_event_row(t, scene_id, 足せなかった文) を 1 行ずつ追記する。
         1 つも足さなければ、場面のファイルは書かず、dropped の行だけを追記する。
         """
         with self._lock:
-            result = self._queues.add(scene_id, texts, t)
+            result = self._queues.add(scene_id, new_tasks, t)
             if result.added:
                 self._write_scene(scene_id, t)
             for outcome in result.outcomes:
@@ -103,6 +104,11 @@ class TaskBoard:
             for task in canceled:
                 self._append(task_event_row(t, "canceled", task))
             return canceled
+
+    @property
+    def current_scene_id(self) -> str | None:
+        """ロックの中で SceneTaskQueues.current_scene_id (現在の場面 ID。場面なしなら None) を返す。"""
+        raise NotImplementedError
 
     def set_current_scene(self, scene_id: str | None, t: float) -> None:
         """SceneTaskQueues.set_current_scene(scene_id, t) で現在の場面を変える。ファイルも記録も書かない。"""

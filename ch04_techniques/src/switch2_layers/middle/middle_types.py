@@ -5,14 +5,11 @@
 
 middle/state.json の形:
     {"generated_t", "based_on_t", "scene_id", "scene_name", "is_stuck", "stuck_description", "surface_wait_s", "timeline",
-     "surface_rows_offset", "operations_rows_offset", "first_task", "first_task_since_t", "place_name", "current_tile",
-     "press_home"}
-surface_rows_offset と operations_rows_offset は、次の middle の入力で surface.jsonl と operations.jsonl を読み始める
-バイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ (middle_input_builder のモジュールの
-docstring)。
-first_task は出力の短期タスクリストの最初のタスクの文、first_task_since_t は最初のタスクが今の文になった時刻
-(最初のタスクが無いときと記録が無いときは null)。次の middle の入力で、最初のタスクが同じ文のまま何秒続いているかを
-伝えるのに使う (middle.task_progress)。読むときは、2 つのキーが無ければ空文字列と null とみなす。
+     "surface_rows_offset", "operations_rows_offset", "tasks_rows_offset", "place_name", "current_tile", "press_home"}
+surface_rows_offset・operations_rows_offset・tasks_rows_offset は、次の middle の入力で surface.jsonl・operations.jsonl・
+tasks.jsonl を読み始めるバイト位置 (前回までに読んだ完全な行の末尾)。行の時刻ではなくファイルの位置で持つ
+(middle_input_builder のモジュールの docstring)。読むときは、tasks_rows_offset のキーが無ければ 0 とみなす。
+読むときに first_task と first_task_since_t のキーがあっても、無視する (型も確かめない)。
 place_name は出力の現在地の場所の名前 (前後の空白を除いたもの。決められなければ null)、current_tile は出力の現在地の
 マス ({"x": 整数, "y": 整数}。place_name が null のときと書かれなかったときは null)。次の middle の入力で、現在地から
 出口までの経路を計算するのに使う (middle.route_section)。読むときは、2 つのキーが無ければどちらも null とみなす。
@@ -24,6 +21,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.notes.map_document import (
     GridMapDocument,
     MapConnection,
@@ -34,6 +32,7 @@ from switch2_layers.notes.map_document import (
 from switch2_layers.notes.note_paths import is_scene_id
 from switch2_layers.notes.scene_labels import SceneLabel
 from switch2_layers.progress.progress_state import ProgressState
+from switch2_layers.tasks.task_queue import NewTask, TaskView
 
 
 class ObservationKind(StrEnum):
@@ -91,19 +90,16 @@ class MiddleState:
                              (MiddleInput.surface_rows_offset)。次の入力はこの位置から読む
     operations_rows_offset   この出力の入力までに読んだ operations.jsonl の完全な行の末尾のバイト位置
                              (MiddleInput.operations_rows_offset)。次の入力はこの位置から読む
-    first_task               この出力の短期タスクリストの最初のタスクの文 (middle.task_progress.first_task_of の値)。
-                             無ければ空文字列
-    first_task_since_t       最初のタスクが今の文になった時刻 (middle.task_progress.first_task_since の値)。
-                             最初のタスクが無いときと記録が無いときは None
+    tasks_rows_offset        この出力の入力までに読んだ tasks.jsonl の完全な行の末尾のバイト位置
+                             (MiddleInput.tasks_rows_offset)。次の入力はこの位置から読む
     place_name               この出力の現在地の場所の名前 (MiddleOutput.place_name の前後の空白を除いたもの)。
                              決められなければ None
     current_tile             この出力の現在地のマス (MiddleOutput.current_tile)。place_name が None のときと、
                              書かれなかったときは None
     press_home               この出力の press_home (MiddleOutput.press_home)
-    first_task・first_task_since_t の既定値は、2 つのキーが無い middle/state.json を読むときと、最初のタスクを
-    記録しない値 (テストなど) のため。place_name・current_tile の既定値も同じく、2 つのキーが無い middle/state.json を
-    読むときと、現在地を記録しない値 (テストなど) のため。press_home の既定値も同じく、キーが無い middle/state.json を
-    読むときと、HOME を押さない値 (テストなど) のため。
+    place_name・current_tile の既定値は、2 つのキーが無い middle/state.json を読むときと、現在地を記録しない値
+    (テストなど) のため。press_home の既定値も同じく、キーが無い middle/state.json を読むときと、HOME を押さない値
+    (テストなど) のため。
     """
 
     generated_t: float
@@ -116,8 +112,7 @@ class MiddleState:
     timeline: str
     surface_rows_offset: int
     operations_rows_offset: int
-    first_task: str = ""
-    first_task_since_t: float | None = None
+    tasks_rows_offset: int
     place_name: str | None = None
     current_tile: TilePosition | None = None
     press_home: bool = False
@@ -135,11 +130,17 @@ class MiddleInput:
     scene_labels             場面ラベルの一覧
     previous_state           前回の middle/state.json。無いか読めなければ None
     strategy                 大方針 (notes/strategy.md)。無ければ空文字列
-    current_tasks            現在の場面 (previous_state の scene_id) の短期タスクリスト。場面が無いか文書が無ければ空文字列
+    task_queue               入力の場面 (previous_state の scene_id) のタスクのキューの、入力の時刻 t での状態
+                             (キューの順。tasks.task_board.TaskBoard.tasks)。場面が無ければ空
+    task_events              tasks.jsonl の、前回の tasks_rows_offset より後の行のうち、scene_id が入力の場面で、event が
+                             added でない行 (書かれた順)。場面が無ければ空
     surface_rows_offset      surface_rows を読んだ後の、surface.jsonl の完全な行の末尾のバイト位置。
                              この入力で書いた middle/state.json に記録し、次の入力はこの位置から読む
     operations_rows_offset   operation_rows を読んだ後の、operations.jsonl の完全な行の末尾のバイト位置。使い方は
                              surface_rows_offset と同じ
+    tasks_rows_offset        tasks.jsonl を読み終えた後の、完全な行の末尾のバイト位置。使い方は surface_rows_offset と
+                             同じ
+    reasons                  この回に middle を呼んだ理由 (middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順)
     current_controls         現在の場面 (previous_state の scene_id) の操作説明。surface と同じ規則
                              (notes.surface_documents) で選ぶ: 場面が決まっていて、場面の controls.md があって空 (空白だけを
                              含む) でなければ場面の文書、そうでなければ notes/common/controls.md。読めなければ空文字列。
@@ -164,9 +165,12 @@ class MiddleInput:
     scene_labels: tuple[SceneLabel, ...]
     previous_state: MiddleState | None
     strategy: str
-    current_tasks: str
+    task_queue: tuple[TaskView, ...]
+    task_events: tuple[dict[str, object], ...]
     surface_rows_offset: int
     operations_rows_offset: int
+    tasks_rows_offset: int
+    reasons: tuple[MiddleCallReason, ...]
     current_controls: str = ""
     place_names: tuple[str, ...] = ()
     map_document: MapDocument | GridMapDocument | None = None
@@ -183,7 +187,8 @@ class MiddleOutput:
     stuck_description   詰まり方の説明
     surface_wait_s      surface の待ち秒 (0.2〜2.0 の範囲を想定する。範囲外でも surface が収める)
     timeline            系列情報
-    tasks               現在の場面の短期タスクリスト (Markdown)
+    new_tasks           現在の場面のキューの末尾に足すタスク (文と行き先の組。出力の順)。足さなければ空
+    cancel_task_ids     取り消すタスクの ID (出力の順。形は確かめない)。取り消さなければ空
     place_name          現在地の場所の名前。場所の名前の一覧から選び、当てはまるものが無いときだけ新しい名前にする。
                         ゲームの世界の中の場所が映っていない (メニュー・タイトル・戦闘など) か、決められなければ None
     current_tile        現在地のマス (入力のマップの、place_name の場所の座標)。出力が null なら None
@@ -201,7 +206,8 @@ class MiddleOutput:
     stuck_description: str
     surface_wait_s: float
     timeline: str
-    tasks: str
+    new_tasks: tuple[NewTask, ...]
+    cancel_task_ids: tuple[str, ...]
     place_name: str | None = None
     current_tile: TilePosition | None = None
     new_connections: tuple[MapConnection, ...] = ()
@@ -213,7 +219,7 @@ class MiddleAnalyzer(Protocol):
     """middle の分析。後続の実装では gpt-6-luna を呼ぶ。"""
 
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
-        """middle_input から場面・詰まり・待ち時間・系列情報・短期タスクリストを決めて返す。失敗したら例外を出す。"""
+        """middle_input から場面・詰まり・待ち時間・系列情報・足すタスクと取り消すタスクを決めて返す。失敗したら例外を出す。"""
         ...
 
 
@@ -234,8 +240,7 @@ def middle_state_to_json(state: MiddleState) -> dict[str, object]:
         "timeline": state.timeline,
         "surface_rows_offset": state.surface_rows_offset,
         "operations_rows_offset": state.operations_rows_offset,
-        "first_task": state.first_task,
-        "first_task_since_t": state.first_task_since_t,
+        "tasks_rows_offset": state.tasks_rows_offset,
         "place_name": state.place_name,
         "current_tile": None
         if state.current_tile is None
@@ -251,8 +256,8 @@ def middle_state_from_json(value: object) -> MiddleState:
     generated_t・based_on_t・surface_wait_s は数 (bool を除く)、surface_rows_offset と operations_rows_offset は
     0 以上の整数 (bool を除く)、scene_id と scene_name は文字列か null、is_stuck は真偽、stuck_description と timeline は
     文字列。scene_id が文字列なら場面 ID の形に限る。
-    first_task と first_task_since_t は省けるキーで、無ければ既定値 (空文字列と None) にする。あれば、first_task は
-    文字列、first_task_since_t は数 (bool を除く) か null でなければ ValueError にする。
+    tasks_rows_offset は省けるキーで、無ければ 0 にする。あれば、0 以上の整数 (bool を除く) でなければ ValueError にする。
+    first_task と first_task_since_t のキーは、あっても無視する (型も確かめない)。
     place_name と current_tile も省けるキーで、無ければどちらも None にする。あれば、place_name は文字列か null
     (文字列は書かれたまま)、current_tile は {"x": 整数, "y": 整数} の object か null でなければ ValueError にする
     (x か y が無い、整数でない (bool と小数 (1.0 を含む) は整数でない) ときも ValueError。object のほかのキーは無視する)。
@@ -268,12 +273,9 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
     scene_id = _optional_string(value, "scene_id")
     if scene_id is not None and not is_scene_id(scene_id):
         raise ValueError(f"invalid scene id in middle state: {scene_id!r}")
-    # first_task と first_task_since_t は省けるキー: 無ければ既定値にする
-    first_task = _string(value, "first_task") if "first_task" in value else ""
-    first_task_since_t = (
-        _optional_number(value, "first_task_since_t")
-        if "first_task_since_t" in value
-        else None
+    # tasks_rows_offset は省けるキー: 無ければ 0 にする
+    tasks_rows_offset = (
+        _offset(value, "tasks_rows_offset") if "tasks_rows_offset" in value else 0
     )
     # place_name と current_tile も省けるキー: 無ければ None にする
     place_name = (
@@ -295,8 +297,7 @@ def _middle_state_from_object(value: Mapping[str, object]) -> MiddleState:
         timeline=_string(value, "timeline"),
         surface_rows_offset=_offset(value, "surface_rows_offset"),
         operations_rows_offset=_offset(value, "operations_rows_offset"),
-        first_task=first_task,
-        first_task_since_t=first_task_since_t,
+        tasks_rows_offset=tasks_rows_offset,
         place_name=place_name,
         current_tile=current_tile,
         press_home=press_home,
@@ -320,16 +321,6 @@ def _number(value: Mapping[str, object], key: str) -> float:
     if isinstance(item, int | float) and not isinstance(item, bool):
         return float(item)
     raise ValueError(f"{key!r} in middle state must be a number: {item!r}")
-
-
-def _optional_number(value: Mapping[str, object], key: str) -> float | None:
-    """value[key] が数 (bool を除く) か null ならその値を返す。それ以外は ValueError。"""
-    item = _field(value, key)
-    if item is None:
-        return None
-    if isinstance(item, int | float) and not isinstance(item, bool):
-        return float(item)
-    raise ValueError(f"{key!r} in middle state must be a number or null: {item!r}")
 
 
 def _offset(value: Mapping[str, object], key: str) -> int:

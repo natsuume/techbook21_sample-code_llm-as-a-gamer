@@ -63,6 +63,7 @@ from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
 from switch2_layers.system_screen.system_screen_references import (
     SYSTEM_SCREEN_CHOICE_NAMES,
 )
+from switch2_layers.tasks.task_board import TaskBoard
 
 RUN_SECONDS = 3.0  # 止めるまで動かす秒数
 # 画面の停滞の計測のテストで止めるまで動かす秒数 (最初の 2 秒のフレームは新しい画面になるため、長めにとる)
@@ -313,6 +314,60 @@ def test_start_record_has_the_deep_runner_choice(tmp_path):
     start = read_rows(root / "run.jsonl")[0]
     assert start["event"] == "start"
     assert start["args"]["deep"] == "fake"
+
+
+def test_start_record_has_the_task_arguments(tmp_path):
+    # --threshold-task と --task-stuck-seconds も、ほかの起動引数と同じく start の args に入る
+    app = LayersApp(
+        settings(tmp_path, threshold_task=0.7, task_stuck_seconds=12.0),
+        parts(FakeSender()),
+    )
+    reason, root = run_app(app, stop_after=0.5)
+    assert reason == REASON_INTERRUPTED
+    args = read_rows(root / "run.jsonl")[0]["args"]
+    assert args["threshold_task"] == 0.7
+    assert args["task_stuck_seconds"] == 12.0
+
+
+class TaskBoardRecorder:
+    """app モジュールの TaskBoard を包み、start が作ったものと、現在の場面の設定の呼び出しを覚える。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch):
+        self.made: list[TaskBoard] = []
+        # (場面 ID, 時刻) を呼ばれた順に
+        self.scenes: list[tuple[str | None, float]] = []
+        recorder = self
+
+        class RecordingTaskBoard(TaskBoard):
+            def set_current_scene(self, scene_id: str | None, t: float) -> None:
+                recorder.scenes.append((scene_id, t))
+                super().set_current_scene(scene_id, t)
+
+        def build(*args: object, **kwargs: object) -> TaskBoard:
+            board = RecordingTaskBoard(*args, **kwargs)
+            self.made.append(board)
+            return board
+
+        monkeypatch.setattr(app_module, "TaskBoard", build)
+
+
+def test_leaving_play_sets_no_current_scene_on_the_task_board(tmp_path, monkeypatch):
+    recorder = TaskBoardRecorder(monkeypatch)
+    app = LayersApp(settings(tmp_path), parts(FakeSender()))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    # start が 1 つ作り、surface と middle のループに渡す
+    [board] = recorder.made
+    clean_up = [row for row in phase_rows(root) if row["phase"] == "clean_up"]
+    assert clean_up
+    clean_up_t = clean_up[0]["t"]
+    # play の間は middle の出力の場面 (フェイクの場面 scene-001) を設定する
+    assert any(
+        scene_id == "scene-001" and t <= clean_up_t for scene_id, t in recorder.scenes
+    )
+    # play から出たら (片付けに移ったら)、現在の場面を場面なしにする
+    assert any(scene_id is None and t >= clean_up_t for scene_id, t in recorder.scenes)
+    assert board.paths.root == root
 
 
 def test_home_is_never_sent_to_the_controller(tmp_path):

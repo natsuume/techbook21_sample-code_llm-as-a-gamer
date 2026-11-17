@@ -106,6 +106,10 @@ SAFETY_INTERVAL_MIN_S = 0.2
 SAFETY_INTERVAL_MAX_S = 10.0
 DEFAULT_THRESHOLD_SAFETY = 0.7
 DEFAULT_MAX_SAFETY_ERRORS = 3
+# surface の先頭のタスクの 2 つの問い (task_done・task_cancel) のしきい値
+DEFAULT_THRESHOLD_TASK = 0.5
+# 現在の場面の最も古いタスクの続いた秒数がこれを超えたら、middle を呼ぶきっかけ (stuck) にする
+DEFAULT_TASK_STUCK_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -143,11 +147,17 @@ class RunSettings:
                                 SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下)
     threshold_safety            安全の問いのしきい値。確率がこれを超えた画面で止める
                                 (--threshold-safety、既定 0.7。0 より大きく 1 より小さい値)
+    threshold_task              surface の先頭のタスクの 2 つの問い (task_done・task_cancel) のしきい値。確率がこれを
+                                超えた要求が、同じタスクについて続けて 2 回あったら成立にする
+                                (--threshold-task、既定 0.5。0 以上 1 以下)
     max_safety_errors           安全の監視の失敗がこの回数続いたら全体を止める (--max-safety-errors、既定 3。1 以上)
     progress_window_s           画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数)
                                 (--progress-window、既定 300。0 より大きい有限の値)
     stuck_advice_seconds        新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で求める。
                                 超えたまま続く間は、この秒数ごとに求める (--stuck-advice-seconds、既定 60。
+                                0 より大きい有限の値)
+    task_stuck_seconds          現在の場面の最も古いタスクの続いた秒数がこれを超えたら、間隔を待たずに middle を呼ぶ
+                                (きっかけ stuck)。超えたまま続く間は、この秒数ごとに呼ぶ (--task-stuck-seconds、既定 30。
                                 0 より大きい有限の値)
     """
 
@@ -172,9 +182,11 @@ class RunSettings:
     safety: SafetyKind = DEFAULT_SAFETY
     safety_interval_s: float = DEFAULT_SAFETY_INTERVAL_S
     threshold_safety: float = DEFAULT_THRESHOLD_SAFETY
+    threshold_task: float = DEFAULT_THRESHOLD_TASK
     max_safety_errors: int = DEFAULT_MAX_SAFETY_ERRORS
     progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
     stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
+    task_stuck_seconds: float = DEFAULT_TASK_STUCK_SECONDS
 
 
 @dataclass(frozen=True)
@@ -219,7 +231,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
-    --progress-window と --stuck-advice-seconds は 0 より大きい有限の値。
+    --threshold-task は 0 以上 1 以下 (nan は誤り)。
+    --progress-window・--stuck-advice-seconds・--task-stuck-seconds は 0 より大きい有限の値。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -288,6 +301,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
             "--threshold-safety must be more than 0 and less than 1: "
             f"{settings.threshold_safety}"
         )
+    if not 0.0 <= settings.threshold_task <= 1.0:
+        errors.append(f"--threshold-task must be 0..1: {settings.threshold_task}")
     if settings.max_safety_errors < 1:
         errors.append(
             f"--max-safety-errors must be 1 or more: {settings.max_safety_errors}"
@@ -301,6 +316,11 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             "--stuck-advice-seconds must be a finite number more than 0: "
             f"{settings.stuck_advice_seconds}"
+        )
+    if not _is_finite_positive(settings.task_stuck_seconds):
+        errors.append(
+            "--task-stuck-seconds must be a finite number more than 0: "
+            f"{settings.task_stuck_seconds}"
         )
     return errors
 

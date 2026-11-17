@@ -11,7 +11,7 @@
           {"type": "input_text", "text": luna_instructions.LUNA_DEVELOPER_INSTRUCTIONS,
            "prompt_cache_breakpoint": {"mode": "explicit"}}]},
         {"role": "user", "content": [
-          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 15>},
+          {"type": "input_text", "text": <節 1>}, ..., {"type": "input_text", "text": <節 17>},
           {"type": "input_text", "text": frame_label(フレーム 1 の t)},
           {"type": "input_image", "image_url": jpeg_data_url(フレーム 1 の JPEG)},
           ...]}
@@ -30,20 +30,22 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     4. マップ                           describe_map_document(middle_input.map_document)
     5. 現在地からの経路 (コードの計算)  route_section.describe_route_section(middle_input.map_document,
                                         middle_input.previous_state) (見出しは route_section.ROUTE_SECTION_TITLE)
-    6. 前回の middle の出力             describe_previous_state(middle_input.previous_state, middle_input.t)
+    6. 前回の middle の出力             describe_previous_state(middle_input.previous_state)
     7. ゲームの性質                     middle_input.game の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (待ち時間と、タスクにしない行動を決めるために渡す)
     8. 大方針                           middle_input.strategy の前後の空白を除いたもの。空なら EMPTY_TEXT
-    9. 現在の場面の短期タスクリスト     middle_input.current_tasks の前後の空白を除いたもの。空なら EMPTY_TEXT
-    10. 現在の場面の操作説明            middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
+    9. 現在の場面のタスクのキュー       describe_task_queue(middle_input.task_queue)
+    10. 前回以降のタスクの出来事        describe_task_events(middle_input.task_events)
+    11. 呼ばれた理由                    describe_call_reasons(middle_input.reasons)
+    12. 現在の場面の操作説明            middle_input.current_controls の前後の空白を除いたもの。空なら EMPTY_TEXT
                                         (unknown のボタンを確かめるタスクを作るために渡す)
-    11. 前回以降の surface の記録       record_summary.summarize_surface_rows(middle_input.surface_rows)
-    12. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
-    13. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
+    13. 前回以降の surface の記録       record_summary.summarize_surface_rows(middle_input.surface_rows)
+    14. 前回以降の操作の記録            record_summary.summarize_operation_rows(middle_input.operation_rows)
+    15. 場面転換の印                    scene_change_reported が真なら SCENE_CHANGE_REPORTED_TEXT、偽なら
                                         SCENE_CHANGE_NOT_REPORTED_TEXT
-    14. 画面の停滞 (コードの計測)       describe_progress(middle_input.progress)。surface に渡すものと同じ文
+    16. 画面の停滞 (コードの計測)       describe_progress(middle_input.progress)。surface に渡すものと同じ文
                                         (progress.progress_text) に、値の時刻を添える
-    15. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
+    17. フレーム                        「一定間隔で保存したフレーム <枚数> 枚 (古い順)。各画像の直前に時刻のラベルがある」。
                                         0 枚なら NO_FRAMES_TEXT
 節の後ろに、middle_input.frames の順 (古い順) に、時刻のラベル (frame_label) と画像 (input_image) を 1 組ずつ置く。
 画像の detail は指定しない (既定の auto)。
@@ -51,11 +53,12 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
 
 import base64
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from switch2_layers.frames.surface_frames import format_frame_label
 from switch2_layers.middle.luna_instructions import LUNA_DEVELOPER_INSTRUCTIONS
 from switch2_layers.middle.luna_output_schema import build_text_format
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleState
 from switch2_layers.middle.record_summary import (
     summarize_operation_rows,
@@ -76,6 +79,7 @@ from switch2_layers.progress.progress_text import (
     NO_PROGRESS_TEXT,
     describe_progress_values,
 )
+from switch2_layers.tasks.task_queue import DropReason, TaskView
 
 LUNA_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "none"
@@ -89,7 +93,9 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "前回の middle の出力",
     "ゲームの性質",
     "大方針",
-    "現在の場面の短期タスクリスト",
+    "現在の場面のタスクのキュー",
+    "前回以降のタスクの出来事",
+    "呼ばれた理由",
     "現在の場面の操作説明",
     "前回以降の surface の記録",
     "前回以降の操作の記録",
@@ -105,6 +111,29 @@ SCENE_CHANGE_NOT_REPORTED_TEXT = (
 NO_FRAMES_TEXT = "フレームは無い"
 # マップ (notes/map/map.json) が無い・読めない・形に合わないときに、マップの節に書く文字列
 NO_MAP_TEXT = "マップなし"
+# タスクのキューの節で、行き先が無いタスクに書く文字列 (「行き先: なし」)
+NO_DESTINATION_TEXT = "なし"
+# タスクの出来事の節の、tasks.jsonl の event の値 → 書き方 (added の行は入力に入らない)
+TASK_EVENT_TEXTS: dict[str, str] = {
+    "done": "完了",
+    "cancel_requested": "取り消しの要求",
+    "canceled": "取り消し",
+    "dropped": "足せなかった",
+}
+# タスクの出来事の節の、足せなかった理由 (tasks.jsonl の reason) → 括弧の中の書き方
+DROP_REASON_TEXTS: dict[DropReason, str] = {
+    "empty": "空の文",
+    "duplicate": "同じ文がある",
+    "limit": "上限",
+}
+# 呼ばれた理由の節の、理由 → 説明 (middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順に書く)
+CALL_REASON_TEXTS: dict[MiddleCallReason, str] = {
+    "queue_empty": "現在の場面のキューが、完了か取り消しで空になった",
+    "cancel_requested": "surface が実行中のタスクの取り消しを求めた",
+    "stuck": "現在の場面の最も古いタスクが、詰まりとみなす秒数を超えてキューに残っている",
+    "scene_change": "surface が場面転換を検知した",
+    "interval": "前回から一定の間隔がたった",
+}
 
 
 def jpeg_data_url(jpeg: bytes) -> str:
@@ -172,21 +201,14 @@ def describe_progress(progress: ProgressState | None) -> str:
     )
 
 
-def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
+def describe_previous_state(state: MiddleState | None) -> str:
     """前回の middle の出力を、次の行の文にする。state が None なら EMPTY_TEXT を返す。
-
-    now_t は今回の入力の時刻 (MiddleInput.t)。最初のタスクが今の文になってからの経過秒の基準にする。
 
         作成時刻: t=<generated_t> (入力の時刻 t=<based_on_t>)
         場面: <scene_name> (<scene_id>)        場面が決まっていなければ「場面: (決まっていない)」
         止まっているか: はい | いいえ
         詰まり方: <stuck_description>          空なら EMPTY_TEXT
         surface の待ち時間: <surface_wait_s> 秒        surface_wait_s は書式 g (例: 0.4)
-        最初のタスク: <first_task>             空なら EMPTY_TEXT
-        最初のタスクが今の文になった時刻: t=<first_task_since_t> (入力の時刻まで <経過> 秒)
-                                               経過は max(0.0, now_t - first_task_since_t) を小数 1 桁 (書式 .1f。
-                                               例: 35.2)。first_task_since_t が None なら
-                                               「最初のタスクが今の文になった時刻: (無い)」
         系列情報:
         <timeline>                             空なら EMPTY_TEXT
     t は format_frame_label の形。
@@ -197,14 +219,6 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
         scene = "(決まっていない)"
     else:
         scene = f"{state.scene_name} ({state.scene_id})"
-    if state.first_task_since_t is None:
-        first_task_since_text = EMPTY_TEXT
-    else:
-        elapsed_s = max(0.0, now_t - state.first_task_since_t)
-        first_task_since_text = (
-            f"{format_frame_label(state.first_task_since_t)} "
-            f"(入力の時刻まで {elapsed_s:.1f} 秒)"
-        )
     return "\n".join(
         [
             (
@@ -215,16 +229,50 @@ def describe_previous_state(state: MiddleState | None, now_t: float) -> str:
             f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
             f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
             f"surface の待ち時間: {state.surface_wait_s:g} 秒",
-            f"最初のタスク: {state.first_task or EMPTY_TEXT}",
-            f"最初のタスクが今の文になった時刻: {first_task_since_text}",
             "系列情報:",
             state.timeline or EMPTY_TEXT,
         ]
     )
 
 
+def describe_task_queue(tasks: Sequence[TaskView]) -> str:
+    """現在の場面のタスクのキューの節の中身を返す。tasks が空なら EMPTY_TEXT を返す。
+
+    1 行 1 タスクで、tasks の順 (キューの順) に「- <id>: <text> (<行き先>、キューに入ってから <秒数> 秒<要求>)」の行を
+    改行 1 つでつなぐ (末尾に改行を付けない)。
+        行き先   「行き先: <place> (<x>, <y>)」。tile が None なら「行き先: <place>」、destination が None なら
+                 「行き先: なし」(NO_DESTINATION_TEXT)
+        秒数     TaskView.active_s (別の場面にいる間は止まる続いた秒数) を書式 g で書く (例: 12.5)
+        要求     cancel_requested_t があれば「、取り消しの要求あり」、無ければ何も書かない
+    例: 「- task-003: 宿屋に入っている (行き先: 町 (3, 4)、キューに入ってから 12.5 秒、取り消しの要求あり)」
+    """
+    raise NotImplementedError
+
+
+def describe_task_events(rows: Sequence[Mapping[str, object]]) -> str:
+    """前回以降のタスクの出来事の節の中身を返す。rows が空なら EMPTY_TEXT を返す。
+
+    rows は MiddleInput.task_events (tasks.jsonl の行。書かれた順)。1 行 1 出来事で、rows の順に次の行を改行 1 つで
+    つなぐ (末尾に改行を付けない)。t は format_frame_label の形 (surface の記録の節の時刻と同じ):
+        done・cancel_requested・canceled   「- t=<t> <TASK_EVENT_TEXTS[event]> <id> 「<text>」」
+                                            (例: 「- t=12.345 完了 task-003 「宿屋に入っている」」)
+        dropped                             「- t=<t> 足せなかった (<DROP_REASON_TEXTS[reason]>) 「<text>」」
+                                            (例: 「- t=12.345 足せなかった (同じ文がある) 「宿屋に入っている」」)
+    """
+    raise NotImplementedError
+
+
+def describe_call_reasons(reasons: Sequence[MiddleCallReason]) -> str:
+    """呼ばれた理由の節の中身を返す。
+
+    理由ごとに 1 行「- <理由>: <CALL_REASON_TEXTS[理由]>」を、middle.middle_trigger.MIDDLE_CALL_REASON_ORDER の順に
+    改行 1 つでつなぐ (末尾に改行を付けない)。例: 「- interval: 前回から一定の間隔がたった」
+    """
+    raise NotImplementedError
+
+
 def build_user_sections(middle_input: MiddleInput) -> list[str]:
-    """user メッセージの 15 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
+    """user メッセージの 17 の節の文を、モジュールの docstring の順と形で返す (画像の組は含まない)。"""
     frame_count = len(middle_input.frames)
     if frame_count:
         frames_text = (
@@ -239,10 +287,12 @@ def build_user_sections(middle_input: MiddleInput) -> list[str]:
         describe_place_names(middle_input.place_names),
         describe_map_document(middle_input.map_document),
         describe_route_section(middle_input.map_document, middle_input.previous_state),
-        describe_previous_state(middle_input.previous_state, middle_input.t),
+        describe_previous_state(middle_input.previous_state),
         _stripped_or_empty_text(middle_input.game),
         _stripped_or_empty_text(middle_input.strategy),
-        _stripped_or_empty_text(middle_input.current_tasks),
+        describe_task_queue(middle_input.task_queue),
+        describe_task_events(middle_input.task_events),
+        describe_call_reasons(middle_input.reasons),
         _stripped_or_empty_text(middle_input.current_controls),
         summarize_surface_rows(middle_input.surface_rows),
         summarize_operation_rows(middle_input.operation_rows),

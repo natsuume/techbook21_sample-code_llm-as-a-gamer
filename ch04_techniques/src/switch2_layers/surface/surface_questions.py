@@ -12,7 +12,11 @@
     scene_change      scene_changed                           noul    1
     box_exists        box_exists_<番号>                        noul    box の対象ごと
     box               box_<番号>                               box     問い直す対象ごと
+    task_done         task_done                               noul    1 (先頭のタスクがあるときだけ)
+    task_cancel       task_cancel                             noul    1 (先頭のタスクがあるときだけ)
 <番号> は対象の一覧 (surface.box_targets) の中の 1 始まりの位置。
+task_done と task_cancel は build_surface_questions には入れず、先頭のタスクがあるときだけ、JevSurfaceDecider が
+build_task_questions の 2 問を一覧の最後に足す。
 十字キーは、方向 (dpad_direction) と押し方 (dpad_press) の 2 問で問い、allowed_buttons に依らず送る。
 選択肢の問いは「なし」(NONE_CHOICE) を先頭に置く。公式ドキュメント
 (https://docs.typesafe.ai/model-jaggedness.md の "Choice option order") に、Jev は先頭の選択肢に寄ることがあると
@@ -102,6 +106,9 @@ ADVISOR_KINDS: tuple[DocumentKind, ...] = (
 # 情報ラベルの名前 (操作説明・攻略情報・大方針・詰まり・マップ)。並びは問いの順と、SurfaceOutput.info_labels の順
 INFO_LABEL_NAMES = ("controls", "tips", "strategy", "stuck", "map")
 SCENE_CHANGE_QUESTION_NAME = "scene_changed"
+# 先頭のタスクを達成したかの問いと、達成できないか状況に合わないかの問いの ID
+TASK_DONE_QUESTION_NAME = "task_done"
+TASK_CANCEL_QUESTION_NAME = "task_cancel"
 
 
 class QuestionType(StrEnum):
@@ -129,6 +136,8 @@ class QuestionKind(StrEnum):
     SCENE_CHANGE = "scene_change"
     BOX_EXISTS = "box_exists"
     BOX = "box"
+    TASK_DONE = "task_done"
+    TASK_CANCEL = "task_cancel"
     SAFETY = "safety"
     MONITOR = "monitor"
 
@@ -155,7 +164,7 @@ class SurfaceQuestion:
     target          button はボタン名、dpad_direction と dpad_press は DPAD_TARGET、stick_direction は `LS_x` の形、
                     stick_strength は `LS_x_50` の形、
                     advisor は文書の種類の値 (DocumentKind.value)、info_label は情報ラベルの名前、
-                    scene_change は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
+                    scene_change・task_done・task_cancel は空文字列、box_exists と box は対象の名前 (BoxTarget.name)、
                     safety は問いの名前 (safety.safety_questions.SAFETY_QUESTION_NAMES の要素か
                     SYSTEM_SCREEN_QUESTION_NAME)、monitor は監視の名前
     question_type   Jev の問いの型。button・dpad_direction・dpad_press・stick_direction・monitor と、safety の
@@ -225,8 +234,9 @@ SURFACE_INSTRUCTIONS = (
     "`frames` は直近 2 秒以内のゲームの画面で、古い順に並び、最後が最新です。"
     "各画像の左上には時刻を、追えている対象には枠と名前を書き込んであります。"
     "書き込んだ時刻・枠・名前は、ゲームの画面の一部ではありません。\n"
-    "`documents` は、今の場面の短期タスクリスト (tasks)・攻略情報 (tips)・操作説明 (controls)・"
+    "`documents` は、今実行中のタスク (tasks)・攻略情報 (tips)・操作説明 (controls)・"
     "詰まったときの助言 (advice) と、場面に依らないゲームの性質 (game) です。"
+    "`documents.tasks` は今実行中のタスク 1 つで、達成したい状態が書かれています (タスクが無ければ空です)。"
     "`timeline` は上位の層がまとめた系列情報とその作成時刻、"
     "`recent_actions` は直近に送った操作 (古い順) です。\n"
     "`progress` は、コードが画面から測った停滞 (画面が変わっていない秒数と、直近に見た画面だけが出ていて"
@@ -234,7 +244,7 @@ SURFACE_INSTRUCTIONS = (
     "`advisor` は、deep (文書をまとめる上位のモデル) の文書の種類ごとの呼び出しの状況 (実行中のジョブ、保留中の要求、"
     "前回の終了、今求めたときの扱い、surface が最後に求めた結果) です。\n"
     "規則:\n"
-    "- 短期タスクリストの実行中のタスクを進める操作を選ぶ。\n"
+    "- `documents.tasks` に書かれた状態に近づく操作を選ぶ。\n"
     "- 操作の問い (ボタン・十字キー・スティック) と、ほかの問い (deep を呼ぶか・情報ラベル・場面転換・box) は、"
     "それぞれ独立に答える。ほかの問いへの答えで操作を変えない。\n" + SAFETY_RULES
 )
@@ -253,7 +263,7 @@ ADVISOR_QUESTION_TEXTS: dict[DocumentKind, str] = {
     DocumentKind.STRATEGY: (
         "今、deep (文書をまとめる上位のモデル) に、大方針 (ゲームの目標と進め方) の更新を求めるべきか。"
         "今の目標を達成したとき、今の目標が達成できないと分かったとき、"
-        "短期タスクリスト (`documents.tasks`) が画面の状況に合わないときに真にする。"
+        "実行中のタスク (`documents.tasks`) が画面の状況に合わないときに真にする。"
     ),
     DocumentKind.ADVICE: (
         "今、deep (文書をまとめる上位のモデル) に、詰まったときの助言 (`documents.advice`) を求めるべきか。"
@@ -286,6 +296,9 @@ SCENE_CHANGE_QUESTION_TEXT = "`frames` の画像の間で、画面の種類 (フ
 # box の存在と box の問いの文。{frame} は latest_frame_path の値、{name} と {description} は対象の名前と説明
 BOX_EXISTS_QUESTION_TEXT = "`{frame}` に「{name}」({description}) が写っているか。"
 BOX_QUESTION_TEXT = "`{frame}` の中の「{name}」({description}) を囲む box。"
+# 先頭のタスクの 2 つの問いの文。{task} は先頭のタスクの文に置き換える
+TASK_DONE_QUESTION_TEXT = "「{task}」を達成した。"
+TASK_CANCEL_QUESTION_TEXT = "「{task}」は、今の状況では達成できないか、状況に合わない。"
 
 
 def box_exists_question_name(number: int) -> str:
@@ -510,6 +523,18 @@ def build_box_questions(
         for number, target in enumerate(targets, start=1)
         if target.name in requery_names
     ]
+
+
+def build_task_questions(task_text: str) -> list[SurfaceQuestion]:
+    """先頭のタスクの文 task_text の 2 問を、task_done・task_cancel の順で返す。
+
+    task_done: name は TASK_DONE_QUESTION_NAME、種類は QuestionKind.TASK_DONE、文は TASK_DONE_QUESTION_TEXT の {task} を
+    task_text に置き換えたもの (例: 「「宿屋に入っている」を達成した。」)。
+    task_cancel: name は TASK_CANCEL_QUESTION_NAME、種類は QuestionKind.TASK_CANCEL、文は TASK_CANCEL_QUESTION_TEXT の
+    {task} を task_text に置き換えたもの。
+    どちらも target は空文字列、型は noul。
+    """
+    raise NotImplementedError
 
 
 def _target_text(template: str, target: BoxTarget, frame_path: str) -> str:

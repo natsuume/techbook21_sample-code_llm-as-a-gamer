@@ -3,8 +3,8 @@
 1 回の要求の流れ (step):
     1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選ぶ。2 秒以内のフレームが無ければ要求を送らず、
        NO_FRAME_RETRY_S 秒待って選び直す
-    2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書を読む。
-       画面の停滞の計測の値 (progress/state.json) も読む
+    2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書 (キューの先頭のタスクを含む) を
+       読む。画面の停滞の計測の値 (progress/state.json) も読む
     3. 画像を作る: 各画像の左上に t を書き込み、追えている box の枠と名前も書き込んで JPEG にする。どの box を
        書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
        Box を問い直す対象は、最新のフレームの画像に書き込まない)。
@@ -15,14 +15,19 @@
     5. 出力の操作を、surface の操作の関門 (surface_output_gate.SurfaceOutputGate) で送る。関門は押せるボタン (HOME を
        除く 16 個) に絞り、段階が play のときだけ送る (play でなければ送らずに SurfaceOutputBlockedError を出す)
     6. 1 行を surface.jsonl に書く
-    7. deep を呼ぶ要求を deep のスケジューラーに渡す
-    8. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
+    7. 先頭のタスクの 2 つの問いの答えを続けて数え (surface.task_answer_streak.TaskAnswerStreak)、成立したら
+       キューの部品 (tasks.task_board.TaskBoard) で先頭のタスクを完了にするか、取り消しの要求を付ける。キューが空に
+       なったこと・取り消しの要求が新しく成立したこと・場面転換を検知したことを、middle を呼ぶきっかけとして知らせる
+       (trigger_notify)
+    8. deep を呼ぶ要求を deep のスケジューラーに渡す
+    9. 待つ (middle/state.json の surface_wait_s を 0.2〜2.0 秒に収めた値)
 decide が例外を出したら、操作を中立にして DECIDE_ERROR_WAIT_S 秒待つ。max_errors 回続けたら on_stop で全体を止める。
 ブリッジの復旧中は要求を送らず、操作を中立にして BRIDGE_WAIT_S 秒待つ。
 操作の送信と中立のレポートは、すべて関門 (SurfaceOutputGate) を通す (hardware.pad_output.PadOutput を直接触らない)。
 止める合図は、decide が戻ったとき (例外を含む)、操作の送信 (5 の apply と、decide の失敗の後の neutral) が戻ったとき
-(成功・失敗とも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に確かめる。立っていたら、その回の
-残りの送信・記録 (surface.jsonl・run.jsonl)・deep の要求をせずにループを抜ける (止めた後に記録を増やさない)。
+(成功・失敗とも)、surface.jsonl の行を書く直前と書いた後 (7 の前)、deep を要求する直前 (種類ごと) に確かめる。
+立っていたら、その回の残りの送信・記録 (surface.jsonl・run.jsonl)・キューの部品の操作と知らせ・deep の要求をせずに
+ループを抜ける (止めた後に記録を増やさない)。
 surface.jsonl と surface_requests.jsonl の追記の失敗は、どちらも step の外に例外として出し、run が全体を止める。
 テストでは step を 1 回ずつ呼び、待ちは戻り値の wait_s で確かめる。
 """
@@ -58,6 +63,7 @@ from switch2_layers.frames.surface_frames import (
     select_surface_frames,
 )
 from switch2_layers.hardware.pad_output import OutputStoppedError
+from switch2_layers.middle.middle_trigger import MiddleCallReason
 from switch2_layers.notes.surface_documents import read_surface_documents
 from switch2_layers.progress.progress_state import read_progress_state
 from switch2_layers.records.run_log import (
@@ -90,6 +96,8 @@ from switch2_layers.surface.surface_types import (
     SurfaceOutput,
     SurfaceRequest,
 )
+from switch2_layers.surface.task_answer_streak import TaskAnswerStreak
+from switch2_layers.tasks.task_board import TaskBoard
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -138,12 +146,15 @@ class SurfaceStepResult:
 class SurfaceLoopSettings:
     """surface のループの設定。
 
-    max_errors     decide の失敗がこの回数続いたら on_stop を呼ぶ (--max-surface-errors)
-    image_width    送る画像の幅の上限
-    jpeg_quality   送る画像の JPEG の品質
+    max_errors       decide の失敗がこの回数続いたら on_stop を呼ぶ (--max-surface-errors)
+    threshold_task   先頭のタスクの 2 つの問い (task_done・task_cancel) のしきい値 (--threshold-task)。確率がこれを
+                     超えた要求が、同じタスクについて続けて TaskAnswerStreak の数だけあったら成立にする
+    image_width      送る画像の幅の上限
+    jpeg_quality     送る画像の JPEG の品質
     """
 
     max_errors: int
+    threshold_task: float
     image_width: int = SURFACE_IMAGE_WIDTH
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
 
@@ -169,6 +180,10 @@ class SurfaceLoopParts:
     plan_boxes      場面 ID を受け取り、その要求の box の書き込み方 (frames.surface_frames.BoxDrawingPlan) を返す関数
                     (run の surface が jev なら surface.jev_surface.JevSurfaceDecider.plan_boxes)。step が要求ごとに
                     1 回、画像を作る前に呼ぶ。None (既定) なら、boxes_at の box をすべて書き込み、色は box の並びで決める
+    board           タスクのキューの部品 (run では middle のループと同じ TaskBoard)。先頭のタスクの完了と取り消しの要求に
+                    使う。None (既定) なら、完了も取り消しの要求もしない
+    trigger_notify  middle を呼ぶきっかけを知らせる関数 (run では middle.middle_trigger.MiddleTrigger.notify)。
+                    None (既定) なら知らせない
     """
 
     paths: RunPaths
@@ -184,6 +199,8 @@ class SurfaceLoopParts:
     on_stop: Callable[[str], None]
     boxes_at: Callable[[float], Sequence[Box]] | None = None
     plan_boxes: Callable[[str | None], BoxDrawingPlan] | None = None
+    board: TaskBoard | None = None
+    trigger_notify: Callable[[MiddleCallReason], None] | None = None
 
 
 def surface_failure_reason(count: int) -> str:
@@ -226,10 +243,12 @@ class SurfaceLoop:
     """surface の要求を繰り返す。step は 1 つのスレッドからだけ呼ぶ。"""
 
     def __init__(self, parts: SurfaceLoopParts, settings: SurfaceLoopSettings) -> None:
-        """続けて失敗した回数 0、直近の操作の記録が空の状態で作る。"""
+        """続けて失敗した回数 0、直近の操作の記録が空、先頭のタスクの答えをまだ数えていない状態で作る。"""
         self.parts = parts
         self.settings = settings
         self._consecutive_errors = 0
+        # 先頭のタスクの 2 つの問いが、続けてしきい値を超えた数
+        self._task_answer_streak = TaskAnswerStreak()
         self._recent_actions: deque[RecentAction] = deque(maxlen=RECENT_ACTIONS_COUNT)
         # 直前の step でブリッジを使えていたか (最初の step の前は使えていたものとする)
         self._bridge_was_ok = True
@@ -286,11 +305,20 @@ class SurfaceLoop:
            出したら、行の error にその説明を書き、action と blocked_buttons は
            buttons.filter_action(出力の操作, output_gate.allowed_buttons) の結果にする。送れたら、送った操作を
            直近の操作に足す (RECENT_ACTIONS_COUNT 件まで)。apply の例外は、decide の失敗の回数に数えない
-        8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。deep_requests は出力の deep_kinds を DOCUMENT_KINDS の順に
-           並べたもの、wait_s は SurfaceContext.wait_s、request は出力の exchange.request.request_index、answers は
-           exchange.answers (usage はその usage)。exchange が None (フェイク) なら request・answers・usage は null)。
-           surface.jsonl と surface_requests.jsonl に書くのはこのスレッドだけ
-        9. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、request の直前に stop を確かめてから、
+        8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。task_id は documents.task_id、deep_requests は出力の
+           deep_kinds を DOCUMENT_KINDS の順に並べたもの、wait_s は SurfaceContext.wait_s、request は出力の
+           exchange.request.request_index、answers は exchange.answers (usage はその usage)。exchange が None (フェイク)
+           なら request・answers・usage は null)。surface.jsonl と surface_requests.jsonl に書くのはこのスレッドだけ
+        9. 行を書いた後、stop が立っていなければ、先頭のタスクの答えを扱う。時刻 t はこの回の行の t_received:
+           a. decision = TaskAnswerStreak.observe(documents.task_id, 出力の task_done_p, 出力の task_cancel_p,
+              settings.threshold_task) (答えのあった要求だけを数える。6 の失敗した要求では呼ばず、数も消さない)
+           b. decision.done なら board.complete(documents.scene_id, documents.task_id, t)。完了にして、その場面の
+              キュー (board.tasks(documents.scene_id, t)) が空になったら trigger_notify("queue_empty")
+           c. decision.cancel なら board.request_cancel(documents.scene_id, documents.task_id, t)。新しく付けたら
+              trigger_notify("cancel_requested")
+           d. 出力の scene_changed (場面転換の判定。確率が 0.5 を超えた) が真なら trigger_notify("scene_change")
+           board が None なら b と c の完了と取り消しの要求をせず、trigger_notify が None なら知らせない
+        10. deep_kinds の種類ごとに (DOCUMENT_KINDS の順)、request の直前に stop を確かめてから、
            deep_requests.request(種類, DeepTrigger.SURFACE, 現在の場面 ID) を呼ぶ。request が例外 (Exception) を出したら、
            外に出さずに run_log に deep_request_error {"source": "surface", "kind", "trigger", "scene_id", "error": 説明} を書き、
            残りの種類の要求を続ける (decide の失敗の回数には数えず、ループも止めない)
@@ -304,7 +332,9 @@ class SurfaceLoop:
             - apply が戻ったとき (7。OutputStoppedError を含む): 行を書かず、deep も呼ばない
             - 行を書く直前 (6・8): 行を書かず、deep も呼ばない (6 では、run.jsonl の surface_error は書いた後で、
               on_stop は呼ばない)
-            - deep を要求する直前 (9): その種類と残りの種類の要求をしない (行は書いた後)
+            - 行を書いた後 (9 の前): 先頭のタスクの答えを扱わない (行は書いた後。続く 10 の deep を要求する直前の
+              確かめで抜ける)
+            - deep を要求する直前 (10): その種類と残りの種類の要求をしない (行は書いた後)
         """
         parts = self.parts
         if parts.bridge_state() != BRIDGE_OK:
@@ -521,10 +551,10 @@ class SurfaceLoop:
         context: SurfaceContext,
         stop: threading.Event | None,
     ) -> SurfaceStepResult:
-        """decide の出力を送り、記録して、deep を要求する (step の 7〜9)。
+        """decide の出力を送り、記録して、先頭のタスクの答えを扱い、deep を要求する (step の 7〜10)。
 
         apply が戻った後 (例外でも)、surface.jsonl の行を書く直前、deep を要求する直前 (種類ごと) に stop を確かめ、
-        立っていれば STOPPED を返す。
+        立っていれば STOPPED を返す。行を書いた後にも確かめ、立っていれば先頭のタスクの答えを扱わない。
         """
         parts = self.parts
         self._consecutive_errors = 0
@@ -568,9 +598,22 @@ class SurfaceLoop:
         if _is_stopped(stop):
             return _stopped_result()
         append_json_line(parts.paths.surface_log, row)
+        if not _is_stopped(stop) and (
+            parts.board is not None or parts.trigger_notify is not None
+        ):
+            self._handle_task_answers(documents, output, t_received)
         if not self._request_deep(deep_kinds, context.scene_id, stop):
             return _stopped_result()
         return SurfaceStepResult(SurfaceStepOutcome.SENT, context.wait_s, row)
+
+    def _handle_task_answers(
+        self, documents: SurfaceDocuments, output: SurfaceOutput, t: float
+    ) -> None:
+        """先頭のタスクの 2 つの問いの答えを数え、完了・取り消しの要求・きっかけの知らせを行う (step の 9 の a〜d)。
+
+        t はこの回の行の t_received。
+        """
+        raise NotImplementedError
 
     def _request_deep(
         self,
@@ -578,7 +621,7 @@ class SurfaceLoop:
         scene_id: str | None,
         stop: threading.Event | None,
     ) -> bool:
-        """deep を要求する (step の 9)。受け口の例外は deep_request_error に書き、残りの種類を続ける。
+        """deep を要求する (step の 10)。受け口の例外は deep_request_error に書き、残りの種類を続ける。
 
         要求の直前に stop を確かめ、立っていたらその種類と残りの種類を要求せずに False を返す。
         すべての種類を要求し終えたら True を返す。
