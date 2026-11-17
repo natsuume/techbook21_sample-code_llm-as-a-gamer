@@ -1,15 +1,18 @@
 """コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once を持つ。
 
-    switch2-layers run [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--max-surface-errors N]
-                       [--middle-interval S] [--middle-window S] [--max-middle-errors N]
-                       [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S] [--allow-home]
+    switch2-layers run --software NAME --user NAME [--runs-dir DIR] [--interval-fps N] [--interval-width N]
+                       [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
+                       [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
                        [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
-        実機で 3 層を動かす。surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
-        middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。deep は --deep で選ぶ
-        (既定 claude = Claude Code、fake = deep.fake_deep)。安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、
-        fake は safety.fake_safety)
+        実機で 3 層を動かす。準備 (コントローラーの登録・指定のソフト (--software) を指定のユーザー (--user) で
+        起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
+        surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
+        middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。本体の画面の middle も
+        --middle で選ぶ (luna は middle.system_screen_middle.LunaSystemScreenMiddle、fake は操作なしで done を
+        真で返し続けるフェイク)。deep は --deep で選ぶ (既定 claude = Claude Code、fake = deep.fake_deep)。
+        安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、fake は safety.fake_safety)
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude|fake]
@@ -26,9 +29,9 @@ fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境
 確率を 0 として返す (safety.fake_safety)。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、--surface jev と
 同じく終了コード 2 を返す。
 
-引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値など) は argparse が使い方とともに
-表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、各サブコマンドの処理が標準エラー出力に書いて
-終了コード 2 を返す。
+引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値、run の --software・--user が
+無い・空か空白だけ、など) は argparse が使い方とともに表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、
+各サブコマンドの処理が標準エラー出力に書いて終了コード 2 を返す。
 """
 
 import argparse
@@ -53,6 +56,12 @@ from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
 from switch2_layers.middle.middle_types import MiddleAnalyzer
+from switch2_layers.middle.system_screen_middle import (
+    FAKE_DONE_OUTPUT,
+    FakeSystemScreenMiddle,
+    LunaSystemScreenMiddle,
+    SystemScreenMiddle,
+)
 from switch2_layers.safety.safety_assembly import build_safety_assembly
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import (
@@ -107,6 +116,7 @@ from switch2_layers.surface.surface_assembly import (
     SurfaceAssembly,
     build_surface_assembly,
 )
+from switch2_layers.system_screen.system_screen_references import SYSTEM_SCREEN_NAMES
 
 PROG = "switch2-layers"
 # 範囲の誤りで返す終了コード (argparse の使い方の誤りと同じ)
@@ -137,6 +147,8 @@ def add_run_parser(
 ) -> None:
     """サブコマンド run の引数を定義する。既定値は settings の DEFAULT_* と同じ。
 
+    --software NAME と --user NAME は必須 (無ければ argparse の誤り)。空か空白だけの値も argparse の誤り
+    (SystemExit 2) にする。値は書かれたまま Namespace の software と user に入る。
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
     --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
@@ -149,6 +161,20 @@ def add_run_parser(
             "実機で 3 層を動かす。surface は --surface、middle は --middle、deep は --deep で選ぶ。"
             "Ctrl+C で止まる"
         ),
+    )
+    parser.add_argument(
+        "--software",
+        metavar="NAME",
+        type=_non_blank_name,
+        required=True,
+        help="起動するソフトの名前 (HOME メニューの絵の上に出る名前。必須)",
+    )
+    parser.add_argument(
+        "--user",
+        metavar="NAME",
+        type=_non_blank_name,
+        required=True,
+        help="ソフトを遊ぶユーザーの名前 (ユーザー選択に出る名前。必須)",
     )
     parser.add_argument(
         "--runs-dir",
@@ -230,11 +256,6 @@ def add_run_parser(
             "deep のジョブの実行時間の上限 (秒) "
             f"(0 より大きい値。既定 {DEFAULT_DEEP_TIMEOUT_S:g})"
         ),
-    )
-    parser.add_argument(
-        "--allow-home",
-        action="store_true",
-        help="押せるボタンに HOME を足す (既定では HOME を押さない)",
     )
     add_middle_kind_argument(parser)
     parser.add_argument(
@@ -330,6 +351,13 @@ def add_run_parser(
         ),
     )
     parser.set_defaults(handler=run_command)
+
+
+def _non_blank_name(value: str) -> str:
+    """--software と --user の値を、書かれたまま返す。空か空白だけなら argparse.ArgumentTypeError にする。"""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty or blank")
+    return value
 
 
 def add_middle_kind_argument(parser: argparse.ArgumentParser) -> None:
@@ -441,9 +469,12 @@ def add_deep_once_parser(
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
-    --middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice に、--safety は SafetyKind にする。
+    --software と --user は software_name と user_name にする。--middle は MiddleKind に、--surface は SurfaceKind に、
+    --deep は DeepRunnerChoice に、--safety は SafetyKind にする。
     """
     return RunSettings(
+        software_name=args.software,
+        user_name=args.user,
         runs_dir=args.runs_dir,
         interval_fps=args.interval_fps,
         interval_width=args.interval_width,
@@ -454,7 +485,6 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         deep_min_start_interval_s=args.deep_min_start_interval,
         deep_auto_seconds=args.deep_auto_seconds,
         deep_timeout_s=args.deep_timeout,
-        allow_home=args.allow_home,
         middle=MiddleKind(args.middle),
         surface=SurfaceKind(args.surface),
         threshold_advisor=args.threshold_advisor,
@@ -505,6 +535,36 @@ def create_middle_analyzer(
     return LunaMiddleAnalyzer(api_key=api_key)
 
 
+def create_system_screen_middle(
+    kind: MiddleKind, environ: Mapping[str, str]
+) -> SystemScreenMiddle:
+    """--middle の値 kind の、本体の画面の middle を作って返す。要求はまだ送らない。
+
+    - MiddleKind.FAKE: middle.system_screen_middle.FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT)
+      (操作なしで done を真で返し続ける。environ を見ない)
+    - MiddleKind.LUNA: middle.system_screen_middle.LunaSystemScreenMiddle(api_key=environ[OPENAI_API_KEY_ENV] の
+      前後の空白を除いたもの, screen_names=system_screen.system_screen_references.SYSTEM_SCREEN_NAMES)
+      (照合と同じ 5 個の見本の名前)。キーが無いか空なら ValueError (呼ぶ前に settings.openai_api_key_errors で
+      確かめておく)
+    run_command は、environ に os.environ を渡してこの関数で作る。
+    """
+    if kind is MiddleKind.FAKE:
+        return FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT)
+    api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
+    return LunaSystemScreenMiddle(api_key=api_key, screen_names=SYSTEM_SCREEN_NAMES)
+
+
+def start_isolated_bridge() -> Bridge:
+    """ブリッジを新しいセッションで起動して返す (controller_bridge.Bridge(new_session=True))。
+
+    run の BridgeSupervisor の start_bridge に渡し、最初の起動にも起動し直しにも使う。最初の Ctrl+C の SIGINT が
+    ブリッジに届かないので、片付けの操作を送れる。
+    """
+    return Bridge(new_session=True)
+
+
 def run_command(args: argparse.Namespace) -> int:
     """run の処理。終了コードを返す。
 
@@ -518,16 +578,20 @@ def run_command(args: argparse.Namespace) -> int:
        (実機にも実行ディレクトリーにも触れない)。
        surface と安全の監視のそれぞれについて、jev なら API キーは環境変数 TYPESAFE_API_KEY の前後の空白を除いたもの、
        fake なら None (読まない)
-    4. middle = create_middle_analyzer(settings.middle, os.environ)
+    4. middle = create_middle_analyzer(settings.middle, os.environ) と
+       system_middle = create_system_screen_middle(settings.middle, os.environ)
     5. surface.surface_assembly.build_surface_assembly(settings, surface の API キー) で surface の部品を作り、
        safety.safety_assembly.build_safety_assembly(settings.safety, 安全の監視の API キー) で安全の監視の部品を作る
-    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=controller_bridge.Bridge,
+    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=start_isolated_bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS) を作る
+    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True) を作る
+    6 と 7 は、ブリッジと ffmpeg を新しいセッションで起動する。最初の Ctrl+C の SIGINT は端末の前面のプロセスグループの
+    すべてに届くため、同じグループのままだとブリッジと ffmpeg も終わり、片付けの操作を送れないため
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
        bridge_state=supervisor の state を返す関数, surface=5 の部品の decider, middle=4 の middle,
-       deep=build_deep_runner(settings.deep), safety=安全の監視の部品の checker, on_frame=部品の on_frame,
+       deep=build_deep_runner(settings.deep), safety=安全の監視の部品の checker, system_middle=4 の system_middle,
+       on_frame=部品の on_frame,
        surface_boxes_at=部品の boxes_at, on_run_directory=部品の on_run_directory,
        surface_plan_boxes=部品の plan_boxes)).run() で動かし、止まるまで待つ
        (settings.deep は --deep の値。run.jsonl の start の args にも deep として書く)
@@ -551,6 +615,7 @@ def run_command(args: argparse.Namespace) -> int:
         _print_errors(typesafe_key_errors)
         return EXIT_USAGE
     middle = create_middle_analyzer(settings.middle, os.environ)
+    system_middle = create_system_screen_middle(settings.middle, os.environ)
     surface = build_surface_assembly(
         settings, _typesafe_api_key(settings.surface is SurfaceKind.JEV)
     )
@@ -559,7 +624,9 @@ def run_command(args: argparse.Namespace) -> int:
             settings.safety, _typesafe_api_key(settings.safety is SafetyKind.JEV)
         )
         try:
-            return _run_with_hardware(settings, middle, surface, safety.checker)
+            return _run_with_hardware(
+                settings, middle, system_middle, surface, safety.checker
+            )
         finally:
             safety.close()
     finally:
@@ -576,6 +643,7 @@ def _typesafe_api_key(needed: bool) -> str | None:
 def _run_with_hardware(
     settings: RunSettings,
     middle: MiddleAnalyzer,
+    system_middle: SystemScreenMiddle,
     surface: SurfaceAssembly,
     safety: SafetyChecker,
 ) -> int:
@@ -585,14 +653,14 @@ def _run_with_hardware(
     """
     try:
         supervisor = BridgeSupervisor(
-            start_bridge=Bridge, reset_radio=reset_bluetooth_radio
+            start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio
         )
     except BridgeStartError as error:
         print(str(error), file=sys.stderr)
         return 1
     capture: Capture | None = None
     try:
-        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS)
+        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True)
         parts = LayersParts(
             frame_reader=SwitchCaptureReader(capture),
             report_sender=supervisor,
@@ -601,6 +669,7 @@ def _run_with_hardware(
             middle=middle,
             deep=build_deep_runner(settings.deep),
             safety=safety,
+            system_middle=system_middle,
             on_frame=surface.on_frame,
             surface_boxes_at=surface.boxes_at,
             on_run_directory=surface.on_run_directory,

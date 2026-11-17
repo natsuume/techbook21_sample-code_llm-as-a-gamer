@@ -67,7 +67,6 @@ def test_deep_min_start_interval_default_follows_the_issue():
         {"deep_auto_seconds": 0.5, "deep_min_start_interval_s": 0.0},
         {"deep_auto_seconds": 15.0, "deep_min_start_interval_s": 15.0},
         {"deep_timeout_s": 0.5},
-        {"allow_home": True},
     ],
 )
 def test_boundary_values_are_valid(changes):
@@ -220,14 +219,29 @@ def test_invalid_deep_once_scene(kind, scene_id):
 
 
 def test_run_settings_to_json_contains_all_arguments():
-    settings = RunSettings(runs_dir=Path("elsewhere"), allow_home=True)
+    settings = RunSettings(
+        software_name="テストのソフト",
+        user_name="ユーザー 1",
+        runs_dir=Path("elsewhere"),
+    )
     value = run_settings_to_json(settings)
     assert set(value) == {field.name for field in dataclasses.fields(RunSettings)}
     assert value["runs_dir"] == "elsewhere"
-    assert value["allow_home"] is True
     assert value["middle_interval_s"] == 5.0
+    # 指定のソフトとユーザーの名前も、ほかの起動引数と同じく書く
+    assert value["software_name"] == "テストのソフト"
+    assert value["user_name"] == "ユーザー 1"
     # そのまま JSON にできる
     assert json.loads(json.dumps(value)) == value
+
+
+def test_run_settings_have_software_and_user_names_without_allow_home():
+    names = {field.name for field in dataclasses.fields(RunSettings)}
+    assert {"software_name", "user_name"} <= names
+    assert "allow_home" not in names
+    # 既定値の空文字列はテストで作るときのため (run では cli が必須にする)
+    assert RunSettings().software_name == ""
+    assert RunSettings().user_name == ""
 
 
 def test_deep_runner_defaults_to_claude_code():

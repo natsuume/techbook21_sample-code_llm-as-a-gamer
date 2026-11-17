@@ -125,7 +125,10 @@ class LoopHarness:
 
 
 def make_loop(
-    tmp_path: Path, *results: MiddleOutput | Exception, max_errors: int = 5
+    tmp_path: Path,
+    *results: MiddleOutput | Exception,
+    max_errors: int = 5,
+    on_press_home: Callable[[], None] | None = None,
 ) -> LoopHarness:
     """MiddleLoop と偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = 10.0。"""
     root = make_run(tmp_path)
@@ -141,6 +144,7 @@ def make_loop(
         run_log=RunLog(paths.run_log, clock),
         deep_requests=deep_sink,
         on_stop=stops.append,
+        on_press_home=on_press_home,
     )
     loop = MiddleLoop(
         parts, MiddleLoopSettings(interval_s=5.0, window_s=10.0, max_errors=max_errors)
@@ -541,6 +545,32 @@ def test_success_resets_failures(tmp_path):
     assert harness.stops == [middle_failure_reason(3)]
 
 
+def test_press_home_of_a_successful_output_is_reported(tmp_path):
+    pressed: list[bool] = []
+    harness = make_loop(
+        tmp_path,
+        dataclasses.replace(output(), press_home=True),
+        on_press_home=lambda: pressed.append(True),
+    )
+    assert harness.loop.run_once().ok is True
+    assert pressed == [True]
+    state = json.loads((harness.root / "middle" / "state.json").read_text("utf-8"))
+    assert state["press_home"] is True
+
+
+def test_press_home_is_not_reported_without_press_home_or_on_failure(tmp_path):
+    pressed: list[bool] = []
+    harness = make_loop(
+        tmp_path,
+        output(),
+        RuntimeError("luna failed"),
+        on_press_home=lambda: pressed.append(True),
+    )
+    harness.loop.run_once()
+    harness.loop.run_once()
+    assert pressed == []
+
+
 def test_loop_passes_new_scene_to_deep_scheduler(tmp_path):
     harness = make_loop(tmp_path, output("町"))
     harness.loop.run_once()
@@ -778,6 +808,7 @@ SKELETON_CALL_KEYS = [
     "scene_name",
     "new_scene",
     "surface_wait_s",
+    "press_home",
     "deep_requests",
     "deep_requests_sent",
     "error",

@@ -11,7 +11,9 @@ from switch2_layers.run_directory import (
     INITIAL_COMMON_TIPS,
     INITIAL_STRATEGY,
     MIDDLE_MAP_RECORDS_FILE,
+    MIDDLE_SYSTEM_CALLS_FILE,
     SURFACE_REQUESTS_LOG_FILE,
+    TASKS_LOG_FILE,
     RunPaths,
     create_run_directory,
     frame_file_name,
@@ -125,9 +127,21 @@ def test_middle_map_records_path():
     assert RunPaths(root).middle_map_records == root / "middle" / "map_records.jsonl"
 
 
+def test_system_calls_path():
+    root = Path("/runs/20261115-142233")
+    assert MIDDLE_SYSTEM_CALLS_FILE == "system_calls.jsonl"
+    assert RunPaths(root).system_calls == root / "middle" / "system_calls.jsonl"
+
+
 def test_safety_log_path():
     root = Path("/runs/20261115-142233")
     assert RunPaths(root).safety_log == root / "safety.jsonl"
+
+
+def test_tasks_log_path():
+    root = Path("/runs/20261115-142233")
+    assert TASKS_LOG_FILE == "tasks.jsonl"
+    assert RunPaths(root).tasks_log == root / "tasks.jsonl"
 
 
 def test_orchestrator_paths():

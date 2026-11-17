@@ -42,12 +42,14 @@ def ffmpeg(monkeypatch):
     class Calls:
         def __init__(self):
             self.args: list[list[str]] = []
+            self.kwargs: list[dict] = []
             self.stdout = b""
 
     calls = Calls()
 
     def fake_popen(args, **kwargs):
         calls.args.append(list(args))
+        calls.kwargs.append(kwargs)
         return FakeFfmpegProcess(calls.stdout)
 
     monkeypatch.setattr(capture, "find_ffmpeg", lambda: "ffmpeg.exe")
@@ -68,6 +70,21 @@ def wait_until_ended(cap: Capture) -> str:
         if time.monotonic() >= deadline:
             pytest.fail(f"capture did not end within {WAIT_TIMEOUT} seconds: {status}")
         time.sleep(POLL_INTERVAL)
+
+
+def test_capture_keeps_ffmpeg_in_the_same_session_by_default(ffmpeg):
+    cap = Capture(ffmpeg_fps=30, process_fps=10)
+    wait_until_ended(cap)
+    cap.close()
+    assert [kwargs["start_new_session"] for kwargs in ffmpeg.kwargs] == [False]
+
+
+def test_capture_starts_ffmpeg_in_a_new_session_when_asked(ffmpeg):
+    # 端末の Ctrl+C の SIGINT が ffmpeg に届かないようにする
+    cap = Capture(ffmpeg_fps=30, process_fps=10, new_session=True)
+    wait_until_ended(cap)
+    cap.close()
+    assert [kwargs["start_new_session"] for kwargs in ffmpeg.kwargs] == [True]
 
 
 def test_status_without_frames_has_no_buffered_count(ffmpeg):

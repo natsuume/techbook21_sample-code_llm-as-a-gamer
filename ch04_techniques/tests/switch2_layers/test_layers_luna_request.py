@@ -553,6 +553,14 @@ def test_instructions_cover_every_output_field_and_timeline_section():
         assert title in LUNA_DEVELOPER_INSTRUCTIONS
 
 
+def test_instructions_explain_when_to_press_home():
+    # press_home を真にするのは、ゲームが操作を受け付けないなど本体の画面に出る必要があるときだけ。
+    # 真にすると HOME を押して復帰の段階に移る
+    assert "press_home" in LUNA_DEVELOPER_INSTRUCTIONS
+    assert "ゲームが操作を受け付けない" in LUNA_DEVELOPER_INSTRUCTIONS
+    assert "復帰" in LUNA_DEVELOPER_INSTRUCTIONS
+
+
 def test_instructions_include_the_safety_rules():
     # 変わらない指示の中に入れる (毎回同じ文字列のまま、キャッシュから読む)
     assert SAFETY_RULES in LUNA_DEVELOPER_INSTRUCTIONS

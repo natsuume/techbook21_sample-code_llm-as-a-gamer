@@ -18,7 +18,7 @@ from typing import Literal
 NO_SCREEN_NAME = "none"
 # 入力の履歴に入れる、これまでの呼び出しの最大の数 (新しい方から数える)
 MAX_HISTORY_ENTRIES = 10
-# 決定のボタン。操作の列の先頭の操作にだけ置ける。入力の「この段階で送った決定」には、このボタンを含む press を並べる
+# 決定のボタン。操作の列の先頭の操作にだけ置ける。入力の「この段階で送った A・B・X」に、送ったものを並べる
 DECISION_BUTTON = "A"
 
 # 操作の種類: press (ボタンを押す)、wait (何も送らずに待つ)
@@ -30,7 +30,7 @@ class SystemGoal(StrEnum):
 
     PREPARE = "prepare"  # 準備: コントローラーを 1P に登録し、指定のソフトを指定のユーザーで起動する
     RECOVER = "recover"  # 復帰: 指定のソフトのゲームの画面に戻る
-    CLEAN_UP = "clean_up"  # 片付け: HOME メニューに戻る (指定のソフトは終了しない)
+    CLEAN_UP = "clean_up"  # 片付け: HOME メニューに戻り、指定のソフトを終了する
 
 
 class SystemCutReason(StrEnum):
@@ -105,7 +105,7 @@ class SystemScreenInput:
     judged_screen    照合の結果の画面の名前。見本のどの画面でもない (または照合の結果がまだ無い) なら None
     judged_frame_t   照合したフレームの時刻。照合の結果がまだ無ければ None
     history          この段階でのこれまでの呼び出しの履歴 (古い順)。要求の履歴の節には新しい方から MAX_HISTORY_ENTRIES 件を
-                     入れ、送った決定の節には履歴のすべてを使う
+                     入れ、送った A・B・X の節には履歴のすべてを使う
     """
 
     t: float
@@ -125,7 +125,8 @@ class SystemScreenOutput:
 
     observation   画面の様子とカーソルの位置 (middle が書いた文)
     operations    送る操作の列 (0〜middle.system_screen_schema.MAX_OPERATIONS 個。前から順に送る)
-    done          目的を果たした (準備・復帰ではゲームの画面が映った、片付けでは HOME メニューに戻った) なら True
+    done          目的を果たした (準備・復帰ではゲームの画面が映った、片付けでは指定のソフトを終了して HOME メニューに
+                  戻った) なら True
     """
 
     observation: str

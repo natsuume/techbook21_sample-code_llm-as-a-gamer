@@ -146,6 +146,42 @@ def test_init_enables_features_in_available_order(tmp_path):
     )
 
 
+def test_init_writes_initial_files_of_enabled_features_unsubstituted(tmp_path):
+    directory = tmp_path / "play"
+    result = handle_init(
+        directory,
+        "G",
+        "X",
+        ["memo-files"],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert result.exit_code == 0
+    memo = directory / "memo.md"
+    assert memo.is_file()
+    assert memo.read_text(encoding="utf-8") == "# メモ $goal\n"
+
+
+def test_init_without_features_creates_only_the_base_files(tmp_path):
+    directory = tmp_path / "play"
+    handle_init(
+        directory,
+        "G",
+        "X",
+        [],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FAKE_FEATURES,
+    )
+    assert sorted(os.listdir(directory)) == [
+        "CLAUDE.md",
+        "frames",
+        "harness.json",
+        "records",
+    ]
+
+
 def test_init_prints_absolute_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = handle_init(
@@ -744,7 +780,7 @@ def test_run_launches_and_reports_the_outcome(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={"PATH": "/usr/bin"},
@@ -778,7 +814,7 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -788,6 +824,26 @@ def test_run_allows_commands_of_enabled_features(paths, clock):
     assert "Bash(uv run switch2-harness note *)" in args
     assert "Bash(uv run switch2-harness notes *)" in args
     assert "Bash(uv run switch2-harness history *)" not in args
+
+
+def test_run_allows_writing_files_of_enabled_features(paths, clock):
+    write_harness_json(paths, ["memo-files"])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    args = starter.launches[0].args
+    assert args[args.index("--tools") + 1] == "Bash,Read,Write,Edit"
+    assert "Edit(./memo.md)" in args
 
 
 def test_run_reports_budget_exhausted(paths, clock):
@@ -812,7 +868,7 @@ def test_run_reports_budget_exhausted(paths, clock):
         LaunchOptions(max_budget_usd=1.0),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -836,7 +892,7 @@ def test_run_reports_an_unconfirmed_release(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=FakeSleep(clock),
         send=daemon,
         base_env={},
@@ -869,7 +925,7 @@ def test_run_rejects_non_positive_minutes(paths, clock, minutes):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -892,7 +948,7 @@ def test_run_rejects_unknown_feature_in_harness_json(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -917,7 +973,7 @@ def test_run_rejects_invalid_max_budget_usd(paths, clock, budget, shown):
         LaunchOptions(max_budget_usd=budget),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -951,7 +1007,7 @@ def test_run_terminated_by_signal_reports_an_error_after_cleanup(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -986,7 +1042,7 @@ def test_run_interrupted_by_ctrl_c_reports_an_error_after_cleanup(paths, clock):
         LaunchOptions(),
         start_process=starter,
         clock=clock,
-        monotonic=clock,
+        deadline_clock=clock,
         sleep=sleep,
         send=daemon,
         base_env={},
@@ -1002,7 +1058,7 @@ def test_run_interrupted_by_ctrl_c_reports_an_error_after_cleanup(paths, clock):
     ]
 
 
-def test_run_uses_the_monotonic_clock_for_the_deadline(paths):
+def test_run_uses_the_deadline_clock_for_the_deadline(paths):
     write_harness_json(paths, [])
     wall = FakeClock(START_TIME)
     mono = FakeClock(50.0)
@@ -1014,7 +1070,7 @@ def test_run_uses_the_monotonic_clock_for_the_deadline(paths):
         LaunchOptions(),
         start_process=starter,
         clock=wall,
-        monotonic=mono,
+        deadline_clock=mono,
         sleep=sleep,
         send=FakeDaemon(mono),
         base_env={},

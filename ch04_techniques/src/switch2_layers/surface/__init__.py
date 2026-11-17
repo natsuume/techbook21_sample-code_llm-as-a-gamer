@@ -1,5 +1,6 @@
 """surface 層: 型と Protocol (surface_types)、フェイク (fake_surface)、middle/state.json の読み込み
-(middle_state_reader)、surface.jsonl の行 (surface_record)、1 回分の処理とループ (surface_loop)。
+(middle_state_reader)、surface.jsonl の行 (surface_record)、1 回分の処理とループ (surface_loop)、操作の送信の関門
+(surface_output_gate。押せるボタンの制限と、段階が play のときだけ送ること)。
 
 TypeSafe Jev を呼ぶ実装 (jev_surface) と、その部品:
     jev_client           Jev の HTTP の呼び出しと応答の読み取り

@@ -55,7 +55,7 @@ class Harness:
         self.deps = CliDependencies(
             send=self.daemon,
             clock=self.clock,
-            monotonic=self.clock,
+            deadline_clock=self.clock,
             now=lambda: datetime(2026, 11, 16, 21, 0, 5, tzinfo=JST),
             sleep=FakeSleep(self.clock),
             start_process=self.starter,
@@ -341,6 +341,23 @@ def test_look_prints_no_history_without_features(tmp_path, harness, capsys):
     assert capsys.readouterr().out == f"ok {directory / 'frames' / '000002.png'}\n"
 
 
+# --- メモファイル (notes) ---
+
+
+def test_init_with_notes_writes_the_initial_notes(tmp_path, harness):
+    # 本物の要素の一覧とテンプレートで init する
+    harness.deps = replace(
+        harness.deps, read_template=read_package_template, available=FEATURES
+    )
+    directory = tmp_path / "play"
+    assert harness.run("init", str(directory), "--game", "G", "--enable", "notes") == 0
+    notes = directory / "notes.md"
+    assert notes.is_file()
+    assert notes.read_text(encoding="utf-8") == read_package_template(
+        "notes-initial.md"
+    )
+
+
 # --- report ---
 
 
@@ -432,7 +449,8 @@ def test_production_dependencies():
     deps = production_dependencies()
     assert deps.send is send_command
     assert deps.clock is time.time
-    assert deps.monotonic is time.monotonic
+    # run の期限も壁時計で決める (WSL2 では time.monotonic が実時間より遅く進むため)
+    assert deps.deadline_clock is time.time
     assert deps.sleep is time.sleep
     assert deps.start_process is start_claude_process
     assert deps.environ is os.environ

@@ -28,7 +28,7 @@ user メッセージの節 (この順。各節は「## <USER_SECTION_TITLES の�
     4. 指定のユーザー         screen_input.user_name (書かれたまま)
     5. 照合の結果             describe_judgment(judged_screen, judged_frame_t)
     6. この段階のこれまでの呼び出し   describe_history(history) (新しい方から MAX_HISTORY_ENTRIES 件)
-    7. この段階で送った決定 (A)       describe_sent_decisions(history) (履歴のすべてから)
+    7. この段階で送った A・B・X        describe_sent_buttons(history) (履歴のすべてから)
     8. 今の画像               IMAGE_SECTION_TEXT
 節の後ろに、今の画像の時刻のラベル (frame_label(frame_t)) と画像 (input_image) を 1 組置く。
 """
@@ -67,12 +67,15 @@ USER_SECTION_TITLES: tuple[str, ...] = (
     "指定のユーザー",
     "照合の結果",
     "この段階のこれまでの呼び出し",
-    "この段階で送った決定 (A)",
+    "この段階で送った A・B・X",
     "今の画像",
 )
 EMPTY_TEXT = "(無い)"
-# この段階で送った決定 (A) が無いときの、その節の中身
-NO_SENT_DECISIONS_TEXT = "まだ送っていません"
+# この段階で送った A・B・X の節に並べるボタン (決定・戻る・ソフトをおわる)。準備の手順は登録を確かめた B と、その後の
+# A の前後で、片付けの手順は終了の確認を出した X で、次の操作を決めるため
+LISTED_BUTTONS: tuple[str, ...] = (DECISION_BUTTON, "B", "X")
+# この段階で送った A・B・X が無いときの、その節の中身
+NO_SENT_BUTTONS_TEXT = "まだ送っていません"
 # 照合の結果がまだ無いとき (judged_frame_t が None) の、照合の結果の節の中身
 NO_JUDGMENT_TEXT = "照合の結果はまだ無い"
 # 照合の結果が None (見本のどの画面でもない) のときに、画面の名前の後ろに添える説明
@@ -132,22 +135,25 @@ def _describe_step(record: SystemStepRecord) -> str:
     )
 
 
-def describe_sent_decisions(history: Sequence[SystemStepRecord]) -> str:
-    """この段階で送った決定 (A) の節の中身を返す。
+def describe_sent_buttons(history: Sequence[SystemStepRecord]) -> str:
+    """この段階で送った A・B・X の節の中身を返す。
 
     history のすべて (MAX_HISTORY_ENTRIES 件に削る前のもの) を古い順に見て、各履歴の操作の列の先頭から sent_count 個
-    (実際に送った操作) のうち、buttons に DECISION_BUTTON を含む press を、1 件 1 行「t=<その呼び出しの時刻> <その操作の
-    screen> で A」で並べる (行は改行 1 つでつなぎ、末尾に改行を付けない。t は format_frame_label の形)。
+    (実際に送った操作) のうち、press の buttons にある LISTED_BUTTONS のボタンを、1 つ 1 行「t=<その呼び出しの時刻>
+    <その操作の screen> で <ボタン>」で、送った順に並べる (1 つの press に LISTED_BUTTONS のボタンが 2 つ以上あれば、
+    LISTED_BUTTONS の順に 1 行ずつ。行は改行 1 つでつなぎ、末尾に改行を付けない。t は format_frame_label の形)。
     打ち切りで送らなかった操作は入れない。cut_reason が send_failed のとき、送信に失敗した press は sent_count に
-    含まれるため、届いたかもしれないものとして入る。1 件も無ければ NO_SENT_DECISIONS_TEXT を返す。
+    含まれるため、届いたかもしれないものとして入る。1 件も無ければ NO_SENT_BUTTONS_TEXT を返す。
     """
     lines = [
-        f"{format_frame_label(record.t)} {operation.screen} で {DECISION_BUTTON}"
+        f"{format_frame_label(record.t)} {operation.screen} で {button}"
         for record in history
         for operation in record.operations[: record.sent_count]
-        if operation.kind == "press" and DECISION_BUTTON in operation.buttons
+        if operation.kind == "press"
+        for button in LISTED_BUTTONS
+        if button in operation.buttons
     ]
-    return "\n".join(lines) if lines else NO_SENT_DECISIONS_TEXT
+    return "\n".join(lines) if lines else NO_SENT_BUTTONS_TEXT
 
 
 def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
@@ -160,7 +166,7 @@ def build_user_sections(screen_input: SystemScreenInput) -> list[str]:
         screen_input.user_name,
         describe_judgment(screen_input.judged_screen, screen_input.judged_frame_t),
         describe_history(screen_input.history),
-        describe_sent_decisions(screen_input.history),
+        describe_sent_buttons(screen_input.history),
         IMAGE_SECTION_TEXT,
     ]
     return [

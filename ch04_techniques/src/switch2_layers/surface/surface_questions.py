@@ -530,7 +530,7 @@ def build_surface_questions(
     十字キーの 2 問 (build_dpad_questions) は、allowed_buttons に依らず、ボタンの問いの直後
     (スティックの向きの問いの前) に入れる。
     frame_path = latest_frame_path(frame_count) を、情報ラベル・box の存在・box の問いの文に使う。
-    ボタンの問いは allowed_buttons のボタンだけ (HOME は --allow-home のときだけ allowed_buttons に入る)。
+    ボタンの問いは allowed_buttons のボタンだけ (run では buttons.allowed_buttons() の 16 個で、HOME の問いは無い)。
     """
     frame_path = latest_frame_path(frame_count)
     return (

@@ -36,6 +36,7 @@ from switch2_harness.features import (
     FEATURES,
     Feature,
     agent_commands,
+    agent_writable_files,
     validate_feature_names,
 )
 from switch2_harness.frame_files import reserve_next_frame_path
@@ -151,8 +152,11 @@ def handle_init(
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1 (ファイルシステムには触れない)
     2. HarnessConfig(game, goal, 検証した名前, format_created_at(now())) を作る
     3. instructions.render_instructions(config, read_template, available) で CLAUDE.md の本文を作る
-    4. workspace.create_workspace で作る。WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
-    5. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
+    4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
+       (置換はしない)、{<name>: <本文>} を作る
+    5. workspace.create_workspace で作る。4. の辞書を initial_files に渡す。
+       WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
+    6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
     """
     try:
         names = validate_feature_names(enable, available)
@@ -163,8 +167,13 @@ def handle_init(
     )
     paths = workspace_paths(directory)
     instructions_text = render_instructions(config, read_template, available)
+    # 要素のファイルの最初の内容は、テンプレートを置換せずにそのまま書く
+    initial_files = {
+        writable_file.name: read_template(writable_file.template_file)
+        for writable_file in agent_writable_files(names, available)
+    }
     try:
-        create_workspace(paths, config, instructions_text)
+        create_workspace(paths, config, instructions_text, initial_files)
     except WorkspaceNotEmptyError as e:
         return _error_result(e)
     features_text = ",".join(names) or "none"
@@ -324,7 +333,7 @@ def handle_run(
     *,
     start_process: StartProcess,
     clock: Callable[[], float],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
     sleep: Callable[[float], None],
     send: SendCommand,
     base_env: Mapping[str, str],
@@ -332,7 +341,7 @@ def handle_run(
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
 
-    clock は記録の時刻 (本番は time.time)、monotonic は期限と経過時間を計る単調時計 (本番は time.monotonic) で、
+    clock は記録の時刻、deadline_clock は期限と経過時間を計る時計 (本番はどちらも time.time) で、
     どちらもそのまま run_agent_until に渡す。
 
     1. agent_launcher.validate_minutes(minutes) と agent_launcher.validate_max_budget_usd(options.max_budget_usd) を
@@ -342,6 +351,7 @@ def handle_run(
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1
     3. agent_launcher.run_agent_until を、game=config.game、
        agent_commands=features.agent_commands(config.features, available)、
+       writable_files=<features.agent_writable_files(config.features, available) の各 name のタプル>、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で、
        with signal_guard.interrupts_as_exceptions(): の中で呼ぶ。後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら
@@ -361,6 +371,10 @@ def handle_run(
         config = read_config(paths.harness_file, available)
     except ValueError as e:
         return _error_result(e)
+    writable_files = tuple(
+        writable_file.name
+        for writable_file in agent_writable_files(config.features, available)
+    )
     try:
         with interrupts_as_exceptions():
             outcome = run_agent_until(
@@ -371,11 +385,12 @@ def handle_run(
                 options,
                 start_process=start_process,
                 clock=clock,
-                monotonic=monotonic,
+                deadline_clock=deadline_clock,
                 sleep=sleep,
                 send=send,
                 record=partial(append_event, paths.events_file),
                 base_env=base_env,
+                writable_files=writable_files,
             )
     except RunTerminated:
         return CommandResult(exit_code=1, stderr_lines=(RUN_TERMINATED_MESSAGE,))

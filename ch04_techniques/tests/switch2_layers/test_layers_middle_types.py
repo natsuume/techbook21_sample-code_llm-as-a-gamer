@@ -59,6 +59,7 @@ def test_round_trip():
         "first_task_since_t",
         "place_name",
         "current_tile",
+        "press_home",
     ]
     assert value["surface_rows_offset"] == 120
     assert value["operations_rows_offset"] == 40
@@ -300,3 +301,41 @@ def test_output_and_observation_tiles_have_defaults():
         kind=ObservationKind.EXIT, place="家の 1 階", description="扉"
     )
     assert observation.tile is None
+
+
+# --- HOME を押すか (press_home) ---
+
+
+def test_press_home_defaults_to_false():
+    assert STATE.press_home is False
+    output = MiddleOutput(
+        scene_name=None,
+        is_stuck=False,
+        stuck_description="",
+        surface_wait_s=0.5,
+        timeline="",
+        tasks="",
+    )
+    assert output.press_home is False
+
+
+@pytest.mark.parametrize("press_home", [True, False])
+def test_press_home_is_written_and_read(press_home):
+    state = dataclasses.replace(STATE, press_home=press_home)
+    value = middle_state_to_json(state)
+    assert value["press_home"] is press_home
+    assert middle_state_from_json(value) == state
+
+
+def test_missing_press_home_is_read_as_false():
+    value = middle_state_to_json(dataclasses.replace(STATE, press_home=True))
+    del value["press_home"]
+    assert middle_state_from_json(value).press_home is False
+    assert middle_state_from_json(STATE_JSON_WITHOUT_FIRST_TASK).press_home is False
+
+
+@pytest.mark.parametrize("press_home", ["true", 1, None])
+def test_wrong_press_home_type_is_rejected(press_home):
+    value = {**STATE_JSON_WITHOUT_FIRST_TASK, "press_home": press_home}
+    with pytest.raises(ValueError):
+        middle_state_from_json(value)

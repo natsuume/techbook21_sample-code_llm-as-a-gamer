@@ -78,7 +78,8 @@ def write_middle_output(
     3. MiddleState(generated_t, based_on_t=middle_input.t, scene_id, scene_name (前後の空白を除いたもの), is_stuck,
        stuck_description, surface_wait_s, timeline, surface_rows_offset=middle_input.surface_rows_offset,
        operations_rows_offset=middle_input.operations_rows_offset, first_task, first_task_since_t, place_name,
-       current_tile) を middle/state.json に置き換えて書く。first_task は middle.task_progress.first_task_of(output.tasks)、
+       current_tile, press_home=output.press_home) を middle/state.json に置き換えて書く。first_task は
+       middle.task_progress.first_task_of(output.tasks)、
        first_task_since_t は middle.task_progress.first_task_since(middle_input.previous_state, first_task, generated_t,
        scene_id=今回の場面 ID) (first_task が空なら None。前回と今回の場面 ID がどちらも決まっていて違えば引き継がない)。
        place_name は output.place_name の前後の空白を除いたもの (None か、除いて空なら None)、current_tile は
@@ -122,6 +123,7 @@ def write_middle_output(
         ),
         place_name=place_name,
         current_tile=None if place_name is None else output.current_tile,
+        press_home=output.press_home,
     )
     if _is_stopped(stop):
         return None

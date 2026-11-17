@@ -29,6 +29,10 @@ EVENT_DEEP_PENDING = "deep_pending"
 # 含む。どちらも例外を外に出さず、ループも止めない
 EVENT_DEEP_REQUEST_ERROR = "deep_request_error"
 EVENT_FRAMES_DROPPED = "frames_dropped"  # 画像の保存を捨てた件数 (終了時)
+# run の段階が変わった。phase (移った後の段階) と reason (変化の理由) を含む (system_screen.run_phase)
+EVENT_PHASE = "phase"
+# 片付けが終わった。result (system_screen.run_phase.CleanUpResult の値) を含む
+EVENT_CLEAN_UP_END = "clean_up_end"
 # Orchestrator 型の主ループのセッションの開始。session (番号) を含む
 EVENT_ORCHESTRATOR_SESSION_START = "orchestrator_session_start"
 # 主ループのセッションの終了。session・reason・returncode・usage_tokens を含む

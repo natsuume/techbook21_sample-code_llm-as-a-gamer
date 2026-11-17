@@ -56,9 +56,11 @@ class Bridge:
     broken にしたときは、押されたままの入力を残さないよう best-effort でブリッジを終了させる
     (quit を書く → 最大 BRIDGE_QUIT_TIMEOUT 秒終了を待つ → 終わらなければ kill)。
     ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
+    new_session が True なら、ブリッジを新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の SIGINT が
+    ブリッジに届かなくなるため、呼び出し側は Ctrl+C の後もレポートを送れる。ブリッジは close で終わらせる。
     """
 
-    def __init__(self):
+    def __init__(self, new_session: bool = False):
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()
@@ -79,6 +81,7 @@ class Bridge:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            start_new_session=new_session,
         )
         # 応答を期限付きで待つため、読み取りは専用スレッドで行いキューに渡す (None は出力の終了)
         self.lines: queue.Queue[str | None] = queue.Queue()

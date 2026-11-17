@@ -10,10 +10,13 @@
     surface_requests.jsonl                  surface が Jev に送った要求の記録 (surface.surface_record)
     safety.jsonl                            安全の確かめの 1 回ごとの記録 (safety.safety_record)
     operations.jsonl                        コントローラーに送った操作 (records.operation_log)
+    tasks.jsonl                             短期タスクのキューの出来事の記録 (tasks.task_events)
     notes/                                  文書 (notes.note_paths。box で取る対象の一覧は surface.box_targets)
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
     middle/map_records.jsonl                middle のマップの記録 (middle.map_records)
+    middle/system_calls.jsonl               本体の画面の middle の呼び出しと、操作の列の実行の結果
+                                            (middle.system_call_record)
     deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
                                             Claude Code で動かしたジョブには stream.jsonl・result.json も置く
                                             (deep.claude_stream_log)
@@ -63,12 +66,16 @@ SURFACE_LOG_FILE = "surface.jsonl"
 SURFACE_REQUESTS_LOG_FILE = "surface_requests.jsonl"
 SAFETY_LOG_FILE = "safety.jsonl"
 OPERATIONS_LOG_FILE = "operations.jsonl"
+# 短期タスクのキューの出来事の記録 (tasks.task_events)
+TASKS_LOG_FILE = "tasks.jsonl"
 NOTES_DIR = "notes"
 MIDDLE_DIR = "middle"
 MIDDLE_STATE_FILE = "state.json"
 MIDDLE_CALLS_FILE = "calls.jsonl"
 # middle のマップの記録 (middle.map_records)
 MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
+# 本体の画面の middle の呼び出しと、操作の列の実行の結果 (middle.system_call_record)
+MIDDLE_SYSTEM_CALLS_FILE = "system_calls.jsonl"
 DEEP_DIR = "deep"
 # 画面の停滞の計測 (progress.progress_loop)
 PROGRESS_DIR = "progress"
@@ -144,6 +151,11 @@ class RunPaths:
         return self.root / OPERATIONS_LOG_FILE
 
     @property
+    def tasks_log(self) -> Path:
+        """root / TASKS_LOG_FILE"""
+        return self.root / TASKS_LOG_FILE
+
+    @property
     def notes_dir(self) -> Path:
         """root / NOTES_DIR"""
         return self.root / NOTES_DIR
@@ -167,6 +179,11 @@ class RunPaths:
     def middle_map_records(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE"""
         return self.root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE
+
+    @property
+    def system_calls(self) -> Path:
+        """root / MIDDLE_DIR / MIDDLE_SYSTEM_CALLS_FILE"""
+        return self.root / MIDDLE_DIR / MIDDLE_SYSTEM_CALLS_FILE
 
     @property
     def deep_dir(self) -> Path:

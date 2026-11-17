@@ -4,7 +4,7 @@ import pytest
 from switch2_remote.controller_state import BUTTON_ORDER
 
 import switch2_layers.surface.surface_questions as surface_questions_module
-from switch2_layers.buttons import allowed_buttons
+from switch2_layers.buttons import ALL_BUTTONS, allowed_buttons
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, BoxTarget
@@ -249,7 +249,7 @@ def test_box_question_names():
 
 
 def test_button_questions_are_only_for_allowed_buttons_in_button_order():
-    questions = build_button_questions(allowed_buttons(allow_home=False))
+    questions = build_button_questions(allowed_buttons())
     assert [question.target for question in questions] == [
         button for button in BUTTON_ORDER if button not in DPAD_BUTTONS | {"HOME"}
     ]
@@ -263,9 +263,10 @@ def test_button_questions_are_only_for_allowed_buttons_in_button_order():
     assert first.choices == BUTTON_CHOICES
 
 
-def test_home_question_only_with_allow_home():
-    without = build_button_questions(allowed_buttons(allow_home=False))
-    with_home = build_button_questions(allowed_buttons(allow_home=True))
+def test_home_question_only_when_home_is_allowed():
+    # run の surface の押せるボタン (allowed_buttons) には HOME が無いので、HOME の問いは無い
+    without = build_button_questions(allowed_buttons())
+    with_home = build_button_questions(ALL_BUTTONS)
     assert "button_HOME" not in [question.name for question in without]
     assert "button_HOME" in [question.name for question in with_home]
     assert len(with_home) == 13
@@ -491,7 +492,7 @@ def test_box_questions_only_for_requery_targets_with_the_same_numbers():
 
 def test_surface_questions_are_in_the_order_of_the_table():
     questions = build_surface_questions(
-        allowed_buttons(allow_home=False), TARGETS, {"敵"}, frame_count=5
+        allowed_buttons(), TARGETS, {"敵"}, frame_count=5
     )
     kinds = [question.kind for question in questions]
     expected = (
@@ -520,7 +521,7 @@ def test_surface_questions_are_in_the_order_of_the_table():
 
 def test_surface_question_ids_are_unique_and_safe():
     questions = build_surface_questions(
-        allowed_buttons(allow_home=True),
+        ALL_BUTTONS,
         DEFAULT_BOX_TARGETS,
         {target.name for target in DEFAULT_BOX_TARGETS},
         frame_count=3,
@@ -541,7 +542,7 @@ def test_surface_question_ids_are_unique_and_safe():
 
 def test_surface_questions_without_requery_have_no_box_question():
     questions = build_surface_questions(
-        allowed_buttons(allow_home=False), TARGETS, set(), frame_count=1
+        allowed_buttons(), TARGETS, set(), frame_count=1
     )
     assert not any(q.question_type is QuestionType.BOX for q in questions)
     assert sum(q.kind is QuestionKind.BOX_EXISTS for q in questions) == 3

@@ -142,7 +142,7 @@ class JevAsker(Protocol):
 class JevSurfaceSettings:
     """JevSurfaceDecider の設定。
 
-    allowed_buttons     押せるボタン (buttons.allowed_buttons(--allow-home))。ボタンの問いはこのボタンだけにする
+    allowed_buttons     押せるボタン (run では buttons.allowed_buttons() の HOME を除く 16 個)。ボタンの問いはこのボタンだけにする
     threshold_advisor   advisor 判定のしきい値 (--threshold-advisor)。確率がこれを超えた種類の deep を呼ぶ
     box_requery_every   前回の問い直しからこの回数の要求がたった対象の box を問い直す (--box-requery-every)
     hold_margin         押し方の選び方の差の値 (--hold-margin)。hold の確率が tap の確率をこの値より大きく上回ったときだけ
