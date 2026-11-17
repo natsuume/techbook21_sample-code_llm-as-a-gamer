@@ -1,13 +1,14 @@
 """gpt-6-luna の出力の JSON Schema (Structured Outputs) と、出力の JSON の文を MiddleOutput にする読み取り。I/O を扱わない。
 
 出力の形 (すべて required。additionalProperties は false。キーの順に書かせる):
-    {"scene_name": 文字列, "place_name": 文字列, "current_tile": 座標か null,
+    {"place_name": 文字列, "current_tile": 座標か null,
      "new_connections": [{"from": 文字列, "to": 文字列, "how": 文字列, "from_tile": 座標か null,
                           "to_tile": 座標か null}, ...],
      "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列,
                            "tile": 座標か null}, ...],
      "is_stuck": 真偽, "stuck_description": 文字列, "press_home": 真偽,
      "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列,
+     "scene_name": 文字列,
      "cancel_task_ids": [文字列, ...],
      "new_tasks": [{"text": 文字列, "destination": {"place": 文字列, "tile": 座標か null} か null}, ...]}
 座標は {"x": 整数, "y": 整数} (入力のマップのその場所の座標。x は右に、y は下に増える)。座標か null の値は、
@@ -16,7 +17,10 @@ anyOf で行き先の object と {"type": "null"} を並べる。
 new_connections・new_observations・new_tasks の要素と、座標と行き先の object も、すべて required で
 additionalProperties は false。
 場所の項目 (place_name・current_tile・new_connections・new_observations) は、タスクの項目 (cancel_task_ids・new_tasks)
-より前に書かせる。new_tasks の数の上限 (3 個まで) はスキーマ (maxItems) に置かず、説明文に書く。
+より前に書かせる。scene_name は timeline の直後 (cancel_task_ids の前) に書かせる。画面の移り変わり (timeline の
+「場面の移り変わり」の節) を書いてから場面を決めさせるため。scene_name の説明は、指示 (luna_instructions) の場面ラベルの
+節と同じ 3 つの条件 (前回と同じ種類の画面なら前回の場面名、違う種類なら一覧から選ぶ、一覧に無ければ新しい名前を作る) にする。
+new_tasks の数の上限 (3 個まで) はスキーマ (maxItems) に置かず、説明文に書く。
 cancel_task_ids は取り消すタスクの ID (ID の形は確かめない)、new_tasks は現在の場面のキューの末尾に足すタスクで、
 行き先は MiddleOutput に入れる前には直さない (マップと照らして直すのは middle.task_destination_fix)。
 scene_name が空 (空白だけを含む) なら、場面を決められなかったものとして MiddleOutput の scene_name を None にする。
@@ -80,13 +84,6 @@ _TILE_CONDITION = (
 MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "scene_name": {
-            "type": "string",
-            "description": (
-                "現在の場面ラベル。場面ラベルの一覧に当てはまるものがあれば、その名前をそのまま書く。"
-                "当てはまるものが無いときだけ新しい名前を作る。決められなければ空文字列"
-            ),
-        },
         "place_name": {
             "type": "string",
             "description": (
@@ -172,6 +169,15 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
             "type": "string",
             "description": "系列情報。決められた節に分けて書く",
         },
+        "scene_name": {
+            "type": "string",
+            "description": (
+                "現在の場面ラベル。最新のフレームが前回の場面と同じ種類の画面なら、前回の場面名をそのまま書く。"
+                "違う種類の画面なら、場面ラベルの一覧から当てはまる名前を探して、そのまま書く。一覧に当てはまる"
+                "名前が無ければ新しい名前を作る (一覧に無いことを理由に前回の場面名を保たない)。"
+                "決められなければ空文字列"
+            ),
+        },
         "cancel_task_ids": {
             "type": "array",
             "description": (
@@ -219,7 +225,6 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         },
     },
     "required": [
-        "scene_name",
         "place_name",
         "current_tile",
         "new_connections",
@@ -229,6 +234,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         "press_home",
         "surface_wait_s",
         "timeline",
+        "scene_name",
         "cancel_task_ids",
         "new_tasks",
     ],
@@ -236,7 +242,6 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
 }
 # 出力のキー。MIDDLE_OUTPUT_SCHEMA の properties (と required) と同じキーを同じ順に並べる
 _OUTPUT_KEYS: tuple[str, ...] = (
-    "scene_name",
     "place_name",
     "current_tile",
     "new_connections",
@@ -246,6 +251,7 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "press_home",
     "surface_wait_s",
     "timeline",
+    "scene_name",
     "cancel_task_ids",
     "new_tasks",
 )

@@ -1,7 +1,7 @@
 """MiddleAnalyzer の gpt-6-luna の実装 (LunaMiddleAnalyzer) と、middle/calls.jsonl の行に足す記録。
 
 1 回の analyze の流れ:
-    1. luna_request.build_luna_payload で要求の本文を作る
+    1. luna_request.build_luna_payload(middle_input, reasoning_effort=reasoning_effort) で要求の本文を作る
     2. luna_client.post_responses で 1 回だけ送る (タイムアウトは timeout_s。再試行はしない)
     3. luna_client.read_output_text で出力の文を取り出す (status が completed でない・拒否・出力の文が無いときは
        LunaCallError)
@@ -28,7 +28,7 @@ from switch2_layers.middle.luna_client import (
     read_output_text,
 )
 from switch2_layers.middle.luna_output_schema import parse_middle_output
-from switch2_layers.middle.luna_request import build_luna_payload
+from switch2_layers.middle.luna_request import REASONING_EFFORT, build_luna_payload
 from switch2_layers.middle.luna_usage import (
     estimate_cost_usd,
     read_usage,
@@ -64,9 +64,11 @@ class LunaMiddleAnalyzer:
     run_once と同じ 1 つのスレッドから使う。
 
     属性:
-        api_key     API キー (cli が環境変数 OPENAI_API_KEY から読む)
-        client      要求に使う httpx.Client。None を渡したら新しく作る (テストでは MockTransport の Client を渡す)
-        timeout_s   1 回の要求のタイムアウト (秒)
+        api_key            API キー (cli が環境変数 OPENAI_API_KEY から読む)
+        client             要求に使う httpx.Client。None を渡したら新しく作る (テストでは MockTransport の Client を渡す)
+        timeout_s          1 回の要求のタイムアウト (秒)
+        reasoning_effort   要求の reasoning の effort の文字列 (キーワード引数。既定 luna_request.REASONING_EFFORT の
+                           "none")。cli の run は起動引数 --middle-effort の値 ("none" か "low") を渡す。値は確かめない
     """
 
     def __init__(
@@ -74,23 +76,28 @@ class LunaMiddleAnalyzer:
         api_key: str,
         client: httpx.Client | None = None,
         timeout_s: float = LUNA_TIMEOUT_S,
+        reasoning_effort: str = REASONING_EFFORT,
     ) -> None:
         """属性を入れる。client が None なら httpx.Client() を作る。ここでは要求を送らない。"""
         self.api_key = api_key
         self.client = httpx.Client() if client is None else client
         self.timeout_s = timeout_s
+        self.reasoning_effort = reasoning_effort
         # 直前の analyze の記録。analyze を呼んでいないか、渡した後なら空
         self._call_details: dict[str, object] = {}
 
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
         """middle_input から gpt-6-luna の出力を得て MiddleOutput を返す (モジュールの docstring の 1〜4)。
 
+        要求の reasoning の effort は reasoning_effort にする。
         始めに、持っている記録を build_call_details(None, None) に置き換える (前の回の記録を残さない)。
         応答の本文を受け取ったら build_call_details(本文, None)、LunaCallError なら
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、例外を外に出す。
         """
         self._call_details = build_call_details(None, None)
-        payload = build_luna_payload(middle_input)
+        payload = build_luna_payload(
+            middle_input, reasoning_effort=self.reasoning_effort
+        )
         try:
             body = post_responses(self.client, self.api_key, payload, self.timeout_s)
             # 出力を読めなくても (スキーマに合わない出力を含む)、費用のかかった応答を記録に残す

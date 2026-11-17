@@ -18,6 +18,7 @@ from switch2_layers.settings import (
     DEFAULT_DEEP_RUNNER,
     DEFAULT_HOLD_MARGIN,
     DEFAULT_MAX_SAFETY_ERRORS,
+    DEFAULT_MIDDLE_EFFORT,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_RUN_MODE,
     DEFAULT_SAFETY,
@@ -35,6 +36,7 @@ from switch2_layers.settings import (
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     DeepRunnerChoice,
+    MiddleEffort,
     MiddleKind,
     MiddleOnceSettings,
     RunMode,
@@ -295,6 +297,42 @@ def test_run_settings_to_json_writes_middle_as_string():
     value = run_settings_to_json(RunSettings(middle=MiddleKind.FAKE))
     assert value["middle"] == "fake"
     assert json.loads(json.dumps(value))["middle"] == "fake"
+
+
+# --- ゲーム用の middle の reasoning effort (--middle-effort) ---
+
+
+def test_middle_effort_values_and_default():
+    assert [effort.value for effort in MiddleEffort] == ["none", "low"]
+    assert DEFAULT_MIDDLE_EFFORT is MiddleEffort.NONE
+    assert RunSettings().middle_effort is MiddleEffort.NONE
+
+
+def test_middle_effort_follows_the_middle():
+    names = [field.name for field in dataclasses.fields(RunSettings)]
+    assert names[names.index("middle") + 1] == "middle_effort"
+
+
+@pytest.mark.parametrize("effort", list(MiddleEffort))
+@pytest.mark.parametrize("middle", list(MiddleKind))
+def test_middle_effort_does_not_affect_range_errors(middle, effort):
+    assert run_settings_errors(RunSettings(middle=middle, middle_effort=effort)) == []
+
+
+@pytest.mark.parametrize(
+    "effort, expected", [(MiddleEffort.NONE, "none"), (MiddleEffort.LOW, "low")]
+)
+def test_run_settings_to_json_writes_middle_effort_as_string(effort, expected):
+    value = run_settings_to_json(RunSettings(middle_effort=effort))
+    # run.jsonl の start の args に、値の文字列で書く
+    assert value["middle_effort"] == expected
+    assert type(value["middle_effort"]) is str
+    assert json.loads(json.dumps(value))["middle_effort"] == expected
+    # --middle fake でも書く (使わないが、起動引数として残す)
+    fake = run_settings_to_json(
+        RunSettings(middle=MiddleKind.FAKE, middle_effort=effort)
+    )
+    assert fake["middle_effort"] == expected
 
 
 @pytest.mark.parametrize(

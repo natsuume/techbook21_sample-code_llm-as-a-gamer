@@ -4,7 +4,8 @@
 *_settings_errors で範囲を確かめてから使う。範囲の誤りのメッセージには、起動引数の名前 (--middle-interval 等) を含める。
 キャプチャーのフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に固定する。
 middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
-読む (openai_api_key_errors で有無を確かめる)。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
+読む (openai_api_key_errors で有無を確かめる)。run のゲーム用の middle (luna) の reasoning effort は --middle-effort
+(MiddleEffort) で選ぶ。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
 環境変数 TYPESAFE_API_KEY_ENV から読む (typesafe_api_key_errors で有無を確かめる)。deep のジョブを実行するものは
 --deep (DeepRunnerChoice) で選ぶ。安全の監視の実装は --safety (SafetyKind) で選ぶ。jev に要る API キーは surface と
 同じ環境変数 TYPESAFE_API_KEY_ENV から読む (safety_api_key_errors で有無を確かめる)。
@@ -61,6 +62,22 @@ class MiddleKind(StrEnum):
 DEFAULT_MIDDLE_KIND = MiddleKind.LUNA
 # --middle luna の API キーを読む環境変数の名前
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+
+
+class MiddleEffort(StrEnum):
+    """run の --middle-effort の値 (ゲーム用の middle (luna) の要求の reasoning の effort)。
+
+    値の文字列を、そのまま要求の reasoning.effort に入れる (middle.luna_request.build_luna_payload)。
+    --middle fake では使わない。本体の画面の middle の effort (middle.system_screen_request の
+    SYSTEM_SCREEN_REASONING_EFFORT) には効かない。
+    """
+
+    NONE = "none"
+    LOW = "low"
+
+
+# 既定は middle.luna_request.REASONING_EFFORT と同じ値
+DEFAULT_MIDDLE_EFFORT = MiddleEffort.NONE
 
 # switch2_remote.capture.Capture に渡すフレームレート。process_fps は一定間隔の保存のフレームレートの上限でもある
 CAPTURE_FFMPEG_FPS = 30
@@ -178,6 +195,8 @@ class RunSettings:
     deep_timeout_s              deep のジョブの実行時間の上限 (--deep-timeout、既定 300。0 より大きい有限の値)
     middle                      middle の分析の実装 (--middle、既定 luna。fake か luna)。luna では環境変数
                                 OPENAI_API_KEY が要る (openai_api_key_errors)
+    middle_effort               ゲーム用の middle (luna) の要求の reasoning の effort (--middle-effort、既定 none。
+                                MiddleEffort の none か low)。--middle fake と本体の画面の middle には効かない
     surface                     surface の実装 (--surface、既定 jev)。jev のときは環境変数 TYPESAFE_API_KEY が要る
     threshold_advisor           advisor 判定のしきい値。確率がこれを超えた種類の deep を呼ぶ
                                 (--threshold-advisor、既定 0.5。0 以上 1 以下)
@@ -240,6 +259,7 @@ class RunSettings:
     deep_auto_seconds: float = DEFAULT_DEEP_AUTO_SECONDS
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
     middle: MiddleKind = DEFAULT_MIDDLE_KIND
+    middle_effort: MiddleEffort = DEFAULT_MIDDLE_EFFORT
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
@@ -302,6 +322,7 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
     --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
+    middle_effort は値の型 (MiddleEffort) で決まるため確かめない。
     surface は値の型 (SurfaceKind) で、surface_map は値の型 (SurfaceMapMode) で決まるため確かめない。
     安全の監視の引数: --safety-interval は SAFETY_INTERVAL_MIN_S 以上 SAFETY_INTERVAL_MAX_S 以下 (nan は誤り)、
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
@@ -569,15 +590,17 @@ def orchestrator_api_key_errors(environ: Mapping[str, str]) -> list[str]:
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・surface_map・deep・safety・
-    mode は値の文字列。middle は "fake" / "luna"、surface は "jev" / "fake"、surface_map は "text" / "none"、deep は
-    "claude" / "fake"、safety は "jev" / "fake"、mode は "advisor" / "orchestrator") にする。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・middle_effort・surface・surface_map・
+    deep・safety・mode は値の文字列 (型も str)。middle は "fake" / "luna"、middle_effort は "none" / "low"、surface は
+    "jev" / "fake"、surface_map は "text" / "none"、deep は "claude" / "fake"、safety は "jev" / "fake"、mode は
+    "advisor" / "orchestrator") にする。middle_effort は --middle fake でも入れる。
     software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値は、
     mode に依らず入れる。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
+    value["middle_effort"] = settings.middle_effort.value
     value["surface"] = settings.surface.value
     value["surface_map"] = settings.surface_map.value
     value["deep"] = settings.deep.value

@@ -4,7 +4,8 @@
                        [--interval-width N]
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
-                       [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
+                       [--middle fake|luna] [--middle-effort none|low] [--surface fake|jev] [--threshold-advisor P]
+                       [--box-requery-every N]
                        [--hold-margin P] [--surface-map text|none] [--deep claude|fake] [--safety jev|fake]
                        [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
@@ -35,6 +36,9 @@ deep は notes/ の文書の本体を直接編集するため、文書を入れ�
 --middle (run と middle-once) は middle の実装を選ぶ。既定の luna は gpt-6-luna を呼び (middle.luna_middle)、
 fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境変数 OPENAI_API_KEY が無い (空を含む) ときは、
 実機 (ブリッジ・キャプチャー) と実行ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
+--middle-effort (run だけ) は、ゲーム用の middle (luna) の要求の reasoning effort を none か low から選ぶ (既定 none)。
+本体の画面の middle の effort (low) は変えない。--middle fake では使わない (指定しても動きは変わらない)。
+middle-once は既定の none で呼ぶ。
 --surface (run) は surface の実装を選ぶ。既定の jev は TypeSafe Jev を呼び (surface.jev_surface)、fake は骨組みの
 フェイク (surface.fake_surface) を使う。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、実機と実行
 ディレクトリーに触れる前に、標準エラー出力に書いて終了コード 2 を返す。
@@ -44,8 +48,8 @@ fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境
 run --mode orchestrator は、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (監視は常に Jev を使うため、
 --safety fake でも要る)。OPENAI_API_KEY は確かめない。無ければ、実機と実行ディレクトリーに触れる前に終了コード 2 を返す。
 
-引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値、run --mode advisor の --software・
---user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
+引数の形の誤り (知らない引数、数として読めない値、--doc・--middle・--middle-effort の知らない値、run --mode advisor の
+--software・--user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
 SystemExit (終了コード 2) にする。値の範囲の誤りと人の初期指示の誤り (空か空白だけ、ファイルが読めない) は、
 各サブコマンドの処理が標準エラー出力に書いて終了コード 2 を返す。
 """
@@ -109,6 +113,7 @@ from switch2_layers.settings import (
     DEFAULT_MAX_MONITOR_ERRORS,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MAX_SURFACE_ERRORS,
+    DEFAULT_MIDDLE_EFFORT,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
@@ -141,6 +146,7 @@ from switch2_layers.settings import (
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     DeepRunnerChoice,
+    MiddleEffort,
     MiddleKind,
     MiddleOnceSettings,
     RunMode,
@@ -247,6 +253,9 @@ def add_run_parser(
     --software NAME と --user NAME は、--mode advisor のときだけ必須 (無ければ LayersArgumentParser が argparse の誤り
     にする)。空か空白だけの値は、どちらの --mode でも argparse の誤り (SystemExit 2) にする。値は書かれたまま
     Namespace の software と user に入る (無ければ None)。
+    --middle-effort は settings.MiddleEffort の値 (none / low) から選ぶ (既定 settings.DEFAULT_MIDDLE_EFFORT の none。
+    ほかの値は argparse の invalid choice の誤り)。--middle (add_middle_kind_argument) の直後に足し、Namespace の
+    middle_effort には文字列が入る (run_settings_from_args が MiddleEffort にする)。
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
     --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
     --surface-map は settings.SurfaceMapMode の値 (text / none) から選ぶ (既定 text)。
@@ -374,6 +383,15 @@ def add_run_parser(
         ),
     )
     add_middle_kind_argument(parser)
+    parser.add_argument(
+        "--middle-effort",
+        choices=[effort.value for effort in MiddleEffort],
+        default=DEFAULT_MIDDLE_EFFORT.value,
+        help=(
+            "ゲーム用の middle (luna) の要求の reasoning effort。本体の画面の middle と --middle fake には使わない "
+            f"(既定 {DEFAULT_MIDDLE_EFFORT.value})"
+        ),
+    )
     parser.add_argument(
         "--surface",
         choices=[kind.value for kind in SurfaceKind],
@@ -710,7 +728,8 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
     --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator では
-    使わないため無くてよい)。--middle は MiddleKind に、--surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
+    使わないため無くてよい)。--middle は MiddleKind に、--middle-effort は MiddleEffort (middle_effort) に、
+    --surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
     --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値は、
     --mode に依らず写す。
     --instruction と --instruction-file は写さない (run_command が orchestrator のときだけ読む)。
@@ -729,6 +748,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         deep_auto_seconds=args.deep_auto_seconds,
         deep_timeout_s=args.deep_timeout,
         middle=MiddleKind(args.middle),
+        middle_effort=MiddleEffort(args.middle_effort),
         surface=SurfaceKind(args.surface),
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
@@ -771,22 +791,27 @@ def deep_once_settings_from_args(args: argparse.Namespace) -> DeepOnceSettings:
 
 
 def create_middle_analyzer(
-    kind: MiddleKind, environ: Mapping[str, str]
+    kind: MiddleKind,
+    environ: Mapping[str, str],
+    effort: MiddleEffort = DEFAULT_MIDDLE_EFFORT,
 ) -> MiddleAnalyzer:
     """--middle の値 kind の MiddleAnalyzer を作って返す。要求はまだ送らない。
 
-    - MiddleKind.FAKE: middle.fake_middle.FakeMiddleAnalyzer() (environ を見ない)
+    effort は 3 つ目の引数 (settings.MiddleEffort。既定 settings.DEFAULT_MIDDLE_EFFORT の none)。
+    - MiddleKind.FAKE: middle.fake_middle.FakeMiddleAnalyzer() (environ と effort を見ない)
     - MiddleKind.LUNA: middle.luna_middle.LunaMiddleAnalyzer(api_key=environ[OPENAI_API_KEY_ENV] の前後の空白を
-      除いたもの)。キーが無いか空なら ValueError (呼ぶ前に settings.openai_api_key_errors で確かめておく)
-    run_command と middle_once_command は、environ に os.environ を渡してこの関数で作る
-    (テストはこの関数を差し替えて、MockTransport の Client を持つ LunaMiddleAnalyzer を渡せる)。
+      除いたもの, reasoning_effort=effort の値の文字列)。キーが無いか空なら ValueError (呼ぶ前に
+      settings.openai_api_key_errors で確かめておく)
+    run_command は (settings.middle, os.environ, settings.middle_effort)、middle_once_command は (settings.middle,
+    os.environ) を渡してこの関数で作る (middle-once の effort は既定の none)。テストはこの関数を
+    (kind, environ) を受け取る関数に差し替えて、MockTransport の Client を持つ LunaMiddleAnalyzer を渡せる。
     """
     if kind is MiddleKind.FAKE:
         return FakeMiddleAnalyzer()
     api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
     if not api_key:
         raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
-    return LunaMiddleAnalyzer(api_key=api_key)
+    return LunaMiddleAnalyzer(api_key=api_key, reasoning_effort=effort.value)
 
 
 def create_system_screen_middle(
@@ -846,8 +871,9 @@ def run_command(args: argparse.Namespace) -> int:
        (実機にも実行ディレクトリーにも触れない)。
        surface と安全の監視のそれぞれについて、jev なら API キーは環境変数 TYPESAFE_API_KEY の前後の空白を除いたもの、
        fake なら None (読まない)
-    4. middle = create_middle_analyzer(settings.middle, os.environ) と
-       system_middle = create_system_screen_middle(settings.middle, os.environ)
+    4. middle = create_middle_analyzer(settings.middle, os.environ, settings.middle_effort) と
+       system_middle = create_system_screen_middle(settings.middle, os.environ) (本体の画面の middle には
+       settings.middle_effort を渡さない)
     5. surface.surface_assembly.build_surface_assembly(settings, surface の API キー) で surface の部品を作り、
        safety.safety_assembly.build_safety_assembly(settings.safety, 安全の監視の API キー) で安全の監視の部品を作る
     6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=start_isolated_bridge,
@@ -886,7 +912,7 @@ def run_command(args: argparse.Namespace) -> int:
     if typesafe_key_errors:
         _print_errors(typesafe_key_errors)
         return EXIT_USAGE
-    middle = create_middle_analyzer(settings.middle, os.environ)
+    middle = create_middle_analyzer(settings.middle, os.environ, settings.middle_effort)
     system_middle = create_system_screen_middle(settings.middle, os.environ)
     surface = build_surface_assembly(
         settings, _typesafe_api_key(settings.surface is SurfaceKind.JEV)

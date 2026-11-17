@@ -1,8 +1,11 @@
-"""gpt-6-luna の変わらない指示 (LUNA_DEVELOPER_INSTRUCTIONS) のうち、タスクのキュー (足すタスクと取り消すタスク) に
-関わる指示を、特徴的な語句で確かめる。文の言い回しは決めず、指示に含まれるべき語句と、消す指示の語句を確かめる。
+"""gpt-6-luna の変わらない指示 (LUNA_DEVELOPER_INSTRUCTIONS) のうち、タスクのキュー (足すタスクと取り消すタスク) と
+場面ラベル (scene_name) に関わる指示を確かめる。
 
+タスクの指示は、特徴的な語句で確かめる。文の言い回しは決めず、指示に含まれるべき語句と、消す指示の語句を確かめる。
 タスクの指示は、見出しの行に new_tasks を含む節 (例: 「# タスクの追加と取り消し (new_tasks・cancel_task_ids)」) に
 書かれているものとする。
+場面ラベルの指示は、見出しの行に scene_name を含む節 (「# 場面ラベル (scene_name)」) の箇条を、決めた文のとおりに
+確かめる。
 """
 
 from switch2_layers.middle.luna_instructions import LUNA_DEVELOPER_INSTRUCTIONS
@@ -163,6 +166,63 @@ def test_done_but_not_achieved_task_is_added_again():
     section = task_section()
     assert "完了" in section
     assert "足し直" in section
+
+
+# --- 場面ラベル (scene_name) ---
+
+# 場面を決める手順の箇条 (この順に続けて書く。番号の行は 2 字下げる)
+SCENE_NAME_STEPS = [
+    "- 毎回、最新のフレームの画面の種類を見て、次の順で場面を決めます",
+    "  1. 最新のフレームが、前回の場面と同じ種類の画面なら、前回の場面名をそのまま書きます",
+    (
+        "  2. 違う種類の画面なら、場面ラベルの一覧から、その画面に当てはまる名前を探します。"
+        "あれば、その名前を一字一句そのまま書きます"
+    ),
+    (
+        "  3. 一覧に当てはまる名前が無ければ、新しい名前を作ります。新しい名前は 20 文字以内の短い日本語の"
+        "名詞句にし、一覧のどの名前とも区別できるようにします"
+    ),
+    "- 一覧に当てはまる名前が無いことを理由に、前回の場面名を保ちません",
+]
+
+
+def scene_section_lines() -> list[str]:
+    """場面ラベルの節 (見出しの行に scene_name を含む節) の、空でない行を返す。"""
+    return [line for line in section_with("scene_name").split("\n") if line]
+
+
+def test_scene_name_is_decided_by_the_steps():
+    # 場面の例の後ろに手順を置き、ほかの箇条 (場面の例・フィールドの中の場所・暗転やロード・場面転換の印) は変えない
+    assert scene_section_lines() == [
+        (
+            "- 場面は、ゲームの画面の種類や遊び方のまとまりです。例: タイトル画面、メインメニュー、フィールド、"
+            "戦闘、会話、ショップ、ロード画面"
+        ),
+        *SCENE_NAME_STEPS,
+        (
+            "- フィールドの中の場所 (町の名前、家の 1 階、ダンジョンの階など) は場面ラベルにしません。同じ"
+            "フィールドの中を移動しても、場面は変えません。場所は place_name に書きます"
+        ),
+        (
+            "- 暗転やロードの途中のような一時的な画面では、前後のフレームを見て決めます。どうしても決められない"
+            "ときだけ空文字列にします"
+        ),
+        (
+            "- 場面転換の印があるときや、フレームの見た目が大きく変わったときは、特に注意して場面を確かめます"
+        ),
+    ]
+
+
+def test_scene_section_has_no_old_rules():
+    # 「一覧に当てはまる名前が無ければ前回の場面名を保つ」と読める箇条を置かない
+    lines = scene_section_lines()
+    for prefix in [
+        "- 毎回、最新のフレームを見て場面を確かめます",
+        "- 場面ラベルの一覧に当てはまる場面があれば",
+        "- 当てはまるものが無いときだけ、新しい名前を作ります",
+    ]:
+        assert not any(line.startswith(prefix) for line in lines), prefix
+    assert not any("前回の場面のままだと決めつけません" in line for line in lines)
 
 
 # --- 詰まり ---
