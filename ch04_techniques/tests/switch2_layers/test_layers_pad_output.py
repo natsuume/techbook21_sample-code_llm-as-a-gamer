@@ -1110,3 +1110,183 @@ def test_timer_thread_releases_timed_hold_and_starts_waiting_hold():
         assert wait_until(lambda: sender.reports[-1][0] & A_BIT != 0)
     finally:
         output.close()
+
+
+# --- 十字キーの斜めの短押し (2 つの方向の押し始めをそろえる) ---
+
+# レポートの hat の値 (switch2_remote.controller_state.DPAD_HAT と同じ)
+HAT_UP_RIGHT = 1
+HAT_NONE = 15
+
+
+def test_diagonal_tap_after_holding_one_direction_starts_both_after_gap():
+    output, sender, clock, events = make_output()
+    output.apply(PadAction(held=frozenset({"UP"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    # apply のレポートでは UP を離し、RIGHT もまだ押さない
+    assert sender.reports[-1][2] == HAT_NONE
+    # 記録する操作は、求められた操作のまま
+    assert events[-1].action == PadAction(taps=frozenset({"UP", "RIGHT"}))
+    count = len(sender.reports)
+    clock.now = 1.0 + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # 離す間隔の後に、UP と RIGHT を同じレポートで押す
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+    # 押してから TAP_PRESS_S 後に、2 つとも同じレポートで離す
+    pressed_at = clock.now
+    clock.now = pressed_at + TAP_PRESS_S - 0.01
+    output.release_due_taps()
+    assert len(sender.reports) == count + 1
+    clock.now = pressed_at + TAP_PRESS_S
+    output.release_due_taps()
+    assert len(sender.reports) == count + 2
+    assert sender.reports[-1][2] == HAT_NONE
+
+
+def test_diagonal_tap_right_after_timer_release_of_one_direction_starts_both_later():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"UP"})))
+    # タイマーが TAP_PRESS_S の時点で UP を離す (最後に離した時刻 = TAP_PRESS_S)
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    clock.now = TAP_PRESS_S + 0.03
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    # UP は離してから間隔がたっていないので待ち、RIGHT も一緒に待つ
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # 「UP を離した時刻 + 間隔」に、2 つを同じレポートで押す
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+
+
+def test_diagonal_tap_waiting_in_different_ways_starts_both_at_the_later_time():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"RIGHT"})))
+    # タイマーが TAP_PRESS_S の時点で RIGHT を離す
+    clock.now = TAP_PRESS_S
+    output.release_due_taps()
+    clock.now = TAP_PRESS_S + 0.01
+    output.apply(PadAction(taps=frozenset({"UP"})))
+    # UP は短押しの最中 (直前のレポートで押されている)、RIGHT は離した直後
+    sent_at = TAP_PRESS_S + 0.03
+    clock.now = sent_at
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    # RIGHT の早い方の時刻 (離した時刻 + 間隔) では押さない
+    clock.now = TAP_PRESS_S + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    clock.now = sent_at + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # 遅い方 (UP を離したレポートの送信が戻った時刻 + 間隔) に、2 つを同じレポートで押す
+    clock.now = sent_at + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+
+
+def test_diagonal_tap_while_one_direction_is_already_waiting_starts_both_together():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"UP"})))
+    clock.now = 1.0
+    # UP を離して、1.0 + 間隔に短押しを始める予定にする
+    output.apply(PadAction(taps=frozenset({"UP"})))
+    clock.now = 1.05
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    # RIGHT はすぐには押さない
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    clock.now = 1.0 + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    # UP の始める時刻 (延ばさない) に、2 つを同じレポートで押す
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+
+
+def test_diagonal_tap_without_waiting_presses_both_in_the_apply_report():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+    count = len(sender.reports)
+    clock.now = TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count
+
+
+def test_taps_of_other_buttons_are_not_aligned():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"A"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"A", "B"})))
+    # B はすぐ押し、A は離してから間隔の後に押す
+    assert sender.reports[-1][0] & B_BIT
+    assert sender.reports[-1][0] & A_BIT == 0
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert sender.reports[-1][0] & A_BIT
+
+
+def test_diagonal_is_aligned_while_other_buttons_start_immediately():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"UP"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT", "B"})))
+    # B はすぐ押し、UP と RIGHT はまだ押さない
+    assert sender.reports[-1][0] & B_BIT
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    clock.now = 1.0 + TAP_RELEASE_GAP_S - 0.01
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
+
+
+def test_tap_of_one_held_direction_still_waits_for_gap():
+    output, sender, clock, _ = make_output()
+    output.apply(PadAction(held=frozenset({"UP"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"UP"})))
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP
+
+
+def test_diagonal_partner_waits_until_send_return_plus_gap():
+    # 送信に時間がかかっても、2 つとも「apply のレポートの送信が戻った時刻 + 間隔」に押す
+    output, sender, clock, _ = make_slow_output(0.02)
+    output.apply(PadAction(held=frozenset({"UP"})))
+    clock.now = 1.0
+    output.apply(PadAction(taps=frozenset({"UP", "RIGHT"})))
+    sent_at = clock.now
+    assert sent_at == pytest.approx(1.02)
+    assert sender.reports[-1][2] == HAT_NONE
+    count = len(sender.reports)
+    # apply を呼んだ時刻 + 間隔では、まだ押さない
+    clock.now = 1.0 + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count
+    clock.now = sent_at + TAP_RELEASE_GAP_S
+    output.start_due_taps()
+    assert len(sender.reports) == count + 1
+    assert sender.reports[-1][2] == HAT_UP_RIGHT
