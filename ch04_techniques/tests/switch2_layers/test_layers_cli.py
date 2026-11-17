@@ -30,10 +30,13 @@ from switch2_layers.deep.deep_scheduler import (
 )
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
+from switch2_layers.middle.luna_client import LunaCallError
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
+from switch2_layers.middle.middle_types import MiddleInput
 from switch2_layers.middle.system_screen_middle import (
     FAKE_DONE_OUTPUT,
     LunaSystemScreenMiddle,
+    SystemScreenMiddleError,
 )
 from switch2_layers.middle.system_screen_types import (
     SystemGoal,
@@ -61,6 +64,7 @@ from switch2_layers.settings import (
     DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_TASK,
     DeepRunnerChoice,
+    MiddleEffort,
     MiddleKind,
     RunMode,
     RunSettings,
@@ -798,8 +802,8 @@ def test_middle_once_without_api_key_exits_and_writes_nothing(
     ) == {"scenes": []}
 
 
+# gpt-6-luna の出力の例 (スキーマのキーの順に書く。scene_name は timeline の直後)
 LUNA_OUTPUT = {
-    "scene_name": "タイトル画面",
     # タイトル画面にはゲームの世界の中の場所が映っていない
     "place_name": "",
     "current_tile": None,
@@ -810,6 +814,7 @@ LUNA_OUTPUT = {
     "press_home": False,
     "surface_wait_s": 1.5,
     "timeline": "## 操作のまとめ\n- まだ操作していない",
+    "scene_name": "タイトル画面",
     "cancel_task_ids": [],
     "new_tasks": [],
 }
@@ -1627,6 +1632,122 @@ def test_run_passes_the_surface_map_to_the_jev_surface(monkeypatch):
     [(_, parts)] = created
     assert isinstance(parts.surface, JevSurfaceDecider)
     assert parts.surface.settings.surface_map is SurfaceMapMode.NONE
+
+
+# --- ゲーム用の middle の reasoning effort (--middle-effort) ---
+
+# ゲーム用の middle の analyze に渡す入力 (要求の本文を確かめるだけで、応答は読まない)
+MIDDLE_INPUT = MiddleInput(
+    t=1.0,
+    frames=(),
+    surface_rows=(),
+    operation_rows=(),
+    scene_change_reported=False,
+    scene_labels=(),
+    previous_state=None,
+    strategy="",
+    task_queue=(),
+    task_events=(),
+    surface_rows_offset=0,
+    operations_rows_offset=0,
+    tasks_rows_offset=0,
+    reasons=("interval",),
+)
+
+
+def recording_client(requests: list[httpx.Request]) -> httpx.Client:
+    """送った要求を requests に記録し、500 を返す MockTransport の Client を返す (実際の API を呼ばない)。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, text="the cli tests check only the request")
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_run_middle_effort_defaults_to_none():
+    args = build_parser().parse_args(RUN)
+    assert args.middle_effort == "none"
+    assert run_settings_from_args(args).middle_effort is MiddleEffort.NONE
+
+
+def test_run_accepts_middle_effort_low():
+    args = build_parser().parse_args([*RUN, "--middle-effort", "low"])
+    assert args.middle_effort == "low"
+    assert run_settings_from_args(args).middle_effort is MiddleEffort.LOW
+
+
+@pytest.mark.parametrize("value", ["minimal", "medium", "high"])
+def test_run_rejects_other_middle_efforts(value, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, "--middle-effort", value])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--middle-effort" in err
+    assert "invalid choice" in err
+
+
+def test_create_middle_analyzer_uses_the_given_effort():
+    environ = {API_KEY_ENV: "sk-test"}
+    # middle-once は effort を渡さず、既定の none で呼ぶ
+    assert create_middle_analyzer(MiddleKind.LUNA, environ).reasoning_effort == "none"
+    analyzer = create_middle_analyzer(MiddleKind.LUNA, environ, MiddleEffort.LOW)
+    assert isinstance(analyzer, LunaMiddleAnalyzer)
+    assert analyzer.reasoning_effort == "low"
+
+
+@pytest.mark.parametrize(
+    "extra, expected",
+    [
+        ([], "none"),
+        (["--middle-effort", "none"], "none"),
+        (["--middle-effort", "low"], "low"),
+    ],
+    ids=["default", "none", "low"],
+)
+def test_run_sends_the_middle_effort_in_the_luna_request(monkeypatch, extra, expected):
+    monkeypatch.setenv(API_KEY_ENV, "sk-test")
+    created = stub_hardware_and_app(monkeypatch)
+    argv = [*RUN, "--surface", "fake", "--deep", "fake", "--safety", "fake", *extra]
+    assert main(argv) == 0
+    [(settings, parts)] = created
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    assert settings.middle_effort == expected
+    assert run_settings_to_json(settings)["middle_effort"] == expected
+    # ゲーム用の middle の要求の reasoning.effort になる
+    assert isinstance(parts.middle, LunaMiddleAnalyzer)
+    requests: list[httpx.Request] = []
+    parts.middle.client = recording_client(requests)
+    with pytest.raises(LunaCallError):
+        parts.middle.analyze(MIDDLE_INPUT)
+    [request] = requests
+    assert json.loads(request.content)["reasoning"] == {"effort": expected}
+
+
+@pytest.mark.parametrize("effort", ["none", "low"])
+def test_run_keeps_the_system_screen_middle_effort_low(monkeypatch, effort):
+    # 本体の画面の middle の要求の effort は、--middle-effort に依らず low
+    monkeypatch.setenv(API_KEY_ENV, "sk-test")
+    created = stub_hardware_and_app(monkeypatch)
+    argv = [*RUN, "--surface", "fake", "--deep", "fake", "--safety", "fake"]
+    assert main([*argv, "--middle-effort", effort]) == 0
+    [(_, parts)] = created
+    assert isinstance(parts.system_middle, LunaSystemScreenMiddle)
+    requests: list[httpx.Request] = []
+    parts.system_middle.client = recording_client(requests)
+    with pytest.raises(SystemScreenMiddleError):
+        parts.system_middle.decide(SYSTEM_SCREEN_INPUT)
+    [request] = requests
+    assert json.loads(request.content)["reasoning"] == {"effort": "low"}
+
+
+def test_run_with_fake_middle_ignores_the_middle_effort(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, *ALL_FAKE, "--middle-effort", "low"]) == 0
+    [(settings, parts)] = created
+    # フェイクの middle は effort を使わない (起動引数としては run.jsonl の args に残す)
+    assert isinstance(parts.middle, FakeMiddleAnalyzer)
+    assert run_settings_to_json(settings)["middle_effort"] == "low"
 
 
 # --- 先頭のタスクの問いのしきい値と、詰まりのきっかけの秒数 (--threshold-task・--task-stuck-seconds) ---

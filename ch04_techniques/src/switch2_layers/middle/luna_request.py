@@ -3,7 +3,7 @@
 要求の形:
     {
       "model": LUNA_MODEL,
-      "reasoning": {"effort": REASONING_EFFORT},
+      "reasoning": {"effort": reasoning_effort},
       "text": {"format": luna_output_schema.build_text_format()},
       "prompt_cache_options": {"mode": "explicit"},
       "input": [
@@ -17,7 +17,9 @@
           ...]}
       ]
     }
-reasoning の effort は省くと medium になるため、none を明示する。
+reasoning の effort は build_luna_payload の reasoning_effort にする。cli が起動引数 --middle-effort の値 (none か low)
+を渡し、既定は REASONING_EFFORT (none)。effort は省くと medium になるため、既定の none も明示する。effort を変えても、
+developer メッセージと text.format は変わらない。
 developer メッセージは入力によらず同じにし、その最後の (唯一の) 内容に明示のキャッシュの区切りを置く。
 prompt_cache_options の mode を explicit にして、自動の区切りを置かせない。区切りより後ろの毎回変わる user メッセージ
 (画像を含む) はキャッシュに書かれず、書き込みの割増がかからない。user メッセージには区切りを置かない。
@@ -85,6 +87,8 @@ from switch2_layers.progress.progress_text import (
 from switch2_layers.tasks.task_queue import DropReason, TaskDestination, TaskView
 
 LUNA_MODEL = "gpt-6-luna"
+# ゲーム用の middle の reasoning の effort の既定値 (build_luna_payload と middle.luna_middle.LunaMiddleAnalyzer の
+# reasoning_effort の既定値。起動引数 --middle-effort の既定 settings.DEFAULT_MIDDLE_EFFORT と同じ値)
 REASONING_EFFORT = "none"
 # user メッセージの節の見出し (この順に置く)
 USER_SECTION_TITLES: tuple[str, ...] = (
@@ -409,7 +413,11 @@ def build_user_message(middle_input: MiddleInput) -> dict[str, object]:
 
 
 def build_luna_payload(middle_input: MiddleInput) -> dict[str, object]:
-    """middle_input から、要求の本文 (モジュールの docstring の形) を作って返す。"""
+    """middle_input から、要求の本文 (モジュールの docstring の形) を作って返す。
+
+    reasoning_effort (キーワード引数。既定 REASONING_EFFORT の "none") を、そのまま reasoning の effort に入れる
+    (値は確かめない)。
+    """
     return {
         "model": LUNA_MODEL,
         "reasoning": {"effort": REASONING_EFFORT},

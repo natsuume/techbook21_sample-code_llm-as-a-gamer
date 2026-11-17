@@ -3,6 +3,7 @@ import json
 import pytest
 
 from switch2_layers.middle.luna_output_schema import (
+    _OUTPUT_KEYS,
     MIDDLE_OUTPUT_SCHEMA,
     OUTPUT_FORMAT_NAME,
     build_text_format,
@@ -17,9 +18,9 @@ from switch2_layers.notes.map_document import MapConnection, TilePosition
 from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 # 出力のキー。場所 (place_name・current_tile・new_connections・new_observations) は、タスクの項目
-# (cancel_task_ids・new_tasks) より前に書かせる。press_home は詰まり (is_stuck・stuck_description) の直後に書かせる
+# (cancel_task_ids・new_tasks) より前に書かせる。press_home は詰まり (is_stuck・stuck_description) の直後に書かせる。
+# scene_name は timeline の直後 (cancel_task_ids の前) に書かせる (画面の移り変わりを書いてから場面を決めさせる)
 OUTPUT_KEYS = [
-    "scene_name",
     "place_name",
     "current_tile",
     "new_connections",
@@ -29,11 +30,12 @@ OUTPUT_KEYS = [
     "press_home",
     "surface_wait_s",
     "timeline",
+    "scene_name",
     "cancel_task_ids",
     "new_tasks",
 ]
+# 出力の例 (OUTPUT_KEYS の順に書く)
 VALID_OUTPUT = {
-    "scene_name": "フィールド",
     "place_name": "家の 1 階",
     "current_tile": {"x": 7, "y": 1},
     "new_connections": [
@@ -70,6 +72,7 @@ VALID_OUTPUT = {
     "press_home": False,
     "surface_wait_s": 0.5,
     "timeline": "## 操作のまとめ\n- 上を押し続けた",
+    "scene_name": "フィールド",
     "cancel_task_ids": [],
     "new_tasks": [],
 }
@@ -169,7 +172,6 @@ def test_schema_has_twelve_required_fields_without_additional_properties():
     assert without_descriptions(MIDDLE_OUTPUT_SCHEMA) == {
         "type": "object",
         "properties": {
-            "scene_name": {"type": "string"},
             "place_name": {"type": "string"},
             "current_tile": TILE_OR_NULL,
             "new_connections": {
@@ -209,6 +211,7 @@ def test_schema_has_twelve_required_fields_without_additional_properties():
             "press_home": {"type": "boolean"},
             "surface_wait_s": {"type": "number", "minimum": 0.2, "maximum": 2.0},
             "timeline": {"type": "string"},
+            "scene_name": {"type": "string"},
             # 数の上限 (maxItems) は置かない (説明文に書く)
             "cancel_task_ids": {"type": "array", "items": {"type": "string"}},
             "new_tasks": {
@@ -247,6 +250,32 @@ def test_schema_has_twelve_required_fields_without_additional_properties():
     assert list(new_task) == ["text", "destination"]
     assert list(new_task["destination"]["anyOf"][0]["properties"]) == ["place", "tile"]
     assert json.loads(json.dumps(MIDDLE_OUTPUT_SCHEMA)) == MIDDLE_OUTPUT_SCHEMA
+
+
+def test_scene_name_is_written_right_after_timeline():
+    # properties (出力を書く順) と required の両方で、timeline の直後・cancel_task_ids の前
+    for keys in [
+        list(MIDDLE_OUTPUT_SCHEMA["properties"]),
+        MIDDLE_OUTPUT_SCHEMA["required"],
+    ]:
+        index = keys.index("scene_name")
+        assert keys[index - 1] == "timeline"
+        assert keys[index + 1] == "cancel_task_ids"
+
+
+def test_output_keys_for_reading_follow_the_schema_order():
+    # 出力の読み取りが確かめるキー (_OUTPUT_KEYS) も、スキーマの properties と同じ順に並べる
+    assert list(_OUTPUT_KEYS) == OUTPUT_KEYS
+    assert list(_OUTPUT_KEYS) == list(MIDDLE_OUTPUT_SCHEMA["properties"])
+
+
+def test_scene_name_description_follows_the_steps():
+    # 説明は、指示の場面ラベルの節と同じ手順 (前回と同じ種類の画面なら前回の場面名、違えば一覧から、無ければ新しく)
+    description = MIDDLE_OUTPUT_SCHEMA["properties"]["scene_name"]["description"]
+    for phrase in ["前回の場面名", "一覧", "新しい名前"]:
+        assert phrase in description, phrase
+    # 「一覧に無ければ前回の場面名を保つ」と読める書き方を使わない
+    assert "当てはまるものが無いときだけ" not in description
 
 
 def test_task_fields_have_descriptions():

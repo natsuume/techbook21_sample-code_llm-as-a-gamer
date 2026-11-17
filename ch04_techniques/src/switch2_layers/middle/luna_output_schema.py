@@ -1,13 +1,14 @@
 """gpt-6-luna の出力の JSON Schema (Structured Outputs) と、出力の JSON の文を MiddleOutput にする読み取り。I/O を扱わない。
 
 出力の形 (すべて required。additionalProperties は false。キーの順に書かせる):
-    {"scene_name": 文字列, "place_name": 文字列, "current_tile": 座標か null,
+    {"place_name": 文字列, "current_tile": 座標か null,
      "new_connections": [{"from": 文字列, "to": 文字列, "how": 文字列, "from_tile": 座標か null,
                           "to_tile": 座標か null}, ...],
      "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列,
                            "tile": 座標か null}, ...],
      "is_stuck": 真偽, "stuck_description": 文字列, "press_home": 真偽,
      "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列,
+     "scene_name": 文字列,
      "cancel_task_ids": [文字列, ...],
      "new_tasks": [{"text": 文字列, "destination": {"place": 文字列, "tile": 座標か null} か null}, ...]}
 座標は {"x": 整数, "y": 整数} (入力のマップのその場所の座標。x は右に、y は下に増える)。座標か null の値は、
@@ -16,7 +17,10 @@ anyOf で行き先の object と {"type": "null"} を並べる。
 new_connections・new_observations・new_tasks の要素と、座標と行き先の object も、すべて required で
 additionalProperties は false。
 場所の項目 (place_name・current_tile・new_connections・new_observations) は、タスクの項目 (cancel_task_ids・new_tasks)
-より前に書かせる。new_tasks の数の上限 (3 個まで) はスキーマ (maxItems) に置かず、説明文に書く。
+より前に書かせる。scene_name は timeline の直後 (cancel_task_ids の前) に書かせる。画面の移り変わり (timeline の
+「場面の移り変わり」の節) を書いてから場面を決めさせるため。scene_name の説明は、指示 (luna_instructions) の場面ラベルの
+節と同じ 3 つの条件 (前回と同じ種類の画面なら前回の場面名、違う種類なら一覧から選ぶ、一覧に無ければ新しい名前を作る) にする。
+new_tasks の数の上限 (3 個まで) はスキーマ (maxItems) に置かず、説明文に書く。
 cancel_task_ids は取り消すタスクの ID (ID の形は確かめない)、new_tasks は現在の場面のキューの末尾に足すタスクで、
 行き先は MiddleOutput に入れる前には直さない (マップと照らして直すのは middle.task_destination_fix)。
 scene_name が空 (空白だけを含む) なら、場面を決められなかったものとして MiddleOutput の scene_name を None にする。

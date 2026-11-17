@@ -33,8 +33,8 @@ MIDDLE_INPUT = MiddleInput(
     tasks_rows_offset=0,
     reasons=("interval",),
 )
+# 出力の例 (スキーマのキーの順に書く。scene_name は timeline の直後)
 OUTPUT = {
-    "scene_name": "タイトル画面",
     # タイトル画面にはゲームの世界の中の場所が映っていない
     "place_name": "",
     "current_tile": None,
@@ -45,6 +45,7 @@ OUTPUT = {
     "press_home": False,
     "surface_wait_s": 1.5,
     "timeline": "## 操作のまとめ\n- まだ操作していない",
+    "scene_name": "タイトル画面",
     "cancel_task_ids": [],
     "new_tasks": [],
 }
@@ -157,7 +158,6 @@ def test_analyze_sends_the_expected_request():
     assert text_format["type"] == "json_schema"
     assert text_format["strict"] is True
     assert text_format["schema"]["required"] == [
-        "scene_name",
         "place_name",
         "current_tile",
         "new_connections",
@@ -167,6 +167,7 @@ def test_analyze_sends_the_expected_request():
         "press_home",
         "surface_wait_s",
         "timeline",
+        "scene_name",
         "cancel_task_ids",
         "new_tasks",
     ]
@@ -182,6 +183,23 @@ def test_analyze_sends_the_expected_request():
     texts = [part["text"] for part in user["content"] if part["type"] == "input_text"]
     assert "フレーム t=12.000" in texts
     assert "フレーム t=19.800" in texts
+
+
+def test_reasoning_effort_defaults_to_none():
+    analyzer, handler = make_analyzer(httpx.Response(200, json=response_body()))
+    assert analyzer.reasoning_effort == "none"
+    analyzer.analyze(MIDDLE_INPUT)
+    assert handler.payload()["reasoning"] == {"effort": "none"}
+
+
+@pytest.mark.parametrize("effort", ["none", "low"])
+def test_analyze_sends_the_given_reasoning_effort(effort):
+    handler = RecordingHandler(httpx.Response(200, json=response_body()))
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    analyzer = LunaMiddleAnalyzer("sk-test", client=client, reasoning_effort=effort)
+    assert analyzer.reasoning_effort == effort
+    assert analyzer.analyze(MIDDLE_INPUT).scene_name == "タイトル画面"
+    assert handler.payload()["reasoning"] == {"effort": effort}
 
 
 def test_details_after_success_have_usage_cost_and_response():

@@ -1,7 +1,7 @@
 """MiddleAnalyzer の gpt-6-luna の実装 (LunaMiddleAnalyzer) と、middle/calls.jsonl の行に足す記録。
 
 1 回の analyze の流れ:
-    1. luna_request.build_luna_payload で要求の本文を作る
+    1. luna_request.build_luna_payload(middle_input, reasoning_effort=reasoning_effort) で要求の本文を作る
     2. luna_client.post_responses で 1 回だけ送る (タイムアウトは timeout_s。再試行はしない)
     3. luna_client.read_output_text で出力の文を取り出す (status が completed でない・拒否・出力の文が無いときは
        LunaCallError)
@@ -64,9 +64,11 @@ class LunaMiddleAnalyzer:
     run_once と同じ 1 つのスレッドから使う。
 
     属性:
-        api_key     API キー (cli が環境変数 OPENAI_API_KEY から読む)
-        client      要求に使う httpx.Client。None を渡したら新しく作る (テストでは MockTransport の Client を渡す)
-        timeout_s   1 回の要求のタイムアウト (秒)
+        api_key            API キー (cli が環境変数 OPENAI_API_KEY から読む)
+        client             要求に使う httpx.Client。None を渡したら新しく作る (テストでは MockTransport の Client を渡す)
+        timeout_s          1 回の要求のタイムアウト (秒)
+        reasoning_effort   要求の reasoning の effort の文字列 (キーワード引数。既定 luna_request.REASONING_EFFORT の
+                           "none")。cli の run は起動引数 --middle-effort の値 ("none" か "low") を渡す。値は確かめない
     """
 
     def __init__(
@@ -85,6 +87,7 @@ class LunaMiddleAnalyzer:
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
         """middle_input から gpt-6-luna の出力を得て MiddleOutput を返す (モジュールの docstring の 1〜4)。
 
+        要求の reasoning の effort は reasoning_effort にする。
         始めに、持っている記録を build_call_details(None, None) に置き換える (前の回の記録を残さない)。
         応答の本文を受け取ったら build_call_details(本文, None)、LunaCallError なら
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、例外を外に出す。

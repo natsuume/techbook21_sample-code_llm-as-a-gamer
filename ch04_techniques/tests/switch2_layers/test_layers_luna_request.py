@@ -271,6 +271,17 @@ def test_payload_top_level_fields():
     assert json.loads(json.dumps(payload, ensure_ascii=False)) == payload
 
 
+@pytest.mark.parametrize("effort", ["none", "low"])
+def test_payload_uses_the_given_reasoning_effort(effort):
+    payload = build_luna_payload(FULL_INPUT, reasoning_effort=effort)
+    assert payload["reasoning"] == {"effort": effort}
+    # effort のほかは変わらない (developer メッセージと text.format はキャッシュと出力の形のため同じにする)
+    default = build_luna_payload(FULL_INPUT)
+    assert {key: value for key, value in payload.items() if key != "reasoning"} == {
+        key: value for key, value in default.items() if key != "reasoning"
+    }
+
+
 def test_developer_message_has_fixed_instructions_and_cache_breakpoint():
     expected = {
         "role": "developer",
