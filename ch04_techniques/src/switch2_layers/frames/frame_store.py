@@ -16,7 +16,9 @@
   latest_frames.add_image(t, frames/interval/ の相対パス, 縮小した同じ画像 (BGR), jpeg_quality) を呼ぶ (時刻の
   書き込みと frames/latest/ の置き換えは LatestFrames が行う)。行を足さなかったフレーム (書き込みの失敗・close が
   あきらめた後) は渡さない。latest_frames を渡さなければ (advisor 型) frames/latest/ を書かない。
-  frames/interval/ の画像と frames.jsonl の行は、latest_frames の有無で変わらない
+  frames/interval/ の画像と frames.jsonl の行は、latest_frames の有無で変わらない。
+  add_image が例外を出しても、logging で警告を書いて次の件に進み (書き出しスレッドを止めない)、written と dropped の
+  数は変えない (その 1 件は frames/interval/ と frames.jsonl に書けているため written に数えたまま)
 
 書き込み (縮小・JPEG 化・ファイルの書き込み) は専用の書き出しスレッドで行い、受け付けは上限付きのキューで行う。
 キューが満杯のときは保存を捨て、捨てた件数を dropped に数える (終了時に run.jsonl の frames_dropped に記録する)。
@@ -93,6 +95,18 @@ class _SaveItem:
     image: EncodedImage | None = None
     content: Hashable = ()
     number: int = 1
+
+
+@dataclass(frozen=True)
+class _WrittenImage:
+    """書いた画像 1 件。
+
+    record           frames.jsonl に足す行
+    interval_image   一定間隔のフレームなら、縮小した画像 (BGR。frames/latest/ の画像の元)。surface の画像なら None
+    """
+
+    record: FrameRecord
+    interval_image: np.ndarray | None
 
 
 def _record_from_row(row: dict[str, object]) -> FrameRecord | None:
@@ -377,9 +391,13 @@ class FrameStore:
         3. ロックの外で行を足し、written に数えて True を返す。追記に失敗したら (OSError・ValueError) dropped に数え、
            surface の画像なら予約から外して False を返す。2 で行を足すと決めた 1 件は close が数えないので、
            close があきらめた後でも、ここで written か dropped に数える
+        4. 行を足して written に数えた一定間隔のフレームは、latest_frames があれば、縮小した画像を
+           latest_frames.add_image に渡す。add_image が例外を出したら logging で警告を書き、written と dropped の数は
+           変えずに True を返す (その 1 件は frames/interval/ と frames.jsonl に書けている)
         """
         try:
-            record = self._write_image(item)
+            written = self._write_image(item)
+            record = written.record
         except (OSError, ValueError):
             logger.warning("failed to save a %s frame", item.kind, exc_info=True)
             with self._condition:
@@ -406,17 +424,26 @@ class FrameStore:
             self._written += 1
             self._appending = False
             self._writing = False
+        if self.latest_frames is not None and written.interval_image is not None:
+            try:
+                self.latest_frames.add_image(
+                    record.t, record.file, written.interval_image, self.jpeg_quality
+                )
+            except Exception:
+                # 時刻の書き込みと JPEG 化の失敗 (cv2.error) は OSError ではないため、Exception で受ける
+                logger.warning("failed to replace the latest frames", exc_info=True)
         return True
 
-    def _write_image(self, item: _SaveItem) -> FrameRecord:
-        """item の画像を書き、frames.jsonl に足す FrameRecord を返す。"""
+    def _write_image(self, item: _SaveItem) -> _WrittenImage:
+        """item の画像を書き、frames.jsonl に足す FrameRecord と、一定間隔のフレームなら縮小した画像 (BGR) を返す。"""
+        interval_image: np.ndarray | None = None
         if item.kind == "interval":
             if item.nv12 is None:
                 raise ValueError("interval frame without NV12 data")
-            image = encode_jpeg(
-                shrink_to_width(nv12_to_bgr(item.nv12), self.interval_width),
-                self.jpeg_quality,
+            interval_image = shrink_to_width(
+                nv12_to_bgr(item.nv12), self.interval_width
             )
+            image = encode_jpeg(interval_image, self.jpeg_quality)
             path = self.paths.interval_frame(item.t)
         else:
             if item.image is None:
@@ -424,13 +451,14 @@ class FrameStore:
             image = item.image
             path = self.paths.surface_frame(item.t, item.number)
         write_bytes_atomic(path, image.jpeg)
-        return FrameRecord(
+        record = FrameRecord(
             t=item.t,
             kind=item.kind,
             file=self.paths.relative(path),
             width=image.width,
             height=image.height,
         )
+        return _WrittenImage(record=record, interval_image=interval_image)
 
     def _release_reservation_locked(self, item: _SaveItem) -> None:
         """surface の画像なら、その t と内容の組の予約を外す (組の番号は残す)。呼び出し側が _condition を持つ。"""

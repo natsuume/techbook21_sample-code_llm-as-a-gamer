@@ -31,8 +31,9 @@ from typing import Protocol
 
 from switch2_layers.deep.claude_stream_log import assistant_text, is_result_message
 from switch2_layers.error_text import describe_exception
-from switch2_layers.frames.latest_frames import LatestFrame
+from switch2_layers.frames.latest_frames import LatestFrame, newest_frame_t
 from switch2_layers.notes.note_reader import read_note_text
+from switch2_layers.orchestrator.action_settle import wait_for_settled_actions
 from switch2_layers.orchestrator.claude_session_command import (
     ClaudeSessionOptions,
     autocompact_arguments,
@@ -229,6 +230,17 @@ class _TurnEnd(Enum):
     STOPPED = "stopped"  # 停止の合図が立った
     TIMEOUT = "timeout"  # 入力を送ってから turn_timeout_s 秒たった
     ENDED = "ended"  # 標準出力が終わった (子プロセスが終わった)
+
+
+class _AppliedResult(Enum):
+    """ふつうのターンの result の JSON を読んだ結果 (_apply_result の結果)。"""
+
+    # 空でない actions の Decision を apply した (次の入力の前に、その操作の列が終わるのを待つ)
+    ACTIONS = "actions"
+    # 空の actions の Decision を apply したか、JSON に誤りがあった (待たずに次の入力を作る)
+    NO_ACTIONS = "no_actions"
+    # JSON の誤りが max_decision_errors 回続いた (on_stop を呼んだ)
+    STOPPED = "stopped"
 
 
 class _SendFailure(Enum):
@@ -493,16 +505,32 @@ class OrchestratorMainLoop:
                 )
                 self._end_session(session, SessionEndReason.ROTATE)
                 return True
-            if not self._apply_result(session, turn):
+            applied = self._apply_result(session, turn)
+            if applied is _AppliedResult.STOPPED:
                 self._end_session(session, SessionEndReason.CLOSE)
                 return False
             if stop.is_set():
                 self._end_session(session, SessionEndReason.CLOSE)
                 return False
+            # 空でない actions を当てたら、その操作の列が終わって画面が落ち着くまで待ってから次の入力を作る
+            t_wait_start: float | None = None
+            previous_actions: MainActionsRun | None = None
+            if applied is _AppliedResult.ACTIONS:
+                t_wait_start = self.parts.clock.now()
+                previous_actions = self._wait_for_previous_actions(stop)
+                if stop.is_set():
+                    self._end_session(session, SessionEndReason.CLOSE)
+                    return False
             if session.usage_tokens > self.settings.rotate_tokens:
-                turn = self._send_handoff_request(session, stop)
+                turn = self._send_handoff_request(session, stop, t_wait_start)
             else:
-                turn = self._send_turn(session, first=False, stop=stop)
+                turn = self._send_turn(
+                    session,
+                    first=False,
+                    stop=stop,
+                    t_wait_start=t_wait_start,
+                    previous_actions=previous_actions,
+                )
 
     def _start_session(self) -> _OpenSession | None:
         """セッションの流れの 1 (始める)。起動できなければ終了の行を書いて None を返す。"""
@@ -553,13 +581,37 @@ class OrchestratorMainLoop:
         parts.run_log.write(EVENT_ORCHESTRATOR_SESSION_START, session=number)
         return session
 
+    def _wait_for_previous_actions(
+        self, stop: threading.Event
+    ) -> MainActionsRun | None:
+        """前のターンの操作の列が終わって画面が落ち着くまで待ち、落ち着いた列の時刻を返す (セッションの流れの 4 の
+        「次の入力を作る時点」)。stop が立ったか、主ループの列が無ければ None。"""
+        parts = self.parts
+        return wait_for_settled_actions(
+            parts.controller.main_actions_run,
+            self._newest_frame_t,
+            parts.clock,
+            stop,
+            READ_POLL_S,
+        )
+
+    def _newest_frame_t(self) -> float | None:
+        """frames/latest/ の最新のフレームの時刻 (newest_frame_t(latest_frames()))。フレームが無ければ None。"""
+        return newest_frame_t(self.parts.latest_frames())
+
     def _send_turn(
-        self, session: _OpenSession, first: bool, stop: threading.Event
+        self,
+        session: _OpenSession,
+        first: bool,
+        stop: threading.Event,
+        t_wait_start: float | None = None,
+        previous_actions: MainActionsRun | None = None,
     ) -> _SentTurn | _SendFailure:
         """ふつうのターンの入力を作って送り、送ったターンを返す。送れなければ出来事を繰り越して _SendFailure を返す。
 
         first なら、セッションの開始の節を付ける (セッションの流れの 2)。画像は first に関わらず
-        select_turn_frames(latest_frames()) (最新の 5 枚)。
+        select_turn_frames(latest_frames()) (最新の 5 枚)。t_wait_start は前のターンの操作の列を待ち始めた時刻
+        (待たなかったら None で、入力を作った時刻にする)。previous_actions は待った列の時刻 (TurnContext に渡す)。
         """
         parts = self.parts
         paths = parts.paths
@@ -573,6 +625,7 @@ class OrchestratorMainLoop:
                 progress=read_progress_state(paths.progress_state),
                 previous_error=self._previous_error,
                 skipped_skills=self._skipped_skills,
+                previous_actions=previous_actions,
             )
         )
         if first:
@@ -586,7 +639,7 @@ class OrchestratorMainLoop:
         turn = _SentTurn(
             number=session.turn_count + 1,
             kind=TurnKind.TURN,
-            t_wait_start=now,
+            t_wait_start=now if t_wait_start is None else t_wait_start,
             t_sent=now,
             input_text=text,
             images=tuple(image.file for image in images),
@@ -601,15 +654,21 @@ class OrchestratorMainLoop:
         return turn
 
     def _send_handoff_request(
-        self, session: _OpenSession, stop: threading.Event
+        self,
+        session: _OpenSession,
+        stop: threading.Event,
+        t_wait_start: float | None = None,
     ) -> _SentTurn | _SendFailure:
-        """引き継ぎの依頼 (テキストだけ) を送り、送ったターンを返す。送れなければ _SendFailure を返す。"""
+        """引き継ぎの依頼 (テキストだけ) を送り、送ったターンを返す。送れなければ _SendFailure を返す。
+
+        t_wait_start は前のターンの操作の列を待ち始めた時刻 (待たなかったら None で、入力を作った時刻にする)。
+        """
         now = self.parts.clock.now()
         text = handoff_request_text()
         turn = _SentTurn(
             number=session.turn_count + 1,
             kind=TurnKind.HANDOFF,
-            t_wait_start=now,
+            t_wait_start=now if t_wait_start is None else t_wait_start,
             t_sent=now,
             input_text=text,
             images=(),
@@ -682,11 +741,12 @@ class OrchestratorMainLoop:
                 )
                 return _TurnEnd.RESULT
 
-    def _apply_result(self, session: _OpenSession, turn: _SentTurn) -> bool:
+    def _apply_result(self, session: _OpenSession, turn: _SentTurn) -> _AppliedResult:
         """ふつうのターンの result の後に、最後の文を parse_decision に渡して apply し、turns.jsonl に書く。
 
-        JSON の誤りが続いた回数が max_decision_errors に達したら、on_stop を呼んで False を返す (セッションは
-        呼び出し側が終える)。そうでなければ True を返す。
+        JSON の誤りが続いた回数が max_decision_errors に達したら、on_stop を呼んで _AppliedResult.STOPPED を返す
+        (セッションは呼び出し側が終える)。そうでなければ、空でない actions の Decision を apply したら
+        _AppliedResult.ACTIONS、空の actions の Decision か JSON の誤りなら _AppliedResult.NO_ACTIONS を返す。
         """
         parts = self.parts
         decision = parts.parse_decision(turn.last_text or "")
@@ -696,7 +756,9 @@ class OrchestratorMainLoop:
             self._decision_errors = 0
             self._previous_error = None
             self._write_turn(session, turn, t_result, None, TurnOutcome.APPLIED)
-            return True
+            if decision.actions:
+                return _AppliedResult.ACTIONS
+            return _AppliedResult.NO_ACTIONS
         self._decision_errors += 1
         self._previous_error = decision
         parts.run_log.write(
@@ -710,8 +772,8 @@ class OrchestratorMainLoop:
         )
         if self._decision_errors >= self.settings.max_decision_errors:
             parts.on_stop(decision_failure_reason(self._decision_errors))
-            return False
-        return True
+            return _AppliedResult.STOPPED
+        return _AppliedResult.NO_ACTIONS
 
     def _finish_cut_turn(
         self, session: _OpenSession, turn: _SentTurn, end: _TurnEnd

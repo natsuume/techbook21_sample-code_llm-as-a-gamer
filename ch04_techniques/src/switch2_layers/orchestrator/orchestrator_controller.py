@@ -246,6 +246,8 @@ class OrchestratorController:
         self._pending_main: tuple[PrimitiveAction, ...] | None = None
         # 空でない actions を受け付けた回数
         self._actions_serial = 0
+        # 最後に受け付けた主ループの空でない actions の列の時刻 (main_actions_run)。まだ受け付けていなければ None
+        self._main_run: MainActionsRun | None = None
         # 実行中の監視の列の (世代, 条件の位置)。監視の列を実行していなければ None
         self._running_case: tuple[int, int] | None = None
         # 止めたか置き換えた監視の列を、次の回りで捨てる
@@ -300,6 +302,10 @@ class OrchestratorController:
                 self._discarded += self._main_remaining_locked()
                 self._pending_main = main_operations
                 self._actions_serial += 1
+                # 新しい列の時刻 (まだ始めていない)。前の列の時刻は捨てる
+                self._main_run = MainActionsRun(
+                    started_t=None, released_t=None, ended_t=None
+                )
         self._wake.set()
 
     def take_events(self) -> OrchestratorEvents:
@@ -335,7 +341,8 @@ class OrchestratorController:
         """最後に apply で受け付けた、主ループの空でない actions の操作の列の時刻を返す (モジュールの docstring の
         「主ループの操作の列の時刻」)。まだ受け付けていなければ None。出来事は取り出さない (何度呼んでもよい)。
         """
-        raise NotImplementedError
+        with self._lock:
+            return self._main_run
 
     def macro_names(self) -> frozenset[str]:
         """今登録しているマクロの名前の集合を返す。出来事は取り出さない。
@@ -387,9 +394,14 @@ class OrchestratorController:
         self._handle_returned_requests_locked()
         if not self._started:
             return
+        # 主ループの列の時刻 (released_t) には、主ループの列を進めている間に離した時刻だけを入れる
+        main_was_running = self._executor.owner == "orchestrator"
+        release_t_before = self._executor.last_release_t
         self._executor.advance()
         self._blocked.update(self._executor.take_blocked_buttons())
-        if self._executor.take_finished_owner() == "monitor":
+        finished_owner = self._executor.take_finished_owner()
+        self._update_main_run_locked(main_was_running, release_t_before)
+        if finished_owner == "monitor":
             self._finish_running_case_locked()
         self._start_request_if_possible_locked()
 
@@ -402,8 +414,40 @@ class OrchestratorController:
         if self._pending_main is not None:
             if self._executor.owner == "monitor":
                 self._running_case = None
+            started_t = self._parts.clock.now()
             self._executor.start(self._pending_main, "orchestrator")
             self._pending_main = None
+            # 展開した列が空か、出力が止まっていて始められなかったら、始めた時刻に終わったものとする
+            ended_t = None if self._executor.owner == "orchestrator" else started_t
+            self._main_run = MainActionsRun(
+                started_t=started_t, released_t=None, ended_t=ended_t
+            )
+
+    def _update_main_run_locked(
+        self, main_was_running: bool, release_t_before: float | None
+    ) -> None:
+        """回りの 3 (advance) の後に、始めた主ループの列の released_t と ended_t を進める (モジュールの docstring の
+        「主ループの操作の列の時刻」)。
+
+        main_was_running は advance の前に主ループの列を実行していたか、release_t_before は advance の前の
+        ActionExecutor.last_release_t。主ループの列を進める advance で last_release_t が変わったら、それを released_t に
+        する (列を始めるときに前の列を捨てて中立に戻した時刻と、監視の列が離した時刻は入れない)。主ループの列を
+        持たなくなったら (最後まで実行し終えたか、出力が止まって捨てたか)、今の時刻を ended_t にする。
+        """
+        run = self._main_run
+        if run is None or run.started_t is None or run.ended_t is not None:
+            return
+        released_t = run.released_t
+        release_t_after = self._executor.last_release_t
+        if main_was_running and release_t_after != release_t_before:
+            released_t = release_t_after
+        ended_t = (
+            None if self._executor.owner == "orchestrator" else self._parts.clock.now()
+        )
+        if (released_t, ended_t) != (run.released_t, run.ended_t):
+            self._main_run = MainActionsRun(
+                started_t=run.started_t, released_t=released_t, ended_t=ended_t
+            )
 
     def _handle_returned_requests_locked(self) -> None:
         """返った監視の要求を処理し、1 つごとに monitor.jsonl に 1 行書く (回りの 2)。"""

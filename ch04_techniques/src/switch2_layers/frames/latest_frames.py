@@ -21,13 +21,20 @@ add_image と add は書き出しスレッドから、snapshot は主ループ�
 行い、ファイルの書き込み (I/O) はロックの外で行う (snapshot はファイルの書き込みを待たない)。
 """
 
+import logging
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
+from switch2_layers.file_io import write_bytes_atomic
+from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY, encode_jpeg
+from switch2_layers.frames.surface_frames import draw_frame_time
 from switch2_layers.run_directory import RunPaths
+
+# logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
+logger = logging.getLogger(__name__)
 
 # frames/latest/ に置く画像の枚数 (1.jpg〜5.jpg)
 LATEST_FRAME_COUNT = 5
@@ -59,12 +66,17 @@ def make_latest_frame(
     jpeg は image_encoding.encode_jpeg(surface_frames.draw_frame_time(image, t), jpeg_quality).jpeg (左上に
     format_frame_label(t) を書き込んだ画像。image 自体は変えない)。t と source_file はそのまま持つ。
     """
-    raise NotImplementedError
+    stamped = draw_frame_time(image, t)
+    return LatestFrame(
+        t=t, source_file=source_file, jpeg=encode_jpeg(stamped, jpeg_quality).jpeg
+    )
 
 
 def newest_frame_t(frames: Sequence[LatestFrame]) -> float | None:
     """新しい順の frames (LatestFrames.snapshot の値) のうち、最新のフレーム (先頭) の時刻を返す。空なら None (I/O なし)。"""
-    raise NotImplementedError
+    if not frames:
+        return None
+    return frames[0].t
 
 
 class LatestFrames:
@@ -77,6 +89,9 @@ class LatestFrames:
     def __init__(self, paths: RunPaths) -> None:
         """画像を持たない状態で作る。ファイルもディレクトリーも作らない。"""
         self.paths = paths
+        # 新しい順の画像 (最大 LATEST_FRAME_COUNT 枚)。読み書きは _lock の中で行う
+        self._lock = threading.Lock()
+        self._frames: tuple[LatestFrame, ...] = ()
 
     def add_image(
         self,
@@ -87,7 +102,7 @@ class LatestFrames:
     ) -> None:
         """縮小した一定間隔のフレームの画像 image (BGR) を、add(make_latest_frame(t, source_file, image, jpeg_quality))
         で足す (frames.frame_store.FrameStore が呼ぶ)。"""
-        raise NotImplementedError
+        self.add(make_latest_frame(t, source_file, image, jpeg_quality))
 
     def add(self, frame: LatestFrame) -> None:
         """frame を最新として足し (LATEST_FRAME_COUNT 枚を超えたら最も古いものを外す)、frames/latest/ を書き直す
@@ -95,13 +110,25 @@ class LatestFrames:
 
         frames/latest/ が無ければ親を含めて作る。書き込みの失敗 (OSError) は外に出さず、logging で警告を書く
         (一定間隔のフレームの保存と frames.jsonl の記録を止めないため)。書き込みに失敗しても、メモリーの画像は足したままにする。
+        ある番号の書き込みに失敗したら、その回はそれより後の番号を書き直さない。
         """
-        raise NotImplementedError
+        with self._lock:
+            self._frames = (frame, *self._frames)[:LATEST_FRAME_COUNT]
+            frames = self._frames
+        # ファイルの書き込みはロックの外で行う (snapshot を待たせない)
+        try:
+            self.paths.latest_frames_dir.mkdir(parents=True, exist_ok=True)
+            # 1.jpg (最新) から順に、メモリーの画像で書き直す。失敗した番号より後を書き直すと、書き直せなかった
+            # 番号の古い画像と同じ画像が 2 つの番号に並ぶため、最初の失敗でやめる
+            for number, latest in enumerate(frames, start=1):
+                write_bytes_atomic(self.paths.latest_frame(number), latest.jpeg)
+        except OSError:
+            logger.warning("failed to replace the latest frames", exc_info=True)
 
     def snapshot(self) -> tuple[LatestFrame, ...]:
         """今持っている画像を、新しい順のタプルで返す (n 番目が frames/latest/<n>.jpg と同じ画像)。無ければ空のタプル。
 
         同じ時点の画像をまとめて返す (ロックの中で写す)。ファイルは読まない。
         """
-        # 未実装: 画像を持たないものとして空のタプルを返す
-        return ()
+        with self._lock:
+            return self._frames

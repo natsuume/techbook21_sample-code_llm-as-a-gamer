@@ -6,6 +6,7 @@
 from switch2_remote.controller_state import BUTTON_ORDER
 
 from switch2_layers.hardware.pad_output import MAX_HOLD_SECONDS
+from switch2_layers.orchestrator.action_settle import ACTIONS_SETTLE_S
 from switch2_layers.safety.safety_rules import SAFETY_RULES
 
 # Claude が引き継ぎを書く、notes/ からの相対パス
@@ -61,9 +62,9 @@ def orchestrator_instructions() -> str:
        Claude の操作 (actions) の実行中は、監視が止まること
     4. 判断の続け方: 答えの actions が空でなければ、その操作の列がすべて終わり、最後にボタンとスティックを離してから
        action_settle.ACTIONS_SETTLE_S 秒 (0.3 秒) より後に撮った画面がそろってから、その画面を含む次の画面と出来事が
-       届くこと (押す操作の無い actions なら、列が終わってから)。空の actions は「何もしない」
-       の意味で、次の画面と出来事はすぐに届くこと (すぐ届くと書くのは、空の actions のときだけ)。監視に任せて
-       待つときは、空の actions で答えること。次の JSON の actions は、前の actions の残りを捨てて置き換えること
+       届くこと (押す操作の無い actions なら、列が終わってから)。次の JSON の actions は、そのときに実行中の操作の列
+       (監視の操作の列など) の残りを捨てて置き換えること。空の actions は「何もしない」の意味で、次の画面と出来事は
+       すぐに届くこと (すぐ届くと書くのは、空の actions のときだけ)。監視に任せて待つときは、空の actions で答えること
     5. safety.safety_rules.SAFETY_RULES (文をそのまま入れる)
     6. 監視の条件の文は画面の見た目だけで書き、ゲーム名や作品に固有の名前を書かないこと
     7. notes/ に、分かったこと (操作の割り当て、攻略の情報、方針) を書くこと
@@ -79,10 +80,11 @@ def orchestrator_instructions() -> str:
     """
     buttons = "・".join(BUTTON_ORDER)
     max_hold = f"{MAX_HOLD_SECONDS:g}"
+    settle = f"{ACTIONS_SETTLE_S:g}"
     return f"""\
 ## 役割
 あなたは、送られた画面の画像と出来事だけを見てゲームを進める主ループです。
-毎ターン、テキストと、一定間隔のフレームの画像 (それぞれの前に時刻のラベル) が届きます。画像を見て次に何をするかを決め、操作を JSON で書きます。
+毎ターン、テキストと、最新の 5 枚のフレームの画像 (古い順で、それぞれの前に時刻のラベル) が届きます。画像を見て次に何をするかを決め、操作を JSON で書きます。
 
 ## 答えの形
 毎ターンの答えの最後に、```json のブロックを 1 つ書きます。コードは最後の ```json のブロックだけを読みます。
@@ -121,10 +123,11 @@ JSON に誤りがあると、操作・マクロ・監視のどれも変わらず
 条件に当たった回数と、監視の終わりは、次の入力の「前の判断の後の出来事」の節に載ります。
 
 ## 判断の続け方
-判断は休まず続きます。答えを返すと、すぐ次の画面と出来事が届きます。
-次の JSON の "actions" は、前の "actions" の残りを捨てて置き換えます。
-空の "actions" なら、前の操作がそのまま続きます。
-操作の実行中で続けさせたいときや、監視に任せて待つときは、空の "actions" で答えます。
+答えの "actions" が空でなければ、その操作の列がすべて終わり、最後にボタンとスティックを離してから {settle} 秒より後に撮った画面がそろってから、その画面を含む次の画面と出来事が届きます。
+押す操作の無い "actions" ("wait" だけ) なら、列が終わってから次の画面と出来事が届きます。
+次の JSON の "actions" は、そのときに実行中の操作の列 (監視の操作の列など) の残りを捨てて置き換えます。
+空の "actions" は「何もしない」の意味で、次の画面と出来事はすぐに届きます。
+監視に任せて待つときは、空の "actions" で答えます。
 
 ## 安全
 {SAFETY_RULES}
@@ -143,7 +146,8 @@ frontmatter は name: game-<名前> (ディレクトリーの名前と同じ) �
 決まりを守らないスキルは写されず、次の入力の「写さなかったスキル」の節に理由が届きます。
 
 ## 古いフレーム
-古いフレームは frames/interval/ にあります。読んだ画像もコンテキストに残るため、必要なときだけ Read で読みます。
+frames/latest/1.jpg〜5.jpg は最新の 5 枚のフレームで、1.jpg が最新です。いつ Read しても、その時点の最新の画面が読めます。
+それより古いフレームは frames/interval/ にあり、ファイル名は時刻のミリ秒です。
 """
 
 

@@ -55,6 +55,9 @@
     - disableSkillShellExecution を足した引数で起動しても (2026-11-17)、system/init の行と 1 ターンの終わり方は同じ。
       実行ディレクトリーのスキルの本文の !`echo ...` と ```! のブロックは、Skill のツールの結果で
       [shell command execution disabled by policy] に置き換わり、コマンドの出力は出ない
+    - 2026-11-17、Claude Code 2.1.326 で、build_session_command と同じ引数で起動したセッションで、同じパスの画像を
+      一時ファイルに書いてから os.replace で置き換えた後に、もう一度 Read すると、置き換えた後の画像 (1 回目と違う色の
+      画像) が返る
 """
 
 import json

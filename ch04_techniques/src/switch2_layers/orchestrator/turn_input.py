@@ -62,8 +62,9 @@ TURN_MAX_IMAGES = 5
 NONE_TEXT = "無し"
 # 古いフレームの節の文
 FRAMES_GUIDE_TEXT = (
-    "frames/interval/ に一定間隔のフレーム (<tミリ秒9桁>.jpg) がある。"
-    "読んだ画像もコンテキストに残るため、必要なときだけ Read で読む"
+    "frames/latest/1.jpg〜5.jpg は最新の 5 枚 (1.jpg が最新) で、"
+    "いつ Read してもその時点の最新の画面が読める。"
+    "それより古いフレームは frames/interval/ (<tミリ秒9桁>.jpg) にある"
 )
 # 画像のブロックの media_type
 IMAGE_MEDIA_TYPE = "image/jpeg"
@@ -129,8 +130,11 @@ def select_turn_frames(latest: Sequence[LatestFrame]) -> list[TurnImage]:
     TurnImage(t=frame.t, file=frame.source_file, jpeg=frame.jpeg) にする。TURN_MAX_IMAGES 枚に満たなければある分だけ、
     latest が空なら空のリスト。
     """
-    # 未実装: 画像を選ばない (空のリストを返す)
-    return []
+    newest = list(latest[:TURN_MAX_IMAGES])
+    return [
+        TurnImage(t=frame.t, file=frame.source_file, jpeg=frame.jpeg)
+        for frame in reversed(newest)
+    ]
 
 
 def action_to_json(action: Action) -> dict[str, object]:
@@ -206,8 +210,15 @@ def describe_previous_actions(run: MainActionsRun) -> str:
         始めた時刻: <format_frame_label(run.started_t)>
         終えた時刻 (最後に離した時刻): <format_frame_label(終えた時刻)>
     終えた時刻は run.released_t。押す操作の無い列 (released_t が None) なら run.ended_t。
+    run が終わっていなければ (started_t か ended_t が None なら) ValueError。
     """
-    raise NotImplementedError
+    if run.started_t is None or run.ended_t is None:
+        raise ValueError(f"the actions have not ended: {run!r}")
+    end_t = run.ended_t if run.released_t is None else run.released_t
+    return (
+        f"始めた時刻: {format_frame_label(run.started_t)}\n"
+        f"終えた時刻 (最後に離した時刻): {format_frame_label(end_t)}"
+    )
 
 
 def describe_progress_for_turn(progress: ProgressState | None, now_t: float) -> str:
@@ -314,6 +325,12 @@ def build_turn_text(context: TurnContext) -> str:
         ("## 時刻", format_frame_label(context.now_t)),
         ("## 前の判断の後の出来事", describe_events(context.events)),
         ("## 主ループの操作", describe_running(context.events)),
+    ]
+    if context.previous_actions is not None:
+        sections.append(
+            ("## 前の操作の列", describe_previous_actions(context.previous_actions))
+        )
+    sections += [
         (
             "## 画面の停滞 (コードの計測)",
             describe_progress_for_turn(context.progress, context.now_t),

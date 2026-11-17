@@ -173,6 +173,8 @@ def turn_row(record: TurnRecord) -> dict[str, object]:
         "session": record.session,
         "turn": record.turn,
         "kind": record.kind.value,
+        "t_wait_start": record.t_wait_start,
+        "wait_s": round(record.t_sent - record.t_wait_start, 3),
         "t_sent": record.t_sent,
         "t_result": record.t_result,
         "duration_s": duration_s,

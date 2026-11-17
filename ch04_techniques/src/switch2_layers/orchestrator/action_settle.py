@@ -18,7 +18,7 @@ import threading
 from collections.abc import Callable
 
 from switch2_layers.orchestrator.orchestrator_events import MainActionsRun
-from switch2_layers.run_clock import RunClock
+from switch2_layers.run_clock import RunClock, round_to_milliseconds
 
 # 操作の列の最後にボタンとスティックを離してから、次の入力を作るまでに置く秒数 (画面が操作に反応して落ち着くまで)
 ACTIONS_SETTLE_S = 0.3
@@ -33,7 +33,11 @@ def settled_time(run: MainActionsRun) -> float | None:
       (最後の操作が ACTIONS_SETTLE_S 秒より長い wait なら、列が終わった時刻)
     足した値はミリ秒に丸める (時計の t はミリ秒に丸めた値なので、丸めずに比べると境界ちょうどの時刻を逃すことがある)。
     """
-    raise NotImplementedError
+    if run.ended_t is None:
+        return None
+    if run.released_t is None:
+        return run.ended_t
+    return max(run.ended_t, round_to_milliseconds(run.released_t + ACTIONS_SETTLE_S))
 
 
 def settled_frame_after(run: MainActionsRun) -> float | None:
@@ -42,7 +46,9 @@ def settled_frame_after(run: MainActionsRun) -> float | None:
     run.released_t があれば round_to_milliseconds(run.released_t + ACTIONS_SETTLE_S)。run.released_t が None (押す操作の
     無い列) なら None (フレームの条件を使わない)。列が終わったか (ended_t) は見ない。
     """
-    raise NotImplementedError
+    if run.released_t is None:
+        return None
+    return round_to_milliseconds(run.released_t + ACTIONS_SETTLE_S)
 
 
 def actions_settled(
@@ -56,7 +62,13 @@ def actions_settled(
         - settled_frame_after(run) が None (押す操作の無い列) か、latest_frame_t が None でなく settled_frame_after(run)
           より大きい (フレームの条件。ちょうど同じ時刻のフレームは通さない)
     """
-    raise NotImplementedError
+    settle_t = settled_time(run)
+    if settle_t is None or now_t < settle_t:
+        return False
+    frame_after = settled_frame_after(run)
+    if frame_after is None:
+        return True
+    return latest_frame_t is not None and latest_frame_t > frame_after
 
 
 def wait_for_settled_actions(
@@ -77,4 +89,12 @@ def wait_for_settled_actions(
         4. stop.wait(poll_s) で最大 poll_s 秒待つ
     run・時計・フレームの時刻は、回りごとに読み直す。
     """
-    raise NotImplementedError
+    while True:
+        if stop.is_set():
+            return None
+        run = read_run()
+        if run is None:
+            return None
+        if actions_settled(run, clock.now(), read_latest_frame_t()):
+            return run
+        stop.wait(poll_s)

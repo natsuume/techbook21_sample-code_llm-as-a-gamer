@@ -316,6 +316,70 @@ def test_without_latest_frames_frames_latest_is_not_written(tmp_path):
     assert not (root / "frames" / "latest").exists()
 
 
+def test_failure_to_replace_the_latest_frames_does_not_stop_saving(tmp_path, caplog):
+    class FailOnceLatestFrames(LatestFrames):
+        """最初の add_image だけ、cv2 の例外 (OSError ではない) を出す。"""
+
+        def __init__(self, paths: RunPaths) -> None:
+            super().__init__(paths)
+            self.failed = False
+
+        def add_image(self, t, source_file, image, jpeg_quality=DEFAULT_JPEG_QUALITY):
+            if not self.failed:
+                self.failed = True
+                raise cv2.error("drawing the time failed")
+            super().add_image(t, source_file, image, jpeg_quality)
+
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    latest = FailOnceLatestFrames(paths)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=64,
+        start_thread=False,
+        latest_frames=latest,
+    )
+    for t in [0.0, 0.2]:
+        assert store.offer_interval(captured(t)) is True
+    assert store.write_queued() == 2
+    # 置き換えに失敗した 1 件も、frames/interval/ と frames.jsonl には書けているので written に数える
+    assert (store.written, store.dropped) == (2, 0)
+    assert [row["file"] for row in frames_rows(root)] == [
+        "frames/interval/000000000.jpg",
+        "frames/interval/000000200.jpg",
+    ]
+    assert all((root / row["file"]).is_file() for row in frames_rows(root))
+    # 次のフレームからは、frames/latest/ の置き換えを続ける
+    assert latest_names(root) == ["1.jpg"]
+    assert [item.t for item in latest.snapshot()] == [0.2]
+    assert "failed to replace the latest frames" in caplog.text
+
+
+def test_writer_thread_keeps_saving_when_replacing_the_latest_frames_fails(tmp_path):
+    class FailingLatestFrames(LatestFrames):
+        """add_image のたびに、cv2 の例外 (OSError ではない) を出す。"""
+
+        def add_image(self, t, source_file, image, jpeg_quality=DEFAULT_JPEG_QUALITY):
+            raise cv2.error("drawing the time failed")
+
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    store = FrameStore(
+        paths,
+        interval_fps=5.0,
+        interval_width=64,
+        latest_frames=FailingLatestFrames(paths),
+    )
+    for t in [0.0, 0.2, 0.4]:
+        assert store.offer_interval(captured(t)) is True
+    # 書き出しスレッドが止まっていなければ、close はキューの分を書き終えるのを待てる
+    store.close()
+    assert (store.written, store.dropped) == (3, 0)
+    assert [row["t"] for row in frames_rows(root)] == [0.0, 0.2, 0.4]
+    assert all((root / row["file"]).is_file() for row in frames_rows(root))
+
+
 # --- surface の画像の保存 ---
 
 
