@@ -1282,6 +1282,31 @@ def test_delegate_deleting_a_macro_used_by_the_current_choices_is_an_error():
     assert_error_at(parse_delegate(value, context), "macros.delete[0]")
 
 
+@pytest.mark.parametrize(
+    "delegate_value",
+    [OMIT, None, {"action": "stop"}],
+    ids=["no_delegate", "null_delegate", "stop"],
+)
+def test_delegate_replacing_a_macro_of_the_current_choices_with_home_is_an_error(
+    delegate_value,
+):
+    # 委任中は、delegate のキーの有無と値に依らず、行動のマクロを HOME を押す列に置き換えられない
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value: dict[str, object] = {
+        "macros": {"set": {"attack": [press(buttons=["HOME"])]}}
+    }
+    if delegate_value is not OMIT:
+        value["delegate"] = delegate_value
+    assert_error_at(parse_delegate(value, context), "macros.set.attack")
+
+
+def test_delegate_registering_a_home_macro_not_used_by_the_choices_is_valid():
+    context = delegate_context(active=True, previous=PREVIOUS_DELEGATION)
+    value = {"macros": {"set": {"open_home": [press(buttons=["HOME"])]}}}
+    decision = assert_decision(parse_delegate(value, context))
+    assert set(decision.macros_set) == {"open_home"}
+
+
 def test_delegate_error_changes_nothing_of_the_actions_and_macros():
     # 委任の指示に誤りがあれば、同じ JSON の操作とマクロも当てない (Decision を返さない)
     value = {

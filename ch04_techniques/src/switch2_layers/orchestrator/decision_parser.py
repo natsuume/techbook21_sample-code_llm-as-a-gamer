@@ -73,8 +73,15 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
       delegate_questions.RESERVED_OPTION_NAMES の名前、同じ choices の前の行動と同じ名前、または HOME を押すマクロ
       (マクロの操作の列を action_executor.expand_actions で展開した列に、buttons に HOME を含む press がある。マクロの
       操作の列は、この JSON の macros.set にあればそれ、無ければ DelegateContext.macros のもの)
-    - start で省いて前の委任から使う choices と、委任中の update で省いて今の委任から使う choices の行動が、この JSON
-      の macros を当てた後の登録に無いか、HOME を押すマクロ (委任中でないときの update で省いた choices は確かめない)
+    - start で省いて前の委任から使う choices の行動が、この JSON の macros を当てた後の登録に無いか、HOME を押す
+      マクロ。委任中の update で省いて今の委任から使う choices の行動が、この JSON の macros を当てた後の登録に無い
+      (HOME を押すかは、下の macros.set の規則で確かめる。委任中でないときの update で省いた choices は確かめない)
+    - 委任中 (DelegateContext.active。委任を始める前を含む) に、macros.set で、委任の行動のマクロを HOME を押す
+      操作の列にした (その操作の列を action_executor.expand_actions で展開した列に、buttons に HOME を含む press が
+      ある)。委任の行動は、この JSON の update が choices を書いていればその choices、そうでなければ今の委任
+      (DelegateContext.previous) の choices。delegate のキーの有無と値に依らず確かめる (delegate が無い・null・
+      choices を省いた update・stop のどれでも誤り。stop で委任を終える JSON でも誤り)。委任の行動に使っていない
+      マクロは、HOME を押す列でも登録できる
     - 委任中に、今の委任 (DelegateContext.previous) の choices の name を macros.delete に書いた (同じ JSON に update
       や stop があっても誤り)
 値の直し方:
@@ -105,8 +112,9 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         行動の name の誤り (登録に無い・予約の名前・重複・HOME を押すマクロ)
                                              その行動の name のパス (`delegate.choices[1].name`)
         省いて前の委任か今の委任から使う choices の誤り
-                                             `delegate.choices`。ただし、今の委任の行動のマクロを、この JSON の
-                                             macros.set で HOME を押す操作の列に置き換えたときは `macros.set.<名前>`
+                                             `delegate.choices`
+        委任中に、委任の行動のマクロを HOME を押す操作の列にする
+                                             そのマクロの macros.set のパス (`macros.set.<名前>`)
         委任中の行動のマクロを消す            その名前のパス (`macros.delete[0]`)
     コードブロックが無い・最後のブロックが閉じていない・JSON として読めない・最上位が object でないときは、パスを
     付けない文にする。読み取りの中で想定外の例外が出たときも、例外を外に出さず、UNEXPECTED_ERROR_MESSAGE に

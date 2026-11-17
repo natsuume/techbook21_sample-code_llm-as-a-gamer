@@ -129,7 +129,8 @@ take_events:
           か "stop") を、一度だけの出来事として delegate_skipped_actions に足す
         - 委任中か始める前の start は、何もしない (parse_decision が委任中かを確かめて誤りにし、委任が始まるのは apply
           からだけなので、起きない)
-        - 委任の行動に使っているマクロの置き換え (macros.set) は、次に Jev がその行動を選んだときから使う
+        - 委任の行動に使っているマクロの置き換え (macros.set) は、次に Jev がその行動を選んだときから使う。HOME を
+          押す操作の列への置き換えは、parse_decision が誤りにする (この apply には届かない)
     委任を始める (run のループの回りの 1 で): ActiveDelegation(値, 今の時刻, settings.delegate.max_errors) を作り、委任の
         通し番号を 1 進め、run.jsonl に delegate_start {"tasks", "cautions", "choices": [{"name", "description"}, ...]}
         を書く。出力が止まっていれば (ActionExecutor.output_stopped) 始めない
