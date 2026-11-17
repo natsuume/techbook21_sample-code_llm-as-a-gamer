@@ -8,7 +8,7 @@
                        [--hold-margin P] [--surface-map text|none] [--deep claude|fake] [--safety jev|fake]
                        [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
-                       [--threshold-task P] [--task-stuck-seconds S]
+                       [--threshold-task P] [--task-stuck-seconds S] [--system-advice-seconds S]
         実機で 3 層を動かす (advisor 型。--mode の既定)。準備 (コントローラーの登録・指定のソフト (--software) を
         指定のユーザー (--user) で起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
         surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
@@ -122,6 +122,7 @@ from switch2_layers.settings import (
     DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
     DEFAULT_SURFACE_MAP,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
     DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
@@ -493,6 +494,16 @@ def add_run_parser(
             f"(0 より大きい値。既定 {DEFAULT_TASK_STUCK_SECONDS:g})"
         ),
     )
+    parser.add_argument(
+        "--system-advice-seconds",
+        type=float,
+        default=DEFAULT_SYSTEM_ADVICE_SECONDS,
+        help=(
+            "本体の画面の段階 (準備・復帰) がこの秒数を超えて続いたら、advice の deep を求める。"
+            "超えたまま続く間は、この秒数ごとに求める "
+            f"(0 より大きい値。既定 {DEFAULT_SYSTEM_ADVICE_SECONDS:g})"
+        ),
+    )
     add_orchestrator_arguments(parser)
     parser.set_defaults(handler=run_command)
     return parser
@@ -732,6 +743,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         progress_window_s=args.progress_window,
         stuck_advice_seconds=args.stuck_advice_seconds,
         task_stuck_seconds=args.task_stuck_seconds,
+        system_advice_seconds=args.system_advice_seconds,
         mode=RunMode(args.mode),
         orchestrator_effort=args.orchestrator_effort,
         rotate_tokens=args.rotate_tokens,

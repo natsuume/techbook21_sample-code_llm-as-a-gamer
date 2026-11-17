@@ -40,7 +40,10 @@ from switch2_layers.middle.system_screen_types import (
     SystemScreenInput,
 )
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
-from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
+)
 from switch2_layers.safety.fake_safety import FakeSafetyChecker
 from switch2_layers.safety.jev_safety import JevSafetyChecker
 from switch2_layers.safety.safety_assembly import SafetyAssembly
@@ -1491,6 +1494,43 @@ def test_run_passes_the_progress_arguments_in_settings(monkeypatch):
     # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
     assert settings.progress_window_s == 90.0
     assert settings.stuck_advice_seconds == 45.0
+
+
+# --- 本体の画面の段階による助言の引数 (--system-advice-seconds) ---
+
+
+def test_run_system_advice_seconds_default():
+    args = build_parser().parse_args(RUN)
+    assert args.system_advice_seconds == DEFAULT_SYSTEM_ADVICE_SECONDS == 90
+    assert run_settings_from_args(args).system_advice_seconds == 90.0
+
+
+def test_run_accepts_system_advice_seconds():
+    args = build_parser().parse_args([*RUN, "--system-advice-seconds", "30.5"])
+    assert run_settings_from_args(args).system_advice_seconds == 30.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "inf", "nan"])
+def test_run_system_advice_seconds_range_errors_exit_without_hardware(
+    no_hardware, capsys, value
+):
+    argv = [*RUN, "--middle", "fake", "--surface", "fake"]
+    code = main([*argv, "--system-advice-seconds", value])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    # --stuck-advice-seconds と同じ形の範囲の誤り (argparse の使い方の誤りではない)
+    assert "--system-advice-seconds must be a finite number more than 0" in (
+        captured.err
+    )
+
+
+def test_run_passes_the_system_advice_seconds_in_settings(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, *ALL_FAKE, "--system-advice-seconds", "45"]) == 0
+    [(settings, _)] = created
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    assert settings.system_advice_seconds == 45.0
 
 
 # --- 押し方の選び方の差 (--hold-margin) ---

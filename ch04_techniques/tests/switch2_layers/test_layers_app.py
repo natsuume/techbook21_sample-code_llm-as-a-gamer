@@ -1501,6 +1501,33 @@ def test_system_screen_keeps_running_in_prepare(tmp_path, screen):
     assert [row["phase"] for row in phase_rows(root)] == ["prepare", "clean_up"]
 
 
+def test_system_advice_is_requested_while_staying_in_prepare(tmp_path):
+    # 照合の結果が home_menu のまま準備に居続け、--system-advice-seconds を超えたら、advice をきっかけ system で
+    # 求める (フェイクの deep が成功を返す)。準備には時間切れが無く、止めるまで準備のまま
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(screen="home_menu")])
+    app = LayersApp(
+        safety_settings(tmp_path, system_advice_seconds=0.5),
+        parts(sender, safety=safety),
+    )
+    reason, root = run_app(app, stop_after=2.5)
+    assert reason == REASON_INTERRUPTED
+    assert [row["phase"] for row in phase_rows(root)] == ["prepare", "clean_up"]
+    job = read_json(root / "deep" / "advice-001" / "job.json")
+    assert job["kind"] == "advice"
+    assert job["trigger"] == "system"
+    run_rows = read_rows(root / "run.jsonl")
+    system_starts = [
+        row
+        for row in run_rows
+        if row["event"] == "deep_start" and row["trigger"] == "system"
+    ]
+    assert system_starts
+    assert all(row["kind"] == "advice" for row in system_starts)
+    # 起動引数は run.jsonl の start の args に入る
+    assert run_rows[0]["args"]["system_advice_seconds"] == 0.5
+
+
 class LatestSystemScreenRecorder:
     """app モジュールの LatestSystemScreen を包み、start が作ったものを覚える。"""
 

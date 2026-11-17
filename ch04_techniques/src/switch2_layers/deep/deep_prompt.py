@@ -7,7 +7,12 @@
     controls.md    操作説明の指示
     tips.md        攻略情報の指示 (box_targets.md の書き方を含む)
     strategy.md    大方針の指示 (マップを読み、行き先に通る場所の順を添えることを含む)
-    advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json を使うことを含む)
+    advice.md      詰まったときの助言の指示 (マップの場所の構造と、画面の停滞の計測 progress/state.json と、本体の画面の
+                   middle の記録 middle/system_calls.jsonl を使うこと、「## 本体の画面」の節の書き方を含む)。
+                   ${trigger_instructions} の位置にきっかけごとの指示を入れる
+    system_trigger.md
+                   きっかけが system のジョブだけに入れる指示 (指定のソフトとユーザーの名前の在りかが run.jsonl の 1 行目の
+                   args であることと、名前は対象を見分けるためだけに読み、文書に書かないこと)
     map.md         マップの指示 (middle のマップの記録から、一覧 map.json と文章 places.md を一致させて書く。
                    書くマップの型は、コードが決めて job.json の map_layout で渡す ${map_layout})
     game.md        ゲームの性質の指示 (6 つの節の見出しと順、マップの形式の型の行、確かめたことと推測の分け方、
@@ -15,10 +20,11 @@
 
 値の埋め方: string.Template の ${名前} の形の置き場所に、PROMPT_VALUE_NAMES の値を入れる
 (Template.substitute。足りない値があれば KeyError)。種類ごとの指示も同じ値で埋めてから ${kind_instructions} に入れる。
-Markdown の { } はそのまま残る。
+きっかけが system のジョブでは、system_trigger.md を同じ値で埋めてから、advice.md の ${trigger_instructions} に入れる
+(ほかのきっかけでは空文字列を入れる)。Markdown の { } はそのまま残る。
 埋めるのは、コードが決めた値 (パス・時刻・場面 ID・きっかけ・マップの型) だけにする。文書・記録・画面から読んだ文 (文書の中身、
-場面名、middle の出力など) はプロンプトに入れず、deep にファイルとして読ませる (画面の文字や記録の文による指示の注入を、
-プロンプトの指示と混ぜないため)。
+場面名、middle の出力、run.jsonl の指定のソフトとユーザーの名前など) はプロンプトに入れず、deep にファイルとして読ませる
+(画面の文字や記録の文による指示の注入を、プロンプトの指示と混ぜないため)。
 
 文書の書き方の手順 (common.md に書く): deep は対象の文書の本体 (notes/ の中のファイル) を Edit・Write で直接編集する。
 同じ種類・同じ場面のジョブは 1 件までだが、controls と tips ではほかの場面のジョブも共通の文書を書くので、
@@ -88,9 +94,16 @@ PROMPT_VALUE_NAMES: tuple[str, ...] = (
     "game_note",
     "progress_state",
     "map_layout",
+    "system_calls_log",
+    "run_log",
 )
 # 種類ごとの指示を入れる置き場所の名前 (common.md だけにある)
 KIND_INSTRUCTIONS_NAME = "kind_instructions"
+# きっかけが system のジョブだけに入れる指示のファイル (prompt_values で埋めてから ${trigger_instructions} に入れる)
+SYSTEM_TRIGGER_PROMPT_FILE = "system_trigger.md"
+# きっかけごとの指示を入れる置き場所の名前 (advice.md だけにある)。きっかけが system のジョブでは
+# SYSTEM_TRIGGER_PROMPT_FILE の指示、ほかのきっかけのジョブでは空文字列を入れる
+TRIGGER_INSTRUCTIONS_NAME = "trigger_instructions"
 
 
 @dataclass(frozen=True)
@@ -302,6 +315,8 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         game_note                 実行ディレクトリー/notes/game.md (ゲームの性質の文書。まだ無いこともある)
         progress_state            実行ディレクトリー/progress/state.json (画面の停滞の計測の最新の値)
         map_layout                context.map_layout の値 ("grid" か "free")。None (map 以外の種類) なら NOT_AVAILABLE_TEXT
+        system_calls_log          実行ディレクトリー/middle/system_calls.jsonl (本体の画面の middle の記録)
+        run_log                   実行ディレクトリー/run.jsonl (run の記録。1 行目の start の args に起動引数がある)
     パスは絶対パスの文字列 (Path.as_posix)。実行ディレクトリーの中の配置は run_directory.RunPaths と
     notes.note_paths に合わせる。
     """
@@ -329,21 +344,40 @@ def prompt_values(context: DeepPromptContext) -> dict[str, str]:
         "map_layout": context.map_layout.value
         if context.map_layout is not None
         else NOT_AVAILABLE_TEXT,
+        "system_calls_log": paths.system_calls.as_posix(),
+        "run_log": paths.run_log.as_posix(),
     }
+
+
+def build_trigger_instructions(
+    context: DeepPromptContext, values: dict[str, str]
+) -> str:
+    """きっかけごとの指示 (${trigger_instructions} に入れる文) を返す。
+
+    きっかけが system なら、SYSTEM_TRIGGER_PROMPT_FILE を load_prompt_template で読み、values で埋めたもの
+    (string.Template.substitute)。ほかのきっかけでは空文字列。
+    """
+    if context.trigger != DeepTrigger.SYSTEM.value:
+        return ""
+    template = string.Template(load_prompt_template(SYSTEM_TRIGGER_PROMPT_FILE))
+    return template.substitute(values)
 
 
 def build_deep_prompt(context: DeepPromptContext) -> str:
     """context の種類のプロンプトを作って返す。
 
-    1. 種類ごとの指示 (KIND_PROMPT_FILES[kind]) を load_prompt_template で読み、prompt_values(context) で埋める
-    2. 共通の部分 (COMMON_PROMPT_FILE) を、prompt_values(context) と kind_instructions (1 の結果) で埋める
-    どちらも string.Template.substitute で埋める (値が足りなければ KeyError)。
+    1. きっかけごとの指示 (build_trigger_instructions) を作る
+    2. 種類ごとの指示 (KIND_PROMPT_FILES[kind]) を load_prompt_template で読み、prompt_values(context) と
+       trigger_instructions (1 の結果) で埋める
+    3. 共通の部分 (COMMON_PROMPT_FILE) を、prompt_values(context) と kind_instructions (2 の結果) で埋める
+    どれも string.Template.substitute で埋める (値が足りなければ KeyError)。
     結果の先頭は / でも - でもない (claude -p の引数として、スラッシュコマンドやオプションに読まれない)。
     """
     values = prompt_values(context)
+    trigger_instructions = build_trigger_instructions(context, values)
     kind_file = KIND_PROMPT_FILES[context.kind]
     kind_instructions = string.Template(load_prompt_template(kind_file)).substitute(
-        values
+        values, **{TRIGGER_INSTRUCTIONS_NAME: trigger_instructions}
     )
     return string.Template(load_prompt_template(COMMON_PROMPT_FILE)).substitute(
         values, **{KIND_INSTRUCTIONS_NAME: kind_instructions}

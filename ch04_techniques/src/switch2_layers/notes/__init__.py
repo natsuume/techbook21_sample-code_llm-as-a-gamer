@@ -3,4 +3,4 @@ deep を起動する前の文書のパスのシンボリックリンクの確認
 (surface_documents)、場面ラベルの一覧 (scene_labels)、マップの場所とつながりの一覧 map/map.json (map_document)、
 マス目型のマップの場所の中の経路の計算 (grid_route)、つながりをたどる場所をまたぐ道筋 (cross_place_route)、
 ゲームの性質の文書 game.md から読むマップの型 (game_map_layout)、surface に渡す現在地の場所のマップの文字列
-(surface_map_text)。"""
+(surface_map_text)、助言の文書 advice.md の「本体の画面」の節 (system_screen_advice)。"""
