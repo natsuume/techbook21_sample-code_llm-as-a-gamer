@@ -2,7 +2,7 @@ import json
 import math
 import os
 import signal
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
+    FAKE_REFLECTION,
     FAKE_STAGNATION_ALERT,
     FakeClock,
     FakeDaemon,
@@ -41,7 +42,13 @@ from switch2_harness.commands import (
     release_not_confirmed_message,
 )
 from switch2_harness.event_log import CommandEvent, append_event, read_events
-from switch2_harness.features import BASE_AGENT_COMMANDS, STAGNATION_ALERT_FEATURE
+from switch2_harness.features import (
+    BASE_AGENT_COMMANDS,
+    REFLECTION_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+    Feature,
+)
+from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.signal_guard import RunTerminated
 from switch2_harness.workspace import WorkspacePaths
 
@@ -234,6 +241,47 @@ def test_init_rejects_non_empty_directory(tmp_path):
     assert result.stdout_lines == ()
     assert result.stderr_lines == (f"error directory is not empty: {directory}",)
     assert os.listdir(directory) == ["memo.txt"]
+
+
+# 併用する要素 (requires) と、ファイルの末尾に足す内容 (file_appends) のある要素を含む、テスト用の要素
+FEATURES_WITH_REFLECTION = (*FAKE_FEATURES, FAKE_REFLECTION)
+
+
+def test_init_appends_to_the_initial_file_of_the_required_feature(tmp_path):
+    directory = tmp_path / "play"
+    result = handle_init(
+        directory,
+        "G",
+        "X",
+        [REFLECTION_FEATURE, "memo-files"],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FEATURES_WITH_REFLECTION,
+    )
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {directory} features=memo-files,reflection",)
+    )
+    # memo.md の最初の内容 "# メモ $goal\n" の後に、空行を 1 つ挟んで "## 振り返り $goal\n" を足す (置換はしない)
+    assert (directory / "memo.md").read_text(encoding="utf-8") == (
+        "# メモ $goal\n\n## 振り返り $goal\n"
+    )
+
+
+def test_init_rejects_a_feature_without_its_required_feature(tmp_path):
+    directory = tmp_path / "play"
+    result = handle_init(
+        directory,
+        "G",
+        "X",
+        [REFLECTION_FEATURE],
+        now=fixed_now,
+        read_template=read_fake_template,
+        available=FEATURES_WITH_REFLECTION,
+    )
+    assert result == CommandResult(
+        exit_code=1, stderr_lines=("error feature reflection requires memo-files",)
+    )
+    assert not directory.exists()
 
 
 # --- look ---
@@ -519,6 +567,149 @@ def test_look_prints_the_alert_before_the_history(paths, clock):
             "- 10 秒前 press tap A: 画面の変化 あり",
         ),
     )
+
+
+# --- look の振り返りの知らせ ---
+
+REFLECTION_NOTICE_LINE = "振り返り: notes.md の「振り返り」の節を書き換えました"
+
+
+def record_reflection(paths: WorkspacePaths, time: float) -> CommandEvent:
+    """批評を notes.md に書いたことの記録 (command が reflection の行) を events.jsonl に足し、足した行を返す。"""
+    event = CommandEvent(time, "reflection", ("1",), "ok notes.md", True, 11.0)
+    append_event(paths.events_file, event)
+    return event
+
+
+def notice_event(frame: str) -> CommandEvent:
+    """START_TIME の look が知らせを出したときに記録する行。"""
+    return CommandEvent(
+        time=START_TIME,
+        command="reflection-notice",
+        args=(),
+        reply=REFLECTION_NOTICE_LINE,
+        ok=True,
+        elapsed_s=0.0,
+        frame=frame,
+    )
+
+
+def test_look_prints_and_records_the_reflection_notice_once(paths, clock):
+    reflection = record_reflection(paths, START_TIME - 30.0)
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, reflection_notice=True
+    )
+    first_frame = paths.frames_dir / "000001.png"
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {first_frame}", REFLECTION_NOTICE_LINE)
+    )
+    assert read_events(paths.events_file) == [
+        reflection,
+        CommandEvent(
+            time=START_TIME,
+            command="look",
+            args=(),
+            reply=f"ok {first_frame}",
+            ok=True,
+            elapsed_s=0.5,
+            frame="frames/000001.png",
+        ),
+        notice_event("frames/000001.png"),
+    ]
+    # 次の look は、新しい批評が書かれるまで知らせを出さない
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, reflection_notice=True
+    )
+    second_frame = paths.frames_dir / "000002.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {second_frame}",))
+    assert [event.command for event in read_events(paths.events_file)] == [
+        "reflection",
+        "look",
+        "reflection-notice",
+        "look",
+    ]
+
+
+def test_look_prints_no_reflection_notice_without_a_reflection(paths, clock):
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, reflection_notice=True
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+    assert [event.command for event in read_events(paths.events_file)] == ["look"]
+
+
+def test_failed_look_leaves_the_reflection_notice_to_the_next_look(paths, clock):
+    record_reflection(paths, START_TIME - 30.0)
+    failing = FakeDaemon(clock, {"shot": "error no frame yet"})
+    result = handle_look(paths, send=failing, clock=clock, reflection_notice=True)
+    assert result == CommandResult(exit_code=1, stdout_lines=("error no frame yet",))
+    assert [event.command for event in read_events(paths.events_file)] == [
+        "reflection",
+        "look",
+    ]
+    result = handle_look(
+        paths, send=FakeDaemon(clock), clock=clock, reflection_notice=True
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {frame_path}", REFLECTION_NOTICE_LINE)
+    )
+    events = read_events(paths.events_file)
+    assert [event.command for event in events] == [
+        "reflection",
+        "look",
+        "look",
+        "reflection-notice",
+    ]
+    assert events[-1].frame == "frames/000001.png"
+    assert events[-1].time == events[-2].time
+
+
+def test_look_prints_the_reflection_notice_after_the_alert_and_before_the_history(
+    paths, clock
+):
+    record_earlier_actions(paths)
+    record_reflection(paths, START_TIME - 5.0)
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        frames_changed=RecordingFramesChanged(changed=True),
+        last_new_screen_time=RecordingLastNewScreenTime(START_TIME - 135.7),
+        reflection_notice=True,
+    )
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(
+            f"ok {frame_path}",
+            ALERT_LINE_135,
+            REFLECTION_NOTICE_LINE,
+            HISTORY_HEADER,
+            "- 20 秒前 look 000001.png",
+            "- 10 秒前 press tap A: 画面の変化 あり",
+        ),
+    )
+    # 知らせの行は、look の行と停滞の知らせの行の後に記録する
+    events = read_events(paths.events_file)
+    assert [event.command for event in events[-3:]] == [
+        "look",
+        "stagnation-alert",
+        "reflection-notice",
+    ]
+    assert events[-1] == notice_event("frames/000002.png")
+
+
+def test_look_without_reflection_notice_ignores_reflections(paths, clock):
+    record_reflection(paths, START_TIME - 30.0)
+    result = handle_look(paths, send=FakeDaemon(clock), clock=clock)
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+    assert [event.command for event in read_events(paths.events_file)] == [
+        "reflection",
+        "look",
+    ]
 
 
 # --- press ---
@@ -1324,3 +1515,170 @@ def test_run_stops_recording_screens_when_interrupted(
     assert result == CommandResult(exit_code=1, stderr_lines=(message,))
     assert recording.order == ["enter", "exit"]
     assert recording.sent_at_exit == [["up", "ALL"]]
+
+
+# --- run の振り返り ---
+
+
+class FakeReflecting:
+    """reflecting の fake。呼ばれた (paths, config) と、振り返りの開始 (enter)・終了 (exit) の順を記録する。
+
+    開始のときに起動済みのプロセスの数を launches_at_enter に、終了のときにデーモンに送った引数を sent_at_exit に控え、
+    振り返りが最初の起動の前に始まり、後片付けの up ALL の後に止まることを確かめられるようにする。
+    recording を渡すと、開始と終了のときの画面の記録の順 (FakeScreenRecording.order) も控え、
+    振り返りが画面の記録の内側で動くことを確かめられるようにする。
+    with の中で起きた例外は握りつぶさず、そのまま外に出す。
+    """
+
+    def __init__(
+        self,
+        starter: FakeProcessStarter,
+        daemon: FakeDaemon,
+        recording: FakeScreenRecording | None = None,
+    ) -> None:
+        self.starter = starter
+        self.daemon = daemon
+        self.recording = recording
+        self.calls: list[tuple[WorkspacePaths, HarnessConfig]] = []
+        self.order: list[str] = []
+        self.launches_at_enter: int | None = None
+        self.sent_at_exit: list[list[str]] | None = None
+        self.recording_order_at_enter: list[str] | None = None
+        self.recording_order_at_exit: list[str] | None = None
+
+    def __call__(
+        self, paths: WorkspacePaths, config: HarnessConfig
+    ) -> AbstractContextManager[object]:
+        self.calls.append((paths, config))
+        return self._reflecting()
+
+    @contextmanager
+    def _reflecting(self) -> Iterator[None]:
+        self.order.append("enter")
+        self.launches_at_enter = len(self.starter.launches)
+        if self.recording is not None:
+            self.recording_order_at_enter = list(self.recording.order)
+        try:
+            yield
+        finally:
+            self.order.append("exit")
+            self.sent_at_exit = [list(args) for args in self.daemon.sent]
+            if self.recording is not None:
+                self.recording_order_at_exit = list(self.recording.order)
+
+
+def run_with_fakes(
+    paths: WorkspacePaths,
+    clock: FakeClock,
+    starter: FakeProcessStarter,
+    daemon: FakeDaemon,
+    sleep: Callable[[float], None],
+    available: tuple[Feature, ...],
+    reflecting: FakeReflecting,
+    screen_recording: FakeScreenRecording | None = None,
+) -> CommandResult:
+    """1 分の run を、fake の部品と reflecting で動かす。"""
+    return handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=available,
+        screen_recording=screen_recording,
+        reflecting=reflecting,
+    )
+
+
+def test_run_with_reflection_reflects_around_the_agent(paths, clock):
+    write_harness_json(paths, ["memo-files", REFLECTION_FEATURE])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    reflecting = FakeReflecting(starter, daemon)
+    result = run_with_fakes(
+        paths, clock, starter, daemon, sleep, FEATURES_WITH_REFLECTION, reflecting
+    )
+    assert result.exit_code == 0
+    config = HarnessConfig(
+        game="ゲーム A",
+        goal="ボスを倒す",
+        features=("memo-files", "reflection"),
+        created_at="2026-11-16T21:00:05+09:00",
+    )
+    assert reflecting.calls == [(paths, config)]
+    assert reflecting.order == ["enter", "exit"]
+    # 振り返りは最初の起動の前に始まり、後片付けの up ALL を送った後に止まる
+    assert reflecting.launches_at_enter == 0
+    assert len(starter.launches) == 1
+    assert reflecting.sent_at_exit == [["up", "ALL"]]
+
+
+def test_run_without_reflection_does_not_reflect(paths, clock):
+    write_harness_json(paths, ["memo-files"])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    reflecting = FakeReflecting(starter, daemon)
+    result = run_with_fakes(
+        paths, clock, starter, daemon, sleep, FEATURES_WITH_REFLECTION, reflecting
+    )
+    assert result.exit_code == 0
+    assert reflecting.calls == []
+
+
+@pytest.mark.parametrize(
+    ("interruption", "message"),
+    [
+        (RunTerminated(signal.SIGTERM), "error run terminated by signal"),
+        (KeyboardInterrupt(), "error run interrupted"),
+    ],
+    ids=["sigterm", "ctrl-c"],
+)
+def test_run_stops_reflecting_when_interrupted(paths, clock, interruption, message):
+    write_harness_json(paths, ["memo-files", REFLECTION_FEATURE])
+    starter, daemon, _ = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    reflecting = FakeReflecting(starter, daemon)
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        # 3 回目の待ちの間に SIGTERM か Ctrl-C を受けたことにする
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 3:
+            raise interruption
+        clock.advance(seconds)
+
+    result = run_with_fakes(
+        paths, clock, starter, daemon, sleep, FEATURES_WITH_REFLECTION, reflecting
+    )
+    assert result == CommandResult(exit_code=1, stderr_lines=(message,))
+    assert reflecting.order == ["enter", "exit"]
+    assert reflecting.sent_at_exit == [["up", "ALL"]]
+
+
+def test_run_with_stagnation_alert_and_reflection_enters_both(paths, clock):
+    write_harness_json(
+        paths, ["memo-files", STAGNATION_ALERT_FEATURE, REFLECTION_FEATURE]
+    )
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    recording = FakeScreenRecording(starter, daemon)
+    reflecting = FakeReflecting(starter, daemon, recording)
+    available = (*FAKE_FEATURES, FAKE_STAGNATION_ALERT, FAKE_REFLECTION)
+    result = run_with_fakes(
+        paths,
+        clock,
+        starter,
+        daemon,
+        sleep,
+        available,
+        reflecting,
+        screen_recording=recording,
+    )
+    assert result.exit_code == 0
+    assert recording.order == ["enter", "exit"]
+    assert reflecting.order == ["enter", "exit"]
+    # 振り返りは画面の記録の内側で動く (画面の記録が始まった後に始まり、止まる前に止まる)
+    assert reflecting.recording_order_at_enter == ["enter"]
+    assert reflecting.recording_order_at_exit == ["enter"]
+    assert reflecting.launches_at_enter == 0
+    assert reflecting.sent_at_exit == [["up", "ALL"]]

@@ -36,6 +36,8 @@ def test_event_commands():
         "finish",
         "run",
         "stagnation-alert",
+        "reflection",
+        "reflection-notice",
     )
 
 

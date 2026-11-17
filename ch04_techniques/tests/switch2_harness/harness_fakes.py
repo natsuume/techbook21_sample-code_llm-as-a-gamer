@@ -6,11 +6,17 @@
 
 import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from switch2_harness.features import STAGNATION_ALERT_FEATURE, Feature, WritableFile
+from switch2_harness.features import (
+    REFLECTION_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+    Feature,
+    FileAppend,
+    WritableFile,
+)
 from switch2_harness.workspace import WorkspacePaths
 
 # テスト用の要素。本物の FEATURES に左右されずに、複数の要素の順やサブコマンドの追加を確かめるため、
@@ -40,13 +46,27 @@ FAKE_STAGNATION_ALERT = Feature(
     commands=(),
 )
 
+# テスト用の、メモファイルの要素 (FAKE_NOTES) と併用する要素。CLAUDE.md に節を足さず、memo.md の最初の内容の末尾に
+# memo-reflection.md を足す。名前は本物の振り返りと同じで、run が振り返りに入るかと look が知らせを出すかの判定にも使う。
+# FAKE_FEATURES には含めず、使うテストで available に足す
+FAKE_REFLECTION = Feature(
+    name=REFLECTION_FEATURE,
+    title="振り返り",
+    instruction_file=None,
+    commands=(),
+    requires=(FAKE_NOTES.name,),
+    file_appends=(FileAppend(name="memo.md", template_file="memo-reflection.md"),),
+)
+
 # テスト用のテンプレート (instructions/ の下のファイル名 → 本文)
-# memo-initial.md の $goal は、書き換えられるファイルの最初の内容が置換されないことを確かめるため
+# memo-initial.md と memo-reflection.md の $goal は、書き換えられるファイルの最初の内容と、その末尾に足す内容が
+# 置換されないことを確かめるため
 FAKE_TEMPLATES: dict[str, str] = {
     "base.md": "# 基本 $game\n\n目標: $goal\n",
     "action-history.md": "## 行動履歴 ($game)\n",
     "memo-files.md": "## メモ\n\n$goal を目指す\n\n",
     "memo-initial.md": "# メモ $goal\n",
+    "memo-reflection.md": "## 振り返り $goal\n",
 }
 
 
@@ -254,6 +274,60 @@ class FakeProcessStarter:
         )
         with open(stdout_path, "a", encoding="utf-8") as out:
             out.writelines(line + "\n" for line in plan.output_lines)
+        process = FakeAgentProcess(
+            self.clock, plan, pid=FAKE_PID_BASE + len(self.processes)
+        )
+        self.processes.append(process)
+        return process
+
+
+@dataclass(frozen=True)
+class CriticLaunch:
+    """FakeCriticStarter が受け取った、批評役の起動の引数。"""
+
+    args: list[str]
+    cwd: Path
+    env: dict[str, str]
+    input_text: str
+    stdout_path: Path
+    stderr_path: Path
+
+
+@dataclass
+class FakeCriticStarter:
+    """start_critic (reflection_critic.StartCritic) の fake。
+
+    起動のたびに、受け取った引数を launches に記録し、plans の次のふるまい (使い切ったら最後のものを繰り返す) の
+    output_lines を stdout_path に書いて (本物と同じく、ファイルを作り直してから書く)、そのふるまいの FakeAgentProcess を返す。
+    on_start を渡すと、stdout_path に書いた後、プロセスを作る前に、起動の回の番号 (1 から) を渡して呼ぶ
+    (批評役が動いている間に、エージェントがファイルを書き足すことや、時計が進むことの代わり)。
+    """
+
+    clock: FakeClock
+    plans: list[ProcessPlan]
+    on_start: Callable[[int], None] | None = None
+    launches: list[CriticLaunch] = field(default_factory=list)
+    processes: list[FakeAgentProcess] = field(default_factory=list)
+
+    def __call__(
+        self,
+        args: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        input_text: str,
+        stdout_path: Path,
+        stderr_path: Path,
+    ) -> FakeAgentProcess:
+        plan = self.plans[min(len(self.launches), len(self.plans) - 1)]
+        self.launches.append(
+            CriticLaunch(
+                list(args), cwd, dict(env), input_text, stdout_path, stderr_path
+            )
+        )
+        with open(stdout_path, "w", encoding="utf-8") as out:
+            out.writelines(line + "\n" for line in plan.output_lines)
+        if self.on_start is not None:
+            self.on_start(len(self.launches))
         process = FakeAgentProcess(
             self.clock, plan, pid=FAKE_PID_BASE + len(self.processes)
         )
