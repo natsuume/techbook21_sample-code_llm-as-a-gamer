@@ -1032,6 +1032,31 @@ def test_delegate_return_by_jev_is_told_in_the_next_input(tmp_path):
     assert [row["reason"] for row in ends] == ["jev_return"]
 
 
+def test_delegate_return_by_jev_tells_the_chosen_counts_in_the_next_input(tmp_path):
+    # Jev は 2 回の要求で「操作を返す」を続けて選ぶ。次の入力の出来事と run.jsonl に、その委任で選んだ回数が載る
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(
+            tmp_path, sender, claude, monitor=ChoosingJev(["return_control"])
+        ),
+        stop_when=lambda: any_input_contains(claude, "(jev_return)"),
+    )
+    assert reason == REASON_INTERRUPTED
+    assert any_input_contains(
+        claude,
+        "(jev_return): jev chose return_control 2 times in a row\n"
+        "この委任で Jev が選んだ回数 (要求 2 回、失敗 0 回): "
+        "none 0、press_x 0、return_control 2\n",
+    )
+    [end] = [
+        row for row in read_rows(root / "run.jsonl") if row["event"] == "delegate_end"
+    ]
+    assert end["chosen_counts"] == {"none": 0, "press_x": 0, "return_control": 2}
+    assert end["failures"] == 0
+
+
 def test_delegate_actions_while_delegating_are_discarded_and_told(tmp_path):
     sender = FakeSender()
     claude = RepeatingClaude([DELEGATE_START_REPLY, DELEGATE_ACTIONS_REPLY, WAIT_REPLY])

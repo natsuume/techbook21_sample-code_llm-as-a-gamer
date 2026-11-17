@@ -65,13 +65,20 @@ class MonitorEnd:
 class DelegateEnd:
     """委任が終わり、操作権が主ループに戻ったこと (主ループへの知らせ。実行全体を止めて終えた委任は入れない)。
 
-    reason   戻った理由
-    detail   理由の説明 (orchestrator.delegate_loop の delegate_return_detail・MAIN_STOP_DETAIL・
-             delegate_failure_detail の文)
+    reason          戻った理由
+    detail          理由の説明 (orchestrator.delegate_loop の delegate_return_detail・MAIN_STOP_DETAIL・
+                    delegate_failure_detail の文)
+    chosen_counts   その委任 (始めてから終わるまで) で Jev が選んだ回数を、(選択肢の名前, 回数) で並べたもの
+                    (orchestrator.delegate_loop.order_chosen_counts の並び。0 回の選択肢も含む)。数えるのは、Jev の
+                    答えで処理を決めた要求 (delegate.jsonl の handling が ignored でなく、error が null の行) だけ
+    failure_count   その委任で失敗した要求 (Jev の HTTP のエラーなど。delegate.jsonl の handling が ignored でなく、
+                    error がある行) の数 (続いた回数ではなく合計)。chosen_counts には入れない
     """
 
     reason: DelegateEndReason
     detail: str
+    chosen_counts: tuple[tuple[str, int], ...]
+    failure_count: int
 
 
 @dataclass(frozen=True)

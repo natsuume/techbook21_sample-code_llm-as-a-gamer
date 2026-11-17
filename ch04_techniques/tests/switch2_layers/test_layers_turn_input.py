@@ -39,6 +39,7 @@ from switch2_layers.orchestrator.turn_input import (
     build_turn_text,
     carry_over_events,
     describe_decision_error,
+    describe_delegate_chosen_counts,
     describe_delegation,
     describe_events,
     describe_macros,
@@ -610,10 +611,21 @@ NOT_DELEGATING = DelegationStatus(
     active=False, started_t=None, values=None, last_pick=None, return_streak=0
 )
 JEV_RETURN = DelegateEnd(
-    reason="jev_return", detail="jev chose return_control 2 times in a row"
+    reason="jev_return",
+    detail="jev chose return_control 2 times in a row",
+    chosen_counts=(
+        ("none", 17),
+        ("buster", 7),
+        ("dodge_up", 0),
+        ("return_control", 2),
+    ),
+    failure_count=2,
 )
 MAIN_STOP = DelegateEnd(
-    reason="main_stop", detail="the main loop wrote the delegate stop"
+    reason="main_stop",
+    detail="the main loop wrote the delegate stop",
+    chosen_counts=(("none", 3), ("attack", 1), ("return_control", 0)),
+    failure_count=0,
 )
 
 
@@ -673,6 +685,54 @@ def test_delegate_events_tell_the_return_of_control_and_the_discarded_actions():
         "jev chose return_control 2 times in a row"
     ) in lines
     assert "委任中のため、操作を捨てた: 3 個" in lines
+
+
+def test_delegate_chosen_counts_line_has_the_total_the_failures_and_each_count():
+    # 要求の合計は、選択肢の回数の和 (17 + 7 + 0 + 2) と失敗の回数 (2) の和
+    assert describe_delegate_chosen_counts(JEV_RETURN) == (
+        "この委任で Jev が選んだ回数 (要求 28 回、失敗 2 回): "
+        "none 17、buster 7、dodge_up 0、return_control 2"
+    )
+
+
+def test_delegate_chosen_counts_line_keeps_the_order_of_the_counts():
+    # update で消えた名前 (old_dodge) も、chosen_counts の並びのまま後ろに書く
+    end = DelegateEnd(
+        reason="main_stop",
+        detail="the main loop wrote the delegate stop",
+        chosen_counts=(
+            ("none", 0),
+            ("attack", 4),
+            ("return_control", 1),
+            ("old_dodge", 3),
+        ),
+        failure_count=0,
+    )
+    assert describe_delegate_chosen_counts(end) == (
+        "この委任で Jev が選んだ回数 (要求 8 回、失敗 0 回): "
+        "none 0、attack 4、return_control 1、old_dodge 3"
+    )
+
+
+def test_delegate_events_tell_the_chosen_counts_right_after_each_return_of_control():
+    lines = describe_events(events(delegate_ends=(MAIN_STOP, JEV_RETURN))).splitlines()
+    main_stop_end = (
+        "委任が終わり、操作権が主ループに戻った (main_stop): "
+        "the main loop wrote the delegate stop"
+    )
+    main_stop_counts = (
+        "この委任で Jev が選んだ回数 (要求 4 回、失敗 0 回): "
+        "none 3、attack 1、return_control 0"
+    )
+    jev_return_end = (
+        "委任が終わり、操作権が主ループに戻った (jev_return): "
+        "jev chose return_control 2 times in a row"
+    )
+    jev_return_counts = (
+        "この委任で Jev が選んだ回数 (要求 28 回、失敗 2 回): "
+        "none 17、buster 7、dodge_up 0、return_control 2"
+    )
+    assert lines == [main_stop_end, main_stop_counts, jev_return_end, jev_return_counts]
 
 
 def test_delegate_one_time_events_are_carried_over():

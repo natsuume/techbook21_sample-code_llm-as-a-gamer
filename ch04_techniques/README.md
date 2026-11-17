@@ -1181,7 +1181,10 @@ uv run --env-file .env switch2-layers run --mode delegate --instruction-file ins
 - タスク・注意事項・行動の説明に、ゲーム名や作品に固有の名前 (登場人物・地名など) を書かない
 - 行動は、ボタンの名前ではなく、意図 (近づく・離れる・よける・攻撃するなど) が分かる名前と説明にし、説明にはその行動を選ぶ場面も書く
 - Jev は攻撃の行動を選びやすく、移動だけの行動を選びにくいことがあるため、位置を変える行動は、移動と攻撃を 1 つにしたマクロにもできる
-- 委任中は、最上位の `actions` が捨てられる。取り返すときは `{"action": "stop"}` を書く
+- 時間が進む戦いの場面 (自分が操作しなくても敵が動き、攻撃してくる場面) では、自分で操作せず、必ず委任する。時間の止まる画面 (会話・メニュー・選ぶ画面など) は自分で操作する
+- 委任中に `tasks`・`cautions`・`choices` を直すときは `update` を使う。`{"action": "stop"}` は、戦いの場面が終わったのに Jev が操作を返さないときだけ使う。戦いの場面が続いているのに操作が戻ったら、値を直してすぐに `start` する
+- 委任が終わるたびに、委任中の画面の変化 (自分の体力・倒した敵など) と、次の入力の出来事に載る「この委任で Jev が選んだ回数」を見て、うまくいかなかった点を振り返り、次の委任の `choices`・`tasks`・`cautions` を直す。振り返りの結果は `notes/` に書き、うまくいかなかったことを委任をやめる理由にしない
+- 委任中は、最上位の `actions` が捨てられる。取り返すときは `{"action": "stop"}` を書く (戦いの場面が終わったのに Jev が操作を返さないときだけ)
 
 #### 委任中の主ループ
 
@@ -1197,7 +1200,13 @@ uv run --env-file .env switch2-layers run --mode delegate --instruction-file ins
 | Jev が直近に選んだ行動 | 行動の名前と、その行動を始めた時刻 |
 | Jev が「操作を返す」を続けて選んだ回数 | 回数 |
 
-操作権が主ループに戻ったときは、次の入力の出来事に、戻った理由 (`jev_return`・`main_stop`・`errors`) と説明を書きます。
+操作権が主ループに戻ったときは、次の入力の出来事に、戻った理由 (`jev_return`・`main_stop`・`errors`) と説明を書き、その次の行に、その委任で Jev が選んだ回数を次の形で書きます。
+
+```text
+この委任で Jev が選んだ回数 (要求 30 回、失敗 1 回): none 17、attack 7、evade 0、approach_and_attack 3、return_control 2
+```
+
+回数は、その委任 (始めてから終わるまで) で、Jev の答えで処理を決めた要求を、選んだ選択肢ごとに数えたものです。1 回目の `return_control` (実行中の行動を続けるとき) も数えます。応答を使わなかった要求 (`delegate.jsonl` の `handling` が `ignored`) は数えません。失敗した要求は、選択肢の回数に入れずに、失敗の回数に数えます。要求の回数は、選択肢の回数の和と失敗の回数の和です。並びは、委任が終わった時点の選択肢の順 (`none`、行動を書いた順、`return_control`) で、0 回の選択肢も書きます。`update` で行動を置き換えたために、終わった時点の選択肢に無いが選ばれていた行動は、その後ろに、最初に選ばれた順で書きます。
 
 #### 委任のループの動き
 
@@ -1233,7 +1242,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 | ファイル | 内容 |
 |---|---|
 | `orchestrator/delegate.jsonl` | 委任のループが Jev に送った要求ごとに 1 行。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、送った画像の時刻 (`frame_ts`。古い順)、選択肢ごとの確率 (`probabilities`)、選んだ選択肢 (`chosen`)、そのとき行った処理 (`handling`)、Jev の応答の `usage`、失敗の説明 (`error`) を書きます。`handling` は、行動を始めた `started`、続けた `continued`、操作権を返した `returned`、応答を使わなかった `ignored` です。`chosen` は、その要求で送った選択肢の名前から決めます。失敗した要求では、`probabilities`・`chosen`・`usage` を null にします |
-| `run.jsonl` | 委任の始まり (`delegate_start`。`tasks`・`cautions`・`choices`) と終わり (`delegate_end`。`reason` と `detail`) の行を書きます。`reason` は、Jev が操作を返した `jev_return`、主ループの `stop` の `main_stop`、Jev の失敗が続いた `errors`、実行全体を止めた `stop` です。`start` の行の `args` には、`mode` と 2 つの値 (`delegate_image_width`・`max_delegate_errors`) も書きます |
+| `run.jsonl` | 委任の始まり (`delegate_start`。`tasks`・`cautions`・`choices`) と終わり (`delegate_end`。`reason`・`detail`・`chosen_counts`・`failures`) の行を書きます。`reason` は、Jev が操作を返した `jev_return`、主ループの `stop` の `main_stop`、Jev の失敗が続いた `errors`、実行全体を止めた `stop` です。`chosen_counts` は、その委任で Jev が選んだ回数 (選択肢の名前 → 回数。数え方と並びは「委任中の主ループ」の項の出来事の行と同じ)、`failures` は、その委任で失敗した要求の数です。`reason` が `stop` の行にも書きます。`start` の行の `args` には、`mode` と 2 つの値 (`delegate_image_width`・`max_delegate_errors`) も書きます |
 | `operations.jsonl` | Jev が選んだ行動の操作は、`source` が `delegate` の行になります。主ループの操作は、監視型と同じく `orchestrator` です |
 
 #### 委任型の止まる理由
