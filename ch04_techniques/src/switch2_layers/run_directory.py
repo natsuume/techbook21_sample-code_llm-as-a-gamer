@@ -1,4 +1,4 @@
-"""実行ディレクトリー runs/<YYYYmmdd-HHMMSS>/ のパスの集約、作成、起動時の notes/ の初期ファイル。
+"""実行ディレクトリー runs/<YYYYmmdd-HHMMSS>/ のパスの集約、作成、起動時の notes/ の初期ファイルと人の初期指示。
 
 配置 (実行ディレクトリーからの相対パス):
     run.jsonl                               実行の記録 (records.run_log)
@@ -29,9 +29,13 @@
                                             (deep の stream.jsonl と同じ形)
     orchestrator/monitor.jsonl              Orchestrator 型の監視が Jev に送った要求の記録 (orchestrator.monitor_record)。
                                             monitor_record は、orchestrator/ が無ければ作ってから書く
+    orchestrator/instruction.md             Orchestrator 型の run に渡した人の初期指示の写し (write_initial_instruction)。
+                                            初期指示を渡さなければ無い
     .claude/skills/<名前>/                   主ループの Claude Code に読ませるスキル (orchestrator.skill_copy が写す)
-orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop) と監視の記録
-(orchestrator.monitor_record) が作る。
+orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop)・監視の記録
+(orchestrator.monitor_record)・初期指示の写し (write_initial_instruction) が作る。
+notes/ は、advisor 型の run では write_initial_notes が初期ファイルを書いて作り、Orchestrator 型の run では
+create_empty_notes が空のディレクトリーとして作る。
 """
 
 from collections.abc import Collection
@@ -88,6 +92,8 @@ ORCHESTRATOR_SESSION_DIR_PREFIX = "session-"
 ORCHESTRATOR_SESSION_NUMBER_DIGITS = 3  # セッションのディレクトリーの名前の連番の桁数
 ORCHESTRATOR_STREAM_FILE = "stream.jsonl"
 ORCHESTRATOR_MONITOR_LOG_FILE = "monitor.jsonl"
+# Orchestrator 型の run に渡した人の初期指示の写し
+ORCHESTRATOR_INSTRUCTION_FILE = "instruction.md"
 # 主ループの Claude Code に読ませるスキルの置き場 (orchestrator.skill_copy)
 CLAUDE_DIR = ".claude"
 CLAUDE_SKILLS_DIR = "skills"
@@ -234,6 +240,11 @@ class RunPaths:
         """root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE"""
         return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE
 
+    @property
+    def orchestrator_instruction(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_INSTRUCTION_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_INSTRUCTION_FILE
+
     def interval_frame(self, t: float) -> Path:
         """時刻 t の一定間隔のフレームの画像のパス interval_frames_dir / frame_file_name(t)。"""
         return self.interval_frames_dir / frame_file_name(t)
@@ -288,7 +299,8 @@ def create_run_directory(runs_dir: Path, started_at: datetime) -> RunPaths:
     - 同じ名前のファイルかディレクトリーが既にあれば、末尾に -2、-3 … を付けた最初の無い名前で作る
       (例: 20261115-142233 → 20261115-142233-2 → 20261115-142233-3)
     - 作るのは mkdir(exist_ok=False) で行い、同時に同じ名前で作られても 2 つの実行で同じディレクトリーを使わない
-    - 中に frames/interval/、frames/surface/、middle/、deep/、progress/ も作る。notes/ は write_initial_notes で作る。
+    - 中に frames/interval/、frames/surface/、middle/、deep/、progress/ も作る。notes/ は write_initial_notes
+      (advisor 型) か create_empty_notes (Orchestrator 型) で作る。
       progress/state.json は作らない (最初の一定間隔のフレームの値を計算したときに progress.progress_loop が書く)
     """
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -367,3 +379,19 @@ def write_initial_notes(paths: RunPaths, allowed_buttons: Collection[str]) -> No
     write_json_atomic(notes / SCENE_LABELS_FILE, INITIAL_SCENE_LABELS)
     (notes / MAP_DIR).mkdir(exist_ok=True)
     (notes / SCENES_DIR).mkdir(exist_ok=True)
+
+
+def create_empty_notes(paths: RunPaths) -> None:
+    """notes/ を空のディレクトリーとして作る (Orchestrator 型の run で write_initial_notes の代わりに使う)。
+
+    初期ファイル (write_initial_notes の文書) は書かない。
+    """
+    raise NotImplementedError
+
+
+def write_initial_instruction(paths: RunPaths, text: str) -> None:
+    """人の初期指示 text を orchestrator/instruction.md (paths.orchestrator_instruction) に書く。
+
+    orchestrator/ が無ければ作り、file_io.write_text_atomic で置き換えて書く (text はそのまま書く)。
+    """
+    raise NotImplementedError

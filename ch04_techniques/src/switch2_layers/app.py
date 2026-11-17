@@ -1,4 +1,8 @@
-"""3 層をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
+"""run の部品をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
+
+run の型は settings.RunSettings.mode で決まる。advisor 型 (RunMode.ADVISOR) は surface・middle・deep の 3 層を
+LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、操作の実行と監視を OrchestratorLayersParts で
+組み立てる。Orchestrator 型の組み立て・起動するもの・止まる理由は LayersApp の docstring に書く。以下は advisor 型の説明。
 
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep)、本体の画面の middle は LayersParts で
 受け取る。cli の run は実機の部品と各層 (surface は --surface、middle と本体の画面の middle は --middle、deep は --deep で
@@ -59,9 +63,10 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from switch2_layers.buttons import ALL_BUTTONS, HOME_BUTTON, allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
@@ -91,6 +96,9 @@ from switch2_layers.middle.middle_loop import (
 )
 from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
+from switch2_layers.orchestrator.claude_stream_session import StreamProcessStarter
+from switch2_layers.orchestrator.monitor_loop import MonitorAsker
+from switch2_layers.orchestrator.skill_copy import DEFAULT_SWITCH_SKILLS_DIR
 from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_loop import ProgressLoop
 from switch2_layers.progress.progress_state import read_progress_state
@@ -116,7 +124,7 @@ from switch2_layers.safety.safety_monitor import (
     SafetyMonitorSettings,
 )
 from switch2_layers.safety.safety_types import SafetyChecker
-from switch2_layers.settings import RunSettings, run_settings_to_json
+from switch2_layers.settings import RunMode, RunSettings, run_settings_to_json
 from switch2_layers.surface.middle_state_reader import read_surface_context
 from switch2_layers.surface.surface_loop import (
     SurfaceLoop,
@@ -220,6 +228,47 @@ class LayersParts:
     on_run_directory: Callable[[RunPaths], None] | None = None
     surface_plan_boxes: Callable[[str | None], BoxDrawingPlan] | None = None
     phase_timings: PhaseTimings = DEFAULT_PHASE_TIMINGS
+
+
+@dataclass(frozen=True)
+class OrchestratorLayersParts:
+    """Orchestrator 型の run (settings.mode が orchestrator) で LayersApp に注入する部品。
+
+    frame_reader           キャプチャーの最新フレームの読み取り元 (run では hardware.capture_source.SwitchCaptureReader)
+    report_sender          レポートの送信先 (run では switch2_remote.bridge_supervisor.BridgeSupervisor)
+    bridge_state           ブリッジの状態 ("ok" / "recovering" / "failed") を返す関数 (run では BridgeSupervisor.state を
+                           読む)
+    safety                 安全の監視が画面を確かめるもの (run では --safety の safety.safety_assembly の checker)
+    monitor                監視の要求の送り先 (orchestrator.monitor_loop.MonitorAsker。run では surface.jev_client.JevClient)
+    initial_instruction    人の初期指示 (orchestrator.initial_instruction.load_initial_instruction の値)。無ければ None
+    monotonic              単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
+    local_now              実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
+    start_process          主ループの claude の子プロセスを起動する関数 (None なら subprocess.Popen)
+    signal_process_group   主ループの claude のプロセスグループにシグナルを送る関数 (pgid, signal) (None なら os.killpg)
+    environ                主ループの claude の環境変数の元 (None ならセッションを始めるときの os.environ)
+    switch_skills_dir      本体の操作のスキルを写す元 (既定 orchestrator.skill_copy.DEFAULT_SWITCH_SKILLS_DIR)
+    start_process から switch_skills_dir までの 4 つは、orchestrator.main_loop.OrchestratorMainLoopParts にそのまま渡す
+    (テストでは偽の claude を使う)。
+    """
+
+    frame_reader: LatestFrameReader
+    report_sender: ReportSender
+    bridge_state: Callable[[], str]
+    safety: SafetyChecker
+    monitor: MonitorAsker
+    initial_instruction: str | None = None
+    monotonic: Callable[[], float] = time.monotonic
+    local_now: Callable[[], datetime] = datetime.now
+    start_process: StreamProcessStarter | None = None
+    signal_process_group: Callable[[int, int], None] | None = None
+    environ: Mapping[str, str] | None = None
+    switch_skills_dir: Path = DEFAULT_SWITCH_SKILLS_DIR
+
+
+def monitor_loop_failure_reason(description: str) -> str:
+    """Orchestrator 型の監視のループ (OrchestratorController.run) が想定外の例外で終わるときの理由
+    `monitor loop failed: <description>` を返す (description は error_text.describe_exception(例外) の値)。"""
+    raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -358,23 +407,78 @@ class _SystemScreenPhases:
 
 
 class LayersApp:
-    """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
+    """run の型 (settings.mode) の部品を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
     settings       run の起動引数
-    parts          注入する部品
+    parts          注入する部品。settings.mode が advisor なら LayersParts、orchestrator なら OrchestratorLayersParts
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
-    start_thread   start が surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループの
-                   スレッドを起動する関数 (既定 threading.Thread.start)。テストでは、起動の途中で例外を出す関数を渡せる
+    start_thread   start がループのスレッド (advisor 型は surface と middle のループ・安全の監視・本体の画面のループ・
+                   画面の停滞の計測のループ、Orchestrator 型は下の 4 つ) を起動する関数 (既定 threading.Thread.start)。
+                   テストでは、起動の途中で例外を出す関数を渡せる
+
+    advisor 型の組み立ては start の docstring の 1〜10 のとおり。
+
+    Orchestrator 型 (settings.mode が orchestrator) の組み立て (start):
+        1. RunClock(parts.monotonic) を作る (ここが t = 0)
+        2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
+           run_directory.create_empty_notes(paths) (notes/ は空のディレクトリーで始める。write_initial_notes は呼ばない)。
+           parts.initial_instruction があれば run_directory.write_initial_instruction(paths, 初期指示) で
+           orchestrator/instruction.md に写す (無ければ書かない)
+        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く
+           (mode と Orchestrator 型の 6 つの値を含む)
+        4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個),
+           on_operation=OperationLog.write) を作る。surface.surface_output_gate.SurfaceOutputGate は通さない
+        5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …)、CaptureWatcher を作る
+           (advisor 型と同じ。on_frame は渡さない)
+        6. orchestrator.orchestrator_controller.OrchestratorController(OrchestratorParts(pad_output = 4 の PadOutput,
+           jev = parts.monitor, latest_frame = FrameBuffer.latest, clock, paths),
+           OrchestratorSettings(monitor_threshold, max_monitor_errors))
+        7. orchestrator.main_loop.OrchestratorMainLoop(OrchestratorMainLoopParts(paths, clock,
+           claude = ClaudeSessionOptions(effort = orchestrator_effort),
+           parse_decision = lambda text: decision_parser.parse_decision(text, 6 の macro_names()),
+           controller = 6 の OrchestratorController, initial_instruction = parts.initial_instruction, run_log,
+           on_stop = request_stop, start_process・signal_process_group・environ・switch_skills_dir は parts の値),
+           OrchestratorMainLoopSettings(rotate_tokens, turn_timeout_s, max_decision_errors))
+        8. SafetyMonitor (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
+           on_stop = request_stop、on_start_passed = 6 と 7 の set_started を呼ぶ関数、on_system_screen = 何もしない
+           関数。interval_s・threshold・max_errors は advisor 型と同じ)
+        9. 画面の停滞の計測の ProgressLoop (advisor 型と同じ)
+        スレッドは、監視のループ (6 の run を包み、想定外の例外 (Exception) で抜けたら
+        request_stop(monitor_loop_failure_reason(error_text.describe_exception(例外))) を呼ぶ)、主ループ (7 の run)、
+        安全の監視 (8)、停滞の計測のループ (9) の順に start_thread で起動する。
+        起動しないもの: DeepScheduler・SurfaceLoop・MiddleLoop・SystemScreenLoop (本体の画面の middle も使わない)。
+        段階 (system_screen.run_phase.PhaseTracker) にも入らない (run.jsonl に phase と clean_up_end を書かない)。
+        実行を始めるときの安全の確かめが通って set_started が呼ばれるまで、主ループは claude を起動せず、操作の実行と
+        監視のループは操作も監視の要求も送らない。確かめで止まったら、どちらも始めない。
+        止まる理由 (run.jsonl の stop に書く。どれも片付けを行わず、すぐに操作を中立にして出力を止める。起動したソフトは
+        そのまま残る):
+            - Ctrl+C (REASON_INTERRUPTED)、キャプチャー・ブリッジ・安全の監視の理由、start の途中の例外は advisor 型と同じ
+            - 主ループの理由: main_loop.decision_failure_reason (JSON の誤りが続いた)・session_failure_reason (セッションが
+              最初のターンを終えずに終わることが続いた)・main_loop_failure_reason (主ループの想定外の例外)
+            - 監視のループの想定外の例外: monitor_loop_failure_reason
+        close は advisor 型と同じ順に後片付けをする。主ループのスレッドの終わりは、セッションを閉じる時間
+        (claude_stream_session.SESSION_CLOSE_GRACE_S の 2 倍) に LOOP_JOIN_TIMEOUT_S を足した秒数まで待ち、ほかのループの
+        スレッドは LOOP_JOIN_TIMEOUT_S 秒ずつ待つ。
     """
 
     def __init__(
         self,
         settings: RunSettings,
-        parts: LayersParts,
+        parts: LayersParts | OrchestratorLayersParts,
         sleep: Callable[[float], None] = time.sleep,
         start_thread: Callable[[threading.Thread], None] = threading.Thread.start,
     ) -> None:
-        """属性を持つ。ディレクトリーとスレッドは start で作る。"""
+        """属性を持つ。ディレクトリーとスレッドは start で作る。
+
+        settings.mode と parts の型が合わなければ (orchestrator なのに LayersParts、advisor なのに
+        OrchestratorLayersParts)、ValueError にする。
+        """
+        if settings.mode is RunMode.ORCHESTRATOR and isinstance(parts, LayersParts):
+            raise ValueError("the orchestrator mode needs OrchestratorLayersParts")
+        if settings.mode is RunMode.ADVISOR and isinstance(
+            parts, OrchestratorLayersParts
+        ):
+            raise ValueError("the advisor mode needs LayersParts")
         self.settings = settings
         self.parts = parts
         self.sleep = sleep
@@ -401,6 +505,7 @@ class LayersApp:
     def start(self) -> RunPaths:
         """実行ディレクトリーを作り、部品を組み立ててスレッドを起動し、実行ディレクトリーの RunPaths を返す。
 
+        Orchestrator 型の組み立てはクラスの docstring のとおり。advisor 型は次の 1〜10 のとおり。
         1. RunClock(parts.monotonic) を作る (ここが t = 0)
         2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
            write_initial_notes(paths, buttons.allowed_buttons()) (surface の押せる 16 個。HOME は書かない)
@@ -475,6 +580,9 @@ class LayersApp:
         """start の 1〜10 を行う。作った部品は、作った直後に built に記録する。"""
         settings = self.settings
         parts = self.parts
+        if isinstance(parts, OrchestratorLayersParts):
+            # settings.mode が orchestrator のとき (__init__ で mode と parts の型をそろえてある)
+            raise NotImplementedError("the orchestrator mode is not assembled")
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
         clock = RunClock(parts.monotonic)
         paths = create_run_directory(settings.runs_dir, parts.local_now())

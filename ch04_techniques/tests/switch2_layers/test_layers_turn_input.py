@@ -512,11 +512,13 @@ def test_session_opening_has_instruction_note_files_and_handoff():
 
 
 def test_session_opening_without_instruction_or_handoff():
+    # 初期指示が無いことも主ループに伝えるため、初期指示の節は省かずに本文を NONE_TEXT にする
     text = build_session_opening_text(
         SessionOpening(initial_instruction=None, note_files=(), handoff_text="  \n")
     )
-    assert "## 人の初期指示" not in text
     assert text.splitlines() == [
+        "## 人の初期指示",
+        NONE_TEXT,
         "## notes/ のファイル",
         NONE_TEXT,
         "## 引き継ぎ (notes/handoff.md)",
