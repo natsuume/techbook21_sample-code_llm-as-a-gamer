@@ -8,7 +8,10 @@ import pytest
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.orchestrator.claude_session_command import AUTOCOMPACT_MAX_TOKENS
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
-from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
+)
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
@@ -501,6 +504,48 @@ def test_run_settings_to_json_has_the_progress_arguments():
     assert value["progress_window_s"] == 120.0
     assert value["stuck_advice_seconds"] == 30.0
     assert json.loads(json.dumps(value)) == value
+
+
+# --- 本体の画面の段階による助言 (--system-advice-seconds) ---
+
+
+def test_system_advice_seconds_default_boundary_values_and_record():
+    settings = RunSettings()
+    assert settings.system_advice_seconds == DEFAULT_SYSTEM_ADVICE_SECONDS == 90.0
+    for value in [0.001, 600.0]:
+        changed = dataclasses.replace(settings, system_advice_seconds=value)
+        assert run_settings_errors(changed) == []
+        # run.jsonl の start の args に、system_advice_seconds として書く
+        value_json = run_settings_to_json(changed)
+        assert value_json["system_advice_seconds"] == value
+        assert json.loads(json.dumps(value_json)) == value_json
+    # --stuck-advice-seconds と同じ検証と同じ形のエラー文
+    errors = run_settings_errors(
+        dataclasses.replace(settings, system_advice_seconds=0.0)
+    )
+    assert errors == [
+        "--system-advice-seconds must be a finite number more than 0: 0.0"
+    ]
+
+
+@pytest.mark.parametrize("value", [0.0, -90.0, math.inf, math.nan])
+def test_system_advice_seconds_out_of_range_is_reported(value):
+    errors = run_settings_errors(
+        dataclasses.replace(RunSettings(), system_advice_seconds=value)
+    )
+    assert len(errors) == 1
+    assert errors[0].startswith(
+        "--system-advice-seconds must be a finite number more than 0: "
+    )
+
+
+def test_system_advice_errors_follow_the_argument_order():
+    errors = run_settings_errors(
+        RunSettings(system_advice_seconds=0.0, stuck_advice_seconds=0.0)
+    )
+    assert len(errors) == 2
+    assert "--stuck-advice-seconds" in errors[0]
+    assert "--system-advice-seconds" in errors[1]
 
 
 # --- 押し方の選び方の差 (--hold-margin) ---

@@ -6,6 +6,7 @@
     controller_order   持ちかた/順番を変える
     user_select        ソフトを起動したときのユーザー選択
     software_close     HOME メニューでソフトを終了するときの確認
+    software_list      HOME メニューの「もっとみる」で開く、すべてのソフトの一覧
 見本の名前は、照合の choice の選択肢の名前、安全の監視の要求の state の references のキー、照合の結果の名前を兼ねる
 (英数字と _ だけ)。
 
@@ -88,6 +89,15 @@ SYSTEM_SCREEN_REFERENCES: tuple[SystemScreenReference, ...] = (
             "「キャンセル」「終了する」のボタンの段がある"
         ),
         files=("software_close.jpg",),
+    ),
+    SystemScreenReference(
+        name="software_list",
+        description=(
+            "HOME メニューの「もっとみる」で開く、すべてのソフトの一覧の画面。"
+            "`references.software_list` と同じ、上の「ソフト」「グループ」のタブ、"
+            "左の絞り込みと並べ替えのアイコン、右下の「B もどる」「A 決定」がある"
+        ),
+        files=("software_list.jpg",),
     ),
 )
 # 見本の名前 (SYSTEM_SCREEN_REFERENCES と同じ順)

@@ -44,6 +44,8 @@ class DeepTrigger(StrEnum):
     MANUAL = "manual"  # deep-once で手で起動した
     # 画面の停滞の計測で、新しい画面が出ていない秒数がしきい値を超えた (advice だけ)
     PROGRESS = "progress"
+    # 本体の画面の段階 (prepare・recover) が --system-advice-seconds を超えて続いた (advice だけ)
+    SYSTEM = "system"
 
 
 @dataclass(frozen=True)

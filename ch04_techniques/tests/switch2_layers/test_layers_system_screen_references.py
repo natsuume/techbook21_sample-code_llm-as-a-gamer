@@ -46,6 +46,7 @@ def test_names_follow_the_issue_in_order():
         "controller_order",
         "user_select",
         "software_close",
+        "software_list",
     )
     assert SYSTEM_SCREEN_NAMES == tuple(
         reference.name for reference in SYSTEM_SCREEN_REFERENCES

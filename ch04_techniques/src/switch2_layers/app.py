@@ -16,10 +16,12 @@ LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、�
     実行を始めるときの安全の確かめが通ったら prepare に入る (確かめで止まったら、どの段階にも入らない)。
     prepare・recover・clean_up では、本体の画面のループ (system_screen.system_screen_loop) が本体の画面の middle に
     目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
-    1 回分ずつ進め、deep の自動の呼び出しと advice の要求も play の間だけ行う。play から離れるときは中立のレポートを送り、
-    タスクのキューの部品の現在の場面を場面なしにする (play に戻ったら、次の middle の出力で場面が設定される)。middle の
-    1 回の途中で play から離れたときは、その回が終わった後にも場面なしにし直す (その回の出力の書き込みが場面を設定し
-    直しても、play 以外の段階で続いた秒数を進めないため)。
+    1 回分ずつ進め、deep の自動の呼び出しと画面の停滞による advice の要求も play の間だけ行う。prepare・recover が
+    --system-advice-seconds を超えて続いたら、deep のスケジューラーが advice をきっかけ system で求める。prepare と
+    recover には時間切れが無い。play から離れるときは中立のレポートを送り、タスクのキューの部品の現在の場面を場面なしに
+    する (play に戻ったら、次の middle の出力で場面が設定される)。middle の 1 回の途中で play から離れたときは、その回が
+    終わった後にも場面なしにし直す (その回の出力の書き込みが場面を設定し直しても、play 以外の段階で続いた秒数を
+    進めないため)。
     middle のゲーム用の出力の press_home が真なら、play のときだけ recover に移し (phase の行を書き、play から離れる
     中立のレポートを送る)、その後で HOME を短押しする (中立のレポートで短押しを取り消さないため)。
 押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
@@ -35,8 +37,6 @@ press_home の HOME はこれで送る。surface は surface.surface_output_gate
     - ブリッジの復旧が失敗した (bridge_state() が "failed")             REASON_BRIDGE_FAILED
     - 安全の確かめでオンライン・購入・本体の設定の画面を見つけたか、確かめが失敗した
                                                                     safety.safety_judge・safety_monitor の理由
-    - prepare か recover が時間切れになった                             run_phase.REASON_PREPARATION_TIMED_OUT・
-                                                                    REASON_RECOVERY_TIMED_OUT
     - start の途中の例外、ループの想定外の例外                          start failed*・*loop failed*
 片付けを行わない止まり方では、すぐに操作を中立にして出力を止め、全体を止める。
 片付け: 片付けを行う理由で止めるとき (段階に入った後で、まだ片付けをしていなければ)、止まる理由を決めてから clean_up に
@@ -59,7 +59,7 @@ start の途中で例外 (Ctrl+C の KeyboardInterrupt を含む) が出たら�
     キャプチャーの読み取り (CaptureSource)、画像の書き出し (FrameStore)、短押しのタイマー (PadOutput)、
     surface のループ、middle のループ、本体の画面のループ (SystemScreenLoop)、安全の監視 (SafetyMonitor)、
     画面の停滞の計測のループ (progress.progress_loop)、deep の自動の呼び出し (DeepScheduler) とジョブ。
-    wait を呼んだスレッド (run ではメインスレッド) が、止まる条件と段階の時間切れを MONITOR_INTERVAL_S ごとに確かめる。
+    wait を呼んだスレッド (run ではメインスレッド) が、止まる条件と片付けの時間切れを MONITOR_INTERVAL_S ごとに確かめる。
 """
 
 import logging
@@ -587,8 +587,10 @@ class LayersApp:
            on_frame=parts.on_frame)、CaptureWatcher を作る
         6. DeepScheduler (current_scene_id は middle/state.json の scene_id、latest_frame_t は frames.jsonl の最後の t、
            progress_state は progress/state.json の値 (progress.progress_state.read_progress_state)、
-           is_play は段階が play かを返す関数、timeout_s は deep_timeout_s、stuck_advice_seconds は
-           stuck_advice_seconds) を作って start する (タイムアウト・自動の呼び出し・きっかけ progress の判定のスレッド)
+           is_play は段階が play かを返す関数、current_phase は段階とその段階に入った時刻の組を返す関数 (段階に入る前は
+           None)、timeout_s は deep_timeout_s、stuck_advice_seconds は stuck_advice_seconds、system_advice_seconds は
+           system_advice_seconds) を作って start する (タイムアウト・自動の呼び出し・きっかけ progress と system の判定の
+           スレッド)
         7. タスクのキューの部品 TaskBoard(paths) を 1 つ作り、middle.middle_trigger.MiddleTrigger(middle_interval_s,
            task_stuck_seconds, clock, oldest_active_s = 時刻 t を受け取り、TaskBoard.current_scene_id の場面の
            TaskBoard.oldest_active_s(場面, t) を返す関数 (現在の場面が無ければ None)) を作る。
@@ -693,12 +695,14 @@ class LayersApp:
                 latest_frame_t=lambda: latest_frame_t(paths),
                 progress_state=lambda: read_progress_state(paths.progress_state),
                 is_play=self._playing,
+                current_phase=self._current_phase,
             ),
             DeepSchedulerSettings(
                 min_start_interval_s=settings.deep_min_start_interval_s,
                 auto_seconds=settings.deep_auto_seconds,
                 timeout_s=settings.deep_timeout_s,
                 stuck_advice_seconds=settings.stuck_advice_seconds,
+                system_advice_seconds=settings.system_advice_seconds,
             ),
         )
         built.deep_scheduler = deep_scheduler
@@ -1036,6 +1040,14 @@ class LayersApp:
         with self._phase_lock:
             return self._is_play()
 
+    def _current_phase(self) -> tuple[RunPhase, float] | None:
+        """段階のロックを取って、(段階, その段階に入った時刻) を返す。段階に入る前は None (deep のスケジューラーに渡す)。"""
+        with self._phase_lock:
+            tracker = self._tracker
+            if tracker is None:
+                return None
+            return tracker.phase, tracker.phase_started_t
+
     def _phase_snapshot(self) -> _PhaseSnapshot:
         """段階のロックの中で、段階の判定の読み取りをまとめて返す (段階に入る前は PREPARE・0.0・False)。"""
         with self._phase_lock:
@@ -1322,7 +1334,7 @@ class LayersApp:
             self._end_clean_up_locked(CleanUpResult.INTERRUPTED)
 
     def _check_phase_time(self, started: _StartedParts) -> None:
-        """段階の判定の時間切れを確かめる (wait の見張りの 1 回分)。"""
+        """段階の判定の時間切れ (片付けの時間切れ) を確かめる (wait の見張りの 1 回分)。"""
         now = started.clock.now()
         self._phase_input(lambda tracker: tracker.check_time(now))
 
@@ -1332,8 +1344,8 @@ class LayersApp:
         ループの停止の合図が立つまで (片付けの間も)、MONITOR_INTERVAL_S ごとに (sleep で待って) 次を確かめる:
             - CaptureWatcher.check_once() が理由を返したら request_stop(その理由)
             - bridge_state() が "failed" なら request_stop(REASON_BRIDGE_FAILED)
-            - 段階に入っていれば、PhaseTracker.check_time(clock.now()) の時間切れ (止める理由は request_stop(理由)、
-              片付けの時間切れは片付けを timeout で終える)
+            - 段階に入っていれば、PhaseTracker.check_time(clock.now()) の時間切れ (片付けの時間切れは片付けを timeout で
+              終える。prepare と recover には時間切れが無い)
         待っている間の KeyboardInterrupt (Ctrl+C) は外に出さずに確かめを続ける。1 回目は request_stop(REASON_INTERRUPTED)
         にし、片付けの間の 2 回目は片付けを interrupted で終える。前に数えた KeyboardInterrupt から
         INTERRUPT_REPEAT_WINDOW_S 秒以内 (parts.monotonic で測る) のものは、同じ割り込みとして数えない。

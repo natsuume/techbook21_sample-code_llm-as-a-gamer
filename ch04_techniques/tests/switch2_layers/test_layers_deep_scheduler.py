@@ -38,6 +38,7 @@ from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
+from switch2_layers.system_screen.run_phase import RunPhase
 
 ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
 
@@ -118,6 +119,15 @@ class Harness:
     )
     # is_play が返す値 (run の段階が play か)
     phase: dict[str, bool] = field(default_factory=lambda: {"play": True})
+    # current_phase が返す値 (run の段階と、その段階に入った時刻。段階に入る前は None)
+    current: dict[str, tuple[RunPhase, float] | None] = field(
+        default_factory=lambda: {"value": None}
+    )
+
+    def in_phase(self, phase: RunPhase, started_t: float) -> None:
+        """run の段階を、時刻 started_t に入った phase にする (is_play も段階に合わせる)。"""
+        self.current["value"] = (phase, started_t)
+        self.phase["play"] = phase is RunPhase.PLAY
 
     def stuck_for(self, no_novel_s: float | None) -> None:
         """progress_state が、新しい画面が出ていない秒数 no_novel_s の値を返すようにする (None なら値が無い)。"""
@@ -200,6 +210,7 @@ def make_scheduler(
     start_job_thread: Callable[[Callable[[], None]], None] | None = None,
     stuck_advice_seconds: float = 60.0,
     after_log_write: Callable[[str], None] | None = None,
+    system_advice_seconds: float = 90.0,
 ) -> Harness:
     """DeepScheduler と偽の部品を組み立てる (テストの本体から呼ぶ)。スケジューラーは t = 0 に作る。
 
@@ -219,6 +230,7 @@ def make_scheduler(
     on_sleep: list[Callable[[], None]] = []
     progress: dict[str, ProgressState | None] = {"state": None}
     phase = {"play": True}
+    current: dict[str, tuple[RunPhase, float] | None] = {"value": None}
     holder: list[Harness] = []
     parts = DeepSchedulerParts(
         paths=paths,
@@ -234,12 +246,14 @@ def make_scheduler(
         prepare_job_directory=prepare_job_directory,
         progress_state=lambda: progress["state"],
         is_play=lambda: phase["play"],
+        current_phase=lambda: current["value"],
     )
     settings = DeepSchedulerSettings(
         min_start_interval_s=min_start_interval_s,
         auto_seconds=auto_seconds,
         timeout_s=timeout_s,
         stuck_advice_seconds=stuck_advice_seconds,
+        system_advice_seconds=system_advice_seconds,
     )
     harness = Harness(
         root,
@@ -253,6 +267,7 @@ def make_scheduler(
         on_sleep,
         progress,
         phase,
+        current,
     )
     holder.append(harness)
     return harness
@@ -2368,4 +2383,194 @@ def test_check_progress_uses_the_configured_threshold(tmp_path):
     harness.at(10.0)
     harness.stuck_for(5.5)
     result = harness.scheduler.check_progress()
+    assert result is not None and result.started is True
+
+
+# --- 本体の画面の段階による advice の要求 (きっかけ system) ---
+
+
+def test_check_system_requests_nothing_before_any_phase(tmp_path):
+    # 既定のしきい値は 90 秒 (--system-advice-seconds)
+    assert DeepSchedulerSettings(1.0, 1.0, 1.0).system_advice_seconds == 90.0
+    harness = make_scheduler(tmp_path)
+    # 段階に入る前 (current_phase が None) は、どれだけたっても要求しない
+    harness.at(500.0)
+    assert harness.scheduler.check_system() is None
+    assert run_rows(harness.root) == []
+    assert list((harness.root / "deep").iterdir()) == []
+
+
+@pytest.mark.parametrize("phase", [RunPhase.PREPARE, RunPhase.RECOVER])
+def test_check_system_requests_advice_when_the_phase_lasts_over_the_threshold(
+    tmp_path, phase
+):
+    harness = make_scheduler(tmp_path)
+    harness.latest["t"] = 109.8
+    harness.in_phase(phase, 20.0)
+    # ちょうどしきい値 (段階に入ってから 90 秒) では要求しない
+    harness.at(110.0)
+    assert harness.scheduler.check_system() is None
+    harness.at(110.5)
+    result = harness.scheduler.check_system()
+    assert result is not None and result.started is True
+    assert result.job_dir == harness.root / "deep" / "advice-001"
+    value = job_json(result.job_dir)
+    assert value["kind"] == "advice"
+    assert value["trigger"] == "system"
+    # advice は場面に依らない
+    assert value["scene_id"] is None
+    assert value["latest_frame_t"] == 109.8
+    assert run_rows(harness.root, "deep_start") == [
+        {
+            "t": 110.5,
+            "event": "deep_start",
+            "kind": "advice",
+            "scene_id": None,
+            "trigger": "system",
+            "job": "deep/advice-001",
+            "pending_t": None,
+        }
+    ]
+    assert harness.scheduler.is_running(ADVICE_KEY)
+
+
+def test_check_system_requests_again_every_threshold_seconds(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.in_phase(RunPhase.PREPARE, 0.0)
+    harness.at(91.0)
+    assert harness.scheduler.check_system().started is True
+    harness.at(92.0)
+    harness.threads.run_all()
+    # 超えたまま続く間は、前回の要求から 90 秒たつまで要求しない
+    for t in [92.5, 150.0, 180.9]:
+        harness.at(t)
+        assert harness.scheduler.check_system() is None
+    harness.at(181.0)
+    second = harness.scheduler.check_system()
+    assert second is not None and second.started is True
+    assert second.job_dir == harness.root / "deep" / "advice-002"
+    assert job_json(second.job_dir)["trigger"] == "system"
+
+
+@pytest.mark.parametrize("phase", [RunPhase.PLAY, RunPhase.CLEAN_UP])
+def test_check_system_requests_nothing_in_play_or_clean_up(tmp_path, phase):
+    harness = make_scheduler(tmp_path)
+    harness.in_phase(phase, 0.0)
+    harness.at(500.0)
+    assert harness.scheduler.check_system() is None
+    assert run_rows(harness.root) == []
+    assert list((harness.root / "deep").iterdir()) == []
+
+
+def test_check_system_waits_while_advice_is_running(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.in_phase(RunPhase.RECOVER, 0.0)
+    harness.at(80.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    # advice のジョブ (きっかけに依らない) が実行中の間は要求しない (保留も作らない)
+    for t in [100.0, 120.0]:
+        harness.at(t)
+        assert harness.scheduler.check_system() is None
+    assert run_rows(harness.root, "deep_pending") == []
+    # 実行中のジョブが終わった後の判定で要求する
+    harness.threads.run_all()
+    harness.at(120.5)
+    result = harness.scheduler.check_system()
+    assert result is not None and result.started is True
+    assert job_json(result.job_dir)["trigger"] == "system"
+    assert [row["trigger"] for row in run_rows(harness.root, "deep_start")] == [
+        "surface",
+        "system",
+    ]
+
+
+def test_check_system_counts_again_after_the_phase_changes(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.in_phase(RunPhase.PREPARE, 0.0)
+    harness.at(91.0)
+    assert harness.scheduler.check_system().started is True
+    harness.at(92.0)
+    harness.threads.run_all()
+    # play の間は数えない
+    harness.in_phase(RunPhase.PLAY, 95.0)
+    harness.at(96.0)
+    assert harness.scheduler.check_system() is None
+    # recover に入った時刻から数え直す。前回の要求から 90 秒たっても、recover に入ってから 90 秒を超えるまでは
+    # 要求しない
+    harness.in_phase(RunPhase.RECOVER, 100.0)
+    for t in [181.0, 190.0]:
+        harness.at(t)
+        assert harness.scheduler.check_system() is None
+    harness.at(190.5)
+    result = harness.scheduler.check_system()
+    assert result is not None and result.started is True
+    assert result.job_dir == harness.root / "deep" / "advice-002"
+
+
+def test_check_system_keeps_the_min_start_interval(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.at(95.0)
+    harness.scheduler.request(DocumentKind.ADVICE, DeepTrigger.SURFACE, None)
+    harness.at(96.0)
+    harness.threads.run_all()
+    harness.in_phase(RunPhase.PREPARE, 0.0)
+    harness.at(100.0)
+    result = harness.scheduler.check_system()
+    # 同じ文書の前回の起動から 15 秒たっていないため、要求を捨てる
+    assert result is not None
+    assert result.started is False
+    assert result.reason == SKIP_MIN_START_INTERVAL
+    assert run_rows(harness.root, "deep_skipped") == [
+        {
+            "t": 100.0,
+            "event": "deep_skipped",
+            "kind": "advice",
+            "scene_id": None,
+            "trigger": "system",
+            "reason": "min_start_interval",
+            "since_last_start_s": 5.0,
+        }
+    ]
+    # 捨てた要求も「要求した」に数え、判定のたびには出し直さない
+    harness.at(110.0)
+    assert harness.scheduler.check_system() is None
+    assert len(run_rows(harness.root, "deep_skipped")) == 1
+    harness.at(190.0)
+    assert harness.scheduler.check_system().started is True
+
+
+def test_check_system_records_request_errors_and_does_not_retry_at_once(tmp_path):
+    preparation = FailingPreparation(DocumentKind.ADVICE)
+    harness = make_scheduler(tmp_path, prepare_job_directory=preparation)
+    harness.in_phase(RunPhase.RECOVER, 0.0)
+    harness.at(100.0)
+    assert harness.scheduler.check_system() is None
+    errors = run_rows(harness.root, "deep_request_error")
+    assert len(errors) == 1
+    assert errors[0]["t"] == 100.0
+    assert errors[0]["source"] == "system"
+    assert errors[0]["kind"] == "advice"
+    assert errors[0]["trigger"] == "system"
+    assert errors[0]["scene_id"] is None
+    assert "cannot prepare advice" in errors[0]["error"]
+    harness.at(100.5)
+    assert harness.scheduler.check_system() is None
+    assert preparation.calls == [DocumentKind.ADVICE]
+
+
+def test_check_system_does_nothing_after_close(tmp_path):
+    harness = make_scheduler(tmp_path)
+    harness.in_phase(RunPhase.PREPARE, 0.0)
+    harness.scheduler.close()
+    harness.at(100.0)
+    assert harness.scheduler.check_system() is None
+    assert run_rows(harness.root, "deep_skipped") == []
+    assert list((harness.root / "deep").iterdir()) == []
+
+
+def test_check_system_uses_the_configured_threshold(tmp_path):
+    harness = make_scheduler(tmp_path, system_advice_seconds=5.0)
+    harness.in_phase(RunPhase.PREPARE, 0.0)
+    harness.at(5.5)
+    result = harness.scheduler.check_system()
     assert result is not None and result.started is True

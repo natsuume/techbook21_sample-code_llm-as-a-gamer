@@ -18,8 +18,11 @@
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
 - 画面の停滞の計測による呼び出し (check_progress) は、新しい画面が出ていない秒数が stuck_advice_seconds を超えたら、
   advice の文書をきっかけ progress で要求する (progress.stuck_advice_trigger の規則。最小の起動間隔は request が当てる)
+- 本体の画面の段階による呼び出し (check_system) は、段階 prepare・recover が続いた秒数が system_advice_seconds を
+  超えたら、advice の文書をきっかけ system で要求する (check_progress と同じ規則を、別の判定のインスタンスで当てる)
 - 自動の呼び出しと画面の停滞の計測による呼び出しは、run の段階が play のときだけ行う (部品の is_play で確かめる。
-  タイムアウトの判定 check_timeouts は段階に依らず続ける)
+  タイムアウトの判定 check_timeouts は段階に依らず続ける)。本体の画面の段階による呼び出しは、段階が prepare・recover
+  のときだけ行う (部品の current_phase で確かめる)
 - ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
@@ -61,6 +64,7 @@ from switch2_layers.notes.note_paths import document_key, is_scene_id
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.progress.stuck_advice_trigger import (
     DEFAULT_STUCK_ADVICE_SECONDS,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
     StuckAdviceTrigger,
 )
 from switch2_layers.records.run_log import (
@@ -75,6 +79,7 @@ from switch2_layers.records.run_log import (
 from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths, open_run_directory
 from switch2_layers.surface.middle_state_reader import read_surface_context
+from switch2_layers.system_screen.run_phase import RunPhase
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -96,6 +101,10 @@ REQUEST_PENDING = "pending"
 # check_progress は、progress/state.json の t がこの秒数より前の値では判定を見送る。
 # フレームの保存か値の書き込みが止まったときに、しきい値を超えた古い値で advice を求め続けないため
 PROGRESS_STATE_MAX_AGE_S = 10.0
+# check_system が、続いた秒数を数える段階 (本体の画面の middle が操作を決める段階のうち、片付けを除くもの)
+SYSTEM_ADVICE_PHASES: frozenset[RunPhase] = frozenset(
+    {RunPhase.PREPARE, RunPhase.RECOVER}
+)
 
 
 class DeepStopReason(StrEnum):
@@ -212,6 +221,11 @@ def always_play() -> bool:
     return True
 
 
+def no_current_phase() -> tuple[RunPhase, float] | None:
+    """いつも None (段階に入る前) を返す (DeepSchedulerParts.current_phase の既定値)。"""
+    return None
+
+
 @dataclass(frozen=True)
 class DeepSchedulerSettings:
     """deep のスケジューラーの設定。
@@ -223,6 +237,9 @@ class DeepSchedulerSettings:
     stop_grace_s           stop を呼んでから、run が戻らなければ kill を呼ぶまでの秒数 (既定 STOP_GRACE_S)
     stuck_advice_seconds   新しい画面が出ていない秒数がこれを超えたら、advice の deep をきっかけ progress で要求する
                            (--stuck-advice-seconds。既定 progress.stuck_advice_trigger.DEFAULT_STUCK_ADVICE_SECONDS)
+    system_advice_seconds  本体の画面の段階 (prepare・recover) が続いた秒数がこれを超えたら、advice の deep を
+                           きっかけ system で要求する (--system-advice-seconds。既定
+                           progress.stuck_advice_trigger.DEFAULT_SYSTEM_ADVICE_SECONDS)
     """
 
     min_start_interval_s: float
@@ -230,6 +247,7 @@ class DeepSchedulerSettings:
     timeout_s: float
     stop_grace_s: float = STOP_GRACE_S
     stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
+    system_advice_seconds: float = DEFAULT_SYSTEM_ADVICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -255,6 +273,9 @@ class DeepSchedulerParts:
     is_play            run の段階が play なら True を返す関数 (run では app の段階を読む)。False の間は、自動の呼び出し
                        (check_auto) と画面の停滞の計測による呼び出し (check_progress) をしない。既定は、いつも True を
                        返す関数
+    current_phase      run の段階と、その段階に入った時刻 (RunClock の t) の組 (段階, 時刻) を返す関数 (run では app の
+                       段階の判定を読む)。段階に入る前 (実行を始めるときの確かめが通る前) は None。本体の画面の段階による
+                       呼び出し (check_system) に使う。既定は、いつも None を返す関数 (きっかけ system で要求しない)
     """
 
     paths: RunPaths
@@ -268,6 +289,7 @@ class DeepSchedulerParts:
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
     progress_state: Callable[[], ProgressState | None] = no_progress_state
     is_play: Callable[[], bool] = always_play
+    current_phase: Callable[[], tuple[RunPhase, float] | None] = no_current_phase
 
 
 @dataclass
@@ -320,7 +342,7 @@ class DeepScheduler:
 
     request・check_auto・check_timeouts・close・document_status は複数のスレッドから呼んでよい (判断と記録と読み取りは
     1 つのロックの中で行う。DeepRunner の stop・kill・run と、close の待ち (sleep) はロックの外で呼ぶ)。
-    check_progress は 1 つのスレッドからだけ呼ぶ。
+    check_progress と check_system は 1 つのスレッドからだけ呼ぶ。
     DeepRequestSink と surface.surface_types.DeepStatusReader の実装。作ったときの t を、最初の対象の文書が対象になった
     時刻とする。
     ジョブは起動 (request から、または保留から) してから、run が戻るか kill を呼ぶまで「実行中」に数える。
@@ -351,6 +373,8 @@ class DeepScheduler:
         self._thread: threading.Thread | None = None
         # きっかけ progress で要求するかの判定 (check_progress だけが使う)
         self._stuck_advice = StuckAdviceTrigger(settings.stuck_advice_seconds)
+        # きっかけ system で要求するかの判定 (check_system だけが使う)
+        self._system_advice = StuckAdviceTrigger(settings.system_advice_seconds)
 
     def request(
         self, kind: DocumentKind, trigger: DeepTrigger, scene_id: str | None
@@ -564,6 +588,49 @@ class DeepScheduler:
             )
             return None
 
+    def check_system(self) -> DeepRequestResult | None:
+        """本体の画面の段階が続いた秒数から、advice の deep をきっかけ system で要求するかを 1 回判定する。
+
+        判定は progress.stuck_advice_trigger.StuckAdviceTrigger (しきい値は settings.system_advice_seconds。
+        check_progress とは別のインスタンス) で行う:
+            1. now = clock.now()、phase = parts.current_phase()。phase が (prepare か recover, その段階に入った時刻) なら
+               elapsed = now − その段階に入った時刻、それ以外 (play・clean_up・段階に入る前の None) なら elapsed = None
+               (StuckAdviceTrigger は None で前回の要求を忘れる。段階が変わると elapsed が小さくなり、数え直す)
+            2. advice の文書 (場面に依らない) のジョブが 1 つ以上実行中か (きっかけに依らない) を確かめる
+            3. StuckAdviceTrigger.check(now, elapsed, 実行中か) が True なら、request(DocumentKind.ADVICE,
+               DeepTrigger.SYSTEM, None) を呼んで、その結果を返す。最小の起動間隔と保留などの規則は request が
+               そのまま当てる (捨てたか保留したら DeepRequestResult(started=False, ...))
+            4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "system",
+               "kind": "advice", "trigger": "system", "scene_id": null, "error": 説明} を書き、None を返す
+        要求しなければ None を返す。close の後は、何もせず None を返す (StuckAdviceTrigger も呼ばない)。
+        is_play には依らない (段階は 1 の current_phase で確かめる)。
+        判定の状態 (前回の要求の時刻) を持つため、1 つのスレッド (start で起動する判定のスレッド) からだけ呼ぶ。
+        """
+        with self._lock:
+            if self._closed:
+                return None
+        now = self.parts.clock.now()
+        current = self.parts.current_phase()
+        elapsed = None
+        if current is not None and current[0] in SYSTEM_ADVICE_PHASES:
+            elapsed = now - current[1]
+        advice_running = self.is_running(document_key(DocumentKind.ADVICE, None))
+        if not self._system_advice.check(now, elapsed, advice_running):
+            return None
+        try:
+            return self.request(DocumentKind.ADVICE, DeepTrigger.SYSTEM, None)
+        except Exception as error:
+            logger.debug("system deep request failed", exc_info=True)
+            self.parts.run_log.write(
+                EVENT_DEEP_REQUEST_ERROR,
+                source="system",
+                kind=DocumentKind.ADVICE.value,
+                trigger=DeepTrigger.SYSTEM.value,
+                scene_id=None,
+                error=describe_exception(error),
+            )
+            return None
+
     def check_timeouts(self) -> None:
         """実行中のジョブのタイムアウトと、止めたジョブの kill を 1 回判定する。
 
@@ -652,10 +719,11 @@ class DeepScheduler:
             )
 
     def start(self) -> None:
-        """CHECK_INTERVAL_S ごとに check_timeouts・check_auto・check_progress をこの順に呼ぶスレッド (daemon) を起動する。
+        """CHECK_INTERVAL_S ごとに check_timeouts・check_auto・check_progress・check_system をこの順に呼ぶスレッド
+        (daemon) を起動する。
 
-        2 回目以降は何もしない。check_timeouts・check_auto・check_progress の想定外の例外 (Exception) は、スレッドを
-        止めずに logging で警告を書く。
+        2 回目以降は何もしない。check_timeouts・check_auto・check_progress・check_system の想定外の例外 (Exception) は、
+        スレッドを止めずに logging で警告を書く。
         """
         with self._lock:
             if self._thread is not None or self._closed:
@@ -969,7 +1037,7 @@ class DeepScheduler:
 
     def _run_checks(self) -> None:
         """start で起動するスレッドの本体。close まで CHECK_INTERVAL_S ごとに check_timeouts・check_auto・
-        check_progress を呼ぶ。"""
+        check_progress・check_system を呼ぶ。"""
         while not self._stop_checks.wait(CHECK_INTERVAL_S):
             try:
                 self.check_timeouts()
@@ -983,6 +1051,10 @@ class DeepScheduler:
                 self.check_progress()
             except Exception:
                 logger.warning("checking progress deep requests failed", exc_info=True)
+            try:
+                self.check_system()
+            except Exception:
+                logger.warning("checking system deep requests failed", exc_info=True)
 
 
 def _call_runner(action: Callable[[Path], None], job_dir: Path) -> None:

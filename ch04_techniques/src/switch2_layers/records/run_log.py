@@ -23,8 +23,9 @@ EVENT_DEEP_END = "deep_end"  # deep のジョブの終了 (kill を含む)
 EVENT_DEEP_SKIPPED = "deep_skipped"  # deep を呼ぶ要求を捨てた
 # 同じ文書の deep のジョブが実行中のため、deep を呼ぶ要求を保留した。kind・scene_id・trigger・since_last_start_s を含む
 EVENT_DEEP_PENDING = "deep_pending"
-# deep を要求したときの失敗。surface・middle・自動の呼び出し・画面の停滞の計測が deep を要求したときに、要求の受け口
-# (DeepScheduler.request) が例外を出した (source は "surface" / "middle" / "auto" / "progress")、または保留中の要求を
+# deep を要求したときの失敗。surface・middle・自動の呼び出し・画面の停滞の計測・本体の画面の段階の判定が deep を
+# 要求したときに、要求の受け口 (DeepScheduler.request) が例外を出した (source は "surface" / "middle" / "auto" /
+# "progress" / "system")、または保留中の要求を
 # 起動するときにジョブのディレクトリーを用意できなかった (source は "pending")。source・kind・trigger・scene_id・error を
 # 含む。どちらも例外を外に出さず、ループも止めない
 EVENT_DEEP_REQUEST_ERROR = "deep_request_error"

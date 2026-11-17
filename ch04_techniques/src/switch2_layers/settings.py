@@ -40,7 +40,10 @@ from switch2_layers.orchestrator.orchestrator_controller import (
     DEFAULT_MONITOR_THRESHOLD,
 )
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
-from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
+from switch2_layers.progress.stuck_advice_trigger import (
+    DEFAULT_STUCK_ADVICE_SECONDS,
+    DEFAULT_SYSTEM_ADVICE_SECONDS,
+)
 from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
 
 
@@ -191,6 +194,9 @@ class RunSettings:
     task_stuck_seconds          現在の場面の最も古いタスクの続いた秒数がこれを超えたら、間隔を待たずに middle を呼ぶ
                                 (きっかけ stuck)。超えたまま続く間は、この秒数ごとに呼ぶ (--task-stuck-seconds、既定 30。
                                 0 より大きい有限の値)
+    system_advice_seconds       本体の画面の段階 (prepare・recover) がこの秒数を超えて続いたら、advice の deep を
+                                きっかけ system で求める。超えたまま続く間は、この秒数ごとに求める
+                                (--system-advice-seconds、既定 90。0 より大きい有限の値)
     mode                     run の型 (--mode、既定 advisor。advisor か orchestrator)
     orchestrator_effort         主ループの Claude Code の --effort の値 (--orchestrator-effort、既定
                                 claude_session_command.ORCHESTRATOR_EFFORT の medium。ORCHESTRATOR_EFFORTS のどれか)
@@ -235,6 +241,7 @@ class RunSettings:
     progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
     stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
     task_stuck_seconds: float = DEFAULT_TASK_STUCK_SECONDS
+    system_advice_seconds: float = DEFAULT_SYSTEM_ADVICE_SECONDS
     mode: RunMode = DEFAULT_RUN_MODE
     orchestrator_effort: str = ORCHESTRATOR_EFFORT
     rotate_tokens: int = DEFAULT_ROTATE_TOKENS
@@ -287,7 +294,7 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
     --threshold-task は 0 以上 1 以下 (nan は誤り)。
-    --progress-window・--stuck-advice-seconds・--task-stuck-seconds は 0 より大きい有限の値。
+    --progress-window・--stuck-advice-seconds・--task-stuck-seconds・--system-advice-seconds は 0 より大きい有限の値。
     Orchestrator 型の 6 つの値 (_orchestrator_errors) は、mode に依らず確かめる: --orchestrator-effort は
     ORCHESTRATOR_EFFORTS のどれか、--rotate-tokens は 1 以上で AUTOCOMPACT_MAX_TOKENS 未満、--turn-timeout は 0 より
     大きい有限の値、--max-decision-errors と --max-monitor-errors は 1 以上、--monitor-threshold は 0 より大きく 1 より
@@ -380,6 +387,11 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             "--task-stuck-seconds must be a finite number more than 0: "
             f"{settings.task_stuck_seconds}"
+        )
+    if not _is_finite_positive(settings.system_advice_seconds):
+        errors.append(
+            "--system-advice-seconds must be a finite number more than 0: "
+            f"{settings.system_advice_seconds}"
         )
     errors += _orchestrator_errors(settings)
     return errors
