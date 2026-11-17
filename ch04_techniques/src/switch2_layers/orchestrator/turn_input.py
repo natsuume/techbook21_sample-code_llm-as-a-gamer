@@ -13,7 +13,7 @@
     ## 今のマクロ                     describe_macros
     ## 古いフレーム                   FRAMES_GUIDE_TEXT
 セッションの最初の入力では、この前に build_session_opening_text の節を置く (人の初期指示・notes/ のファイルの一覧・
-notes/handoff.md の中身)。
+notes/handoff.md の中身)。人の初期指示が無いときも節は省かず、本文を NONE_TEXT にして、初期指示が無いことを伝える。
 出来事の繰り越し (carry_over_events): result を受け取れなかった入力に載せた一度だけの出来事 (条件の当たり・監視の
 終わり・捨てた操作の数・外したボタン) は、次の入力で新しく取り出した出来事と合わせて渡す。
 画像 (select_turn_frames): 前の入力を送った時刻から今までの一定間隔のフレームから、均等に最大 TURN_MAX_IMAGES 枚
@@ -367,13 +367,14 @@ def list_note_files(notes_dir: Path) -> tuple[str, ...]:
 def build_session_opening_text(opening: SessionOpening) -> str:
     """セッションの最初の入力の、ふつうのターンのテキストの前に置く節を返す。次の節を順に改行でつなぐ:
 
-    ## 人の初期指示                  opening.initial_instruction (None ならこの節を書かない)
+    ## 人の初期指示                  opening.initial_instruction (None なら NONE_TEXT。初期指示が無いことを伝える)
     ## notes/ のファイル             note_files ごとに `- <相対パス>` の行 (無ければ NONE_TEXT)
     ## 引き継ぎ (notes/handoff.md)   handoff_text (空か空白だけなら NONE_TEXT)
     """
-    sections: list[tuple[str, str]] = []
-    if opening.initial_instruction is not None:
-        sections.append(("## 人の初期指示", opening.initial_instruction))
+    instruction = opening.initial_instruction
+    sections: list[tuple[str, str]] = [
+        ("## 人の初期指示", NONE_TEXT if instruction is None else instruction)
+    ]
     note_lines = "\n".join(f"- {note}" for note in opening.note_files)
     sections.append(("## notes/ のファイル", note_lines or NONE_TEXT))
     handoff = opening.handoff_text.rstrip()

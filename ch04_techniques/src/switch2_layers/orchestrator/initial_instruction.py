@@ -23,4 +23,24 @@ def load_initial_instruction(text: str | None, file: Path | None) -> str | None:
       そうでなければ中身をそのまま返す
     - 両方: InitialInstructionError (cli では argparse の相互排他のグループが先に誤りにする)
     """
-    raise NotImplementedError
+    if text is not None and file is not None:
+        raise InitialInstructionError(
+            "--instruction and --instruction-file cannot be used together"
+        )
+    if text is not None:
+        if not text.strip():
+            raise InitialInstructionError("--instruction must not be empty or blank")
+        return text
+    if file is None:
+        return None
+    try:
+        content = file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise InitialInstructionError(
+            f"--instruction-file cannot be read as UTF-8 text: {file} ({error})"
+        ) from error
+    if not content.strip():
+        raise InitialInstructionError(
+            f"--instruction-file must not be empty or blank: {file}"
+        )
+    return content

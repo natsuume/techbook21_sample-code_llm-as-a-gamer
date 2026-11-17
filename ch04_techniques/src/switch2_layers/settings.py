@@ -26,7 +26,10 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
-from switch2_layers.orchestrator.claude_session_command import ORCHESTRATOR_EFFORT
+from switch2_layers.orchestrator.claude_session_command import (
+    AUTOCOMPACT_MAX_TOKENS,
+    ORCHESTRATOR_EFFORT,
+)
 from switch2_layers.orchestrator.main_loop import (
     DEFAULT_MAX_DECISION_ERRORS,
     DEFAULT_ROTATE_TOKENS,
@@ -272,6 +275,10 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     --threshold-safety は 0 より大きく 1 より小さい値 (0・1・nan は誤り)、--max-safety-errors は 1 以上。
     safety は値の型 (SafetyKind) で決まるため確かめない。
     --progress-window と --stuck-advice-seconds は 0 より大きい有限の値。
+    Orchestrator 型の 6 つの値 (_orchestrator_errors) は、mode に依らず確かめる: --orchestrator-effort は
+    ORCHESTRATOR_EFFORTS のどれか、--rotate-tokens は 1 以上で AUTOCOMPACT_MAX_TOKENS 未満、--turn-timeout は 0 より
+    大きい有限の値、--max-decision-errors と --max-monitor-errors は 1 以上、--monitor-threshold は 0 より大きく 1 より
+    小さい値 (0・1・nan は誤り)。mode は値の型 (RunMode) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -353,6 +360,41 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             "--stuck-advice-seconds must be a finite number more than 0: "
             f"{settings.stuck_advice_seconds}"
+        )
+    errors += _orchestrator_errors(settings)
+    return errors
+
+
+def _orchestrator_errors(settings: RunSettings) -> list[str]:
+    """Orchestrator 型の 6 つの値の範囲の誤りを、RunSettings の属性の順のメッセージのリストにする。"""
+    errors: list[str] = []
+    if settings.orchestrator_effort not in ORCHESTRATOR_EFFORTS:
+        errors.append(
+            f"--orchestrator-effort must be one of {', '.join(ORCHESTRATOR_EFFORTS)}: "
+            f"{settings.orchestrator_effort!r}"
+        )
+    if not 1 <= settings.rotate_tokens < AUTOCOMPACT_MAX_TOKENS:
+        errors.append(
+            f"--rotate-tokens must be 1 or more and less than {AUTOCOMPACT_MAX_TOKENS}: "
+            f"{settings.rotate_tokens}"
+        )
+    if not _is_finite_positive(settings.turn_timeout_s):
+        errors.append(
+            "--turn-timeout must be a finite number more than 0: "
+            f"{settings.turn_timeout_s}"
+        )
+    if settings.max_decision_errors < 1:
+        errors.append(
+            f"--max-decision-errors must be 1 or more: {settings.max_decision_errors}"
+        )
+    if not 0.0 < settings.monitor_threshold < 1.0:
+        errors.append(
+            "--monitor-threshold must be more than 0 and less than 1: "
+            f"{settings.monitor_threshold}"
+        )
+    if settings.max_monitor_errors < 1:
+        errors.append(
+            f"--max-monitor-errors must be 1 or more: {settings.max_monitor_errors}"
         )
     return errors
 
@@ -468,15 +510,25 @@ def orchestrator_api_key_errors(environ: Mapping[str, str]) -> list[str]:
     キーがあれば空のリスト。メッセージに API キーの値は含めない。cli は --mode orchestrator のとき、実機と実行
     ディレクトリーに触れる前にこれを確かめ、誤りがあれば終了コード 2 で終わる。
     """
-    raise NotImplementedError
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--mode {RunMode.ORCHESTRATOR.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV} for the monitor, which always uses Jev "
+            "(even with --safety fake)"
+        )
+    ]
 
 
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety は値の文字列。
-    middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake") にする。
-    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety・mode は値の
+    文字列。middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake"、
+    mode は "advisor" / "orchestrator") にする。
+    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値は、
+    mode に依らず入れる。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
@@ -484,4 +536,5 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value["surface"] = settings.surface.value
     value["deep"] = settings.deep.value
     value["safety"] = settings.safety.value
+    value["mode"] = settings.mode.value
     return value

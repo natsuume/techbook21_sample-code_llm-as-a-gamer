@@ -386,7 +386,7 @@ def create_empty_notes(paths: RunPaths) -> None:
 
     初期ファイル (write_initial_notes の文書) は書かない。
     """
-    raise NotImplementedError
+    paths.notes_dir.mkdir(parents=True, exist_ok=True)
 
 
 def write_initial_instruction(paths: RunPaths, text: str) -> None:
@@ -394,4 +394,5 @@ def write_initial_instruction(paths: RunPaths, text: str) -> None:
 
     orchestrator/ が無ければ作り、file_io.write_text_atomic で置き換えて書く (text はそのまま書く)。
     """
-    raise NotImplementedError
+    paths.orchestrator_dir.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(paths.orchestrator_instruction, text)
