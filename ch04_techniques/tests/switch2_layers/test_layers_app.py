@@ -1310,6 +1310,7 @@ def test_jev_surface_sends_and_records_deep_status_with_mock_jev(tmp_path):
         assert list(recorded) == [
             "instructions",
             "documents",
+            "map",
             "timeline",
             "progress",
             "recent_actions",

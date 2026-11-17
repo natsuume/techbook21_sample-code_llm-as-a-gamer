@@ -28,6 +28,7 @@ from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
 from switch2_layers.frames.surface_frames import BoxDrawingPlan, build_surface_image
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.middle.middle_trigger import MiddleCallReason
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.pad_action import NEUTRAL_ACTION, PadAction
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.records.run_log import RunLog
@@ -607,6 +608,58 @@ def test_recent_actions_are_passed_to_next_request(tmp_path):
     assert recent[0].t == NOW
     # 記録するのは制限に通した後の操作
     assert recent[0].action == PadAction(held=frozenset({"B"}))
+
+
+# --- 現在地 (middle/state.json) と、渡したマップの場所 (surface.jsonl の map_place) ---
+
+
+def test_location_from_middle_state_is_passed_to_the_decider(tmp_path):
+    decider = ScriptedDecider(neutral_output())
+    harness = make_harness(tmp_path, decider)
+    write_state(
+        harness.root,
+        place_name="家の 1 階",
+        current_tile={"x": 3, "y": -2},
+        based_on_t=7.5,
+    )
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    surface_input = decider.inputs[0]
+    assert surface_input.place_name == "家の 1 階"
+    assert surface_input.current_tile == TilePosition(3, -2)
+    assert surface_input.location_based_on_t == 7.5
+    # middle/state.json が無ければ、どれも None
+    (harness.root / "middle" / "state.json").unlink()
+    harness.loop.step()
+    surface_input = decider.inputs[1]
+    assert surface_input.place_name is None
+    assert surface_input.current_tile is None
+    assert surface_input.location_based_on_t is None
+
+
+def test_surface_row_has_the_map_place_of_the_output(tmp_path):
+    decider = ScriptedDecider(
+        SurfaceOutput(action=NEUTRAL_ACTION, map_place="家の 1 階"), neutral_output()
+    )
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    harness.loop.step()
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert [("map_place" in row) for row in rows] == [True, True]
+    # 出力の map_place。マップを渡さなかった出力 (None) は null
+    assert [row["map_place"] for row in rows] == ["家の 1 階", None]
+
+
+def test_failed_request_row_has_null_map_place(tmp_path):
+    decider = ScriptedDecider(RuntimeError("model failed"))
+    harness = make_harness(tmp_path, decider)
+    add_frames(harness, [9.9])
+    harness.loop.step()
+    rows = read_rows(harness.root / "surface.jsonl")
+    assert len(rows) == 1
+    assert "map_place" in rows[0]
+    assert rows[0]["map_place"] is None
 
 
 # --- advisor の状況 (deep の呼び出しの状況) ---

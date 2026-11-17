@@ -66,6 +66,7 @@ from switch2_layers.settings import (
     RunSettings,
     SafetyKind,
     SurfaceKind,
+    SurfaceMapMode,
     run_settings_to_json,
 )
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
@@ -1586,6 +1587,46 @@ def test_run_passes_the_hold_margin_to_the_jev_surface(monkeypatch):
     [(_, parts)] = created
     assert isinstance(parts.surface, JevSurfaceDecider)
     assert parts.surface.settings.hold_margin == 0.3
+
+
+# --- surface に渡すマップ (--surface-map) ---
+
+
+def test_run_surface_map_defaults_to_text():
+    args = build_parser().parse_args(RUN)
+    assert args.surface_map == "text"
+    assert run_settings_from_args(args).surface_map is SurfaceMapMode.TEXT
+
+
+def test_run_accepts_surface_map_none():
+    args = build_parser().parse_args([*RUN, "--surface-map", "none"])
+    assert args.surface_map == "none"
+    assert run_settings_from_args(args).surface_map is SurfaceMapMode.NONE
+
+
+def test_run_rejects_unknown_surface_map(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, "--surface-map", "image"])
+    assert exit_info.value.code == 2
+    assert "--surface-map" in capsys.readouterr().err
+
+
+def test_run_passes_the_surface_map_in_settings(monkeypatch):
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, *ALL_FAKE, "--surface-map", "none"]) == 0
+    [(settings, _)] = created
+    assert settings.surface_map is SurfaceMapMode.NONE
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    assert run_settings_to_json(settings)["surface_map"] == "none"
+
+
+def test_run_passes_the_surface_map_to_the_jev_surface(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    created = stub_hardware_and_app(monkeypatch)
+    assert main([*RUN, "--middle", "fake", "--surface-map", "none"]) == 0
+    [(_, parts)] = created
+    assert isinstance(parts.surface, JevSurfaceDecider)
+    assert parts.surface.settings.surface_map is SurfaceMapMode.NONE
 
 
 # --- 先頭のタスクの問いのしきい値と、詰まりのきっかけの秒数 (--threshold-task・--task-stuck-seconds) ---

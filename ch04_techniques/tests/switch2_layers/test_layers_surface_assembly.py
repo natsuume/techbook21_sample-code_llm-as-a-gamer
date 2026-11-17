@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from switch2_layers.buttons import allowed_buttons
-from switch2_layers.settings import RunSettings, SurfaceKind
+from switch2_layers.settings import RunSettings, SurfaceKind, SurfaceMapMode
 from switch2_layers.surface.box_tracking_state import BoxTrackingState
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_surface import JevSurfaceDecider
@@ -74,4 +74,16 @@ def test_jev_surface_gets_the_hold_margin():
     assembly.close()
     default = build_surface_assembly(RunSettings(), "test-key", http_client=http)
     assert default.decider.settings.hold_margin == RunSettings().hold_margin
+    default.close()
+
+
+def test_jev_surface_gets_the_surface_map():
+    http = httpx.Client(transport=httpx.MockTransport(unused_transport))
+    assembly = build_surface_assembly(
+        RunSettings(surface_map=SurfaceMapMode.NONE), "test-key", http_client=http
+    )
+    assert assembly.decider.settings.surface_map is SurfaceMapMode.NONE
+    assembly.close()
+    default = build_surface_assembly(RunSettings(), "test-key", http_client=http)
+    assert default.decider.settings.surface_map is SurfaceMapMode.TEXT
     default.close()

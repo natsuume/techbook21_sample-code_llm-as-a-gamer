@@ -5,6 +5,7 @@
       "instructions": surface_questions.SURFACE_INSTRUCTIONS,
       "documents": {"tasks": 今実行中のタスク (キューの先頭のタスクの文), "tips": 攻略情報, "controls": 操作説明,
                     "advice": 助言, "game": ゲームの性質},
+      "map": 現在地の場所のマップの文字列 (notes.surface_map_text.build_surface_map_text。渡さなければ空文字列),
       "timeline": {"created": 系列情報の作成時刻のラベル (無ければ NO_TIMELINE_TEXT), "text": 系列情報},
       "progress": {"measured": 画面の停滞の計測の値の時刻のラベル (無ければ NOT_MEASURED_TEXT),
                    "text": 2 つの値の文 (progress.progress_text。無ければ NO_PROGRESS_TEXT)},
@@ -24,14 +25,20 @@ deep_status_text)。画像 (SurfaceInput.frames の JPEG) は assets に入れ�
        前回読んだ一覧と名前が同じで説明が違う対象は、追跡をやめる (forget。3 で問い直す対象になる)
     3. 問い直す対象を box_tracking_state.select_requery_targets で選ぶ
        (2 と 3 は、送る画像を作る前に plan_boxes で済ませていれば、そのときの結果を使う)
-    4. 問いの一覧 (surface_questions.build_surface_questions。先頭のタスクがある (documents.task_id が None でない)
+    4. state の map の文字列と、そのマップの場所の name を決める (JevSurfaceDecider.decide の docstring)。
+       設定の surface_map が NONE なら空文字列と None。TEXT なら notes/map/map.json を
+       notes.map_document.read_map_document で 1 回だけ読み、notes.surface_map_text.build_surface_map_text で作る。
+       マップを作れない (map.json が無い・読めない・形に合わない、現在地が無いかマップに無い) ときも空文字列と None で、
+       decide の失敗にしない
+    5. 問いの一覧 (surface_questions.build_surface_questions。先頭のタスクがある (documents.task_id が None でない)
        ときだけ、surface_questions.build_task_questions(documents.tasks) の 2 問を最後に足す) と state を作る。
-       送る直前に、記録の形の要求
+       送る state と記録の state の map には、4 の同じ文字列を入れる。送る直前に、記録の形の要求
        (surface_types.SurfaceRequest。state は build_recorded_state) を SurfaceInput.request_sink に渡し
        (None なら渡さない)、JevClient.ask で送る
-    5. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)。先頭のタスクの 2 問を
-       送ったら、その答えの確率を出力の task_done_p と task_cancel_p にする (送らなければどちらも None)
-    6. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
+    6. 答えから、操作・deep を呼ぶ種類・情報ラベル・場面転換を決める (surface.action_rules)。先頭のタスクの 2 問を
+       送ったら、その答えの確率を出力の task_done_p と task_cancel_p にする (送らなければどちらも None)。
+       出力の map_place は 4 のマップの場所の name (マップを渡さなかったら None)
+    7. box: 存在の確率が 0.5 未満の対象は追跡をやめ、box を出さない。問い直した対象は Jev の box で追跡を始め直し、
        Jev の box を出す (出どころ jev)。Jev の box が使えない (座標か確信度が 0〜1 の外、幅か高さが 0 以下で
        None) なら、追跡をやめ、box を出さない。ほかの対象は、要求の最新のフレームの位置があれば出す (送る画像に描く
        box と同じ BoxTrackingState.boxes_at の規則。そのフレームで Jev の box から追跡を始め直していればその Jev の
@@ -60,6 +67,11 @@ from switch2_layers.deep.deep_scheduler import (
 )
 from switch2_layers.deep.deep_types import DocumentKind
 from switch2_layers.frames.surface_frames import BoxDrawingPlan
+from switch2_layers.notes.map_document import read_map_document
+from switch2_layers.notes.surface_map_text import (
+    build_surface_map_text,
+    find_map_place,
+)
 from switch2_layers.pad_action import action_to_json
 from switch2_layers.progress.progress_state import ProgressState
 from switch2_layers.progress.progress_text import (
@@ -70,7 +82,9 @@ from switch2_layers.run_directory import RunPaths
 from switch2_layers.settings import (
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_HOLD_MARGIN,
+    DEFAULT_SURFACE_MAP,
     DEFAULT_THRESHOLD_ADVISOR,
+    SurfaceMapMode,
 )
 from switch2_layers.surface.action_rules import (
     decide_deep_kinds,
@@ -154,12 +168,15 @@ class JevSurfaceSettings:
     box_requery_every   前回の問い直しからこの回数の要求がたった対象の box を問い直す (--box-requery-every)
     hold_margin         押し方の選び方の差の値 (--hold-margin)。hold の確率が tap の確率をこの値より大きく上回ったときだけ
                         押し続けにする (surface.action_rules.decide_pad_action に渡す)
+    surface_map         要求の state の map に現在地の場所のマップを入れるか (--surface-map)。TEXT なら
+                        notes.surface_map_text.build_surface_map_text の文字列を入れ、NONE なら空文字列にする
     """
 
     allowed_buttons: frozenset[str]
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
     hold_margin: float = DEFAULT_HOLD_MARGIN
+    surface_map: SurfaceMapMode = DEFAULT_SURFACE_MAP
 
 
 @dataclass(frozen=True)
@@ -357,31 +374,37 @@ def advisor_to_state(
 
 
 def build_surface_state(
-    surface_input: SurfaceInput, references: Sequence[str]
+    surface_input: SurfaceInput, references: Sequence[str], map_text: str = ""
 ) -> dict[str, object]:
     """要求の state (モジュールの docstring の形) を返す。
 
     references は surface_input.frames と同じ順・同じ数の画像の参照文字列。frames の各要素は
     {"label": relative_time_label(frame.t, surface_input.t), "image": 参照文字列}。数が合わなければ ValueError。
+    map_text は state の "map" (documents の直後のキー) にそのまま入れる文字列 (現在地の場所のマップ。渡さなければ
+    空文字列)。既定値の空文字列は、マップを渡さない呼び出し (テストなど) のため。
     """
-    return _state_with_images(surface_input, references)
+    return _state_with_images(surface_input, references, map_text)
 
 
-def build_recorded_state(surface_input: SurfaceInput) -> dict[str, object]:
+def build_recorded_state(
+    surface_input: SurfaceInput, map_text: str = ""
+) -> dict[str, object]:
     """記録に書く state (SurfaceRequest.state) を返す。
 
-    build_surface_state と同じキー・同じ内容で、frames の各要素の image だけを、画像の参照文字列ではなく
-    そのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    build_surface_state(surface_input, 参照文字列, map_text) と同じキー・同じ内容で、frames の各要素の image だけを、
+    画像の参照文字列ではなくそのフレームの SurfaceFrame.file (保存を予約できなかった画像は None) にしたもの。
+    map_text は build_surface_state と同じく state の "map" にそのまま入れる (既定値の空文字列も同じ)。
     """
     return _state_with_images(
-        surface_input, [frame.file for frame in surface_input.frames]
+        surface_input, [frame.file for frame in surface_input.frames], map_text
     )
 
 
 def _state_with_images(
-    surface_input: SurfaceInput, images: Sequence[str | None]
+    surface_input: SurfaceInput, images: Sequence[str | None], map_text: str
 ) -> dict[str, object]:
-    """state (モジュールの docstring の形) を、frames の各要素の image を images の同じ位置の値にして返す。
+    """state (モジュールの docstring の形) を、frames の各要素の image を images の同じ位置の値にし、map を map_text に
+    して返す。
 
     images は surface_input.frames と同じ順・同じ数。数が合わなければ ValueError。
     """
@@ -391,6 +414,7 @@ def _state_with_images(
     return {
         "instructions": SURFACE_INSTRUCTIONS,
         "documents": documents_to_state(surface_input.documents),
+        "map": map_text,
         "timeline": timeline_to_state(
             surface_input.timeline, surface_input.timeline_generated_t, request_t
         ),
@@ -485,8 +509,17 @@ class JevSurfaceDecider:
         直前の plan_boxes の結果が、この要求の番号と場面 ID (surface_input.documents.scene_id) のものなら、対象の一覧と
         問い直す対象はその結果を使う。そうでなければ、ここで決める。
 
+        現在地の場所のマップ: settings.surface_map が NONE なら map_text は空文字列、map_place は None。TEXT なら
+        document = notes.map_document.read_map_document(notes_dir) を 1 回だけ読み、
+        map_text = notes.surface_map_text.build_surface_map_text(document, surface_input.place_name,
+        surface_input.current_tile, surface_input.location_based_on_t, surface_input.documents.task_destination) にする。
+        map_text が空でなければ map_place は notes.surface_map_text.find_map_place(document, surface_input.place_name) の
+        name、空なら None。同じ map_text を build_surface_state と build_recorded_state の両方に渡し、出力の map_place に
+        map_place を入れる。マップを作れないこと (map.json が無い・読めない・形に合わない、place_name が None、場所が
+        マップに無い) は失敗にしない (map_text を空文字列にして、要求は送る)。
+
         送る要求の記録: ask を呼ぶ直前に、surface_input.request_sink (None なら呼ばない) を 1 回だけ
-        SurfaceRequest(要求の番号, client.model, build_recorded_state(surface_input), 問いの一覧) で呼ぶ。
+        SurfaceRequest(要求の番号, client.model, build_recorded_state(surface_input, map_text), 問いの一覧) で呼ぶ。
         要求を作る前に失敗したとき (notes_dir が無いときなど) は呼ばない。ask が失敗したとき
         (送った後の失敗) は呼んだ後に例外が出る。request_sink が例外を出したら、ask を呼ばずにその例外を出す。
         出力の exchange は SurfaceExchange(request_sink に渡したものと同じ SurfaceRequest, ask の答え)。
@@ -528,11 +561,12 @@ class JevSurfaceDecider:
             ),
             *task_questions,
         )
-        state = build_surface_state(surface_input, references)
+        map_text, map_place = self._current_place_map(surface_input, self.notes_dir)
+        state = build_surface_state(surface_input, references, map_text)
         request = SurfaceRequest(
             request_index=request_index,
             model=self.client.model,
-            state=build_recorded_state(surface_input),
+            state=build_recorded_state(surface_input, map_text),
             questions=questions,
         )
         # 送る直前に書く (書けなければ送らない)。送った後の失敗でも、この記録は残る
@@ -556,7 +590,35 @@ class JevSurfaceDecider:
             task_cancel_p=answers.nouls[TASK_CANCEL_QUESTION_NAME]
             if task_questions
             else None,
+            map_place=map_place,
         )
+
+    def _current_place_map(
+        self, surface_input: SurfaceInput, notes_dir: Path
+    ) -> tuple[str, str | None]:
+        """state の map に入れる文字列と、そのマップの場所の name を返す (decide の docstring の「現在地の場所のマップ」)。
+
+        マップを渡さないとき (settings.surface_map が NONE か、文字列が空) は ("", None)。
+        """
+        if self.settings.surface_map is SurfaceMapMode.NONE:
+            return "", None
+        document = read_map_document(notes_dir)
+        place_name = surface_input.place_name
+        map_text = build_surface_map_text(
+            document,
+            place_name,
+            surface_input.current_tile,
+            surface_input.location_based_on_t,
+            surface_input.documents.task_destination,
+        )
+        place = (
+            None
+            if document is None or place_name is None
+            else find_map_place(document, place_name)
+        )
+        if not map_text or place is None:
+            return "", None
+        return map_text, place.name
 
     def _select_targets(
         self, request_index: int, scene_id: str | None
@@ -589,7 +651,7 @@ class JevSurfaceDecider:
     def _decide_boxes(
         self, planned: _RequestTargets, answers: JevAnswers, latest_t: float
     ) -> tuple[Box, ...]:
-        """答えと追跡から、要求の最新のフレーム (時刻 latest_t) の box を対象の一覧の順で返す (decide の流れの 6)。"""
+        """答えと追跡から、要求の最新のフレーム (時刻 latest_t) の box を対象の一覧の順で返す (decide の流れの 7)。"""
         visible = visible_target_names(answers.nouls, planned.targets)
         requery = set(planned.requery_names)
         tracked_boxes = {box.label: box for box in self.tracking.boxes_at(latest_t)}

@@ -3,8 +3,8 @@
 1 回の要求の流れ (step):
     1. フレームを選ぶ: 直近 2 秒以内のフレームから最大 5 枚を選ぶ。2 秒以内のフレームが無ければ要求を送らず、
        NO_FRAME_RETRY_S 秒待って選び直す
-    2. 文書を読む: middle/state.json から現在の場面と系列情報を読み、その場面の文書 (キューの先頭のタスクを含む) を
-       読む。画面の停滞の計測の値 (progress/state.json) も読む
+    2. 文書を読む: middle/state.json から現在の場面と系列情報と現在地 (場所・マス・その時刻) を読み、その場面の文書
+       (キューの先頭のタスクとその行き先を含む) を読む。画面の停滞の計測の値 (progress/state.json) も読む
     3. 画像を作る: 各画像の左上に t を書き込み、追えている box の枠と名前も書き込んで JPEG にする。どの box を
        書き込むかと枠の色は、その要求の書き込み方 (frames.surface_frames.BoxDrawingPlan) で決める (その要求で
        Box を問い直す対象は、最新のフレームの画像に書き込まない)。
@@ -286,7 +286,9 @@ class SurfaceLoop:
            警告を書いて残りの種類を続ける (decide の失敗には数えず、run.jsonl にも書かない)。
            writer = SurfaceRequestWriter(paths.surface_requests_log, clock) を作る。t_sent = clock.now() で
            SurfaceInput(t=now_t, frames, documents, timeline, timeline_generated_t, 直近の操作, advisor_statuses=statuses,
-           request_sink=writer, progress=3 で読んだ値) を decide に渡し、戻ったら (例外でも) t_received = clock.now()。
+           request_sink=writer, progress=3 で読んだ値, place_name=SurfaceContext.place_name,
+           current_tile=SurfaceContext.current_tile, location_based_on_t=SurfaceContext.based_on_t) を decide に渡し、
+           戻ったら (例外でも) t_received = clock.now()。
            ここで stop を確かめる。
            続けて、writer.write_error があれば (surface_requests.jsonl の追記の失敗)、decide の成否に依らず、その例外を
            step の外にそのまま出す (surface.jsonl の追記の失敗と同じ扱い。操作の送信・失敗の回数の変更・
@@ -296,7 +298,7 @@ class SurfaceLoop:
            surface_error {"error": 説明, "count": 続けて失敗した回数} を書き、surface.jsonl に error の行
            (action は null、blocked_buttons・deep_requests・info_labels・boxes は空、scene_changed は False、
            wait_s は DECIDE_ERROR_WAIT_S、request は writer.request_index (要求を送る前に失敗して書いていなければ
-           null)、answers と usage は null) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
+           null)、answers と usage と map_place は null) を書く (書く直前に stop を確かめる)。回数が max_errors に達したら
            on_stop(surface_failure_reason(回数)) を呼ぶ。DECIDE_ERROR (wait_s = DECIDE_ERROR_WAIT_S) を返す
         7. 成功したら、続けて失敗した回数を 0 にし、output_gate.apply(出力の操作) で送る。apply が戻ったら
            (例外でも) stop を確かめる。行の action と blocked_buttons は
@@ -308,7 +310,7 @@ class SurfaceLoop:
         8. surface.jsonl に 1 行書く (書く直前に stop を確かめる。task_id は documents.task_id、deep_requests は出力の
            deep_kinds を DOCUMENT_KINDS の順に並べたもの、wait_s は SurfaceContext.wait_s、request は出力の
            exchange.request.request_index、answers は exchange.answers (usage はその usage)。exchange が None (フェイク)
-           なら request・answers・usage は null)。surface.jsonl と surface_requests.jsonl に書くのはこのスレッドだけ
+           なら request・answers・usage は null。map_place は出力の map_place (None なら null))。surface.jsonl と surface_requests.jsonl に書くのはこのスレッドだけ
         9. 行を書いた後、stop が立っていなければ、先頭のタスクの答えを扱う。時刻 t はこの回の行の t_received:
            a. decision = TaskAnswerStreak.observe(documents.task_id, 出力の task_done_p, 出力の task_cancel_p,
               settings.threshold_task) (答えのあった要求だけを数える。6 の失敗した要求では呼ばず、数も消さない)
@@ -368,6 +370,9 @@ class SurfaceLoop:
             advisor_statuses=advisor_statuses,
             request_sink=writer,
             progress=read_progress_state(parts.paths.progress_state),
+            place_name=context.place_name,
+            current_tile=context.current_tile,
+            location_based_on_t=context.based_on_t,
         )
         t_sent = parts.clock.now()
         try:
@@ -530,6 +535,7 @@ class SurfaceLoop:
             error=description,
             request=request_index,
             answers=None,
+            map_place=None,
         )
         row = surface_row(record)
         if _is_stopped(stop):
@@ -593,6 +599,7 @@ class SurfaceLoop:
             error=error_text,
             request=None if exchange is None else exchange.request.request_index,
             answers=None if exchange is None else exchange.answers,
+            map_place=output.map_place,
         )
         row = surface_row(record)
         if _is_stopped(stop):
