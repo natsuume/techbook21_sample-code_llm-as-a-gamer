@@ -255,6 +255,24 @@ def test_read_saved_tasks_without_destination_key_has_no_destination(tmp_path):
     ]
 
 
+def test_read_saved_tasks_skips_tasks_json_outside_of_notes(tmp_path):
+    notes = tmp_path / "notes"
+    saved = json.dumps({"t": 9.0, "tasks": TASK_ITEMS}, ensure_ascii=False)
+    # 場面の tasks.json が notes/ の外のファイルを指すシンボリックリンク
+    secret = tmp_path / "secret.json"
+    secret.write_text(saved, encoding="utf-8")
+    scene_dir = notes / "scenes" / SCENE
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "tasks.json").symlink_to(secret)
+    # 場面のディレクトリーが notes/ の外のディレクトリーを指すシンボリックリンク
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "tasks.json").write_text(saved, encoding="utf-8")
+    (notes / "scenes" / OTHER).symlink_to(outside)
+    # どちらの場面も読まない
+    assert read_saved_tasks(notes) == []
+
+
 def test_read_saved_tasks_without_scenes_directory(tmp_path):
     notes = tmp_path / "notes"
     assert read_saved_tasks(notes) == []

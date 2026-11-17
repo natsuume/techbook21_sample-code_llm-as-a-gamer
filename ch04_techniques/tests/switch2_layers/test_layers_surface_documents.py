@@ -235,10 +235,32 @@ def test_scene_directory_symlinked_to_outside_is_not_read(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "controls.md").write_text(SECRET, encoding="utf-8")
+    (outside / "tasks.json").write_text(
+        json.dumps({"t": 3.0, "tasks": SCENE_TASK_ITEMS}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (notes / "scenes").mkdir()
     (notes / "scenes" / "scene-001").symlink_to(outside)
     documents = read_surface_documents(notes, "scene-001")
     assert documents.controls == COMMON_CONTROLS
+    # 場面のキューの状態も、notes/ の外のものは読まない
+    assert documents.tasks == ""
+    assert documents.task_id is None
+
+
+def test_tasks_json_symlinked_to_outside_has_no_head_task(tmp_path):
+    notes = make_notes(tmp_path)
+    secret = tmp_path / "secret.json"
+    secret.write_text(
+        json.dumps({"t": 3.0, "tasks": SCENE_TASK_ITEMS}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_scene(notes, "scene-001", {})
+    (notes / "scenes" / "scene-001" / "tasks.json").symlink_to(secret)
+    documents = read_surface_documents(notes, "scene-001")
+    # 読めない tasks.json は無いものとして扱い、先頭のタスクは無い
+    assert documents.tasks == ""
+    assert documents.task_id is None
 
 
 # --- ゲームの性質 (notes/game.md。場面に依らない) ---

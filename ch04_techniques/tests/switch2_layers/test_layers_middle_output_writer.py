@@ -481,11 +481,32 @@ def test_new_tasks_are_not_added_when_the_scene_changed(tmp_path):
     assert board.current_scene_id == OTHER
 
 
-@pytest.mark.parametrize(
-    "previous", [None, previous_state(None), previous_state(SCENE)]
-)
-def test_new_tasks_are_added_unless_the_scene_changed(tmp_path, previous):
-    # 前回の middle/state.json が無い・前回の場面が決まっていない・前回と同じ場面なら、場面は変わっていない
+def test_new_tasks_are_added_when_the_input_scene_is_the_output_scene(tmp_path):
+    # 入力の場面 (前回の middle/state.json の場面) と同じ場面なら、入力で見たキューの末尾に足す
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_labels(root, "町")
+    board = board_with_tasks(paths, "宿屋に入っている")
+    result = write(
+        paths,
+        middle_input(12.0, previous_state=previous_state(SCENE)),
+        output("町", new_tasks=tasks("主人と話している")),
+        12.8,
+        board=board,
+    )
+    assert result is not None
+    assert result.new_tasks_used is True
+    assert [view.text for view in board.tasks(SCENE, 13.0)] == [
+        "宿屋に入っている",
+        "主人と話している",
+    ]
+
+
+@pytest.mark.parametrize("previous", [None, previous_state(None)])
+def test_new_tasks_are_added_without_input_scene_when_the_queue_is_empty(
+    tmp_path, previous
+):
+    # 前回の middle/state.json が無いか、前回の場面が決まっていない。出力の場面のキューが空なら足す
     root = make_run(tmp_path)
     paths = RunPaths(root)
     write_labels(root, "町")
@@ -500,6 +521,50 @@ def test_new_tasks_are_added_unless_the_scene_changed(tmp_path, previous):
     assert result is not None
     assert result.new_tasks_used is True
     assert [view.text for view in board.tasks(SCENE, 13.0)] == ["宿屋に入っている"]
+
+
+@pytest.mark.parametrize("previous", [None, previous_state(None)])
+def test_new_tasks_are_not_added_without_input_scene_when_the_queue_has_tasks(
+    tmp_path, previous
+):
+    # 入力のキューは空に見えるが、出力の場面には middle が見ていないタスクがある: その末尾には足さない
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_labels(root, "町")
+    board = board_with_tasks(paths, "宿屋に入っている")
+    result = write(
+        paths,
+        middle_input(12.0, previous_state=previous),
+        output("町", new_tasks=tasks("主人と話している")),
+        12.8,
+        board=board,
+    )
+    assert result is not None
+    assert result.new_tasks_used is False
+    assert task_ids(board) == ["task-001"]
+    # 行き先の補正は、足さない回も計算する
+    assert result.new_tasks == tasks("主人と話している")
+
+
+def test_queue_emptied_by_cancel_counts_as_empty_without_input_scene(tmp_path):
+    # 入力の場面が決まっていなくても、取り消しの後に出力の場面のキューが空なら足す
+    root = make_run(tmp_path)
+    paths = RunPaths(root)
+    write_labels(root, "町")
+    board = board_with_tasks(paths, "宿屋に入っている")
+    result = write(
+        paths,
+        middle_input(12.0, reasons=("cancel_requested",)),
+        output(
+            "町", new_tasks=tasks("主人と話している"), cancel_task_ids=("task-001",)
+        ),
+        12.8,
+        board=board,
+    )
+    assert result is not None
+    assert result.cancel_used is True
+    assert result.new_tasks_used is True
+    assert task_ids(board) == ["task-002"]
 
 
 # --- キューの部品の操作: 取り消し ---
@@ -547,7 +612,7 @@ def test_cancel_is_done_before_adding(tmp_path):
     board.add(SCENE, tasks("D", "E"), 1.0)
     result = write(
         paths,
-        middle_input(12.0, reasons=("stuck",)),
+        middle_input(12.0, previous_state=previous_state(SCENE), reasons=("stuck",)),
         output("町", new_tasks=tasks("F"), cancel_task_ids=("task-001",)),
         12.8,
         board=board,

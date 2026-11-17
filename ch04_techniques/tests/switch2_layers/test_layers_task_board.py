@@ -644,6 +644,21 @@ def test_restore_uses_the_largest_number_in_saved_tasks(tmp_path):
     )
 
 
+def test_restore_skips_tasks_json_outside_of_notes(tmp_path):
+    paths = RunPaths(tmp_path)
+    # 場面の tasks.json が notes/ の外のファイルを指すシンボリックリンク
+    secret = tmp_path / "secret.json"
+    write_json(
+        secret, {"t": 40.0, "tasks": [json_item("task-009", "宿屋に入る", 10.0, 12.5)]}
+    )
+    json_path = tasks_json_path(paths, SCENE)
+    json_path.parent.mkdir(parents=True)
+    json_path.symlink_to(secret)
+    board = restore_task_board(paths)
+    # 作り直しで、その場面のタスクを読まない
+    assert board.tasks(SCENE, 50.0) == ()
+
+
 def test_restore_empty_run_directory(tmp_path):
     paths = RunPaths(tmp_path)
     board = restore_task_board(paths)

@@ -11,6 +11,8 @@ tasks.json の形 (キーはこの順):
 tasks.md の形:
     未完了のタスクを、キューの順に `- <文>` の行で並べたもの (行き先は書かない)。無ければ空のファイル
 どちらも置き換えの書き込み (file_io.write_json_atomic・write_text_atomic) で書く。
+保存済みの tasks.json は notes.note_reader.read_note_text で読み、シンボリックリンクを解決した先が notes/ の外のものは
+読まない (surface と middle が読むほかの文書と同じ)。
 """
 
 import json
@@ -24,6 +26,7 @@ from switch2_layers.notes.note_paths import (
     scene_note,
     tasks_json_note,
 )
+from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.tasks.task_queue import TaskDestination, TaskView
 
 
@@ -96,8 +99,10 @@ def read_saved_tasks(notes_dir: Path) -> list[TaskView]:
     """notes_dir の下に保存された tasks.json から、未完了のタスクを読む。
 
     notes_dir/scenes/ の下の、名前が場面 ID の形 (note_paths.is_scene_id) のディレクトリーを名前の順に見て、
-    tasks.json があれば、その tasks の各項目を TaskView (scene_id はディレクトリーの名前、destination は項目の
-    destination を destination_from_json で読んだ値 (キーが無ければ None)、ほかは項目の同じ名前の値) にする。
+    tasks.json を notes.note_reader.read_note_text(notes_dir, note_paths.tasks_json_note(場面 ID)) で読む。読んだ文字列が
+    空 (無い・シンボリックリンクを解決した先が notes/ の外・UTF-8 でない) なら、その場面を読み飛ばす。
+    読めたら、その tasks の各項目を TaskView (scene_id はディレクトリーの名前、destination は項目の destination を
+    destination_from_json で読んだ値 (キーが無ければ None)、ほかは項目の同じ名前の値) にする。
     ディレクトリーの順、配列の順に並べて返す。
     notes_dir/scenes/ が無ければ空のリスト。tasks.json の読み込みの例外 (壊れた JSON など) はそのまま出す。
     """
@@ -109,10 +114,11 @@ def read_saved_tasks(notes_dir: Path) -> list[TaskView]:
         scene_id = directory.name
         if not (directory.is_dir() and is_scene_id(scene_id)):
             continue
-        json_path = notes_dir / tasks_json_note(scene_id)
-        if not json_path.is_file():
+        # notes/ の外を指す tasks.json は、無いものとして読み飛ばす
+        text = read_note_text(notes_dir, tasks_json_note(scene_id))
+        if not text:
             continue
-        value = json.loads(json_path.read_text(encoding="utf-8"))
+        value = json.loads(text)
         for item in value["tasks"]:
             saved.append(
                 TaskView(

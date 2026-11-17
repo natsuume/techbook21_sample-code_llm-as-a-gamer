@@ -8,9 +8,13 @@
        2a. 現在の場面を、出力で決まった場面にする (決まらなければ場面なし)
        2b. 取り消し: その回の呼ばれた理由に cancel_requested か stuck があるか、出力の is_stuck が真のときだけ、
            出力の cancel_task_ids で取り消す。それ以外の回の cancel_task_ids は使わない (middle/calls.jsonl に残すだけ)
-       2c. 追加: 出力の場面が決まっていて、場面が変わっていない回だけ、行き先を直した (middle.task_destination_fix)
-           new_tasks を出力の場面のキューに足す。場面が変わったとは、前回の middle/state.json の scene_id と出力の
-           場面 ID がどちらも決まっていて違うこと。行き先の補正は、足さない回も計算する
+       2c. 追加: 出力の場面が決まっていて、次のどちらかのときだけ、行き先を直した (middle.task_destination_fix)
+           new_tasks を出力の場面のキューに足す (middle が入力で見たキューの末尾にだけ足すため)
+             - 入力の場面 (前回の middle/state.json の scene_id) が出力の場面と同じ
+             - 入力の場面が決まっていない (前回の middle/state.json が無い場合を含む。入力のキューは空に見える) で、
+               2b の後の時点で出力の場面のキューが空
+           それ以外 (場面が変わった回と、入力の場面が決まっていないのに出力の場面のキューにタスクがある回) は足さない。
+           行き先の補正は、足さない回も計算する
        2d. 2b で 1 つ以上取り消し、2c の後に出力の場面のキューが空なら、trigger_notify("queue_empty") で middle を
            呼ぶきっかけを知らせる (出力の場面が決まらない回と、trigger_notify が None のときは知らせない)
     3. middle/state.json を置き換える
@@ -119,9 +123,13 @@ def write_middle_output(
           board.cancel(output.cancel_task_ids, generated_t) で取り消す (cancel_used = True)。それ以外は呼ばない
           (cancel_used = False)
        c. middle.task_destination_fix.fix_new_tasks(output.new_tasks, middle_input.map_document) で行き先を直す
-          (足さない回も計算する)。1 の場面 ID があり、場面が変わっていなければ (middle_input.previous_state の scene_id と
-          1 の場面 ID がどちらも None でなく違う、でなければ)、board.add(1 の場面 ID, 直した new_tasks, generated_t) で
-          足す (new_tasks_used = True)。それ以外は足さない (new_tasks_used = False)
+          (足さない回も計算する)。入力の場面を middle_input.previous_state の scene_id (previous_state が None なら
+          None) とする。1 の場面 ID があり、次のどちらかのときだけ、board.add(1 の場面 ID, 直した new_tasks,
+          generated_t) で足す (new_tasks_used = True):
+            - 入力の場面が 1 の場面 ID と同じ
+            - 入力の場面が None で、b の後の board.tasks(1 の場面 ID, generated_t) が空
+          それ以外 (1 の場面 ID が無い回・入力の場面と 1 の場面 ID が違う回・入力の場面が None で 1 の場面のキューに
+          タスクがある回) は足さない (new_tasks_used = False)
        d. b で 1 つ以上取り消し、c の後に 1 の場面 ID があって board.tasks(1 の場面 ID, generated_t) が空なら、
           trigger_notify("queue_empty") を呼ぶ (trigger_notify が None なら呼ばない)
     3. MiddleState(generated_t, based_on_t=middle_input.t, scene_id, scene_name (前後の空白を除いたもの), is_stuck,
@@ -197,7 +205,11 @@ def _update_task_board(
     trigger_notify: Callable[[MiddleCallReason], None] | None,
     generated_t: float,
 ) -> _TaskBoardUpdate:
-    """キューの部品を操作する (write_middle_output の 2 の a〜d)。scene_id は 1 で決めた場面 ID (決まらなければ None)。"""
+    """キューの部品を操作する (write_middle_output の 2 の a〜d)。scene_id は 1 で決めた場面 ID (決まらなければ None)。
+
+    c の追加は、scene_id があり、入力の場面 (middle_input.previous_state の scene_id。previous_state が None なら None)
+    が scene_id と同じか、入力の場面が None で b の後の scene_id のキューが空のときだけ行う。
+    """
     raise NotImplementedError
 
 
