@@ -47,11 +47,13 @@ from switch2_harness.features import (
     BASE_AGENT_COMMANDS,
     FEATURES,
     MULTI_FRAME_FEATURE,
+    REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
 )
 from switch2_harness.harness_config import DEFAULT_GOAL, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
+from switch2_harness.reflection_critic import StartCritic, start_critic_process
 from switch2_harness.screen_recorder import read_latest_last_new_screen_time
 from switch2_harness.workspace import (
     NotAWorkspaceError,
@@ -73,8 +75,10 @@ class CliDependencies:
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
     start_process: claude の起動 (本番は agent_launcher.start_claude_process)
+    start_critic: 振り返りの要素の批評役 (claude -p) の起動 (本番は reflection_critic.start_critic_process)
     environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
-    read_template: CLAUDE.md と、要素が置くファイルの最初の内容のテンプレートの読み込み (本番は instructions.read_package_template)
+    read_template: CLAUDE.md と、要素が置くファイルの最初の内容と、批評役への指示のテンプレートの読み込み
+        (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     """
 
@@ -84,6 +88,7 @@ class CliDependencies:
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     start_process: StartProcess
+    start_critic: StartCritic
     environ: Mapping[str, str]
     read_template: ReadTemplate
     available: tuple[Feature, ...]
@@ -103,6 +108,7 @@ def production_dependencies() -> CliDependencies:
         now=_local_now,
         sleep=time.sleep,
         start_process=start_claude_process,
+        start_critic=start_critic_process,
         environ=os.environ,
         read_template=read_package_template,
         available=FEATURES,
@@ -233,6 +239,18 @@ def _look_last_new_screen_time(
     return None
 
 
+def _look_reflection_notice(
+    paths: WorkspacePaths, available: tuple[Feature, ...]
+) -> bool:
+    """look に渡す reflection_notice を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に振り返りの要素
+    (features.REFLECTION_FEATURE) があれば True、無ければ False。
+    """
+    config = read_config(paths.harness_file, available)
+    return REFLECTION_FEATURE in config.features
+
+
 def _look_multi_frame(paths: WorkspacePaths, available: tuple[Feature, ...]) -> bool:
     """look に渡す multi_frame を返す。
 
@@ -255,6 +273,7 @@ def _dispatch(
             clock=deps.clock,
             frames_changed=_look_frames_changed(paths, deps.available),
             last_new_screen_time=_look_last_new_screen_time(paths, deps.available),
+            reflection_notice=_look_reflection_notice(paths, deps.available),
             multi_frame=_look_multi_frame(paths, deps.available),
             sleep=deps.sleep,
         )
@@ -283,6 +302,8 @@ def _dispatch(
             send=deps.send,
             base_env=deps.environ,
             available=deps.available,
+            start_critic=deps.start_critic,
+            read_template=deps.read_template,
         )
     raise ValueError(f"unknown command: {command}")
 
@@ -305,6 +326,8 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     screen_recorder.read_latest_last_new_screen_time(<作業ディレクトリー>) を呼ぶ関数を last_new_screen_time として渡す
     (最後の新しい画面から stagnation_alert.STAGNATION_SECONDS 秒以上たっていたら、look の応答の直後に知らせの行を表示する)。
     無効なら渡さない。
+    さらに look は、振り返りの要素 (features.REFLECTION_FEATURE) が有効なら reflection_notice=True を渡す
+    (批評を notes.md に書いた後の最初の look で、振り返りの知らせの行を表示する)。無効なら False。
     また look は、複数フレームの要素 (features.MULTI_FRAME_FEATURE) が有効なら multi_frame=True を渡し
     (続けて撮った画面を並べた画像を保存し、look の応答の直後にそのパスの行を表示する)、無効なら multi_frame=False を渡す。
     どちらの場合も、撮影の間の待ちに使う deps.sleep を sleep として渡す。

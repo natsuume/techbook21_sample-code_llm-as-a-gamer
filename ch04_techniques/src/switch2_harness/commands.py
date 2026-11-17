@@ -12,8 +12,9 @@
 
 look / press / status / finish は、成否によらず records/events.jsonl にイベントを 1 つずつ (finish は 2 つ) 記録する。
 複数フレームの要素で続けて撮る look も、look のイベントは 1 つにする。
-ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録する
-(time は look のイベントと同じ、elapsed_s は 0.0)。
+ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録し、
+振り返りの知らせを出した look は、さらにその後に command が reflection-notice のイベントも記録する
+(どちらも time は look のイベントと同じ、elapsed_s は 0.0)。
 イベントの time は送信の直前の clock()、elapsed_s は送信の直後の clock() との差、ok は応答が error で始まらないこと。
 複数フレームの look では、time は 1 回目の送信の直前の clock()、elapsed_s は最後に送った撮影の応答の直後の clock() との差
 (成功なら 6 回の撮影と、その間の待ちの全体) にする。
@@ -42,9 +43,11 @@ from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import (
     FEATURES,
+    REFLECTION_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
     agent_commands,
+    agent_file_appends,
     agent_writable_files,
     validate_feature_names,
 )
@@ -54,7 +57,11 @@ from switch2_harness.harness_config import (
     format_created_at,
     read_config,
 )
-from switch2_harness.instructions import ReadTemplate, render_instructions
+from switch2_harness.instructions import (
+    ReadTemplate,
+    read_package_template,
+    render_instructions,
+)
 from switch2_harness.multi_frame import (
     MULTI_FRAMES_DIR_NAME,
     multi_frame_line,
@@ -64,6 +71,13 @@ from switch2_harness.multi_frame import (
     write_tile,
 )
 from switch2_harness.press_args import press_args_error, split_press_args
+from switch2_harness.reflection import NOTICE_LINE, build_notice_event, notice_pending
+from switch2_harness.reflection_critic import (
+    Reflecting,
+    StartCritic,
+    reflecting_with_critic,
+    start_critic_process,
+)
 from switch2_harness.screen_change import load_sample
 from switch2_harness.screen_recorder import ScreenRecording, recording_screens
 from switch2_harness.session_report import (
@@ -179,6 +193,21 @@ def _stagnation_alert_lines(
     return (alert_line(seconds),)
 
 
+def _reflection_notice_lines(
+    paths: WorkspacePaths, look: CommandEvent, frame: str
+) -> tuple[str, ...]:
+    """成功した look のイベント look について、振り返りの知らせを出すなら記録して、知らせの行を返す。
+
+    event_log.read_events(paths.events_file) を読み、reflection.notice_pending が False なら、何も記録せず () を返す。
+    True なら reflection.build_notice_event(look.time, frame) を paths.events_file に追記し、
+    (reflection.NOTICE_LINE,) を返す。
+    """
+    if not notice_pending(read_events(paths.events_file)):
+        return ()
+    append_event(paths.events_file, build_notice_event(look.time, frame))
+    return (NOTICE_LINE,)
+
+
 def _shoot_multi_frame_and_record(
     paths: WorkspacePaths,
     frame_path: Path,
@@ -247,7 +276,10 @@ def handle_init(
     2. HarnessConfig(game, goal, 検証した名前, format_created_at(now())) を作る
     3. instructions.render_instructions(config, read_template, available) で CLAUDE.md の本文を作る
     4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
-       (置換はしない)、{<name>: <本文>} を作る
+       (置換はしない)、{<name>: <本文>} を作る。続けて、features.agent_file_appends(検証した名前, available) の順に、
+       各 FileAppend について read_template(<template_file>) を読み (置換はしない)、辞書の <name> の本文を
+       `<本文の末尾の改行を除いたもの>\\n\\n<足す内容の末尾の改行を除いたもの>\\n` にする
+       (例: "# メモ\\n" に "## 振り返り\\n" を足すと "# メモ\\n\\n## 振り返り\\n")
     5. workspace.create_workspace で作る。4. の辞書を initial_files に渡す。
        WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
     6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
@@ -261,11 +293,15 @@ def handle_init(
     )
     paths = workspace_paths(directory)
     instructions_text = render_instructions(config, read_template, available)
-    # 要素のファイルの最初の内容は、テンプレートを置換せずにそのまま書く
+    # 要素のファイルの最初の内容と、その末尾に足す内容は、テンプレートを置換せずにそのまま書く
     initial_files = {
         writable_file.name: read_template(writable_file.template_file)
         for writable_file in agent_writable_files(names, available)
     }
+    for file_append in agent_file_appends(names, available):
+        text = initial_files[file_append.name].rstrip("\n")
+        addition = read_template(file_append.template_file).rstrip("\n")
+        initial_files[file_append.name] = f"{text}\n\n{addition}\n"
     try:
         create_workspace(paths, config, instructions_text, initial_files)
     except WorkspaceNotEmptyError as e:
@@ -283,6 +319,7 @@ def handle_look(
     clock: Callable[[], float],
     frames_changed: FramesChanged | None = None,
     last_new_screen_time: Callable[[], float | None] | None = None,
+    reflection_notice: bool = False,
     multi_frame: bool = False,
     sleep: Callable[[float], None] = time.sleep,
 ) -> CommandResult:
@@ -316,8 +353,14 @@ def handle_look(
     最後のイベントを今回の look とはみなさない)。previous は今回の look より前のイベントだけなので、今回の知らせの行は入らない。
     応答が error なら履歴は出さない。
 
-    stdout の行の順は、応答、知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。
-    どの場合も終了コードは上と同じ。
+    reflection_notice は振り返りの要素 (reflection) が有効なときに True にする。False なら振り返りの知らせを出さない。
+    True で応答が error でなければ、停滞の知らせを記録した後に event_log.read_events(paths.events_file) を読み、
+    reflection.notice_pending(<イベント>) が True なら、event_log.append_event(paths.events_file,
+    reflection.build_notice_event(<今回の look のイベントの time>, <今回の frame>)) で記録し、
+    reflection.NOTICE_LINE の行を出す。応答が error なら知らせを出さず、記録もしない (次の成功した look で出す)。
+
+    stdout の行の順は、応答、停滞の知らせの行 (出すときだけ)、振り返りの知らせの行 (出すときだけ)、
+    行動履歴の行 (frames_changed を渡したときだけ)。どの場合も終了コードは上と同じ。
 
     複数フレーム: multi_frame は複数フレームの要素 (multi-frame) が有効なときに True にする。sleep は撮影の間の待ちに使う
     (本番は time.sleep)。下の multi_frame.<名前> は、モジュール switch2_harness.multi_frame の定数と関数を指す。
@@ -338,9 +381,10 @@ def handle_look(
         6. 成功なら、multi_frame.write_tile(<6 つのパス>, multi_frame.tile_path_for(frame_path, multi_frames_dir)) で
            並べた画像を書き、1〜5 回目のパスを unlink(missing_ok=True) で消す
         7. stdout の行の順は、応答、multi_frame.multi_frame_line(<並べた画像の絶対パス>)、
-           知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。終了コードは 0。
-           停滞の知らせと行動履歴の扱いは上と同じ (look のイベントは 1 つなので、今回の frame を持つ look のイベントを
-           後ろから探す処理がそのまま使える)
+           停滞の知らせの行 (出すときだけ)、振り返りの知らせの行 (出すときだけ)、
+           行動履歴の行 (frames_changed を渡したときだけ)。終了コードは 0。
+           停滞の知らせ・振り返りの知らせ・行動履歴の扱いは上と同じ (look のイベントは 1 つなので、
+           今回の frame を持つ look のイベントを後ろから探す処理がそのまま使える)
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()
@@ -365,9 +409,13 @@ def handle_look(
         frame_path.unlink(missing_ok=True)
         return _reply_result(reply)
     alert_lines = _stagnation_alert_lines(paths, look, frame, last_new_screen_time)
+    notice_lines = (
+        _reflection_notice_lines(paths, look, frame) if reflection_notice else ()
+    )
     if frames_changed is None:
         return CommandResult(
-            exit_code=0, stdout_lines=(reply, *multi_frame_lines, *alert_lines)
+            exit_code=0,
+            stdout_lines=(reply, *multi_frame_lines, *alert_lines, *notice_lines),
         )
     events = read_events(paths.events_file)
     index = next(
@@ -379,7 +427,14 @@ def handle_look(
         events[:index], events[index].time, frame, frames_changed
     )
     return CommandResult(
-        exit_code=0, stdout_lines=(reply, *multi_frame_lines, *alert_lines, *history)
+        exit_code=0,
+        stdout_lines=(
+            reply,
+            *multi_frame_lines,
+            *alert_lines,
+            *notice_lines,
+            *history,
+        ),
     )
 
 
@@ -488,6 +543,9 @@ def handle_run(
     base_env: Mapping[str, str],
     available: tuple[Feature, ...] = FEATURES,
     screen_recording: ScreenRecording | None = None,
+    reflecting: Reflecting | None = None,
+    start_critic: StartCritic = start_critic_process,
+    read_template: ReadTemplate = read_package_template,
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
 
@@ -514,6 +572,13 @@ def handle_run(
        撮影ごとに新しい画面かを判定して状態ファイルを書く (look がそれを読んで停滞の知らせを出す)。
        記録は最初の起動の前に始まり、run_agent_until が返った後
        (後片付けの up ALL の後) か、例外で抜けるときに止まる。
+       設定の features に features.REFLECTION_FEATURE があれば、画面の記録の with の内側で、
+       振り返り (reflecting(paths, config)。None なら reflection_critic.reflecting_with_critic(paths, config, clock=clock,
+       base_env=base_env, start_critic=start_critic, read_template=read_template)) の with にも入り、その中で
+       run_agent_until を呼ぶ。無ければ contextlib.nullcontext() に入る。
+       start_critic と read_template は reflecting が None のときだけ使う (本番は cli が CliDependencies の値を渡す)。
+       振り返りは、run の開始から 5 分ごとに批評役を起動して notes.md の「振り返り」の節を書き換え、
+       画面の記録と同じく、最初の起動の前に始まり、後片付けの up ALL の後か、例外で抜けるときに止まる。
        後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら
        RUN_INTERRUPTED_MESSAGE を stderr に出し、終了コード 1 (例外は外に出さない)
@@ -543,8 +608,23 @@ def handle_run(
         recording = screen_recording(paths)
     else:
         recording = recording_screens(paths, send=send, clock=clock)
+    reflection: contextlib.AbstractContextManager[object]
+    if REFLECTION_FEATURE not in config.features:
+        reflection = contextlib.nullcontext()
+    elif reflecting is not None:
+        reflection = reflecting(paths, config)
+    else:
+        reflection = reflecting_with_critic(
+            paths,
+            config,
+            clock=clock,
+            base_env=base_env,
+            start_critic=start_critic,
+            read_template=read_template,
+        )
     try:
-        with interrupts_as_exceptions(), recording:
+        # 振り返りは、画面の記録の with の内側で動かす
+        with interrupts_as_exceptions(), recording, reflection:
             outcome = run_agent_until(
                 minutes,
                 paths,
