@@ -12,7 +12,9 @@ from harness_fakes import FakeClock, FakeDaemon, make_paths
 from switch2_harness.screen_recorder import (
     SAMPLE_INTERVAL_S,
     SHOT_TIMEOUT_S,
+    latest_run_dir,
     next_run_dir,
+    read_latest_last_new_screen_time,
     record_sample,
     recording_screens,
     run_recording,
@@ -104,6 +106,18 @@ def count_complete_lines(index_file: Path) -> int:
     return index_file.read_text(encoding="utf-8").count("\n")
 
 
+def read_last_new_screen(run_dir: Path) -> dict[str, object]:
+    text = (run_dir / "last-new-screen.json").read_text(encoding="utf-8")
+    return json.loads(text)
+
+
+def write_last_new_screen_file(run_dir: Path, time: float) -> None:
+    """run_dir を作り、最後の新しい画面の時刻が time の状態ファイル last-new-screen.json を書く。"""
+    run_dir.mkdir(parents=True)
+    state = {"index": 1, "time": time, "file": "000001.png"}
+    (run_dir / "last-new-screen.json").write_text(json.dumps(state), encoding="utf-8")
+
+
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock(START_TIME)
@@ -141,6 +155,55 @@ def test_next_run_dir_creates_missing_parents(tmp_path):
     run_dir = next_run_dir(samples_dir)
     assert run_dir == samples_dir / "run-001"
     assert run_dir.is_dir()
+
+
+# --- latest_run_dir ---
+
+
+def test_latest_run_dir_is_none_without_the_samples_dir(tmp_path):
+    samples_dir = tmp_path / "screen-samples"
+    assert latest_run_dir(samples_dir) is None
+    assert not samples_dir.exists()
+
+
+def test_latest_run_dir_is_none_in_an_empty_directory(tmp_path):
+    samples_dir = tmp_path / "screen-samples"
+    samples_dir.mkdir()
+    assert latest_run_dir(samples_dir) is None
+
+
+def test_latest_run_dir_returns_the_largest_number(tmp_path):
+    samples_dir = tmp_path / "screen-samples"
+    (samples_dir / "run-001").mkdir(parents=True)
+    (samples_dir / "run-007").mkdir()
+    assert latest_run_dir(samples_dir) == samples_dir / "run-007"
+
+
+def test_latest_run_dir_ignores_entries_with_other_names(tmp_path):
+    samples_dir = tmp_path / "screen-samples"
+    (samples_dir / "run-002").mkdir(parents=True)
+    for name in ["run-01", "run-abc", "walk-009", "run-009-old"]:
+        (samples_dir / name).mkdir()
+    # 名前は規則に合うが、ディレクトリーでないもの
+    (samples_dir / "run-999").write_text("not a directory", encoding="utf-8")
+    assert latest_run_dir(samples_dir) == samples_dir / "run-002"
+
+
+# --- read_latest_last_new_screen_time ---
+
+
+def test_read_latest_last_new_screen_time_without_records(tmp_path):
+    paths = make_paths(tmp_path / "play")
+    assert read_latest_last_new_screen_time(paths) is None
+
+
+def test_read_latest_last_new_screen_time_reads_the_latest_run(tmp_path):
+    paths = make_paths(tmp_path / "play")
+    samples_dir = paths.records_dir / "screen-samples"
+    # 時刻の大小ではなく、run の番号の大きい方の状態ファイルを読む
+    write_last_new_screen_file(samples_dir / "run-001", 2000.0)
+    write_last_new_screen_file(samples_dir / "run-002", 1500.0)
+    assert read_latest_last_new_screen_time(paths) == 1500.0
 
 
 # --- sample_file_name ---
@@ -199,6 +262,7 @@ def test_run_recording_records_until_stopped(run_dir, clock):
         "000001.png",
         "000002.png",
         "000003.png",
+        "last-new-screen.json",
         "samples.jsonl",
     ]
 
@@ -222,8 +286,21 @@ def test_run_recording_does_not_skip_image_numbers_after_an_error(run_dir, clock
     assert sorted(path.name for path in run_dir.iterdir()) == [
         "000001.png",
         "000002.png",
+        "last-new-screen.json",
         "samples.jsonl",
     ]
+
+
+def test_run_recording_writes_the_first_sample_as_the_last_new_screen(run_dir, clock):
+    stop = threading.Event()
+    # ShotWritingDaemon は毎回同じ画像を書くので、新しい画面は最初の撮影だけになる
+    daemon = ShotWritingDaemon(clock, stop=stop, stop_at_call=3, max_calls=10)
+    run_recording(run_dir, stop, send=daemon, clock=clock, interval_s=0.0)
+    assert read_last_new_screen(run_dir) == {
+        "index": 1,
+        "time": START_TIME + 0.5,
+        "file": "000001.png",
+    }
 
 
 def test_run_recording_waits_at_most_the_interval_when_the_clock_goes_back(

@@ -404,6 +404,123 @@ def test_look_without_frames_changed_prints_only_the_reply(paths, clock):
     assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
 
 
+# --- look の停滞の知らせ ---
+
+ALERT_LINE_135 = "停滞の知らせ: 新しい画面が 135 秒出ていません"
+
+
+class RecordingLastNewScreenTime:
+    """last_new_screen_time の fake。呼ばれた回数を calls に数え、value を返す。"""
+
+    def __init__(self, value: float | None) -> None:
+        self.value = value
+        self.calls = 0
+
+    def __call__(self) -> float | None:
+        self.calls += 1
+        return self.value
+
+
+def test_look_prints_no_alert_without_a_last_new_screen(paths, clock):
+    last_new_screen_time = RecordingLastNewScreenTime(None)
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        last_new_screen_time=last_new_screen_time,
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+    assert [event.command for event in read_events(paths.events_file)] == ["look"]
+    assert last_new_screen_time.calls == 1
+
+
+def test_look_prints_and_records_the_alert_after_120_seconds(paths, clock):
+    # look のイベントの time (送信の前の START_TIME) の 135.7 秒前。
+    # 送信の後の時計 (START_TIME + 0.5) で計ると 136 秒になる
+    last_new_screen_time = RecordingLastNewScreenTime(START_TIME - 135.7)
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        last_new_screen_time=last_new_screen_time,
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(
+        exit_code=0, stdout_lines=(f"ok {frame_path}", ALERT_LINE_135)
+    )
+    assert read_events(paths.events_file) == [
+        CommandEvent(
+            time=START_TIME,
+            command="look",
+            args=(),
+            reply=f"ok {frame_path}",
+            ok=True,
+            elapsed_s=0.5,
+            frame="frames/000001.png",
+        ),
+        CommandEvent(
+            time=START_TIME,
+            command="stagnation-alert",
+            args=("135",),
+            reply=ALERT_LINE_135,
+            ok=True,
+            elapsed_s=0.0,
+            frame="frames/000001.png",
+        ),
+    ]
+    assert last_new_screen_time.calls == 1
+
+
+def test_look_prints_no_alert_before_120_seconds(paths, clock):
+    # look のイベントの time の 119.5 秒前。送信の後の時計で計ると 120 秒になる
+    last_new_screen_time = RecordingLastNewScreenTime(START_TIME - 119.5)
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        last_new_screen_time=last_new_screen_time,
+    )
+    frame_path = paths.frames_dir / "000001.png"
+    assert result == CommandResult(exit_code=0, stdout_lines=(f"ok {frame_path}",))
+    assert [event.command for event in read_events(paths.events_file)] == ["look"]
+
+
+def test_failed_look_prints_no_alert_and_does_not_read_the_last_new_screen(
+    paths, clock
+):
+    last_new_screen_time = RecordingLastNewScreenTime(START_TIME - 500.0)
+    daemon = FakeDaemon(clock, {"shot": "error no frame yet"})
+    result = handle_look(
+        paths, send=daemon, clock=clock, last_new_screen_time=last_new_screen_time
+    )
+    assert result == CommandResult(exit_code=1, stdout_lines=("error no frame yet",))
+    assert [event.command for event in read_events(paths.events_file)] == ["look"]
+    assert last_new_screen_time.calls == 0
+
+
+def test_look_prints_the_alert_before_the_history(paths, clock):
+    record_earlier_actions(paths)
+    result = handle_look(
+        paths,
+        send=FakeDaemon(clock),
+        clock=clock,
+        frames_changed=RecordingFramesChanged(changed=True),
+        last_new_screen_time=RecordingLastNewScreenTime(START_TIME - 135.7),
+    )
+    frame_path = paths.frames_dir / "000002.png"
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(
+            f"ok {frame_path}",
+            ALERT_LINE_135,
+            HISTORY_HEADER,
+            "- 20 秒前 look 000001.png",
+            "- 10 秒前 press tap A: 画面の変化 あり",
+        ),
+    )
+
+
 # --- press ---
 
 

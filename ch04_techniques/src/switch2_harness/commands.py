@@ -1,7 +1,8 @@
 """switch2-harness の各サブコマンド (init / look / press / status / finish / report / run) の処理本体。
 
 デーモンへの送信 (send)・時計 (clock / now)・待機 (sleep)・プロセスの起動 (start_process)・
-テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed)・画面の記録 (screen_recording) は引数で受け取る。
+テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed)・画面の記録 (screen_recording)・
+最後の新しい画面の時刻の読み込み (last_new_screen_time) は引数で受け取る。
 各処理は表示する行と終了コードを CommandResult で返し、表示は cli が行う。
 
 表示の規則:
@@ -10,6 +11,8 @@
     - 終了コードは成功 0、失敗 1
 
 look / press / status / finish は、成否によらず records/events.jsonl にイベントを 1 つずつ (finish は 2 つ) 記録する。
+ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録する
+(time は look のイベントと同じ、elapsed_s は 0.0)。
 イベントの time は送信の直前の clock()、elapsed_s は送信の直後の clock() との差、ok は応答が error で始まらないこと。
 これらの送信には待ち時間の上限を付けない (send に timeout_s を渡さない。長い tap はデーモンの応答まで時間がかかるため)。
 """
@@ -57,6 +60,11 @@ from switch2_harness.session_report import (
     summary_to_dict,
 )
 from switch2_harness.signal_guard import RunTerminated, interrupts_as_exceptions
+from switch2_harness.stagnation_alert import (
+    alert_line,
+    alert_seconds,
+    build_alert_event,
+)
 from switch2_harness.workspace import (
     WorkspaceNotEmptyError,
     WorkspacePaths,
@@ -112,25 +120,51 @@ def _send_and_record(
     send: SendCommand,
     clock: Callable[[], float],
     frame_on_success: str | None = None,
-) -> str:
-    """request を送り、イベントを記録して応答を返す。frame は応答が error でないときだけ frame_on_success にする。"""
+) -> CommandEvent:
+    """request を送り、イベントを記録して、記録したイベントを返す (応答は .reply)。
+
+    frame は応答が error でないときだけ frame_on_success にする。
+    """
     started = clock()
     reply = send(request)
     elapsed_s = clock() - started
     ok = not is_error_reply(reply)
-    append_event(
-        paths.events_file,
-        CommandEvent(
-            time=started,
-            command=command,
-            args=event_args,
-            reply=reply,
-            ok=ok,
-            elapsed_s=elapsed_s,
-            frame=frame_on_success if ok else None,
-        ),
+    event = CommandEvent(
+        time=started,
+        command=command,
+        args=event_args,
+        reply=reply,
+        ok=ok,
+        elapsed_s=elapsed_s,
+        frame=frame_on_success if ok else None,
     )
-    return reply
+    append_event(paths.events_file, event)
+    return event
+
+
+def _stagnation_alert_lines(
+    paths: WorkspacePaths,
+    look: CommandEvent,
+    frame: str,
+    last_new_screen_time: Callable[[], float | None] | None,
+) -> tuple[str, ...]:
+    """成功した look のイベント look について、停滞の知らせを出すなら記録して、知らせの行を返す。
+
+    last_new_screen_time が None、それが None を返す、
+    または stagnation_alert.alert_seconds(look.time, <最後の新しい画面の時刻>) が None なら、何も記録せず () を返す。
+    そうでなければ stagnation_alert.build_alert_event(look.time, frame, <秒数>) を paths.events_file に追記し、
+    (stagnation_alert.alert_line(<秒数>),) を返す。
+    """
+    if last_new_screen_time is None:
+        return ()
+    last_new_time = last_new_screen_time()
+    if last_new_time is None:
+        return ()
+    seconds = alert_seconds(look.time, last_new_time)
+    if seconds is None:
+        return ()
+    append_event(paths.events_file, build_alert_event(look.time, frame, seconds))
+    return (alert_line(seconds),)
 
 
 def _reply_result(*replies: str) -> CommandResult:
@@ -191,6 +225,7 @@ def handle_look(
     send: SendCommand,
     clock: Callable[[], float],
     frames_changed: FramesChanged | None = None,
+    last_new_screen_time: Callable[[], float | None] | None = None,
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
 
@@ -202,16 +237,29 @@ def handle_look(
     イベント: command="look"、args=()、frame=<作業ディレクトリーからの相対パス (例: "frames/000001.png")>。
     応答が error なら frame は None。
 
-    frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら上のとおり応答だけを出す。
+    last_new_screen_time は停滞の知らせの要素 (stagnation-alert) が有効なときに渡す、最後の新しい画面の時刻
+    (epoch 秒。分からなければ None) を返す関数。None なら呼ばず、知らせを出さない。
+    応答が error なら呼ばず、知らせを出さない。応答が error でなければ last = last_new_screen_time() を呼び、
+    last が None なら知らせを出さない。None でなければ
+    seconds = stagnation_alert.alert_seconds(<今回の look のイベントの time>, last) を求め、None なら知らせを出さない。
+    seconds があれば、event_log.append_event(paths.events_file,
+    stagnation_alert.build_alert_event(<今回の look のイベントの time>, <今回の frame>, seconds)) で、
+    look の行の後に知らせを記録し、stagnation_alert.alert_line(seconds) の行を応答の行の直後に stdout に出す。
+
+    frames_changed は行動履歴の要素 (action-history) が有効なときに渡す。None なら行動履歴を出さない。
     None でなく応答が error でなければ、イベントを記録した後に event_log.read_events(paths.events_file) を読み、
     今回の frame を持つ look のイベントを後ろから探して今回の look (current) とし、それより前のイベントを previous として、
-    action_history.build_history_lines(previous, current.time, <今回の frame>, frames_changed) の行を、
-    応答の行の後に stdout に続ける (並行に走ったコマンドのイベントが今回の look の後ろに追記されていることがあるため、
-    最後のイベントを今回の look とはみなさない)。応答が error なら履歴は出さない。どちらでも終了コードは上と同じ。
+    action_history.build_history_lines(previous, current.time, <今回の frame>, frames_changed) の行を stdout に続ける
+    (並行に走ったコマンドのイベントが今回の look の後ろに追記されていることがあるため、
+    最後のイベントを今回の look とはみなさない)。previous は今回の look より前のイベントだけなので、今回の知らせの行は入らない。
+    応答が error なら履歴は出さない。
+
+    stdout の行の順は、応答、知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。
+    どの場合も終了コードは上と同じ。
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()
-    reply = _send_and_record(
+    look = _send_and_record(
         paths,
         "look",
         (),
@@ -220,11 +268,13 @@ def handle_look(
         clock=clock,
         frame_on_success=frame,
     )
+    reply = look.reply
     if is_error_reply(reply):
         frame_path.unlink(missing_ok=True)
         return _reply_result(reply)
+    alert_lines = _stagnation_alert_lines(paths, look, frame, last_new_screen_time)
     if frames_changed is None:
-        return _reply_result(reply)
+        return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines))
     events = read_events(paths.events_file)
     index = next(
         i
@@ -234,7 +284,7 @@ def handle_look(
     history = build_history_lines(
         events[:index], events[index].time, frame, frames_changed
     )
-    return CommandResult(exit_code=0, stdout_lines=(reply, *history))
+    return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines, *history))
 
 
 def handle_press(
@@ -270,10 +320,10 @@ def handle_press(
             ),
         )
         return CommandResult(exit_code=1, stderr_lines=(rejection,))
-    reply = _send_and_record(
+    event = _send_and_record(
         paths, "press", event_args, list(event_args), send=send, clock=clock
     )
-    return _reply_result(reply)
+    return _reply_result(event.reply)
 
 
 def handle_status(
@@ -283,8 +333,8 @@ def handle_status(
 
     イベント: command="status"、args=()。
     """
-    reply = _send_and_record(paths, "status", (), ["status"], send=send, clock=clock)
-    return _reply_result(reply)
+    event = _send_and_record(paths, "status", (), ["status"], send=send, clock=clock)
+    return _reply_result(event.reply)
 
 
 def handle_finish(
@@ -299,7 +349,7 @@ def handle_finish(
     replies = [
         _send_and_record(
             paths, "finish", request, list(request), send=send, clock=clock
-        )
+        ).reply
         for request in (("up", "ALL"), ("tap", "HOME"))
     ]
     return _reply_result(*replies)
@@ -364,8 +414,9 @@ def handle_run(
        設定の features に features.STAGNATION_ALERT_FEATURE があれば、interrupts_as_exceptions の with の内側で
        画面の記録 (screen_recording(paths)。None なら screen_recorder.recording_screens(paths, send=send, clock=clock)) の
        with に入り、その中で run_agent_until を呼ぶ。無ければ記録の代わりに contextlib.nullcontext() に入る。
-       記録は records/screen-samples/run-<NNN>/ に、裏で一定の間隔で撮った画面の縮小画像と時刻を書く
-       (エージェントには何も知らせない)。記録は最初の起動の前に始まり、run_agent_until が返った後
+       記録は records/screen-samples/run-<NNN>/ に、裏で一定の間隔で撮った画面の縮小画像と時刻を書き、
+       撮影ごとに新しい画面かを判定して状態ファイルを書く (look がそれを読んで停滞の知らせを出す)。
+       記録は最初の起動の前に始まり、run_agent_until が返った後
        (後片付けの up ALL の後) か、例外で抜けるときに止まる。
        後片付けは run_agent_until の finally で済んでいるので、
        RunTerminated (SIGTERM・SIGHUP) で抜けたら RUN_TERMINATED_MESSAGE を、KeyboardInterrupt (Ctrl-C) で抜けたら

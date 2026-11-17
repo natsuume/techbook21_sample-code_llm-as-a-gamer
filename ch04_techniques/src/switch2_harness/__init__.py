@@ -21,7 +21,8 @@
     screen_change     2 枚の画像の変化の割合と PNG の読み込み
     session_report    イベントから実験の集計を作り、表示用のテキストにする
     action_history    行動履歴の要素: look の後に表示する、直近の行動 (look と press) の行を作る
-    screen_recorder   停滞の知らせの要素: run の間に裏で画面を撮り、縮小画像と時刻を記録する
+    stagnation_alert  停滞の知らせの要素: 撮影が新しい画面かの判定と、look に出す知らせの組み立て
+    screen_recorder   停滞の知らせの要素: run の間に裏で画面を撮って記録し、撮影ごとに新しい画面かを判定する
     agent_launcher    claude -p の起動引数の組み立てと、時間を区切った起動
     process_tree      SIGKILL で止める claude の子孫の控えと、pid の再利用を見分けた停止
     signal_guard     run の間の SIGTERM・SIGHUP の例外化と、後片付けの間の割り込みの無視

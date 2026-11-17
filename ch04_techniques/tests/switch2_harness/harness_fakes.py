@@ -30,8 +30,9 @@ FAKE_NOTES = Feature(
 )
 FAKE_FEATURES: tuple[Feature, ...] = (FAKE_HISTORY, FAKE_NOTES)
 
-# テスト用の、CLAUDE.md に節を足さない要素 (instruction_file が None)。名前は本物の停滞の知らせと同じで、
-# run が画面を記録するかの判定 (要素の名前で決まる) にも使う。FAKE_FEATURES には含めず、使うテストで available に足す
+# テスト用の、CLAUDE.md に節を足さない要素 (instruction_file が None。本物の停滞の知らせは節を足す)。
+# 名前は本物の停滞の知らせと同じで、run が画面を記録するかと look が知らせを出すかの判定 (どちらも要素の名前で決まる) にも使う。
+# FAKE_FEATURES には含めず、使うテストで available に足す
 FAKE_STAGNATION_ALERT = Feature(
     name=STAGNATION_ALERT_FEATURE,
     title="停滞の知らせ",

@@ -2,7 +2,8 @@
 
 要素は先行研究の手法を 1 つずつ足したもので、有効にすると、要素によって、CLAUDE.md に節が加わるか、
 エージェントが使えるサブコマンドが増えるか、エージェントが書き換えられるファイルが増えるか、
-サブコマンドの出力が変わるか、run の間に裏で画面が記録される (エージェントには知らせない)。
+サブコマンドの出力が変わる (行動履歴と停滞の知らせ。停滞の知らせは、run の間に裏で撮った画面をもとに、
+look の出力に知らせの行を足す)。
 すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
 
@@ -48,8 +49,8 @@ ACTION_HISTORY_FEATURE = "action-history"
 NOTES_FEATURE = "notes"
 NOTES_FILE_NAME = "notes.md"
 
-# 停滞の知らせの要素の名前。有効にすると、run の間に裏で画面を撮り、縮小画像と時刻を records/screen-samples/ に記録する
-# (screen_recorder)。エージェントへの知らせは出さず、CLAUDE.md にも節を足さない
+# 停滞の知らせの要素の名前。有効にすると、run の間に裏で画面を撮って records/screen-samples/ に記録し (screen_recorder)、
+# 撮影ごとに新しい画面かを判定する。新しい画面が 120 秒出ていないと、look が知らせの行を表示する (stagnation_alert)
 STAGNATION_ALERT_FEATURE = "stagnation-alert"
 
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順になる
@@ -72,7 +73,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         name=STAGNATION_ALERT_FEATURE,
         title="停滞の知らせ",
-        instruction_file=None,
+        instruction_file="stagnation-alert.md",
         commands=(),
     ),
 )

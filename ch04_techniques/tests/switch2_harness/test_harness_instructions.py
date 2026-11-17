@@ -122,6 +122,21 @@ def test_render_instructions_with_notes_adds_its_section():
     assert text.endswith("\n\n" + section + "\n")
 
 
+def test_read_package_template_reads_stagnation_alert_md():
+    text = read_package_template("stagnation-alert.md")
+    assert text.startswith("## 停滞の知らせ\n")
+
+
+def test_render_instructions_with_stagnation_alert_adds_its_section():
+    config = make_config((STAGNATION_ALERT_FEATURE,))
+    text = render_instructions(config, read_package_template)
+    assert "\n\n## 停滞の知らせ\n\n" in text
+    assert text.index("## 守ること") < text.index("## 停滞の知らせ")
+    # 節のテンプレートには置換する $game・$goal が無いため、本文はテンプレートのまま最後に続く
+    section = read_package_template("stagnation-alert.md").rstrip("\n")
+    assert text.endswith("\n\n" + section + "\n")
+
+
 def test_read_package_template_reads_notes_initial_md():
     assert read_package_template("notes-initial.md") == (
         "# メモ\n"
