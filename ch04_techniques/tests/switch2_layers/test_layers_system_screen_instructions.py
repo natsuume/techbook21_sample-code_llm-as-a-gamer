@@ -171,11 +171,15 @@ def test_home_menu_section_describes_the_parental_controls_button():
 
 
 def test_instructions_describe_the_software_list_screen():
-    software_list = screen_section("ソフトの一覧 (もっとみる)")
+    # ソフトの一覧は見本の画面 software_list で、見出しに見本の名前を使う
+    assert "\n## software_list (ソフトの一覧「もっとみる」)\n" in (
+        SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS
+    )
+    software_list = screen_section("software_list (")
     for phrase in [
-        # 照合の結果は none だが、ゲームの画面ではない
-        "照合の結果は none",
-        "ゲームの画面では",
+        # 照合の結果は software_list で、操作の screen にもそのまま書く
+        "照合の結果は software_list です",
+        "(software_list) をそのまま書きます",
         # 目印
         "「ソフト」「グループ」のタブ",
         "じょうご",
@@ -195,16 +199,16 @@ def test_instructions_describe_the_software_list_screen():
         assert phrase in software_list, phrase
 
 
-def test_prepare_text_does_not_treat_the_software_list_as_the_game_screen():
+def test_prepare_text_finds_the_software_on_the_software_list_screen():
     text = goal_text(SystemGoal.PREPARE)
-    marker = (
-        "ソフトの一覧の目印 (「ソフト」「グループ」のタブ、右下の「B もどる」) が映って"
-    )
-    # 手順 1 (HOME を押す) と手順 8 (done) の条件文そのものに、一覧の目印が映っていないことを入れる
-    for number, action in [(1, "HOME を短押し"), (8, "done を true にします")]:
-        line = step_line(text, number)
-        assert marker in line, number
-        assert line.index(marker) < line.index(action), number
+    # ソフトの一覧は照合で software_list と見分けるため、手順 1 と 8 の条件はゲームの画面 (none) のまま
+    assert step_line(text, 1).startswith("1. ゲームの画面 (none) が映っていて、")
+    for number in [1, 8]:
+        assert "ソフトの一覧の目印" not in step_line(text, number), number
+    # 手順 6 は、ソフトの一覧 (照合の結果は software_list) でも指定のソフトを探す
+    assert "(照合の結果は software_list)" in step_line(text, 6)
+    # none の画面にソフトの一覧を含めない
+    assert "ソフトの一覧" not in screen_section("none (")
 
 
 def test_prepare_text_opens_more_software_when_the_software_is_not_on_the_top_row():
@@ -228,9 +232,11 @@ def test_prepare_text_writes_the_registration_state_first():
 def test_recover_and_clean_up_do_not_open_more_software(goal):
     text = goal_text(goal)
     assert "「もっとみる」を開きません" in text
-    # ソフトの一覧が映っていたら、B で HOME メニューに戻る
+    # ソフトの一覧 (software_list) が映っていたら、B で HOME メニューに戻る
     assert any(
-        "ソフトの一覧" in line and "B を短押し" in line and "HOME メニューに戻" in line
+        "ソフトの一覧 (software_list)" in line
+        and "B を短押し" in line
+        and "HOME メニューに戻" in line
         for line in text.splitlines()
     )
 
@@ -309,3 +315,16 @@ def test_input_section_describes_the_deep_advice():
     index = titles.index("- deep の助言")
     assert titles[index - 1] == "- この段階で送った A・B・X"
     assert titles[index + 1] == "- 今の画像"
+
+
+def test_output_section_waits_instead_of_pressing_home_again():
+    # HOME を送った直後の画像がまだゲームの画面なら、HOME を押し直さずに wait を返す (押し直すと HOME メニューが閉じる)
+    for phrase in [
+        "最後の呼び出しで HOME を送っていて",
+        "HOME を押し直さずに",
+        "wait (3 秒)",
+        "HOME が届かなかったものとして",
+    ]:
+        assert phrase in SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS, phrase
+    for goal in [SystemGoal.PREPARE, SystemGoal.CLEAN_UP]:
+        assert "押し直さずに wait を返します" in goal_text(goal), goal

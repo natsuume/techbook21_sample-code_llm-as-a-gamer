@@ -38,6 +38,7 @@ SCREEN_VALUES = {
     "controller_order": 0.0,
     "user_select": 0.01,
     "software_close": 0,
+    "software_list": 0,
 }
 
 
