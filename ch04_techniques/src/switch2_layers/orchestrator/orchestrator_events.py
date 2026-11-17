@@ -4,7 +4,8 @@ OrchestratorEvents (take_events の戻り値): 主ループが次の入力を作
 (case_hits・monitor_ends・discarded_action_count・blocked_buttons) と、取り出した時点の値 (running・
 remaining_action_count・macros・monitor) を持つ。作った後は、Mapping の欄 (macros) の中身を書き換えない。
 MainActionsRun (main_actions_run の戻り値): 主ループの空でない actions の操作の列 1 つの、始めた・最後に離した・終えた
-時刻。主ループは、これを見て前のターンの操作の列が終わるのを待つ (orchestrator.action_settle)。
+時刻。主ループは、これと frames/latest/ の最新のフレームの時刻を見て、前のターンの操作の列が終わり、その後に撮った
+フレームが届くのを待つ (orchestrator.action_settle)。
 """
 
 from collections.abc import Mapping

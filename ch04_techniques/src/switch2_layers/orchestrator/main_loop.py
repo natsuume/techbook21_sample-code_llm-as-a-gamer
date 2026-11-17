@@ -1,8 +1,8 @@
 """Orchestrator 型の主ループ (OrchestratorMainLoop)。
 
 主ループの Claude Code (claude -p) を stream-json の入出力で開いたままにし、前の判断の操作の列が終わって画面が
-落ち着いたら (actions が空なら、すぐ) 次の画面と出来事を渡し、各ターンの最後の JSON を、操作の実行と監視の部品
-(OrchestratorController。parse_decision と apply) に渡す。
+落ち着き、操作の後に撮ったフレームが届いたら (actions が空なら、すぐ) 次の画面と出来事を渡し、各ターンの最後の
+JSON を、操作の実行と監視の部品 (OrchestratorController。parse_decision と apply) に渡す。
 セッションの使用量がしきい値を超えたら、引き継ぎを書かせてからセッションを入れ替える。
 
 使う部品:
@@ -10,7 +10,7 @@
     parent_skill_names       親のディレクトリーのスキルの名前 (skillOverrides で off にする)
     skill_copy               本体の操作のスキルとゲームの内容のスキルを .claude/skills/ に写す
     orchestrator_instructions  変わらない指示 (--append-system-prompt) と引き継ぎの依頼の文
-    action_settle            前のターンの操作の列が終わって落ち着くのを待つ
+    action_settle            前のターンの操作の列が終わり、操作の後に撮ったフレームが届くのを待つ
     turn_input               入力のテキストと画像
     claude_stream_session    子プロセスの起動・標準入力・標準出力・終了
     stream_messages          stream-json の行の読み方と、標準入力に送る行の形
@@ -195,7 +195,8 @@ class OrchestratorMainLoopParts:
     parse_decision         応答の本文から JSON を読む関数 (DecisionParser の渡し方。テストではフェイク)
     controller             操作の実行と監視の部品 (テストではフェイク)
     latest_frames          最新の一定間隔のフレームの画像を、新しい順にまとめて返す関数 (run では
-                           frames.latest_frames.LatestFrames.snapshot。テストではフェイク)。入力を作るときに 1 回呼ぶ
+                           frames.latest_frames.LatestFrames.snapshot。テストではフェイク)。入力を作るときに 1 回呼ぶ。
+                           前のターンの操作の列を待つ間も、最新のフレームの時刻を見るために繰り返し呼ぶ
     initial_instruction    人の初期指示。無ければ None (各セッションの最初の入力に入れる)
     run_log                run.jsonl (orchestrator_session_start・orchestrator_session_end・
                            orchestrator_decision_error を書く)
@@ -343,10 +344,15 @@ class OrchestratorMainLoop:
                (理由 close) 戻る。
                stop が立っていれば、セッションを終えて (理由 close) 戻る。
                次の入力を作る時点: 空でない actions の Decision を apply したら、待ち始めた時刻 (clock.now()) を覚え、
-               action_settle.wait_for_settled_actions(controller.main_actions_run, clock, stop, READ_POLL_S) で、
-               その操作の列 (マクロとコードの手順を含む) が終わり、最後にボタンとスティックを離してから
-               action_settle.ACTIONS_SETTLE_S 秒たつまで待つ (監視の操作は待たない)。待っている間に stop が立ったら、
+               action_settle.wait_for_settled_actions(controller.main_actions_run,
+               frames/latest/ の最新のフレームの時刻を返す関数 (frames.latest_frames.newest_frame_t(latest_frames())),
+               clock, stop, READ_POLL_S) で待つ。待つのは、その操作の列 (マクロとコードの手順を含む) が終わり、最後に
+               ボタンとスティックを離してから action_settle.ACTIONS_SETTLE_S 秒たち、さらに、離した時刻 +
+               ACTIONS_SETTLE_S (ミリ秒に丸めた値) より厳密に後に撮ったフレームが latest_frames に入るまで
+               (action_settle.actions_settled。押す操作の無い列では、フレームの条件を使わず、列が終わるまで)。
+               監視の操作は待たない。待っている間に stop が立ったら (フレームが来ないまま待っているときも)、
                待つのをやめ、次の入力を送らずにセッションを終えて (理由 close) 戻る (次の入力の行は書かない)。
+               入力に添える画像は、待ち終えた後に latest_frames を呼び直して選ぶ (待ちを通したフレームも入る)。
                actions が空の Decision と、JSON の誤り (DecisionError) のときは待たない (待ち始めた時刻は、次の入力を
                作った時刻と同じ)。引き継ぎの依頼も次の入力なので、同じく待ってから送る。
                使用量が rotate_tokens を超えていれば (ちょうどなら超えない)、orchestrator_instructions.

@@ -421,7 +421,8 @@ def no_events() -> OrchestratorEvents:
     )
 
 
-# 既定の主ループの操作の列の時刻: 偽の時計の最初の時刻 (START_T) より前に終わって落ち着いた列 (主ループは待たない)
+# 既定の主ループの操作の列の時刻: 偽の時計の最初の時刻 (START_T) より前に終わって落ち着いた列。t=1.5 より後に撮った
+# フレームがあれば待たない (既定の最新のフレームは t=6〜10、ほかのテストのフレームも t=1.5 より後)
 SETTLED_RUN = MainActionsRun(started_t=1.0, released_t=1.2, ended_t=1.2)
 # 終わっていない列 (テストが FakeController.run を書き換えるまで、主ループは待ち続ける)
 RUNNING_RUN = MainActionsRun(started_t=START_T, released_t=None, ended_t=None)
@@ -567,21 +568,13 @@ def label(t: float) -> str:
 class FakeLatestFrames:
     """latest_frames (LatestFrames.snapshot) のフェイク。
 
-    frames      呼ばれるたびに返す、新しい順の最新のフレームの画像 (sequence が無いとき。テストが書き換えてよい)
-    sequence    呼ばれるたびに、前から 1 つずつ返す画像の組の並び。使い切ったら frames を返す
+    frames      呼ばれるたびに返す、新しい順の最新のフレームの画像 (テストが書き換えて、新しいフレームが入ったことにする)
     """
 
-    def __init__(
-        self,
-        frames: tuple[LatestFrame, ...],
-        sequence: list[tuple[LatestFrame, ...]] | None = None,
-    ):
+    def __init__(self, frames: tuple[LatestFrame, ...]):
         self.frames = frames
-        self.sequence = list(sequence) if sequence is not None else []
 
     def snapshot(self) -> tuple[LatestFrame, ...]:
-        if self.sequence:
-            return self.sequence.pop(0)
         return self.frames
 
 
@@ -994,15 +987,17 @@ def test_first_input_without_initial_instruction_says_there_is_none(tmp_path):
 
 
 def test_next_input_has_the_latest_five_frames_at_that_time(tmp_path):
-    # 入力を作るたびに、その時点の最新の 5 枚をまとめて 1 回受け取る
+    # 入力を作るたびに、その時点の最新の 5 枚をまとめて受け取る
     first_set = newest_first(1.0, 2.0, 3.0, 4.0, 5.0)
     second_set = newest_first(7.0, 8.0, 9.0, 10.0, 11.0)
-    fake = FakeClaude([[Reply(), Hang()]])
-    harness = make_harness(
-        tmp_path,
-        fake,
-        latest=FakeLatestFrames(second_set, sequence=[first_set, second_set]),
-    )
+    latest = FakeLatestFrames(first_set)
+
+    def new_frames_arrive(process: FakeClaudeProcess) -> None:
+        # 1 つ目の入力を作った後に、新しいフレームが入る
+        latest.frames = second_set
+
+    fake = FakeClaude([[Reply(before=new_frames_arrive), Hang()]])
+    harness = make_harness(tmp_path, fake, latest=latest)
     harness.start()
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
     harness.finish()
@@ -1648,7 +1643,7 @@ def wait_fields(row: dict) -> tuple[object, object, object]:
     return (row.get("t_wait_start"), row.get("wait_s"), row.get("t_sent"))
 
 
-def test_next_input_waits_until_the_actions_end_and_settle(tmp_path):
+def test_next_input_waits_for_the_actions_to_end_and_a_frame_after_them(tmp_path):
     controller = FakeController(runs=[RUNNING_RUN])
     fake = FakeClaude([[Reply(), Hang()]])
     harness = make_harness(tmp_path, fake, controller=controller)
@@ -1662,18 +1657,50 @@ def test_next_input_waits_until_the_actions_end_and_settle(tmp_path):
     harness.clock.now = 11.299
     main_loop_reads_again(harness)
     assert len(inputs_of(fake, 0)) == 1
-    harness.clock.now = 11.3
+    # 0.3 秒たっても、t=11.3 より後に撮ったフレームが frames/latest/ に無いうちは作らない
+    # (最新のフレームは t=10.0 のまま)
+    harness.clock.now = 11.35
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # ちょうど t=11.3 に撮ったフレームでも、まだ作らない (厳密に後だけ通す)
+    harness.latest.frames = newest_first(9.0, 10.0, 11.0, 11.2, 11.3)
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    # t=11.4 のフレームが入ったら作る。そのフレームも添える 5 枚に入る
+    harness.clock.now = 11.5
+    harness.latest.frames = newest_first(10.0, 11.0, 11.2, 11.3, 11.4)
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
     harness.finish()
-    assert "## 時刻\nt=11.300" in text_of(inputs_of(fake, 0)[1])
+    second = inputs_of(fake, 0)[1]
+    assert "## 時刻\nt=11.500" in text_of(second)
+    assert labels_of(second) == [label(t) for t in (10.0, 11.0, 11.2, 11.3, 11.4)]
     # 待ち始めた時刻 (result を当てた時刻) と、次の入力を作った時刻 (t_sent) を書く。最初のターンは待たない
     assert [wait_fields(row) for row in turns_rows(harness.root)] == [
         (START_T, 0.0, START_T),
-        (START_T, 1.3, 11.3),
+        (START_T, 1.5, 11.5),
     ]
 
 
-def test_handoff_request_also_waits_until_the_actions_end_and_settle(tmp_path):
+def test_actions_without_a_press_do_not_wait_for_a_new_frame(tmp_path):
+    # wait だけの列 (押す操作が無い) は、フレームの条件を使わず、列が終わったら次の入力を作る
+    wait_only = MainActionsRun(started_t=8.0, released_t=None, ended_t=9.0)
+    controller = FakeController(runs=[wait_only])
+    fake = FakeClaude([[Reply(), Hang()]])
+    harness = make_harness(
+        tmp_path,
+        fake,
+        controller=controller,
+        latest=FakeLatestFrames(newest_first(4.0, 5.0, 6.0, 7.0, 8.0)),
+    )
+    harness.start()
+    assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
+    harness.finish()
+    assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)
+
+
+def test_handoff_request_also_waits_for_the_actions_and_a_frame_after_them(
+    tmp_path,
+):
     controller = FakeController(runs=[RUNNING_RUN])
     fake = FakeClaude([[Reply(calls=(130_000,)), Hang()]])
     harness = make_harness(tmp_path, fake, controller=controller)
@@ -1681,14 +1708,19 @@ def test_handoff_request_also_waits_until_the_actions_end_and_settle(tmp_path):
     assert wait_until(lambda: controller.applied == [DECISION])
     main_loop_reads_again(harness)
     assert len(inputs_of(fake, 0)) == 1
+    # 列は t=10.5 に終わった。t=10.8 より後に撮ったフレームが入るまで、引き継ぎの依頼も送らない
     controller.run = MainActionsRun(started_t=START_T, released_t=10.5, ended_t=10.5)
-    harness.clock.now = 10.8
+    harness.clock.now = 10.9
+    main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
+    harness.clock.now = 11.0
+    harness.latest.frames = newest_first(7.0, 8.0, 9.0, 10.0, 10.9)
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 2)
     harness.finish()
     assert text_of(inputs_of(fake, 0)[1]) == handoff_request_text()
     handoff = turns_rows(harness.root)[1]
     assert handoff["kind"] == "handoff"
-    assert wait_fields(handoff) == (START_T, 0.8, 10.8)
+    assert wait_fields(handoff) == (START_T, 1.0, 11.0)
 
 
 def test_empty_actions_send_the_next_input_without_waiting(tmp_path):
@@ -1746,13 +1778,28 @@ def test_first_input_after_the_handoff_is_sent_without_waiting(tmp_path):
     assert wait_fields(first_of_second_session) == (START_T, 0.0, START_T)
 
 
-def test_stop_while_waiting_for_the_actions_ends_without_the_next_input(tmp_path):
-    controller = FakeController(runs=[RUNNING_RUN])
+@pytest.mark.parametrize(
+    "run",
+    [
+        RUNNING_RUN,
+        # 列は終わって時計も過ぎたが、その後に撮ったフレーム (t=9.3 より後) が来ない。最新のフレームは t=9.0
+        MainActionsRun(started_t=8.0, released_t=9.0, ended_t=9.0),
+    ],
+    ids=["actions_running", "no_frame_after_the_actions"],
+)
+def test_stop_while_waiting_for_the_actions_ends_without_the_next_input(tmp_path, run):
+    controller = FakeController(runs=[run])
     fake = FakeClaude([[Reply(), Hang()]])
-    harness = make_harness(tmp_path, fake, controller=controller)
+    harness = make_harness(
+        tmp_path,
+        fake,
+        controller=controller,
+        latest=FakeLatestFrames(newest_first(5.0, 6.0, 7.0, 8.0, 9.0)),
+    )
     harness.start()
     assert wait_until(lambda: controller.applied == [DECISION])
     main_loop_reads_again(harness)
+    assert len(inputs_of(fake, 0)) == 1
     # 待っている間に止まる理由が起きたら、待つのをやめて止まる
     harness.finish()
     assert len(inputs_of(fake, 0)) == 1
@@ -1772,6 +1819,7 @@ def test_turn_timeout_does_not_count_the_wait_for_the_actions(tmp_path):
     # 待っている間に --turn-timeout (120 秒) より長い時間がたつ
     controller.run = MainActionsRun(started_t=START_T, released_t=199.0, ended_t=199.0)
     harness.clock.now = 200.0
+    harness.latest.frames = newest_first(199.0, 199.2, 199.4, 199.6, 199.8)
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 3)
     harness.finish()
     turns = turns_rows(harness.root)
@@ -1787,7 +1835,8 @@ def test_turn_timeout_does_not_count_the_wait_for_the_actions(tmp_path):
 
 
 def test_input_text_has_the_start_and_end_of_the_previous_actions(tmp_path):
-    # 偽の時計の最初の時刻より前に終わって落ち着いた列 (待たずに次の入力を作る)
+    # 偽の時計の最初の時刻より前に終わって落ち着き、その後に撮ったフレーム (既定の最新は t=10.0) もある列
+    # (待たずに次の入力を作る)
     run = MainActionsRun(started_t=8.0, released_t=9.25, ended_t=9.25)
     controller = FakeController(runs=[run])
     fake = FakeClaude([[Reply(), Hang()]])

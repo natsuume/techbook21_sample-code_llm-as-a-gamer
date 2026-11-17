@@ -14,11 +14,14 @@ Orchestrator 型の run だけで使う (advisor 型では作らず、frames/lat
                                書き直すので、同じ画像が 2 つの番号に並ぶ瞬間も無い。まだ LATEST_FRAME_COUNT 枚に満たない
                                間は、ある分の番号だけを書く (無い番号のファイルは作らない)
     受け取る (snapshot)        主ループは、入力を作るときに snapshot を 1 回呼び、同じ時点の最新の画像をまとめて受け取る
-                               (ファイルを 1 枚ずつ読まない)
+                               (ファイルを 1 枚ずつ読まない)。前のターンの操作の列が終わるのを待つ間も snapshot を読み、
+                               最新のフレームの時刻 (newest_frame_t) で、操作の後に撮ったフレームが入ったかを確かめる
+                               (orchestrator.action_settle のフレームの条件)
 add_image と add は書き出しスレッドから、snapshot は主ループのスレッドから呼ぶ。メモリーの読み書きは 1 つのロックの中で
 行い、ファイルの書き込み (I/O) はロックの外で行う (snapshot はファイルの書き込みを待たない)。
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,6 +59,11 @@ def make_latest_frame(
     jpeg は image_encoding.encode_jpeg(surface_frames.draw_frame_time(image, t), jpeg_quality).jpeg (左上に
     format_frame_label(t) を書き込んだ画像。image 自体は変えない)。t と source_file はそのまま持つ。
     """
+    raise NotImplementedError
+
+
+def newest_frame_t(frames: Sequence[LatestFrame]) -> float | None:
+    """新しい順の frames (LatestFrames.snapshot の値) のうち、最新のフレーム (先頭) の時刻を返す。空なら None (I/O なし)。"""
     raise NotImplementedError
 
 

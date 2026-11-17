@@ -60,7 +60,8 @@ def orchestrator_instructions() -> str:
        条件に当たると操作を実行する)・スキル (Skill のツールで .claude/skills/ のスキルを使う) の使い方。
        Claude の操作 (actions) の実行中は、監視が止まること
     4. 判断の続け方: 答えの actions が空でなければ、その操作の列がすべて終わり、最後にボタンとスティックを離してから
-       action_settle.ACTIONS_SETTLE_S 秒 (0.3 秒) たってから、次の画面と出来事が届くこと。空の actions は「何もしない」
+       action_settle.ACTIONS_SETTLE_S 秒 (0.3 秒) より後に撮った画面がそろってから、その画面を含む次の画面と出来事が
+       届くこと (押す操作の無い actions なら、列が終わってから)。空の actions は「何もしない」
        の意味で、次の画面と出来事はすぐに届くこと (すぐ届くと書くのは、空の actions のときだけ)。監視に任せて
        待つときは、空の actions で答えること。次の JSON の actions は、前の actions の残りを捨てて置き換えること
     5. safety.safety_rules.SAFETY_RULES (文をそのまま入れる)

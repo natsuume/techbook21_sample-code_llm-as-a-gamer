@@ -17,6 +17,7 @@ from switch2_layers.frames.latest_frames import (
     LatestFrame,
     LatestFrames,
     make_latest_frame,
+    newest_frame_t,
 )
 from switch2_layers.frames.surface_frames import draw_frame_time
 from switch2_layers.run_directory import RunPaths
@@ -105,6 +106,12 @@ def test_snapshot_returns_the_latest_frames_together_newest_first(tmp_path):
         latest.add(frame(float(t)))
     # 元の frames/interval/ のファイル名と時刻を、画像と一緒に返す
     assert latest.snapshot() == tuple(frame(float(t)) for t in (6, 5, 4, 3, 2))
+
+
+def test_newest_frame_t_is_the_time_of_the_first_frame():
+    # 主ループは、操作の後に撮ったフレームが入ったかを、最新のフレームの時刻で確かめる
+    assert newest_frame_t((frame(6.0), frame(5.0), frame(4.0))) == 6.0
+    assert newest_frame_t(()) is None
 
 
 def test_files_are_replaced_without_leaving_temporary_files(tmp_path):
