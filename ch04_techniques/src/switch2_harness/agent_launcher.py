@@ -640,7 +640,7 @@ def stop_reason_after_exit(
 def _send_release(
     send: SendCommand,
     sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
 ) -> str:
     """後片付けの up ALL を送り、デーモンの応答を返す。
 
@@ -651,13 +651,13 @@ def _send_release(
     各送信の待ち時間の上限は、RELEASE_TIMEOUT_S の残り (0.1 秒より短くはしない)。
     接続の拒否以外の応答 (成功、上限の超過、接続後の切断など) は、送り直さずにそのまま返す。
     """
-    started = monotonic()
+    started = deadline_clock()
     while True:
-        remaining = RELEASE_TIMEOUT_S - (monotonic() - started)
+        remaining = RELEASE_TIMEOUT_S - (deadline_clock() - started)
         reply = send(["up", "ALL"], timeout_s=max(remaining, 0.1))
         if not reply.startswith(CANNOT_CONNECT_PREFIX):
             return reply
-        if monotonic() - started + RELEASE_RETRY_INTERVAL_S >= RELEASE_TIMEOUT_S:
+        if deadline_clock() - started + RELEASE_RETRY_INTERVAL_S >= RELEASE_TIMEOUT_S:
             return reply
         sleep(RELEASE_RETRY_INTERVAL_S)
 
@@ -716,7 +716,7 @@ def run_agent_until(
     *,
     start_process: StartProcess,
     clock: Callable[[], float],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
     sleep: Callable[[float], None],
     send: SendCommand,
     record: Callable[[CommandEvent], None],
@@ -727,9 +727,11 @@ def run_agent_until(
 ) -> RunOutcome:
     """claude -p を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
 
-    時計は 2 つ受け取る。monotonic (本番は time.monotonic) は期限・残り時間・経過時間 (elapsed_s) を計る単調時計で、
-    clock (本番は time.time) は記録の時刻 (CommandEvent.time) に使う壁時計。壁時計は NTP などで進んだり戻ったりするため、
-    期限の計算には使わない。期限は、最初の起動の前の monotonic() + minutes * 60。
+    時計は 2 つ受け取る。deadline_clock は期限・残り時間・経過時間 (elapsed_s) を計る時計で、
+    clock は記録の時刻 (CommandEvent.time) に使う時計。本番はどちらも壁時計 (time.time) で、第3章の試行
+    (撮影のたびに date で時刻を取った) と同じく実時間で期限を決める。WSL2 では time.monotonic が実時間より約 8% 遅く
+    進んだ (2026-11-17 に確かめた) ため、期限には使わない。壁時計が NTP などで進んだり戻ったりすると、期限もその分ずれる。
+    期限は、最初の起動の前の deadline_clock() + minutes * 60。
 
     最初の起動の前に offset = agent_log_size(paths.agent_log_file) を覚える。以下の read_last_* と
     read_max_total_cost_usd には (paths.agent_log_file, offset) を渡し、今回の run の出力だけを読む。
@@ -742,8 +744,8 @@ def run_agent_until(
     最初の起動と起動し直しの両方で、build_claude_args に writable_files (エージェントが書き換えられるファイルの名前) を渡す。
 
     POLL_INTERVAL_S ごとに (sleep(POLL_INTERVAL_S)) 次を確かめる:
-        - プロセスが動いていて、monotonic() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)
-        - プロセスが終わっていたら、stop_reason_after_exit で判定する。渡す値は、期限までの残りの秒数 (期限 − monotonic())、
+        - プロセスが動いていて、deadline_clock() が期限以上なら、理由 "deadline" で終える (プロセスは後片付けで止める)
+        - プロセスが終わっていたら、stop_reason_after_exit で判定する。渡す値は、期限までの残りの秒数 (期限 − deadline_clock())、
           read_last_result_subtype、残りの予算 (options.max_budget_usd が None でなければ
           options.max_budget_usd − read_max_total_cost_usd。read_max_total_cost_usd が None なら
           options.max_budget_usd のまま。上限が無ければ None)、起動し直した回数、read_last_session_id。
@@ -778,13 +780,13 @@ def run_agent_until(
         - 停止: args=("stop", <理由>)、reply="stopped reason=<理由> launches=<起動した回数>"、ok=True、elapsed_s=0.0
           (プロセスを止めた後に記録する。例外で抜けるときは記録しない)
         - up ALL: args=("release",)、reply=<デーモンの応答>、ok=<応答が error で始まらない>、
-          elapsed_s=<送信にかかった秒数 (monotonic() の差)> (例外で抜けるときも記録する)
+          elapsed_s=<送信にかかった秒数 (deadline_clock() の差)> (例外で抜けるときも記録する)
     各イベントの time はそのときの clock() (壁時計)。
     """
     log_path = paths.agent_log_file
     offset = agent_log_size(log_path)
     env = build_claude_env(base_env, paths.root)
-    deadline = monotonic() + minutes * 60.0
+    deadline = deadline_clock() + minutes * 60.0
     launches = 0
     resumes = 0
     process: AgentProcess | None = None
@@ -820,8 +822,8 @@ def run_agent_until(
         finally:
             nonlocal release_reply
             sent_at = clock()
-            started = monotonic()
-            reply = _send_release(send, sleep, monotonic)
+            started = deadline_clock()
+            reply = _send_release(send, sleep, deadline_clock)
             release_reply = reply
             record(
                 _run_event(
@@ -829,7 +831,7 @@ def run_agent_until(
                     ("release",),
                     reply,
                     ok=not reply.startswith("error"),
-                    elapsed_s=monotonic() - started,
+                    elapsed_s=deadline_clock() - started,
                 )
             )
 
@@ -839,7 +841,7 @@ def run_agent_until(
         launches = 1
         record(_run_event(clock(), ("start",), "launched claude launch=1"))
         while True:
-            now = monotonic()
+            now = deadline_clock()
             if process.poll() is None:
                 if now >= deadline:
                     reason = "deadline"

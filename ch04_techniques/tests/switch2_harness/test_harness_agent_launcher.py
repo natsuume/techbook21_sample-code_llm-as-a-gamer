@@ -926,7 +926,7 @@ def run_scenario(
         options if options is not None else LaunchOptions(),
         start_process=scenario.starter,
         clock=scenario.clock,
-        monotonic=scenario.clock,
+        deadline_clock=scenario.clock,
         sleep=sleep if sleep is not None else scenario.sleep,
         send=send if send is not None else scenario.daemon,
         record=scenario.events.append,
@@ -1360,7 +1360,7 @@ def test_run_releases_buttons_even_if_stopping_fails(tmp_path):
             LaunchOptions(),
             start_process=start_with_failing_signal,
             clock=scenario.clock,
-            monotonic=scenario.clock,
+            deadline_clock=scenario.clock,
             sleep=scenario.sleep,
             send=scenario.daemon,
             record=scenario.events.append,
@@ -1387,7 +1387,7 @@ def test_run_releases_buttons_when_the_first_launch_fails(tmp_path):
             LaunchOptions(),
             start_process=failing_start,
             clock=scenario.clock,
-            monotonic=scenario.clock,
+            deadline_clock=scenario.clock,
             sleep=scenario.sleep,
             send=scenario.daemon,
             record=scenario.events.append,
@@ -1665,7 +1665,7 @@ def test_stop_process_sends_sigkill_even_if_snapshotting_fails(error):
     assert stopped_sessions == [{process.pid}]
 
 
-# --- 期限は単調時計で計る ---
+# --- 期限は deadline_clock で計り、記録の時刻は clock で取る ---
 
 
 @dataclass
@@ -1679,9 +1679,9 @@ class TwoClockRun:
 
 
 def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoClockRun:
-    """壁時計 (clock) と単調時計 (monotonic) を分けて run を動かす。
+    """記録の時計 (clock、wall) と期限の時計 (deadline_clock、mono) を分けて run を動かす。
 
-    sleep は単調時計だけを進める。jump_wall_at_sleep を渡すと、その回の sleep で壁時計を 1 時間進める。
+    sleep は期限の時計だけを進める。jump_wall_at_sleep を渡すと、その回の sleep で記録の時計を 1 時間進める。
     """
     wall = FakeClock(START_TIME)
     mono = FakeClock(50.0)
@@ -1705,7 +1705,7 @@ def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoCl
         LaunchOptions(),
         start_process=starter,
         clock=wall,
-        monotonic=mono,
+        deadline_clock=mono,
         sleep=sleep,
         send=FakeDaemon(mono),
         record=events.append,
@@ -1714,21 +1714,21 @@ def run_with_two_clocks(tmp_path: Path, jump_wall_at_sleep: int | None) -> TwoCl
     return TwoClockRun(wall, mono, starter, sleep_calls, events, outcome)
 
 
-def test_run_does_not_stop_early_when_the_wall_clock_jumps(tmp_path):
+def test_run_does_not_stop_early_when_the_record_clock_jumps(tmp_path):
     run = run_with_two_clocks(tmp_path, jump_wall_at_sleep=10)
     assert run.outcome == RunOutcome(reason="deadline", launches=1)
-    # 単調時計で 60 秒 (POLL_INTERVAL_S ごとに 60 回) たってから止まる
+    # 期限の時計で 60 秒 (POLL_INTERVAL_S ごとに 60 回) たってから止まる
     assert len(run.sleep_calls) == 60
     start, stop, release = run.events
-    # 記録の時刻は壁時計
+    # 記録の時刻は記録の時計
     assert start.time == START_TIME
     assert stop.time == START_TIME + 3600.0
     assert release.time == START_TIME + 3600.0
-    # up ALL にかかった時間は単調時計で計る (FakeDaemon が単調時計を 0.5 秒進める)
+    # up ALL にかかった時間は期限の時計で計る (FakeDaemon が期限の時計を 0.5 秒進める)
     assert release.elapsed_s == pytest.approx(0.5)
 
 
-def test_run_stops_at_the_monotonic_deadline_without_the_wall_clock(tmp_path):
+def test_run_stops_at_the_deadline_clock_without_the_record_clock(tmp_path):
     run = run_with_two_clocks(tmp_path, jump_wall_at_sleep=None)
     assert run.outcome == RunOutcome(reason="deadline", launches=1)
     assert len(run.sleep_calls) == 60

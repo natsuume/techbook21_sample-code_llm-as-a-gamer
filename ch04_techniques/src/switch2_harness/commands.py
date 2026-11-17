@@ -333,7 +333,7 @@ def handle_run(
     *,
     start_process: StartProcess,
     clock: Callable[[], float],
-    monotonic: Callable[[], float],
+    deadline_clock: Callable[[], float],
     sleep: Callable[[float], None],
     send: SendCommand,
     base_env: Mapping[str, str],
@@ -341,7 +341,7 @@ def handle_run(
 ) -> CommandResult:
     """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
 
-    clock は記録の時刻 (本番は time.time)、monotonic は期限と経過時間を計る単調時計 (本番は time.monotonic) で、
+    clock は記録の時刻、deadline_clock は期限と経過時間を計る時計 (本番はどちらも time.time) で、
     どちらもそのまま run_agent_until に渡す。
 
     1. agent_launcher.validate_minutes(minutes) と agent_launcher.validate_max_budget_usd(options.max_budget_usd) を
@@ -385,7 +385,7 @@ def handle_run(
                 options,
                 start_process=start_process,
                 clock=clock,
-                monotonic=monotonic,
+                deadline_clock=deadline_clock,
                 sleep=sleep,
                 send=send,
                 record=partial(append_event, paths.events_file),
