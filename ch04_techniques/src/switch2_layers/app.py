@@ -1,8 +1,9 @@
 """run の部品をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
 
 run の型は settings.RunSettings.mode で決まる。advisor 型 (RunMode.ADVISOR) は surface・middle・deep の 3 層を
-LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、操作の実行と監視を OrchestratorLayersParts で
-組み立てる。Orchestrator 型の組み立て・起動するもの・止まる理由は LayersApp の docstring に書く。以下は advisor 型の説明。
+LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、操作の実行と監視を、委任型 (RunMode.DELEGATE) は
+主ループと、操作の実行と委任のループを OrchestratorLayersParts で組み立てる。Orchestrator 型と委任型の組み立て・
+起動するもの・止まる理由は LayersApp の docstring に書く。以下は advisor 型の説明。
 
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep)、本体の画面の middle は LayersParts で
 受け取る。cli の run は実機の部品と各層 (surface は --surface、middle と本体の画面の middle は --middle、deep は --deep で
@@ -251,14 +252,15 @@ class LayersParts:
 
 @dataclass(frozen=True)
 class OrchestratorLayersParts:
-    """Orchestrator 型の run (settings.mode が orchestrator) で LayersApp に注入する部品。
+    """Orchestrator 型と委任型の run (settings.mode が orchestrator か delegate) で LayersApp に注入する部品。
 
     frame_reader           キャプチャーの最新フレームの読み取り元 (run では hardware.capture_source.SwitchCaptureReader)
     report_sender          レポートの送信先 (run では switch2_remote.bridge_supervisor.BridgeSupervisor)
     bridge_state           ブリッジの状態 ("ok" / "recovering" / "failed") を返す関数 (run では BridgeSupervisor.state を
                            読む)
     safety                 安全の監視が画面を確かめるもの (run では --safety の safety.safety_assembly の checker)
-    monitor                監視の要求の送り先 (orchestrator.monitor_loop.MonitorAsker。run では surface.jev_client.JevClient)
+    monitor                Orchestrator 型の監視と、委任型の委任の要求の送り先 (orchestrator.monitor_loop.MonitorAsker。
+                           run では surface.jev_client.JevClient)
     initial_instruction    人の初期指示 (orchestrator.initial_instruction.load_initial_instruction の値)。無ければ None
     monotonic              単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
     local_now              実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
@@ -288,6 +290,12 @@ def monitor_loop_failure_reason(description: str) -> str:
     """Orchestrator 型の監視のループ (OrchestratorController.run) が想定外の例外で終わるときの理由
     `monitor loop failed: <description>` を返す (description は error_text.describe_exception(例外) の値)。"""
     return f"monitor loop failed: {description}"
+
+
+def delegate_loop_failure_reason(description: str) -> str:
+    """委任型の委任のループ (委任型の OrchestratorController.run) が想定外の例外で終わるときの理由
+    `delegate loop failed: <description>` を返す (description は error_text.describe_exception(例外) の値)。"""
+    raise NotImplementedError("delegate_loop_failure_reason")
 
 
 @dataclass(frozen=True)
@@ -478,10 +486,12 @@ class LayersApp:
     """run の型 (settings.mode) の部品を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
     settings       run の起動引数
-    parts          注入する部品。settings.mode が advisor なら LayersParts、orchestrator なら OrchestratorLayersParts
+    parts          注入する部品。settings.mode が advisor なら LayersParts、orchestrator か delegate なら
+                   OrchestratorLayersParts
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
     start_thread   start がループのスレッド (advisor 型は surface と middle のループ・安全の監視・本体の画面のループ・
-                   画面の停滞の計測のループ、Orchestrator 型は下の 4 つ) を起動する関数 (既定 threading.Thread.start)。
+                   画面の停滞の計測のループ、Orchestrator 型と委任型は下の 4 つずつ) を起動する関数 (既定
+                   threading.Thread.start)。
                    テストでは、起動の途中で例外を出す関数を渡せる
 
     advisor 型の組み立ては start の docstring の 1〜10 のとおり。
@@ -531,6 +541,24 @@ class LayersApp:
         スレッドの終わりは、セッションを閉じる時間 (claude_stream_session.SESSION_CLOSE_GRACE_S の 2 倍) に
         LOOP_JOIN_TIMEOUT_S を足した MAIN_LOOP_JOIN_TIMEOUT_S 秒まで待ち、ほかのループのスレッドは LOOP_JOIN_TIMEOUT_S 秒
         ずつ待つ。
+
+    委任型 (settings.mode が delegate) の組み立て (start): Orchestrator 型の 1〜9 と同じで、次だけが違う。
+        3. start の args には、mode (delegate) と委任型の 2 つの値 (delegate_image_width・max_delegate_errors) も入る
+           (settings.run_settings_to_json が mode に依らず入れる)
+        6〜7 は orchestrator.orchestrator_assembly.build_orchestrator_loops が委任型で作る (OrchestratorLoopParts の
+           buffered_frames に 5 の FrameBuffer.frames を渡す):
+        6. OrchestratorController を委任型 (OrchestratorSettings.delegate = DelegateSettings(image_width =
+           delegate_image_width, max_errors = max_delegate_errors)) で作る。jev は parts.monitor、latest_frames は 5 の
+           LatestFrames.snapshot、buffered_frames は FrameBuffer.frames、run_log は 3 の RunLog
+        7. 主ループは、parse_decision を orchestrator_assembly.delegate_decision_parser(6)、instructions を
+           orchestrator_instructions.delegate_instructions() にして作る (ほかは Orchestrator 型と同じ)
+        スレッドは、委任のループ (orchestrator_assembly.run_delegate_loop で 6 の run を包み、想定外の例外 (Exception)
+        で抜けたら request_stop(delegate_loop_failure_reason(error_text.describe_exception(例外))) を呼ぶ)、主ループ、
+        安全の監視、停滞の計測のループの順に start_thread で起動する。監視のループは起動しない。
+        押せるボタンは Orchestrator 型と同じ 17 個 (主ループの操作と委任の行動の操作の両方を、4 の PadOutput で送る)。
+        止まる理由: 委任のループの想定外の例外は delegate_loop_failure_reason。そのほかは Orchestrator 型と同じ
+        (監視のループが無いので monitor_loop_failure_reason は無い)。委任中も安全の監視は動き、止める画面なら実行全体を
+        止める (委任のループは run.jsonl に delegate_end {"reason": "stop"} を書いて戻る)。
     """
 
     def __init__(
@@ -542,11 +570,13 @@ class LayersApp:
     ) -> None:
         """属性を持つ。ディレクトリーとスレッドは start で作る。
 
-        settings.mode と parts の型が合わなければ (orchestrator なのに LayersParts、advisor なのに
+        settings.mode と parts の型が合わなければ (orchestrator か delegate なのに LayersParts、advisor なのに
         OrchestratorLayersParts)、ValueError にする。
         """
         if settings.mode is RunMode.ORCHESTRATOR and isinstance(parts, LayersParts):
             raise ValueError("the orchestrator mode needs OrchestratorLayersParts")
+        if settings.mode is RunMode.DELEGATE and isinstance(parts, LayersParts):
+            raise ValueError("the delegate mode needs OrchestratorLayersParts")
         if settings.mode is RunMode.ADVISOR and isinstance(
             parts, OrchestratorLayersParts
         ):
@@ -663,7 +693,7 @@ class LayersApp:
         settings = self.settings
         parts = self.parts
         if isinstance(parts, OrchestratorLayersParts):
-            # settings.mode が orchestrator のとき (__init__ で mode と parts の型をそろえてある)
+            # settings.mode が orchestrator か delegate のとき (__init__ で mode と parts の型をそろえてある)
             return self._build_and_start_orchestrator(parts, built)
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
         clock = RunClock(parts.monotonic)
@@ -926,10 +956,11 @@ class LayersApp:
     def _build_and_start_orchestrator(
         self, parts: OrchestratorLayersParts, built: _PartsBuiltSoFar
     ) -> RunPaths:
-        """Orchestrator 型の start (クラスの docstring の 1〜9 とスレッドの起動) を行う。
+        """Orchestrator 型と委任型の start (クラスの docstring の 1〜9 とスレッドの起動) を行う。
 
         作った部品は、作った直後に built に記録する。段階 (PhaseTracker) には入らず、DeepScheduler・SurfaceLoop・
-        MiddleLoop・SystemScreenLoop は作らない。
+        MiddleLoop・SystemScreenLoop は作らない。委任型では、監視のループの代わりに委任のループのスレッドを起動する
+        (クラスの docstring の「委任型の組み立て」)。
         """
         settings = self.settings
         # 1〜3: 時計・実行ディレクトリー (空の notes/ と初期指示の写し)・run.jsonl

@@ -19,6 +19,20 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         {"type": "macro", "name": <マクロの名前>}
     条件:
         {"condition": <文字列>, "actions": [<操作>, ...], "repeat": "every" | "once"}
+--mode delegate の JSON の形 (parse_decision の delegate に DelegateContext を渡したとき。monitor の代わりに delegate):
+    {
+      "actions": [<操作>, ...],
+      "macros": {"set": {...}, "delete": [...]},
+      "delegate": {"action": "start", "tasks": [<文>, ...], "cautions": [<文>, ...], "choices": [<行動>, ...]}
+                | {"action": "update", "tasks": [...], "cautions": [...], "choices": [...]}
+                | {"action": "stop"} | null
+    }
+    行動:
+        {"name": <マクロの名前>, "description": <文>}
+    start と update の tasks・cautions・choices は、どれも省ける。start で省いたキーは前の委任 (DelegateContext.previous)
+    の値で埋め、update で省いたキーは変えない (DelegateUpdate の None)。delegate の null は None (委任を変えない)。
+    delegate を渡さないとき (--mode orchestrator) は、最上位の delegate は知らないキーの誤り。渡したときは、最上位の
+    monitor が知らないキーの誤り。
 誤りにするもの:
     - コードブロックが無い、最後の閉じたブロックより後に閉じていない ```json の開きの行がある、JSON として読めない
       (json.loads の NaN・Infinity・-Infinity と、1e999 のように float で無限大になる数は読めるが、下の秒数・スティックの
@@ -43,10 +57,28 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
     - monitor の action が create・stop のどちらでもない。stop に action のほかのキーがある
     - monitor の create で、name が無い、cases が 0 個か MAX_MONITOR_CASES 個を超える、条件の文が空か空白だけ、
       repeat が every・once のどちらでもない (repeat が無いときも誤り)
+委任の指示の誤り (delegate に DelegateContext を渡したとき):
+    - delegate が object でも null でもない。action が無いか、start・update・stop のどれでもない。stop に action の
+      ほかのキーがある。start・update に action・tasks・cautions・choices のほかのキーがある
+    - 委任中 (DelegateContext.active) に start を書いた。委任中でないのに update か stop を書いた
+    - start で tasks・cautions・choices のどれかを省いたのに、前の委任 (DelegateContext.previous) が無い
+    - tasks が配列でないか、要素が 1〜MAX_DELEGATE_TASKS 個でない。cautions が配列でないか、要素が
+      0〜MAX_DELEGATE_CAUTIONS 個でない。tasks・cautions の要素が文字列でないか、空か空白だけ
+    - choices が配列でないか、要素が 1〜MAX_DELEGATE_CHOICES 個でない。行動が object でない、name か description が
+      無いか文字列でない、知らないキーがある、description が空か空白だけ
+    - 行動の name が、この JSON の macros を当てた後の登録に無い (actions の macro と同じ照らし方)、
+      delegate_questions.RESERVED_OPTION_NAMES の名前、同じ choices の前の行動と同じ名前、または HOME を押すマクロ
+      (マクロの操作の列を action_executor.expand_actions で展開した列に、buttons に HOME を含む press がある。マクロの
+      操作の列は、この JSON の macros.set にあればそれ、無ければ DelegateContext.macros のもの)
+    - start で省いて前の委任から使う choices と、update で省いて今の委任から使う choices の行動が、この JSON の macros
+      を当てた後の登録に無いか、HOME を押すマクロ
+    - 委任中に、今の委任 (DelegateContext.previous) の choices の name を macros.delete に書いた (同じ JSON に update
+      や stop があっても誤り)
 値の直し方:
     PressAction.buttons は pad_action.sort_buttons の順 (重複を除く)、スティックの値と秒数は float にする。
     seconds を省いた press は seconds=None (短押し)。procedure の args は JSON の値のまま入れる。
-    JSON に無いキーは、Decision の既定値 (空の actions・空の macros・監視の指示なし) にする。monitor の null も None。
+    JSON に無いキーは、Decision の既定値 (空の actions・空の macros・監視と委任の指示なし) にする。monitor と
+    delegate の null も None。tasks・cautions・choices の文と名前は書かれたまま (前後の空白も残す) 入れる。
 誤りの説明:
     見つけた誤りをすべて、1 つずつ別の文にして DecisionError.messages に入れる。値の型が違うときは、その値の中は
     確かめない。キーや値についての誤りは `<パス>: <説明>` の形にする。パスは最上位のキーから `.<キー>` と
@@ -62,6 +94,18 @@ JSON の形 (どのキーも省ける。どの object も、ここに無いキ�
         マクロの中の macro                    その操作の type のパス (`macros.set.next_message[0].type`)
         手順の引数                           args の下のパス (`actions[0].args.count`。args が object でなければ
                                              `actions[0].args`)
+        委任の指示の形の誤り                  その値のパス (`delegate`・`delegate.action`・`delegate.tasks[0]`・
+                                             `delegate.choices[1].description` など)
+        委任中の start・委任中でない update と stop
+                                             `delegate.action`
+        前の委任が無いのに省いたキー          そのキーのパス (例: `delegate.tasks`)
+        tasks・cautions・choices の数         その配列のパス (例: `delegate.choices`)
+        行動の name の誤り (登録に無い・予約の名前・重複・HOME を押すマクロ)
+                                             その行動の name のパス (`delegate.choices[1].name`)
+        省いて前の委任か今の委任から使う choices の誤り
+                                             `delegate.choices`。ただし、今の委任の行動のマクロを、この JSON の
+                                             macros.set で HOME を押す操作の列に置き換えたときは `macros.set.<名前>`
+        委任中の行動のマクロを消す            その名前のパス (`macros.delete[0]`)
     コードブロックが無い・最後のブロックが閉じていない・JSON として読めない・最上位が object でないときは、パスを
     付けない文にする。読み取りの中で想定外の例外が出たときも、例外を外に出さず、UNEXPECTED_ERROR_MESSAGE に
     例外の説明を足した、パスを付けない文 1 つの誤りにする。
@@ -83,6 +127,7 @@ from switch2_layers.orchestrator.decision_types import (
     Action,
     Decision,
     DecisionError,
+    DelegateContext,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -109,6 +154,16 @@ logger = logging.getLogger(__name__)
 
 # 最上位のキー
 TOP_LEVEL_KEYS: tuple[str, ...] = ("actions", "macros", "monitor")
+# --mode delegate の最上位のキー (parse_decision の delegate に DelegateContext を渡したとき)
+DELEGATE_TOP_LEVEL_KEYS: tuple[str, ...] = ("actions", "macros", "delegate")
+# delegate の action
+DELEGATE_START = "start"
+DELEGATE_UPDATE = "update"
+DELEGATE_STOP = "stop"
+# 委任の行動 (choices)・タスク (tasks)・注意事項 (cautions) の数の上限。tasks は 1 個以上、cautions は 0 個でもよい
+MAX_DELEGATE_CHOICES = 12
+MAX_DELEGATE_TASKS = 10
+MAX_DELEGATE_CAUTIONS = 10
 # 操作の type
 ACTION_TYPES: tuple[str, ...] = ("press", "wait", "procedure", "macro")
 # press と wait の seconds の上限 (秒)。hardware.pad_output.MAX_HOLD_SECONDS と同じ
@@ -193,16 +248,23 @@ def has_unclosed_json_block_at_end(text: str) -> bool:
 
 
 def parse_decision(
-    text: str, registered_macros: Collection[str] = frozenset()
+    text: str,
+    registered_macros: Collection[str] = frozenset(),
+    delegate: DelegateContext | None = None,
 ) -> Decision | DecisionError:
     """応答の本文 text の最後の ```json のコードブロックを読み、モジュールの docstring の規則で確かめた結果を返す。
 
     registered_macros は、今登録しているマクロの名前 (OrchestratorController.macro_names() の値)。macro の name を、
     これにこの JSON の macros を当てた後の登録と照らす。省くと、登録が空として照らす (この JSON の macros.set で
     登録する名前だけを呼べる)。
-    誤りが 1 つでもあれば DecisionError を返し、Decision は返さない (操作・マクロ・監視のどれも変えないため)。
+    delegate は --mode delegate のときの今の委任の状態 (OrchestratorController.delegate_context() の値)。渡すと、
+    最上位のキーを DELEGATE_TOP_LEVEL_KEYS にして委任の指示を読み、渡さなければ (--mode orchestrator) TOP_LEVEL_KEYS
+    にして監視の指示を読む。
+    誤りが 1 つでもあれば DecisionError を返し、Decision は返さない (操作・マクロ・監視・委任のどれも変えないため)。
     例外は出さない (どんな text でも Decision か DecisionError を返す)。
     """
+    if delegate is not None:
+        raise NotImplementedError("parse_decision for --mode delegate")
     scanned = _scan_json_blocks(text)
     if scanned.unclosed_tail:
         return DecisionError((UNCLOSED_BLOCK_MESSAGE,))

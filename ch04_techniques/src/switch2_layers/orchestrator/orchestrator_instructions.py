@@ -1,6 +1,8 @@
 """主ループの Claude Code に --append-system-prompt で渡す変わらない指示の文と、引き継ぎの依頼の文。
 
-どちらの文にもゲーム名や作品に固有の名前を書かない (ゲーム名を渡すのは、人の初期指示に書かれている場合だけ)。
+変わらない指示は 2 つの版を持つ: --mode orchestrator の監視型の版 (orchestrator_instructions) と、--mode delegate の
+委任型の版 (delegate_instructions)。引き継ぎの依頼の文 (handoff_request_text) は両方で同じものを使う。
+どの文にもゲーム名や作品に固有の名前を書かない (ゲーム名を渡すのは、人の初期指示に書かれている場合だけ)。
 """
 
 from switch2_remote.controller_state import BUTTON_ORDER
@@ -149,6 +151,44 @@ frontmatter は name: game-<名前> (ディレクトリーの名前と同じ) �
 frames/latest/1.jpg〜5.jpg は最新の 5 枚のフレームで、1.jpg が最新です。いつ Read しても、その時点の最新の画面が読めます。
 それより古いフレームは frames/interval/ にあり、ファイル名は時刻のミリ秒です。
 """
+
+
+def delegate_instructions() -> str:
+    """--mode delegate の変わらない指示の文を返す。次の 8 つをすべて書く:
+
+    1. 役割: orchestrator_instructions の 1 に加えて、ターンベースの場面は自分で操作し、ゲームの中の誘導の文・会話・
+       出来事・助言を、委任のタスクと注意事項にまとめること。リアルタイムの場面では、意味のある行動の選択肢とタスク・
+       注意事項を書いて、操作を Jev に委任すること
+    2. JSON の形: 最上位のキーは actions・macros・delegate の 3 つ (どれも省ける。ほかのキーは誤りで、monitor も誤り)。
+       操作・コードの手順・マクロの書き方と、押せるボタンの名前 (switch2_remote.controller_state.BUTTON_ORDER の
+       すべて) は orchestrator_instructions の 2・3 と同じ。JSON に誤りがあれば、操作・マクロ・委任のどれも変わらず、
+       誤りの説明が次の入力で届くこと
+    3. delegate の 3 つの形と値の規則:
+       start ({"action": "start", "tasks", "cautions", "choices"}。choices は {"name": マクロの名前, "description":
+       意味のある行動の説明} の配列) は、同じ JSON の actions がすべて終わってから委任を始めること (actions が空なら
+       すぐ)。start で省いたキーは前の委任の値を使い、前の委任が無いのに省くと誤りであること。委任中の start は誤りで、
+       委任中の変更は update で行うこと。update で省いたキーは変わらないこと。stop ({"action": "stop"}) は委任を終えて
+       操作権を戻すこと。update と stop は委任中でなければ誤りであること。
+       choices は 1〜decision_parser.MAX_DELEGATE_CHOICES 個で、name は登録したマクロ、description は空でない文、同じ
+       name は 2 回書けない、HOME を押すマクロは使えない。tasks は 1〜MAX_DELEGATE_TASKS 個、cautions は
+       0〜MAX_DELEGATE_CAUTIONS 個の空でない文。委任中の choices に使っているマクロは macros の delete で消せないこと
+    4. 委任の動き: Jev は choices から行動を 1 つ選び、選んだ行動のマクロを、実行中の行動の残りを捨てて始めること。
+       Jev が「操作を返す」を続けて delegate_loop.RETURN_CONTROL_STREAK 回選ぶか、Jev の失敗が続くか、stop を書くと、
+       操作権が戻り、次の入力の出来事に理由が届くこと。委任中も毎ターンの入力が届き、委任の節に、委任中かどうか・
+       委任を始めた時刻・今のタスク・注意事項・行動・Jev が直近に選んだ行動とその時刻・「操作を返す」を続けて選んだ
+       回数が載ること
+    5. 委任中は、答えの最上位の actions が捨てられ、次の入力の出来事に知らされること。取り返すときは
+       {"action": "stop"} を書くこと
+    6. タスクと注意事項の書き方: tasks の最初に、その場面で最も重要なこと (例: 自分の HP を 0 にせずに、敵をすべて
+       倒す) を書くこと。敵の攻撃を避けることが要る場面では、そのことを tasks に書くこと。敵の攻撃の動きを観測できたら、
+       cautions に書くこと。タスク・注意事項・行動の説明には、ゲーム名や作品に固有の名前 (登場人物・地名など) を
+       書かないこと
+    7. 判断の続け方: orchestrator_instructions の 4 と同じ (監視の代わりに、委任中は actions が無いので次の画面と
+       出来事がすぐ届く)
+    8. safety.safety_rules.SAFETY_RULES (文をそのまま入れる)、notes/ に書くこと、スキル、古いフレームの読み方
+       (orchestrator_instructions の 5・7・8・9 と同じ)
+    """
+    raise NotImplementedError("delegate_instructions")
 
 
 def handoff_request_text() -> str:

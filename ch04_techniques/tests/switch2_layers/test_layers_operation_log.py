@@ -68,6 +68,14 @@ def test_operation_row_of_system_screen_operation():
     assert row["taps"] == ["DOWN"]
 
 
+def test_operation_row_of_a_delegate_action():
+    # 委任型の委任のループで Jev が選んだ行動の操作は、source を delegate にする
+    action = PadAction(held=frozenset({"A"}))
+    row = operation_row(4.0, OperationEvent(source="delegate", action=action, ok=True))
+    assert row["source"] == "delegate"
+    assert row["held"] == ["A"]
+
+
 def test_operation_log_appends_rows(tmp_path):
     monotonic = FakeMonotonic(10.0)
     path = tmp_path / "operations.jsonl"

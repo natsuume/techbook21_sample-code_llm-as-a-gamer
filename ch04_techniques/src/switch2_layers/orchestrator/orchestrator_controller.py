@@ -1,10 +1,12 @@
 """Orchestrator 型の操作の実行と監視 (OrchestratorController)。主ループ (Claude Code) の Decision を当て、操作の列と
 「画面の条件 → 操作」の Jev の監視を 1 つのループ (run) で動かす。
 
+2 つの型を持つ。OrchestratorSettings.delegate が None なら監視型 (--mode orchestrator。このモジュールの docstring の
+「委任型」の節より前に書いた動き)、None でなければ委任型 (--mode delegate。「委任型」の節)。
 主ループのスレッドは、parse_decision の結果を apply で渡し、前のターンの操作の列が終わるのを main_actions_run で
 確かめてから、次の入力を作るときに take_events で出来事を取り出す。
-apply・take_events・main_actions_run・macro_names・set_started はどのスレッドから呼んでもよい (状態は 1 つのロックの
-中で変える)。
+apply・take_events・main_actions_run・macro_names・delegate_context・set_started はどのスレッドから呼んでもよい
+(状態は 1 つのロックの中で変える)。
 PadOutput への送信と orchestrator/monitor.jsonl への書き込みは、run のループのスレッドだけが行う。Jev への要求は、
 ループが別のスレッドで送る (要求の応答を待つ間も、主ループの操作をすぐ始めるため)。
 
@@ -91,19 +93,80 @@ take_events:
     case_hits は、監視の世代と条件の位置の組ごとに 1 つにまとめる。同じ名前の監視でも、世代が違えば別の CaseHit に
     する。CaseHit の condition と actions は、当たった世代の監視の条件のもの。
 操作の記録:
-    PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor を渡す (action_executor の
-    「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では OperationLog.write) が 1 回の送信に
-    つき 1 行書く。このクラスは記録の関数を受け取らず、operations.jsonl に行を書かない。
+    PadOutput.apply の source に、主ループの列なら orchestrator、監視の列なら monitor、委任の行動の列なら delegate を
+    渡す (action_executor の「操作の記録」)。operations.jsonl の行は、PadOutput の on_operation (run では
+    OperationLog.write) が 1 回の送信につき 1 行書く。このクラスは記録の関数を受け取らず、operations.jsonl に行を
+    書かない。
+委任型 (OrchestratorSettings.delegate があるとき):
+    run のループが委任のループ (orchestrator.delegate_loop) で、監視は使わない (decision.monitor が None でなければ、
+    apply は何も変えずに ValueError を出す。delegate を渡した parse_decision が先に誤りにする)。主ループの列の扱い
+    (始め方・main_actions_run の時刻) とマクロの扱いは監視型と同じ。作るときに、OrchestratorParts の latest_frames・
+    buffered_frames・run_log が None なら ValueError にする。
+    委任の状態 (ロックの中で持つ):
+        委任なし        委任を始めていないか、終えた
+        始める前        start を受け付け、主ループの列の終わりを待っている (DelegationStatus.active は True、
+                        started_t は None)
+        委任中          delegate_loop.ActiveDelegation を持つ
+        前の委任の値    いちばん新しい委任の値 (DelegateContext.previous と DelegationStatus.values に使う)
+    apply (監視型の apply の 1〜4 のうち、3 (監視) の代わりに次を行い、4 (操作) では委任中かを確かめる。委任中かは、
+    この decision の delegate を当てる前の状態で決める):
+        - マクロの呼び出しの確かめ (1) は、委任の行動 (start・update の choices) の名前も含める
+        - この apply の前から委任中か始める前なら、空でない actions を列にせずに捨て、捨てた操作の数 (JSON の
+          actions の要素の数) を delegate_discarded_action_count に足し、main_actions_run を None にする (主ループは
+          待たずに次の入力を作る)。delegate の stop を同じ JSON で書いても、actions は捨てる。この apply の前に
+          委任していなければ、start と同じ JSON の actions も監視型と同じく受け付ける (その列が終わってから委任を始める)
+        - DelegateStart: 前の委任の値を start の値にし、始める前にする。始めたときの actions が空なら、その apply の後の
+          最初の回りで委任を始める。空でなければ、その主ループの列が終わった回り (最後まで実行し終えたか、途中で
+          捨てたか) で始める
+        - DelegateUpdate: 委任中ならその値を置き換え (ActiveDelegation.update)、始める前なら始める値を置き換える。
+          前の委任の値も置き換える。委任の通し番号を 1 進める。実行中の行動は止めない
+        - DelegateStop: 委任中なら操作権を返す (理由 main_stop、detail delegate_loop.MAIN_STOP_DETAIL)。始める前なら、
+          委任を始めずに取り消す (delegate_start も delegate_end も書かず、出来事にも入れない)
+        - 委任中でないときの update と stop、委任中か始める前の start は、何もしない (JSON を読んだ後に Jev が操作権を
+          返したときに起きる。parse_decision が委任中かを確かめて誤りにするため、ほかでは起きない)
+        - 委任の行動に使っているマクロの置き換え (macros.set) は、次に Jev がその行動を選んだときから使う
+    委任を始める (run のループの回りの 1 で): ActiveDelegation(値, 今の時刻, settings.delegate.max_errors) を作り、委任の
+        通し番号を 1 進め、run.jsonl に delegate_start {"tasks", "cautions", "choices": [{"name", "description"}, ...]}
+        を書く。出力が止まっていれば (ActionExecutor.output_stopped) 始めない
+    委任の要求 (run のループの回りの 4 で、監視の要求の代わりに): 次のすべてに当たるとき、別のスレッド (daemon) で
+        delegate_loop.ask_delegate を 1 回呼ぶ (そのスレッドの例外の扱いは監視の要求と同じ。結果は失敗の
+        DelegateRequestResult に変える)。要求には、その時点の委任の通し番号と、ActiveDelegation の値と直近の行動を渡す
+        - 委任中で、出力が止まっていない。返っていない要求が無い (同時に送る要求は 1 つまで)
+        - 委任を始めてから最初の要求か、前の要求の t_received から settings.delegate.request_interval_s 秒たった
+        - delegate_loop.select_delegate_frames(latest_frames(), buffered_frames()) が 1 枚以上のフレームを返す
+        主ループの列や行動の列を実行している間も送る (フレームの新しさの条件は無い)
+    返った委任の要求の処理 (run のループの回りの 2 で、監視の代わりに。1 つごとに delegate.jsonl に 1 行書く
+    (delegate_record。chosen は確率があれば delegate_questions.choose_option の値、handling は下の処理)):
+        - 要求を送ったときの委任の通し番号が今の番号と違う (委任中でなくなったときを含む): ignored。ほかに何もしない
+        - 失敗 (error がある): ActiveDelegation.record_failure。DelegateEnd が返ったら操作権を返し (理由 errors。実行全体は
+          止めない) returned、返らなければ continued
+        - 答えがあった: ActiveDelegation.record_answer(確率, 今の時刻)。start_action があれば、実行中の行動の列を捨てて
+          (ActionExecutor.start が中立に戻す)、そのマクロを今のマクロで展開した列 (action_executor.expand_actions) を
+          委任の行動の列 (source が delegate) として始め、その場で 1 回進めて started。end があれば操作権を返して
+          (理由 jev_return) returned。どちらも無ければ continued (実行中の行動の列はそのまま続ける)
+    操作権を返す (理由 jev_return・main_stop・errors): 委任の行動の列を実行していれば捨てて中立に戻し
+        (ActionExecutor.cancel。apply の stop で返したときは、送信を run のループのスレッドだけで行うため、次の回りの
+        1 で捨てる)、ActiveDelegation を捨て、委任の通し番号を 1 進め、DelegateEnd を出来事に入れ、run.jsonl に
+        delegate_end {"reason", "detail"} を書く。前の委任の値は残す
+    stop が立って run が戻るときに委任中なら、run.jsonl に delegate_end {"reason": "stop", "detail":
+        delegate_loop.RUN_STOP_DETAIL} を書く (出来事には入れない)
+    take_events: 監視型の値に加えて、前回の取り出し以降の delegate_ends・delegate_discarded_action_count を返して空にし、
+        delegation に取り出した時点の委任の状況 (委任中なら ActiveDelegation.status、始める前なら active が True で
+        started_t・last_pick が None、return_streak が 0 の値、委任なしなら active が False で values が前の委任の値の
+        値) を入れる。監視型では delegation は None
+    委任の行動の列は main_actions_run の時刻を変えない。主ループの新しい列を始めるときは、実行中の委任の行動の列も
+    捨てる (委任中は主ループの列を受け付けないので、起きるのは委任を終えた後の列だけ)。
 """
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.frame_buffer import CapturedFrame
 from switch2_layers.frames.image_encoding import DEFAULT_JPEG_QUALITY
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.action_executor import (
     ActionExecutor,
@@ -113,9 +176,11 @@ from switch2_layers.orchestrator.action_executor import (
 from switch2_layers.orchestrator.decision_types import (
     Action,
     Decision,
+    DelegateContext,
     MacroAction,
     MonitorCreate,
 )
+from switch2_layers.orchestrator.delegate_loop import DelegateSettings
 from switch2_layers.orchestrator.macro_registry import MacroRegistry
 from switch2_layers.orchestrator.monitor_loop import (
     ActiveMonitor,
@@ -131,6 +196,7 @@ from switch2_layers.orchestrator.orchestrator_events import (
     OrchestratorEvents,
 )
 from switch2_layers.pad_action import sort_buttons
+from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.safety.safety_monitor import SAFETY_IMAGE_WIDTH
@@ -161,14 +227,19 @@ class OrchestratorParts:
 
     pad_output       操作の送信 (ボタンの制限を含む。押せるボタンの集合と、operations.jsonl に書く on_operation は
                      作った側が決める)
-    jev              監視の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
+    jev              監視 (委任型では委任) の要求の送り先 (surface.jev_client.JevClient と同じ ask を持つもの)
     latest_frame     キャプチャーの最新のフレームを返す関数 (run では FrameBuffer.latest)。まだ無ければ None
-    clock            実行の経過秒の時計。操作の秒数と monitor.jsonl の時刻に使う (PadOutput の clock と同じ monotonic
-                     から作る)
-    paths            実行ディレクトリー (orchestrator/monitor.jsonl に書く)
+    clock            実行の経過秒の時計。操作の秒数と monitor.jsonl・delegate.jsonl の時刻に使う (PadOutput の clock と
+                     同じ monotonic から作る)
+    paths            実行ディレクトリー (orchestrator/monitor.jsonl か orchestrator/delegate.jsonl に書く)
     wait             run のループが回りの最後に待つ関数 (wake, timeout を受け取る)。既定 wait_for_wake。
                      テストでは、回りの数を数える関数を渡せる
     make_reference   画像の参照文字列を作る関数 (既定 jev_client.new_asset_reference。呼ぶたびに異なる文字列を返す)
+    latest_frames    frames/latest/ の最新の一定間隔のフレームを新しい順に返す関数 (run では LatestFrames.snapshot)。
+                     委任型だけで使い、委任型では要る
+    buffered_frames  キャプチャーの元のフレームを古い順に返す関数 (run では FrameBuffer.frames)。委任型だけで使い、
+                     委任型では要る
+    run_log          run.jsonl (delegate_start・delegate_end を書く)。委任型だけで使い、委任型では要る
     """
 
     pad_output: PadOutput
@@ -178,17 +249,22 @@ class OrchestratorParts:
     paths: RunPaths
     wait: Callable[[threading.Event, float], None] = wait_for_wake
     make_reference: Callable[[], str] = new_asset_reference
+    latest_frames: Callable[[], Sequence[LatestFrame]] | None = None
+    buffered_frames: Callable[[], Sequence[CapturedFrame]] | None = None
+    run_log: RunLog | None = None
 
 
 @dataclass(frozen=True)
 class OrchestratorSettings:
     """OrchestratorController の設定。
 
-    monitor_threshold    監視の当たりのしきい値 (--monitor-threshold。0 より大きく 1 未満)
-    max_monitor_errors   監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors。1 以上)
+    monitor_threshold    監視の当たりのしきい値 (--monitor-threshold。0 より大きく 1 未満)。委任型では使わない
+    max_monitor_errors   監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors。1 以上)。委任型では
+                         使わない
     poll_interval_s      run のループが 1 回の回りで待つ秒数の上限
     image_width          監視に送る画像の幅の上限 (安全の監視と同じ)
     jpeg_quality         監視に送る画像の JPEG の品質
+    delegate             委任のループの設定。None (既定) なら監視型、None でなければ委任型
     """
 
     monitor_threshold: float
@@ -196,6 +272,7 @@ class OrchestratorSettings:
     poll_interval_s: float = POLL_INTERVAL_S
     image_width: int = SAFETY_IMAGE_WIDTH
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
+    delegate: DelegateSettings | None = None
 
 
 @dataclass
@@ -227,7 +304,13 @@ class OrchestratorController:
     def __init__(
         self, parts: OrchestratorParts, settings: OrchestratorSettings
     ) -> None:
-        """マクロも監視も操作の列も無く、set_started の前の状態で作る。レポートは送らず、スレッドも起動しない。"""
+        """マクロも監視も委任も操作の列も無く、set_started の前の状態で作る。レポートは送らず、スレッドも起動しない。
+
+        委任型 (settings.delegate が None でない) で、parts の latest_frames・buffered_frames・run_log のどれかが None
+        なら ValueError。
+        """
+        if settings.delegate is not None:
+            raise NotImplementedError("OrchestratorController for --mode delegate")
         self._parts = parts
         self._settings = settings
         # 下の状態は、すべてこのロックの中で読み書きする (run のループの 1 回の回りは、ロックを持ったまま行う)
@@ -351,6 +434,14 @@ class OrchestratorController:
         """
         with self._lock:
             return self._macros.names()
+
+    def delegate_context(self) -> DelegateContext:
+        """今の委任の状態を返す (decision_parser.parse_decision の delegate に渡す)。出来事は取り出さない。
+
+        active は委任中か始める前なら True、previous は前の委任の値 (モジュールの docstring の「委任の状態」)、macros は
+        今登録しているマクロ (MacroRegistry.snapshot)。監視型では、active が False で previous が None の値を返す。
+        """
+        raise NotImplementedError("OrchestratorController.delegate_context")
 
     def set_started(self) -> None:
         """実行を始めるときの安全の確かめが通ったことを伝える。これより前は、操作も監視の要求も送らない。

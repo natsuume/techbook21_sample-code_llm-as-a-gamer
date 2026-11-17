@@ -28,6 +28,7 @@ from switch2_layers.app import (
     LayersApp,
     LayersParts,
     OrchestratorLayersParts,
+    delegate_loop_failure_reason,
     monitor_loop_failure_reason,
 )
 from switch2_layers.deep.fake_deep import FakeDeepRunner
@@ -42,13 +43,19 @@ from switch2_layers.orchestrator.main_loop import (
     session_failure_reason,
 )
 from switch2_layers.orchestrator.monitor_questions import NONE_OPTION
+from switch2_layers.orchestrator.orchestrator_instructions import (
+    delegate_instructions,
+)
 from switch2_layers.orchestrator.turn_input import NONE_TEXT
 from switch2_layers.safety.fake_safety import FakeSafetyChecker
-from switch2_layers.safety.safety_judge import unsafe_screen_at_start_reason
+from switch2_layers.safety.safety_judge import (
+    unsafe_screen_at_start_reason,
+    unsafe_screen_reason,
+)
 from switch2_layers.safety.safety_types import SafetyAnswer
 from switch2_layers.settings import SAFETY_INTERVAL_MIN_S, RunMode, RunSettings
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
-from switch2_layers.surface.jev_client import JevAnswers, JevImage
+from switch2_layers.surface.jev_client import JevAnswers, JevError, JevImage
 from switch2_layers.surface.surface_questions import SurfaceQuestion
 
 # 止まらないときに、テストを終わらせるために Ctrl+C を出すまでの秒数。正しい実装ではここまで待たない
@@ -730,4 +737,365 @@ def test_advisor_mode_with_orchestrator_parts_is_an_error(tmp_path):
     parts = orchestrator_parts(tmp_path, FakeSender(), FakeClaude())
     with pytest.raises(ValueError):
         LayersApp(RunSettings(runs_dir=tmp_path / "runs"), parts)
+    assert not (tmp_path / "runs").exists()
+
+
+# --- 委任型 (--mode delegate) ---
+
+# 委任の行動のマクロを登録し、委任を始める応答 (actions が無いので、すぐに委任を始める)
+DELEGATE_START_REPLY = (
+    "X を押す行動を登録し、リアルタイムの場面の操作を委任する。\n\n"
+    '```json\n{"macros": {"set": {"press_x": [{"type": "press", "buttons": ["X"]}]}}, '
+    '"delegate": {"action": "start", "tasks": ["最重要: HP を 0 にせずに敵をすべて倒す"], '
+    '"cautions": [], "choices": [{"name": "press_x", "description": "X を押して攻撃する"}]}}\n```'
+)
+# 委任中に、主ループが操作を書く応答 (委任中なので捨てられる)
+DELEGATE_ACTIONS_REPLY = (
+    "Y を押したいが、委任中。\n\n"
+    '```json\n{"actions": [{"type": "press", "buttons": ["Y"]}]}\n```'
+)
+# 何も変えない応答
+WAIT_REPLY = "委任の様子を見る。\n\n```json\n{}\n```"
+# 台本が尽きた後に、最後の応答を返すまでの秒数 (委任中は、主ループのターンが続けて来るため)
+REPEAT_DELAY_S = 0.05
+
+
+class RepeatingClaudeProcess(FakeClaudeProcess):
+    """台本が尽きたら、最後の応答を REPEAT_DELAY_S 秒待ってから返し続ける claude の子プロセスの偽物。"""
+
+    def __init__(self, args: list[str], pid: int, replies: list[str]) -> None:
+        super().__init__(args, pid, replies)
+        self.last_reply = replies[-1] if replies else None
+
+    def on_input(self, message: dict) -> None:
+        if not self.replies and self.last_reply is not None:
+            time.sleep(REPEAT_DELAY_S)
+            self.replies.append(self.last_reply)
+        super().on_input(message)
+
+
+class RepeatingClaude(FakeClaude):
+    """FakeClaude と同じく台本を返し、台本が尽きた後も最後の応答を返し続ける start_process の偽物。"""
+
+    def start(self, args: list[str], **kwargs: object) -> FakeClaudeProcess:
+        with self.lock:
+            self.start_attempts += 1
+            replies = [] if self.processes else self.replies
+            process = RepeatingClaudeProcess(
+                list(args), 61000 + len(self.processes), replies
+            )
+            self.processes.append(process)
+            return process
+
+
+class ChoosingJev:
+    """委任の要求の送り先 (orchestrator.monitor_loop.MonitorAsker の形) の偽物。
+
+    要求ごとに、picks の名前の選択肢を前から 1 つずつ選んだ答えを返す (尽きたら最後の名前を選び続ける)。受け取った
+    要求を数え、受け取った画像を残す。before_answer があれば、答えを返す前に呼ぶ。
+    """
+
+    def __init__(
+        self, picks: Sequence[str], before_answer: Callable[[], None] | None = None
+    ) -> None:
+        self.picks = list(picks)
+        self.before_answer = before_answer
+        self.lock = threading.Lock()
+        self.count = 0
+        self.images: list[JevImage] = []
+
+    def ask(
+        self,
+        state: Mapping[str, object],
+        questions: Sequence[SurfaceQuestion],
+        images: Sequence[JevImage],
+    ) -> JevAnswers:
+        with self.lock:
+            self.count += 1
+            self.images.extend(images)
+            name = self.picks[min(self.count, len(self.picks)) - 1]
+        if self.before_answer is not None:
+            self.before_answer()
+        [question] = questions
+        probabilities = {
+            choice.name: 1.0 if choice.name == name else 0.0
+            for choice in question.choices
+        }
+        return JevAnswers(choices={question.name: probabilities}, nouls={}, boxes={})
+
+
+class FailingJev:
+    """委任の要求の送り先の偽物。要求のたびに JevError を出し、受け取った要求を数える。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.count = 0
+
+    def ask(
+        self,
+        state: Mapping[str, object],
+        questions: Sequence[SurfaceQuestion],
+        images: Sequence[JevImage],
+    ) -> JevAnswers:
+        with self.lock:
+            self.count += 1
+        raise JevError("HTTP 500 from the fake")
+
+
+class UnsafeWhen:
+    """SafetyChecker の偽物。condition() が真になったら、オンラインの画面の確率を 0.9 にした答えを返す。"""
+
+    def __init__(self, condition: Callable[[], bool]) -> None:
+        self.condition = condition
+
+    def check(self, jpeg: bytes) -> SafetyAnswer:
+        answer = FakeSafetyChecker().check(jpeg)
+        if not self.condition():
+            return answer
+        return dataclasses.replace(
+            answer, probabilities={**answer.probabilities, "online": 0.9}
+        )
+
+
+def delegate_settings(tmp_path: Path, **changes: object) -> RunSettings:
+    """委任型の起動引数。委任型の 2 つの値は、既定と違う値にする (run.jsonl に届くことを確かめるため)。
+
+    changes の値は、委任型の 2 つの値を含めて、ほかの値より優先する。
+    """
+    values: dict[str, object] = {
+        "mode": RunMode.DELEGATE,
+        "delegate_image_width": 640,
+        "max_delegate_errors": 4,
+    }
+    values.update(changes)
+    return orchestrator_settings(tmp_path, **values)
+
+
+def any_input_contains(claude: FakeClaude, text: str) -> bool:
+    return any(text in input_text(message) for message in claude.first_inputs())
+
+
+def test_delegate_runs_the_main_loop_and_the_delegate_loop_without_the_monitor(
+    tmp_path,
+):
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    jev = ChoosingJev(["press_x"])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=jev),
+        stop_when=lambda: sender.pressed("X"),
+    )
+    assert reason == REASON_INTERRUPTED
+    # run.jsonl: start の args に mode と委任型の 2 つの値を書き、委任の始まりを書く
+    start = read_rows(root / "run.jsonl")[0]
+    assert start["args"]["mode"] == "delegate"
+    assert start["args"]["delegate_image_width"] == 640
+    assert start["args"]["max_delegate_errors"] == 4
+    assert "delegate_start" in run_events(root)
+    assert_stopped_without_phases(root, REASON_INTERRUPTED)
+    # Jev が選んだ行動のマクロの操作は、source が delegate
+    assert any(
+        row["source"] == "delegate" and row["held"] == ["X"]
+        for row in read_rows(root / "operations.jsonl")
+    )
+    delegate_rows = read_rows(root / "orchestrator" / "delegate.jsonl")
+    assert delegate_rows
+    assert delegate_rows[0]["handling"] == "started"
+    # 監視は使わない
+    assert not (root / "orchestrator" / "monitor.jsonl").exists()
+
+
+def test_delegate_claude_is_launched_with_the_delegate_instructions(tmp_path):
+    sender = FakeSender()
+    claude = FakeClaude()
+    reason, _ = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=ChoosingJev(["none"])),
+        stop_when=lambda: len(claude.first_inputs()) >= 1,
+    )
+    assert reason == REASON_INTERRUPTED
+    claude_args = claude.processes[0].args
+    assert (
+        claude_args[claude_args.index("--append-system-prompt") + 1]
+        == delegate_instructions()
+    )
+
+
+def test_delegate_image_width_of_the_settings_reaches_the_jev_images(tmp_path):
+    # --delegate-image-width の値で、Jev に送る画像を作る (キャプチャーの偽物のフレームは幅 640)
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    jev = ChoosingJev(["none"])
+    reason, _ = run_orchestrator(
+        delegate_settings(tmp_path, delegate_image_width=498),
+        orchestrator_parts(tmp_path, sender, claude, monitor=jev),
+        stop_when=lambda: jev.count >= 1,
+    )
+    assert reason == REASON_INTERRUPTED
+    assert jev.images
+    widths = {
+        cv2.imdecode(np.frombuffer(image.jpeg, np.uint8), cv2.IMREAD_COLOR).shape[1]
+        for image in jev.images
+    }
+    assert widths == {498}
+
+
+def test_delegate_max_errors_of_the_settings_return_control_to_the_main_loop(
+    tmp_path,
+):
+    # --max-delegate-errors 回続けて Jev が失敗したら、操作権を主ループに返す (実行は続ける)
+    run_log = tmp_path / "runs" / RUN_DIRECTORY_NAME / "run.jsonl"
+
+    def delegate_ended() -> bool:
+        return any(row["event"] == "delegate_end" for row in read_rows(run_log))
+
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path, max_delegate_errors=2),
+        orchestrator_parts(tmp_path, sender, claude, monitor=FailingJev()),
+        stop_when=delegate_ended,
+    )
+    assert reason == REASON_INTERRUPTED
+    ends = [
+        row for row in read_rows(root / "run.jsonl") if row["event"] == "delegate_end"
+    ]
+    assert [row["reason"] for row in ends] == ["errors"]
+    assert len(read_rows(root / "orchestrator" / "delegate.jsonl")) == 2
+
+
+def test_delegate_main_loop_presses_home_like_the_orchestrator(tmp_path):
+    # 主ループが押せるボタンは、監視型と同じ 17 個 (HOME を含む)
+    sender = FakeSender()
+    claude = FakeClaude([HOME_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=ChoosingJev(["none"])),
+        stop_when=lambda: sender.pressed("HOME"),
+    )
+    assert reason == REASON_INTERRUPTED
+    assert any(
+        row["source"] == "orchestrator" and row["held"] == ["HOME"]
+        for row in read_rows(root / "operations.jsonl")
+    )
+
+
+def test_delegate_interrupt_while_delegating_records_the_end_as_stop(tmp_path):
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=ChoosingJev(["press_x"])),
+        stop_when=lambda: sender.pressed("X"),
+    )
+    assert reason == REASON_INTERRUPTED
+    ends = [
+        row for row in read_rows(root / "run.jsonl") if row["event"] == "delegate_end"
+    ]
+    assert [row["reason"] for row in ends] == ["stop"]
+    # 止めるときは、すぐ操作を中立にする
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_delegate_monitor_in_the_json_is_an_error(tmp_path):
+    sender = FakeSender()
+    claude = FakeClaude([MONITOR_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path, max_decision_errors=1),
+        orchestrator_parts(tmp_path, sender, claude, monitor=ChoosingJev(["none"])),
+    )
+    assert reason == decision_failure_reason(1)
+    [error_row] = [
+        row
+        for row in read_rows(root / "run.jsonl")
+        if row["event"] == "orchestrator_decision_error"
+    ]
+    assert any(message.startswith("monitor: ") for message in error_row["errors"])
+
+
+def test_delegate_return_by_jev_is_told_in_the_next_input(tmp_path):
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(
+            tmp_path, sender, claude, monitor=ChoosingJev(["return_control"])
+        ),
+        stop_when=lambda: any_input_contains(claude, "(jev_return)"),
+    )
+    assert reason == REASON_INTERRUPTED
+    assert any_input_contains(claude, "(jev_return)")
+    ends = [
+        row for row in read_rows(root / "run.jsonl") if row["event"] == "delegate_end"
+    ]
+    assert [row["reason"] for row in ends] == ["jev_return"]
+
+
+def test_delegate_actions_while_delegating_are_discarded_and_told(tmp_path):
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, DELEGATE_ACTIONS_REPLY, WAIT_REPLY])
+    reason, _ = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=ChoosingJev(["none"])),
+        stop_when=lambda: any_input_contains(claude, "委任中のため、操作を捨てた"),
+    )
+    assert reason == REASON_INTERRUPTED
+    assert any_input_contains(claude, "委任中のため、操作を捨てた: 1 個")
+    assert not sender.pressed("Y")
+
+
+def test_delegate_loop_failure_stops_the_run(tmp_path):
+    # 委任の要求の答えを返す前に、delegate.jsonl の場所にディレクトリーを作り、delegate.jsonl への追記を失敗させる
+    delegate_log = (
+        tmp_path / "runs" / RUN_DIRECTORY_NAME / "orchestrator" / "delegate.jsonl"
+    )
+    jev = ChoosingJev(
+        ["none"], before_answer=lambda: delegate_log.mkdir(parents=True, exist_ok=True)
+    )
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(tmp_path, sender, claude, monitor=jev),
+    )
+    assert reason.startswith("delegate loop failed: ")
+    assert "IsADirectoryError" in reason
+    assert_stopped_without_phases(root, reason)
+    assert jev.count >= 1
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_delegate_unsafe_screen_while_delegating_stops_the_run(tmp_path):
+    # 委任中も安全の監視は動き、止める画面なら実行全体を止める
+    sender = FakeSender()
+    claude = RepeatingClaude([DELEGATE_START_REPLY, WAIT_REPLY])
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        orchestrator_parts(
+            tmp_path,
+            sender,
+            claude,
+            monitor=ChoosingJev(["press_x", "none"]),
+            safety=UnsafeWhen(lambda: sender.pressed("X")),
+        ),
+    )
+    assert reason == unsafe_screen_reason("online")
+    assert_stopped_without_phases(root, reason)
+    ends = [
+        row for row in read_rows(root / "run.jsonl") if row["event"] == "delegate_end"
+    ]
+    assert [row["reason"] for row in ends] == ["stop"]
+
+
+def test_delegate_loop_failure_reason():
+    assert (
+        delegate_loop_failure_reason("RuntimeError: broken")
+        == "delegate loop failed: RuntimeError: broken"
+    )
+
+
+def test_delegate_mode_with_layers_parts_is_an_error(tmp_path):
+    with pytest.raises(ValueError):
+        LayersApp(delegate_settings(tmp_path), advisor_parts())
     assert not (tmp_path / "runs").exists()

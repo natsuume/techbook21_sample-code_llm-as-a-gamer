@@ -27,6 +27,15 @@
         準備と片付けの段階は使わない (ソフトの起動とユーザー選択は、主ループが本体の操作のスキルで行う)。
         起動するソフトと遊ぶユーザーは、人の初期指示 (--instruction か --instruction-file) に書く。--software と
         --user は使わない (指定しても動きは変わらない)。surface・middle・deep の引数も使わない
+    switch2-layers run --mode delegate [--instruction TEXT | --instruction-file PATH]
+                       [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
+                       [--max-decision-errors N] [--delegate-image-width N] [--max-delegate-errors N]
+                       [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--safety jev|fake] [--safety-interval S]
+                       [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
+        実機で委任型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と委任のループ
+        (orchestrator.orchestrator_controller の委任型と orchestrator.delegate_loop) を、キャプチャー・安全の監視・
+        停滞の計測と組み立てる (app)。主ループはリアルタイムの場面の操作を Jev に委任する。監視は使わない
+        (--monitor-threshold と --max-monitor-errors は使わない)。そのほかは --mode orchestrator と同じ
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude|fake]
@@ -47,6 +56,7 @@ middle-once は既定の none で呼ぶ。
 同じく終了コード 2 を返す。
 run --mode orchestrator は、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (監視は常に Jev を使うため、
 --safety fake でも要る)。OPENAI_API_KEY は確かめない。無ければ、実機と実行ディレクトリーに触れる前に終了コード 2 を返す。
+run --mode delegate も同じく、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (委任は常に Jev を使うため)。
 
 引数の形の誤り (知らない引数、数として読めない値、--doc・--middle・--middle-effort の知らない値、run --mode advisor の
 --software・--user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
@@ -90,6 +100,10 @@ from switch2_layers.middle.system_screen_middle import (
     LunaSystemScreenMiddle,
     SystemScreenMiddle,
 )
+from switch2_layers.orchestrator.delegate_loop import (
+    DELEGATE_IMAGE_WIDTH_MAX,
+    DELEGATE_IMAGE_WIDTH_MIN,
+)
 from switch2_layers.orchestrator.initial_instruction import (
     InitialInstructionError,
     load_initial_instruction,
@@ -105,10 +119,12 @@ from switch2_layers.settings import (
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
     DEFAULT_DEEP_TIMEOUT_S,
+    DEFAULT_DELEGATE_IMAGE_WIDTH,
     DEFAULT_HOLD_MARGIN,
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
     DEFAULT_MAX_DECISION_ERRORS,
+    DEFAULT_MAX_DELEGATE_ERRORS,
     DEFAULT_MAX_MIDDLE_ERRORS,
     DEFAULT_MAX_MONITOR_ERRORS,
     DEFAULT_MAX_SAFETY_ERRORS,
@@ -248,8 +264,8 @@ def add_run_parser(
 ) -> argparse.ArgumentParser:
     """サブコマンド run の引数を定義し、run の ArgumentParser を返す。既定値は settings の DEFAULT_* と同じ。
 
-    --mode は settings.RunMode の値 (advisor / orchestrator) から選ぶ (既定 advisor)。Namespace の mode には文字列が
-    入る。
+    --mode は settings.RunMode の値 (advisor / orchestrator / delegate) から選ぶ (既定 advisor)。Namespace の mode には
+    文字列が入る。
     --software NAME と --user NAME は、--mode advisor のときだけ必須 (無ければ LayersArgumentParser が argparse の誤り
     にする)。空か空白だけの値は、どちらの --mode でも argparse の誤り (SystemExit 2) にする。値は書かれたまま
     Namespace の software と user に入る (無ければ None)。
@@ -262,14 +278,15 @@ def add_run_parser(
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
     --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
     --threshold-task は float (既定 0.5)、--task-stuck-seconds は float (既定 30)。
-    Orchestrator 型の引数 (add_orchestrator_arguments) も足す。
+    Orchestrator 型の引数 (add_orchestrator_arguments) と委任型の引数 (add_delegate_arguments) も足す。
     """
     parser = commands.add_parser(
         "run",
-        help="実機で 3 層 (advisor 型) か Orchestrator 型を動かす",
+        help="実機で 3 層 (advisor 型)・Orchestrator 型・委任型のどれかを動かす",
         description=(
             "実機で動かす。--mode advisor (既定) は 3 層 (surface は --surface、middle は --middle、deep は --deep で"
-            "選ぶ)、--mode orchestrator は Claude Code の主ループと、操作の実行と監視を動かす。Ctrl+C で止まる"
+            "選ぶ)、--mode orchestrator は Claude Code の主ループと、操作の実行と監視を動かす。--mode delegate は "
+            "Claude Code の主ループと、操作の実行と委任のループを動かす。Ctrl+C で止まる"
         ),
     )
     parser.add_argument(
@@ -278,7 +295,8 @@ def add_run_parser(
         default=DEFAULT_RUN_MODE.value,
         help=(
             "run の型。advisor は surface・middle・deep の 3 層、orchestrator は Claude Code の主ループと、"
-            f"操作の実行と監視を動かす (既定 {DEFAULT_RUN_MODE.value})"
+            "操作の実行と監視、delegate は Claude Code の主ループと、操作の実行と委任のループを動かす "
+            f"(既定 {DEFAULT_RUN_MODE.value})"
         ),
     )
     parser.add_argument(
@@ -523,23 +541,27 @@ def add_run_parser(
         ),
     )
     add_orchestrator_arguments(parser)
+    add_delegate_arguments(parser)
     parser.set_defaults(handler=run_command)
     return parser
 
 
 def add_orchestrator_arguments(parser: argparse.ArgumentParser) -> None:
-    """run の parser に、--mode orchestrator だけで使う引数を足す (使い方の表示では 1 つのグループにまとめる)。
+    """run の parser に、--mode orchestrator (と、--monitor-* のほかは --mode delegate) で使う引数を足す (使い方の
+    表示では 1 つのグループにまとめる)。
 
     --instruction TEXT と --instruction-file PATH は相互排他 (両方なら argparse の誤り)。Namespace の instruction
     (str か None) と instruction_file (Path か None) に入る。中身の確かめ (空か空白だけ・読めないファイル) は
     run_command が行う。
     --orchestrator-effort は settings.ORCHESTRATOR_EFFORTS から選び (既定 medium)、--rotate-tokens は int
     (既定 120000)、--turn-timeout は float (既定 120)、--max-decision-errors は int (既定 3)、--monitor-threshold は
-    float (既定 0.5)、--max-monitor-errors は int (既定 5)。
+    float (既定 0.5)、--max-monitor-errors は int (既定 5)。--monitor-threshold と --max-monitor-errors は
+    --mode delegate では使わない。
     """
     group = parser.add_argument_group(
-        "Orchestrator 型 (--mode orchestrator) の引数",
-        "--mode advisor では使わない (指定しても動きは変わらない)",
+        "Orchestrator 型 (--mode orchestrator と --mode delegate) の引数",
+        "--mode advisor では使わない (指定しても動きは変わらない)。--monitor-threshold と --max-monitor-errors は "
+        "--mode delegate でも使わない",
     )
     instruction = group.add_mutually_exclusive_group()
     instruction.add_argument(
@@ -607,6 +629,37 @@ def add_orchestrator_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "監視の Jev の失敗がこの回数続いたら監視を止める "
             f"(1 以上。既定 {DEFAULT_MAX_MONITOR_ERRORS})"
+        ),
+    )
+
+
+def add_delegate_arguments(parser: argparse.ArgumentParser) -> None:
+    """run の parser に、--mode delegate だけで使う引数を足す (使い方の表示では 1 つのグループにまとめる)。
+
+    --delegate-image-width は int (既定 settings.DEFAULT_DELEGATE_IMAGE_WIDTH の 1280)、--max-delegate-errors は int
+    (既定 settings.DEFAULT_MAX_DELEGATE_ERRORS の 5)。範囲は run_command が settings.run_settings_errors で、--mode に
+    依らず確かめる。
+    """
+    group = parser.add_argument_group(
+        "委任型 (--mode delegate) の引数",
+        "--mode advisor と --mode orchestrator では使わない (指定しても動きは変わらない)",
+    )
+    group.add_argument(
+        "--delegate-image-width",
+        type=int,
+        default=DEFAULT_DELEGATE_IMAGE_WIDTH,
+        help=(
+            "委任のループが Jev に送る画像の幅 "
+            f"({DELEGATE_IMAGE_WIDTH_MIN}〜{DELEGATE_IMAGE_WIDTH_MAX} の整数。既定 {DEFAULT_DELEGATE_IMAGE_WIDTH})"
+        ),
+    )
+    group.add_argument(
+        "--max-delegate-errors",
+        type=int,
+        default=DEFAULT_MAX_DELEGATE_ERRORS,
+        help=(
+            "委任のループの Jev の失敗がこの回数続いたら、操作権を主ループに返す "
+            f"(1 以上。既定 {DEFAULT_MAX_DELEGATE_ERRORS})"
         ),
     )
 
@@ -727,12 +780,12 @@ def add_deep_once_parser(
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
-    --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator では
-    使わないため無くてよい)。--middle は MiddleKind に、--middle-effort は MiddleEffort (middle_effort) に、
-    --surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
-    --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値は、
-    --mode に依らず写す。
-    --instruction と --instruction-file は写さない (run_command が orchestrator のときだけ読む)。
+    --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator と
+    --mode delegate では使わないため無くてよい)。--middle は MiddleKind に、--middle-effort は MiddleEffort
+    (middle_effort) に、--surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
+    --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値と
+    委任型の 2 つの値 (--delegate-image-width・--max-delegate-errors) は、--mode に依らず写す。
+    --instruction と --instruction-file は写さない (run_command が orchestrator と delegate のときだけ読む)。
     """
     return RunSettings(
         software_name=args.software if args.software is not None else "",
@@ -771,6 +824,8 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         max_decision_errors=args.max_decision_errors,
         monitor_threshold=args.monitor_threshold,
         max_monitor_errors=args.max_monitor_errors,
+        delegate_image_width=args.delegate_image_width,
+        max_delegate_errors=args.max_delegate_errors,
     )
 
 
@@ -845,11 +900,13 @@ def start_isolated_bridge() -> Bridge:
 
 
 def create_monitor_client(environ: Mapping[str, str]) -> JevClient:
-    """--mode orchestrator の監視の要求の送り先 (TypeSafe Jev のクライアント) を作って返す。要求はまだ送らない。
+    """--mode orchestrator の監視と --mode delegate の委任の要求の送り先 (TypeSafe Jev のクライアント) を作って返す。
+    要求はまだ送らない。
 
     API キーは environ[TYPESAFE_API_KEY_ENV] の前後の空白を除いたもの。キーが無いか空なら ValueError (呼ぶ前に
-    settings.orchestrator_api_key_errors で確かめておく)。安全の監視のクライアントとは別に作り、閉じるのは run_command。
-    run_command は、environ に os.environ を渡してこの関数で作る (テストはこの関数を差し替えられる)。
+    settings.orchestrator_api_key_errors か delegate_api_key_errors で確かめておく)。安全の監視のクライアントとは別に
+    作り、閉じるのは run_command。run_command は、environ に os.environ を渡してこの関数で作る (テストはこの関数を
+    差し替えられる)。
     """
     api_key = environ.get(TYPESAFE_API_KEY_ENV, "").strip()
     if not api_key:
@@ -861,8 +918,9 @@ def run_command(args: argparse.Namespace) -> int:
     """run の処理。終了コードを返す。
 
     1. run_settings_from_args → settings.run_settings_errors。誤りがあれば 1 行ずつ標準エラー出力に書き、EXIT_USAGE を返す
-       (実機には触れない。Orchestrator 型の 6 つの値も、--mode に依らず確かめる)
-    --mode orchestrator なら、ここから _run_orchestrator_command の流れに進む。以下の 2〜9 は --mode advisor の流れ。
+       (実機には触れない。Orchestrator 型の 6 つの値と委任型の 2 つの値も、--mode に依らず確かめる)
+    --mode orchestrator なら、ここから _run_orchestrator_command の流れに、--mode delegate なら _run_delegate_command の
+    流れに進む。以下の 2〜9 は --mode advisor の流れ。
     2. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
        (実機にも実行ディレクトリーにも触れない)
     3. settings.typesafe_api_key_errors(settings.surface, os.environ) と
@@ -902,6 +960,8 @@ def run_command(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     if settings.mode is RunMode.ORCHESTRATOR:
         return _run_orchestrator_command(settings, args)
+    if settings.mode is RunMode.DELEGATE:
+        return _run_delegate_command(settings, args)
     key_errors = openai_api_key_errors(settings.middle, os.environ)
     if key_errors:
         _print_errors(key_errors)
@@ -988,6 +1048,17 @@ def _run_orchestrator_command(settings: RunSettings, args: argparse.Namespace) -
             monitor.close()
     finally:
         safety.close()
+
+
+def _run_delegate_command(settings: RunSettings, args: argparse.Namespace) -> int:
+    """run_command の --mode delegate の流れ (1 の範囲の確かめの後)。終了コードを返す。
+
+    _run_orchestrator_command の 2〜7 と同じ流れで、3 の API キーの確かめだけを settings.delegate_api_key_errors
+    (os.environ) にする (誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す。実機にも実行ディレクトリーにも触れない)。
+    create_monitor_client(os.environ) で作ったクライアントを、委任の要求の送り先として OrchestratorLayersParts の
+    monitor に渡す。終了コードは advisor と同じ。
+    """
+    raise NotImplementedError("_run_delegate_command")
 
 
 def _typesafe_api_key(needed: bool) -> str | None:

@@ -1,4 +1,4 @@
-"""主ループと監視の操作の列を、1 つずつ PadOutput に送る。
+"""主ループ・監視・委任の行動の操作の列を、1 つずつ PadOutput に送る。
 
 展開 (expand_actions。I/O を持たない):
     procedure は procedures.expand_procedure で、macro は登録した操作の列 (その中の procedure も展開する) で置き換え、
@@ -27,7 +27,7 @@
     離した時刻 (送る直前に読んだ clock.now())。OrchestratorController が、監視の要求に使うフレームが、これに
     orchestrator_controller.MONITOR_FRAME_SETTLE_S を足した時刻より後に撮ったものかを確かめるのに使う。
 操作の記録:
-    PadOutput.apply を呼ぶたびに、source に列の持ち主 (orchestrator か monitor) を渡す
+    PadOutput.apply を呼ぶたびに、source に列の持ち主 (orchestrator・monitor・delegate のどれか) を渡す
     (PadOutput.apply(操作, source=持ち主))。operations.jsonl の行は、PadOutput が on_operation でその source のまま
     書く (このモジュールは記録の関数を持たず、行を書かない)。
     apply の送信の例外は外に出さない (PadOutput が ok=False の行を書く。その操作は時刻どおりに進める)。
@@ -77,8 +77,8 @@ logger = logging.getLogger(__name__)
 
 # 展開した後の操作 (押す操作と待ち)
 PrimitiveAction = PressAction | WaitAction
-# 操作の列の持ち主。PadOutput.apply の source に渡し、operations.jsonl の source になる
-ActionOwner = Literal["orchestrator", "monitor"]
+# 操作の列の持ち主 (主ループ・監視・委任の行動)。PadOutput.apply の source に渡し、operations.jsonl の source になる
+ActionOwner = Literal["orchestrator", "monitor", "delegate"]
 
 
 def expand_actions(

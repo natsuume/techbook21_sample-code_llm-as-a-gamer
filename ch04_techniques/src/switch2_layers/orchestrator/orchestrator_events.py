@@ -1,8 +1,10 @@
 """主ループが操作の実行と監視の部品 (OrchestratorController) から受け取る型。
 
 OrchestratorEvents (take_events の戻り値): 主ループが次の入力を作るときに取り出す出来事。前回の取り出し以降に起きたこと
-(case_hits・monitor_ends・discarded_action_count・blocked_buttons) と、取り出した時点の値 (running・
-remaining_action_count・macros・monitor) を持つ。作った後は、Mapping の欄 (macros) の中身を書き換えない。
+(case_hits・monitor_ends・discarded_action_count・blocked_buttons・delegate_ends・delegate_discarded_action_count) と、
+取り出した時点の値 (running・remaining_action_count・macros・monitor・delegation) を持つ。作った後は、Mapping の欄
+(macros) の中身を書き換えない。delegation は --mode delegate のときだけ None でない (turn_input が委任の節を置くかを
+これで決める)。
 MainActionsRun (main_actions_run の戻り値): 主ループの空でない actions の操作の列 1 つの、始めた・最後に離した・終えた
 時刻。主ループは、これと frames/latest/ の最新のフレームの時刻を見て、前のターンの操作の列が終わり、その後に撮った
 フレームが届くのを待つ (orchestrator.action_settle)。
@@ -12,10 +14,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from switch2_layers.orchestrator.decision_types import Action, MonitorCreate
+from switch2_layers.orchestrator.decision_types import (
+    Action,
+    DelegateStart,
+    MonitorCreate,
+)
 
 # 監視が終わった理由: completed は once の条件の操作を実行し終えた、failed は Jev の失敗が続いた
 MonitorEndReason = Literal["completed", "failed"]
+# 委任が終わって操作権が主ループに戻った理由: jev_return は Jev が「操作を返す」を続けて選んだ、main_stop は主ループが
+# delegate の stop を書いた、errors は Jev の失敗が続いた
+DelegateEndReason = Literal["jev_return", "main_stop", "errors"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,50 @@ class MonitorEnd:
 
 
 @dataclass(frozen=True)
+class DelegateEnd:
+    """委任が終わり、操作権が主ループに戻ったこと (主ループへの知らせ。実行全体を止めて終えた委任は入れない)。
+
+    reason   戻った理由
+    detail   理由の説明 (orchestrator.delegate_loop の delegate_return_detail・MAIN_STOP_DETAIL・
+             delegate_failure_detail の文)
+    """
+
+    reason: DelegateEndReason
+    detail: str
+
+
+@dataclass(frozen=True)
+class DelegatePick:
+    """委任のループで Jev が選んで始めた行動 1 つ。
+
+    name   行動の名前 (DelegateChoice.name。マクロの名前)
+    t      その行動 (マクロの操作の列) を始めた時刻 (実行の経過秒)
+    """
+
+    name: str
+    t: float
+
+
+@dataclass(frozen=True)
+class DelegationStatus:
+    """取り出した時点の委任の状況 (--mode delegate のときの OrchestratorEvents.delegation)。
+
+    active          委任中なら True (委任を始める指示を受け付け、主ループの actions の終わりを待っている間も含む)
+    started_t       委任を始めた時刻。委任中でないか、主ループの actions の終わりを待っていてまだ始めていなければ None
+    values          委任中なら今のタスク・注意事項・行動。委任中でなければ前の委任の値 (start で省いたキーに使う値)。
+                    まだ委任が無ければ None
+    last_pick       今の委任で Jev が直近に選んで始めた行動。委任中でないか、まだ選んでいなければ None
+    return_streak   今の委任で Jev が「操作を返す」を続けて選んだ回数。委任中でなければ 0
+    """
+
+    active: bool
+    started_t: float | None
+    values: DelegateStart | None
+    last_pick: DelegatePick | None
+    return_streak: int
+
+
+@dataclass(frozen=True)
 class OrchestratorEvents:
     """主ループへの知らせ。
 
@@ -59,12 +112,18 @@ class OrchestratorEvents:
     monitor_ends             前回の取り出し以降に終わった監視 (終わった順)
     discarded_action_count   前回の取り出し以降に、新しい actions で捨てた主ループの操作の数 (procedure と macro を
                              展開した後の数。捨てたときに実行中だった操作を含む)
-    blocked_buttons          前回の取り出し以降に、押せずに外したボタン (pad_action.sort_buttons の順、重複なし)
+    blocked_buttons          前回の取り出し以降に、押せずに外したボタン (pad_action.sort_buttons の順、重複なし。
+                             委任の行動の操作で外したボタンを含む)
     running                  取り出した時点で、主ループの actions の残りがある (実行中の操作を含む) なら True
     remaining_action_count   取り出した時点の、主ループの actions の残りの操作の数 (procedure と macro を展開した後の数。
                              実行中の操作を含む)
     macros                   取り出した時点のマクロ (名前 → 登録した操作の列。名前の順)
     monitor                  取り出した時点の監視 (作ったときの指示のまま)。無ければ None
+    delegate_ends            前回の取り出し以降に、操作権が主ループに戻った委任 (戻った順)
+    delegate_discarded_action_count
+                             前回の取り出し以降に、委任中のため捨てた主ループの actions の操作の数 (JSON の actions の
+                             要素の数。procedure と macro は展開しない)
+    delegation               取り出した時点の委任の状況 (--mode delegate のとき)。--mode orchestrator では None
     """
 
     case_hits: tuple[CaseHit, ...] = ()
@@ -75,11 +134,16 @@ class OrchestratorEvents:
     remaining_action_count: int = 0
     macros: Mapping[str, tuple[Action, ...]] = field(default_factory=dict)
     monitor: MonitorCreate | None = None
+    delegate_ends: tuple[DelegateEnd, ...] = ()
+    delegate_discarded_action_count: int = 0
+    delegation: DelegationStatus | None = None
 
 
 @dataclass(frozen=True)
 class MainActionsRun:
     """主ループの空でない actions の操作の列 1 つの時刻 (procedure と macro を展開した後の列。時刻は実行の経過秒)。
+
+    委任の行動の操作の列はこの時刻に入れない (主ループは委任の操作の終わりを待たない)。
 
     started_t    操作の実行と監視の部品が、列を始めた時刻 (まだ始めていなければ None)
     released_t   列の操作が、最後にボタンかスティックを離した時刻 (列を途中で捨てたときに中立に戻した時刻を含む)。

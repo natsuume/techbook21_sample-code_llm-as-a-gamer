@@ -201,7 +201,8 @@ class PadOutput:
 
         source は記録 (OperationEvent と operations.jsonl の行の source) に入れる、送った処理の名前。surface の操作は
         "apply" (既定)、本体の画面の操作 (system_screen.system_operation_runner) は "system"、Orchestrator 型の操作は
-        "orchestrator" (主ループの操作) か "monitor" (監視の操作)。source は記録だけに使い、送り方は変えない。
+        "orchestrator" (主ループの操作)・"monitor" (監視の操作)・"delegate" (委任型の委任の行動の操作) のどれか。
+        source は記録だけに使い、送り方は変えない。
 
         ロックの中で次を行う:
             1. stop_output() の後なら、何も送らず (on_operation も呼ばず) OutputStoppedError を出す

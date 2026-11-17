@@ -7,6 +7,9 @@ import pytest
 from switch2_layers.orchestrator.decision_types import PressAction
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    DelegateEnd,
+    DelegatePick,
+    DelegationStatus,
     MonitorEnd,
     OrchestratorEvents,
 )
@@ -52,4 +55,27 @@ def test_field_names_follow_the_io_contract():
         "remaining_action_count",
         "macros",
         "monitor",
+        "delegate_ends",
+        "delegate_discarded_action_count",
+        "delegation",
     ]
+
+
+def test_delegate_event_field_names_and_defaults_follow_the_io_contract():
+    def names(cls: type) -> list[str]:
+        return [field.name for field in dataclasses.fields(cls)]
+
+    assert names(DelegateEnd) == ["reason", "detail"]
+    assert names(DelegatePick) == ["name", "t"]
+    assert names(DelegationStatus) == [
+        "active",
+        "started_t",
+        "values",
+        "last_pick",
+        "return_streak",
+    ]
+    # 監視型の出来事では、委任の出来事も委任の状況も無い
+    events = OrchestratorEvents()
+    assert events.delegate_ends == ()
+    assert events.delegate_discarded_action_count == 0
+    assert events.delegation is None

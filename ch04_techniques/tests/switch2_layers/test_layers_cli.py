@@ -2120,3 +2120,130 @@ def test_run_orchestrator_passes_the_instruction_file_content_to_app(
     [client] = recorded.clients
     assert parts.monitor is client
     assert client.closed
+
+
+# --- 委任型 (--mode delegate) ---
+
+# 委任型の run (--software と --user は使わないため付けない)
+DELEGATE = ["run", "--mode", "delegate"]
+
+
+def test_run_delegate_defaults_are_1280_and_5():
+    args = build_parser().parse_args(DELEGATE)
+    assert args.mode == "delegate"
+    assert args.delegate_image_width == 1280
+    assert args.max_delegate_errors == 5
+
+
+def test_run_delegate_does_not_need_software_or_user():
+    settings = run_settings_from_args(build_parser().parse_args(DELEGATE))
+    assert settings.mode is RunMode.DELEGATE
+    assert settings.software_name == ""
+    assert settings.user_name == ""
+
+
+def test_run_settings_from_args_copy_the_delegate_values():
+    args = build_parser().parse_args(
+        [*DELEGATE, "--delegate-image-width", "640", "--max-delegate-errors", "3"]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.delegate_image_width == 640
+    assert settings.max_delegate_errors == 3
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        [*RUN, *ALL_FAKE],
+        [*ORCHESTRATOR, "--safety", "fake"],
+        [*DELEGATE, "--safety", "fake"],
+    ],
+    ids=["advisor", "orchestrator", "delegate"],
+)
+@pytest.mark.parametrize(
+    "extra, option",
+    [
+        (["--delegate-image-width", "497"], "--delegate-image-width"),
+        (["--delegate-image-width", "1281"], "--delegate-image-width"),
+        (["--max-delegate-errors", "0"], "--max-delegate-errors"),
+    ],
+)
+def test_run_delegate_range_errors_exit_before_hardware_in_every_mode(
+    orchestrator_key_without_app, tmp_path, capsys, base, extra, option
+):
+    # 2 つの値は --mode に依らず確かめ、範囲の外なら実機に触れずに終了コード 2 で終わる
+    runs_dir = tmp_path / "runs"
+    code = main([*base, "--runs-dir", str(runs_dir), *extra])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert option in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize("key", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_run_delegate_needs_typesafe_api_key_even_with_fake_safety(
+    no_hardware, monkeypatch, tmp_path, capsys, key
+):
+    # 委任は常に Jev を使うため、--safety fake でも TYPESAFE_API_KEY が要る
+    if key is not None:
+        monkeypatch.setenv("TYPESAFE_API_KEY", key)
+    monkeypatch.setattr(cli, "LayersApp", must_not_create_app)
+    runs_dir = tmp_path / "runs"
+    code = main([*DELEGATE, "--runs-dir", str(runs_dir), "--safety", "fake"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "TYPESAFE_API_KEY" in captured.err
+    assert "--mode delegate" in captured.err
+    assert not runs_dir.exists()
+
+
+def test_run_delegate_rejects_blank_instruction(
+    orchestrator_key_without_app, tmp_path, capsys
+):
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [
+            *DELEGATE,
+            "--runs-dir",
+            str(runs_dir),
+            "--safety",
+            "fake",
+            "--instruction",
+            "  ",
+        ]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "--instruction" in captured.err
+    assert not runs_dir.exists()
+
+
+def test_run_delegate_passes_the_instruction_and_the_jev_client_to_app(monkeypatch):
+    # OPENAI_API_KEY は、autouse の without_api_key が消してある (確かめない)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    code = main(
+        [
+            *DELEGATE,
+            "--safety",
+            "fake",
+            "--instruction",
+            INSTRUCTION,
+            "--delegate-image-width",
+            "640",
+        ]
+    )
+    assert code == 0
+    [(settings, parts)] = recorded.created
+    assert settings.mode is RunMode.DELEGATE
+    assert settings.delegate_image_width == 640
+    assert isinstance(parts, OrchestratorLayersParts)
+    assert parts.initial_instruction == INSTRUCTION
+    assert isinstance(parts.safety, FakeSafetyChecker)
+    # 委任の要求の送り先は、監視型と同じ Jev のクライアントで、app が止まった後に閉じる
+    [client] = recorded.clients
+    assert parts.monitor is client
+    assert recorded.open_while_run == [True]
+    assert client.closed

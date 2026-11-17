@@ -1,8 +1,10 @@
-"""Orchestrator 型の run の、主ループ (OrchestratorMainLoop) と操作の実行と監視 (OrchestratorController) の組み立て。
+"""Orchestrator 型と委任型の run の、主ループ (OrchestratorMainLoop) と操作の実行と監視・委任 (OrchestratorController)
+の組み立て。
 
-app.LayersApp が Orchestrator 型の start で使う。共有の部品 (実行ディレクトリー・時計・run.jsonl・PadOutput・
-キャプチャーの最新のフレーム) と注入された部品を OrchestratorLoopParts で受け取り、2 つの部品をつないで返す
-(build_orchestrator_loops)。監視のループのスレッドの本体 (run_monitor_loop) も置く。
+app.LayersApp が Orchestrator 型と委任型の start で使う。共有の部品 (実行ディレクトリー・時計・run.jsonl・PadOutput・
+キャプチャーのフレーム) と注入された部品を OrchestratorLoopParts で受け取り、2 つの部品をつないで返す
+(build_orchestrator_loops。settings.mode で監視型か委任型かを決める)。監視のループのスレッドの本体
+(run_monitor_loop) と、委任のループのスレッドの本体 (run_delegate_loop) も置く。
 スレッドの起動と止まる理由の決め方は app が行う (このモジュールは app を import しない)。
 """
 
@@ -35,7 +37,7 @@ from switch2_layers.orchestrator.orchestrator_controller import (
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
-from switch2_layers.settings import RunSettings
+from switch2_layers.settings import RunMode, RunSettings
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -52,13 +54,15 @@ class OrchestratorLoopParts:
     latest_frame           キャプチャーの最新のフレームを返す関数 (FrameBuffer.latest)
     latest_frames          最新の一定間隔のフレームの画像を新しい順にまとめて返す関数
                            (frames.latest_frames.LatestFrames.snapshot。主ループの入力の画像に使う)
-    monitor                監視の要求の送り先 (run では surface.jev_client.JevClient)
+    monitor                監視 (委任型では委任) の要求の送り先 (run では surface.jev_client.JevClient)
     initial_instruction    人の初期指示。無ければ None
     on_stop                実行全体を止める関数 (止まる理由の文字列を受け取る。app.LayersApp.request_stop)
     start_process          claude の子プロセスを起動する関数 (None なら subprocess.Popen)
     signal_process_group   claude のプロセスグループにシグナルを送る関数 (None なら os.killpg)
     environ                claude の環境変数の元 (None ならセッションを始めるときの os.environ)
     switch_skills_dir      本体の操作のスキルを写す元
+    buffered_frames        キャプチャーの元のフレームを古い順に返す関数 (FrameBuffer.frames。委任の要求の画像に使う)。
+                           委任型だけで使い、委任型では要る (None なら build_orchestrator_loops が ValueError)
     """
 
     paths: RunPaths
@@ -74,13 +78,15 @@ class OrchestratorLoopParts:
     signal_process_group: Callable[[int, int], None] | None
     environ: Mapping[str, str] | None
     switch_skills_dir: Path
+    buffered_frames: Callable[[], Sequence[CapturedFrame]] | None = None
 
 
 @dataclass(frozen=True)
 class OrchestratorLoops:
     """組み立てた 2 つの部品。
 
-    controller   操作の実行と監視 (run を監視のループのスレッドで動かす)
+    controller   操作の実行と監視 (run を監視のループのスレッドで動かす)。委任型では操作の実行と委任 (run を委任の
+                 ループのスレッドで動かす)
     main_loop    主ループ (run を主ループのスレッドで動かす)
     """
 
@@ -106,12 +112,21 @@ def registered_macro_parser(controller: OrchestratorController) -> DecisionParse
     return parse
 
 
+def delegate_decision_parser(controller: OrchestratorController) -> DecisionParser:
+    """--mode delegate の応答の本文を、controller の今のマクロの登録と委任の状態に照らして読む関数を返す。
+
+    返す関数は text を decision_parser.parse_decision(text, controller.macro_names(), controller.delegate_context())
+    で読む (呼ぶたびに今の値を読む)。
+    """
+    raise NotImplementedError("delegate_decision_parser")
+
+
 def build_orchestrator_loops(
     parts: OrchestratorLoopParts, settings: RunSettings
 ) -> OrchestratorLoops:
     """OrchestratorController と OrchestratorMainLoop を作り、主ループから controller を使うようにつないで返す。
 
-    スレッドは起動しない。
+    スレッドは起動しない。settings.mode が delegate でなければ監視型:
         controller   OrchestratorController(OrchestratorParts(pad_output, jev = monitor, latest_frame, clock, paths),
                      OrchestratorSettings(monitor_threshold, max_monitor_errors))
         main_loop    OrchestratorMainLoop(OrchestratorMainLoopParts(paths, clock,
@@ -122,7 +137,17 @@ def build_orchestrator_loops(
                      OrchestratorMainLoopSettings(rotate_tokens, turn_timeout_s, max_decision_errors))
     値は settings の Orchestrator 型の 6 つの値。範囲は cli が settings.run_settings_errors で確かめてある
     (主ループが受け付けない値なら、OrchestratorMainLoop が ValueError にする)。
+    settings.mode が delegate なら委任型 (監視型との違いだけを書く):
+        controller   OrchestratorParts に latest_frames・buffered_frames・run_log も渡し、OrchestratorSettings の
+                     delegate を delegate_loop.DelegateSettings(image_width = delegate_image_width,
+                     max_errors = max_delegate_errors) にする (monitor_threshold と max_monitor_errors は settings の値の
+                     まま渡すが、委任型では使わない)
+        main_loop    parse_decision = delegate_decision_parser(controller)、
+                     instructions = orchestrator_instructions.delegate_instructions()
+    委任型で parts.buffered_frames が None なら ValueError。
     """
+    if settings.mode is RunMode.DELEGATE:
+        raise NotImplementedError("build_orchestrator_loops for --mode delegate")
     controller = OrchestratorController(
         OrchestratorParts(
             pad_output=parts.pad_output,
@@ -177,3 +202,19 @@ def run_monitor_loop(
     except Exception as error:
         logger.warning("orchestrator monitor loop failed", exc_info=True)
         on_failure(describe_exception(error))
+
+
+def run_delegate_loop(
+    controller: OrchestratorController,
+    stop: threading.Event,
+    on_failure: Callable[[str], None],
+) -> None:
+    """委任のループのスレッドの本体。委任型の controller の controller.run(stop) を呼び、stop が立って戻ったら何もせずに
+    戻る。
+
+    run が想定外の例外 (Exception。orchestrator/delegate.jsonl の追記の失敗など) で抜けたら、外に出さずに
+    on_failure(error_text.describe_exception(例外)) を呼んで戻る (app は、説明から委任のループの止まる理由
+    (app.delegate_loop_failure_reason) を作って全体を止める関数を渡す)。押下状態は controller.run が中立に戻してから
+    例外を出す。
+    """
+    raise NotImplementedError("run_delegate_loop")

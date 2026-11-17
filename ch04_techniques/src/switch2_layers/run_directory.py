@@ -34,11 +34,15 @@
                                             (deep の stream.jsonl と同じ形)
     orchestrator/monitor.jsonl              Orchestrator 型の監視が Jev に送った要求の記録 (orchestrator.monitor_record)。
                                             monitor_record は、orchestrator/ が無ければ作ってから書く
+    orchestrator/delegate.jsonl             委任型 (--mode delegate) の委任のループが Jev に送った要求の記録
+                                            (orchestrator.delegate_record)。delegate_record は、orchestrator/ が無ければ
+                                            作ってから書く
     orchestrator/instruction.md             Orchestrator 型の run に渡した人の初期指示の写し (write_initial_instruction)。
                                             初期指示を渡さなければ無い
     .claude/skills/<名前>/                   主ループの Claude Code に読ませるスキル (orchestrator.skill_copy が写す)
-orchestrator/ と .claude/skills/ は、Orchestrator 型の主ループ (orchestrator.main_loop)・監視の記録
-(orchestrator.monitor_record)・初期指示の写し (write_initial_instruction) が作る。
+orchestrator/ と .claude/skills/ は、Orchestrator 型 (委任型を含む) の主ループ (orchestrator.main_loop)・監視の記録
+(orchestrator.monitor_record)・委任の記録 (orchestrator.delegate_record)・初期指示の写し (write_initial_instruction)
+が作る。
 notes/ は、advisor 型の run では write_initial_notes が初期ファイルを書いて作り、Orchestrator 型の run では
 create_empty_notes が空のディレクトリーとして作る。
 """
@@ -101,6 +105,8 @@ ORCHESTRATOR_SESSION_DIR_PREFIX = "session-"
 ORCHESTRATOR_SESSION_NUMBER_DIGITS = 3  # セッションのディレクトリーの名前の連番の桁数
 ORCHESTRATOR_STREAM_FILE = "stream.jsonl"
 ORCHESTRATOR_MONITOR_LOG_FILE = "monitor.jsonl"
+# 委任型の委任のループの記録 (orchestrator.delegate_record)
+ORCHESTRATOR_DELEGATE_LOG_FILE = "delegate.jsonl"
 # Orchestrator 型の run に渡した人の初期指示の写し
 ORCHESTRATOR_INSTRUCTION_FILE = "instruction.md"
 # 主ループの Claude Code に読ませるスキルの置き場 (orchestrator.skill_copy)
@@ -265,6 +271,11 @@ class RunPaths:
     def orchestrator_monitor_log(self) -> Path:
         """root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE"""
         return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_MONITOR_LOG_FILE
+
+    @property
+    def orchestrator_delegate_log(self) -> Path:
+        """root / ORCHESTRATOR_DIR / ORCHESTRATOR_DELEGATE_LOG_FILE"""
+        return self.root / ORCHESTRATOR_DIR / ORCHESTRATOR_DELEGATE_LOG_FILE
 
     @property
     def orchestrator_instruction(self) -> Path:

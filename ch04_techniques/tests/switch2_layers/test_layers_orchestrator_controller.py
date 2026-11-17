@@ -1,12 +1,14 @@
 """OrchestratorController を、偽の時計・偽の送信先・応答をテストが渡す Jev で動かす。
 
-確かめるのは、外から呼ぶメソッド (apply・take_events・macro_names・set_started・run) と、外から見えるもの
-(送信先が受け取ったレポート、orchestrator/monitor.jsonl と operations.jsonl の行、Jev が受け取った要求) だけにする。
+確かめるのは、外から呼ぶメソッド (apply・take_events・macro_names・delegate_context・set_started・run) と、外から
+見えるもの (送信先が受け取ったレポート、orchestrator/monitor.jsonl・orchestrator/delegate.jsonl・operations.jsonl・
+run.jsonl の行、Jev が受け取った要求) だけにする。委任型のテストは、ファイルの最後の節にまとめる。
 時間は偽の時計 (FakeMonotonic) を進めて動かす。run のループの待ち (OrchestratorParts.wait) には LoopRounds を渡し、
 回りの数を数えて「N 回回っても起きない」を確かめる (実時間の長い待ちに頼らない)。LoopRounds は、待つたびに PadOutput の
 タイマーの処理 (start_due_taps など) も呼ぶ (タイマースレッドを起動しない PadOutput の代わり)。
 """
 
+import dataclasses
 import json
 import logging
 import queue
@@ -28,10 +30,16 @@ from switch2_remote.controller_state import (
 )
 
 from switch2_layers.frames.frame_buffer import CapturedFrame
+from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.hardware.pad_output import TAP_PRESS_S, TAP_RELEASE_GAP_S, PadOutput
 from switch2_layers.orchestrator.decision_types import (
     Action,
     Decision,
+    DelegateChoice,
+    DelegateContext,
+    DelegateStart,
+    DelegateStop,
+    DelegateUpdate,
     MacroAction,
     MonitorCase,
     MonitorCreate,
@@ -40,6 +48,11 @@ from switch2_layers.orchestrator.decision_types import (
     ProcedureAction,
     RepeatMode,
     WaitAction,
+)
+from switch2_layers.orchestrator.delegate_loop import (
+    MAIN_STOP_DETAIL,
+    RUN_STOP_DETAIL,
+    DelegateSettings,
 )
 from switch2_layers.orchestrator.monitor_questions import MONITOR_INSTRUCTIONS
 from switch2_layers.orchestrator.orchestrator_controller import (
@@ -50,10 +63,13 @@ from switch2_layers.orchestrator.orchestrator_controller import (
 )
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
+    DelegatePick,
+    DelegationStatus,
     MainActionsRun,
     OrchestratorEvents,
 )
 from switch2_layers.records.operation_log import OperationLog
+from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock, round_to_milliseconds
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.surface.jev_client import JevAnswers, JevError, JevImage
@@ -2010,3 +2026,467 @@ def test_no_request_after_stop_output_even_before_any_operation_is_sent(
     h.controller.apply(monitor(case("c0", tap("B"))))
     h.wait_rounds()
     assert h.jev.request_count() == 0
+
+
+# --- 委任型 (OrchestratorSettings.delegate) ---
+
+# 委任の要求に使う、frames/latest/ の最新のフレームの時刻 (古い順)。元のフレームは、この間の時刻のものも持つ
+DELEGATE_FRAME_TIMES = (99.2, 99.4, 99.6, 99.8, 100.0)
+DELEGATE_IMAGE_WIDTH = 498
+ATTACK = DelegateChoice(name="attack", description="前の敵を攻撃する")
+GUARD = DelegateChoice(name="guard", description="B を押し続けて守る")
+# 委任の行動のマクロ (guard は長く押し続けるので、次の答えのときにまだ実行中)
+DELEGATE_MACROS: dict[str, tuple[Action, ...]] = {
+    "attack": (tap("A"),),
+    "guard": (hold(5.0, "B"),),
+}
+
+
+def delegate_start(**changes: object) -> DelegateStart:
+    values = DelegateStart(
+        tasks=("最重要: HP を 0 にせずに敵をすべて倒す",),
+        cautions=("衝撃波は横一列に進む",),
+        choices=(ATTACK, GUARD),
+    )
+    return dataclasses.replace(values, **changes)
+
+
+def start_delegation(*actions: Action) -> Decision:
+    """行動のマクロを登録し、委任を始める指示 (actions があれば、その後に委任を始める)。"""
+    return Decision(
+        actions=tuple(actions), macros_set=DELEGATE_MACROS, delegate=delegate_start()
+    )
+
+
+def stop_delegation() -> Decision:
+    return Decision(delegate=DelegateStop())
+
+
+class DelegateFrames:
+    """委任型の latest_frames (LatestFrames.snapshot) と buffered_frames (FrameBuffer.frames) の偽物。"""
+
+    def __init__(self) -> None:
+        self.latest = tuple(
+            LatestFrame(
+                t=t,
+                source_file=f"frames/interval/{round(t * 1000):09d}.jpg",
+                jpeg=b"stamped",
+            )
+            for t in reversed(DELEGATE_FRAME_TIMES)
+        )
+        # t=99.1〜100.0 の 0.1 秒ごとの元のフレーム (古い順)
+        self.buffered = [frame_at(round(99.1 + 0.1 * index, 1)) for index in range(10)]
+
+    def snapshot(self) -> tuple[LatestFrame, ...]:
+        return self.latest
+
+    def frames(self) -> list[CapturedFrame]:
+        return list(self.buffered)
+
+
+def make_delegate_harness(
+    tmp_path: Path,
+    cleanups: list[Callable[[], None]],
+    *,
+    max_errors: int = 5,
+    started: bool = True,
+) -> Harness:
+    """委任型の OrchestratorController を作って run のスレッドを起動し、started なら set_started を呼ぶ。
+
+    監視型の make_harness と同じ偽物を使い、latest_frames・buffered_frames に DelegateFrames、run_log に
+    tmp_path/run.jsonl の RunLog を渡す。
+    """
+    monotonic = FakeMonotonic()
+    sender = RecordingSender(monotonic)
+    clock = RunClock(monotonic, origin=0.0)
+    paths = RunPaths(tmp_path)
+    pad_output = PadOutput(
+        sender,
+        ALLOWED,
+        clock=monotonic,
+        on_operation=OperationLog(paths.operations_log, clock).write,
+        start_timer=False,
+    )
+    cleanups.append(pad_output.close)
+    jev = ScriptedJev()
+    cleanups.append(jev.close)
+    frames = FrameSource(SMALL_FRAME)
+    delegate_frames = DelegateFrames()
+    rounds = LoopRounds(pad_output)
+    controller = OrchestratorController(
+        OrchestratorParts(
+            pad_output=pad_output,
+            jev=jev,
+            latest_frame=frames.latest,
+            clock=clock,
+            paths=paths,
+            wait=rounds.wait,
+            latest_frames=delegate_frames.snapshot,
+            buffered_frames=delegate_frames.frames,
+            run_log=RunLog(paths.run_log, clock),
+        ),
+        OrchestratorSettings(
+            monitor_threshold=0.5,
+            max_monitor_errors=5,
+            delegate=DelegateSettings(
+                image_width=DELEGATE_IMAGE_WIDTH, max_errors=max_errors
+            ),
+        ),
+    )
+    harness = Harness(
+        controller=controller,
+        sender=sender,
+        jev=jev,
+        monotonic=monotonic,
+        rounds=rounds,
+        frames=frames,
+        paths=paths,
+        pad_output=pad_output,
+    )
+    cleanups.append(harness.shutdown)
+    harness.start_run()
+    if started:
+        controller.set_started()
+    return harness
+
+
+def delegate_rows(h: Harness) -> list[dict]:
+    return read_rows(h.paths.orchestrator_delegate_log)
+
+
+def run_rows_of(h: Harness, event: str) -> list[dict]:
+    return [row for row in read_rows(h.paths.run_log) if row["event"] == event]
+
+
+def wait_delegate_rows(h: Harness, count: int) -> None:
+    """委任の応答を count 件処理し終える (delegate.jsonl に count 行書く) まで待つ。"""
+    h.wait_until(lambda: len(delegate_rows(h)) >= count, f"{count} delegate rows")
+
+
+def test_delegate_requests_start_right_after_a_start_without_actions(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    request = h.wait_request(1)
+    assert request.question.kind is QuestionKind.DELEGATE
+    assert [choice.name for choice in request.question.choices] == [
+        "none",
+        "attack",
+        "guard",
+        "return_control",
+    ]
+    assert request.state["tasks"] == ["最重要: HP を 0 にせずに敵をすべて倒す"]
+    assert request.state["cautions"] == ["衝撃波は横一列に進む"]
+
+
+def test_delegate_starts_after_the_actions_of_the_same_json_end(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation(hold(1.0, "X")))
+    h.wait_pressed({"X"})
+    h.set_time(0.99)
+    h.wait_rounds()
+    assert h.jev.request_count() == 0
+    h.set_time(1.001)
+    h.wait_request(1)
+
+
+def test_delegate_request_has_the_latest_five_frames_at_the_delegate_image_width(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    request = h.wait_request(1)
+    assert len(request.images) == 5
+    # 古い順に、時刻のラベルを付ける
+    assert [row["t"] for row in request.state["frames"]] == [
+        "t=99.200",
+        "t=99.400",
+        "t=99.600",
+        "t=99.800",
+        "t=100.000",
+    ]
+    assert [row["image"] for row in request.state["frames"]] == [
+        image.reference for image in request.images
+    ]
+    widths = [
+        cv2.imdecode(np.frombuffer(image.jpeg, np.uint8), cv2.IMREAD_COLOR).shape[1]
+        for image in request.images
+    ]
+    assert widths == [DELEGATE_IMAGE_WIDTH] * 5
+
+
+def test_delegate_chosen_action_runs_its_macro_with_the_delegate_source(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), attack=0.9))
+    h.wait_pressed({"A"})
+    rows = rows_pressing(h.operation_rows(), "A")
+    assert rows
+    assert all(row["source"] == "delegate" for row in rows)
+
+
+def test_delegate_new_action_discards_the_rest_of_the_running_action(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    h.wait_pressed({"B"})
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), attack=0.9))
+    h.wait_pressed({"A"})
+    # 押し続けていた B は、A を押す前に離した
+    assert h.sender.release_times("B")
+    assert not any({"A", "B"} <= sent.buttons for sent in h.sender.reports())
+
+
+def test_delegate_none_keeps_the_running_action(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    h.wait_pressed({"B"})
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), none=0.9))
+    wait_delegate_rows(h, 2)
+    h.wait_rounds()
+    assert h.sender.pressed_now() == {"B"}
+    assert h.sender.release_times("B") == []
+
+
+def test_delegate_next_request_is_sent_0_2_seconds_after_the_response(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), none=0.9))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.19)
+    h.wait_rounds()
+    assert h.jev.request_count() == 1
+    h.set_time(0.201)
+    h.wait_request(2)
+
+
+def test_delegate_two_return_controls_in_a_row_end_the_delegation_with_neutral(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    h.wait_pressed({"B"})
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), return_control=0.9))
+    wait_delegate_rows(h, 2)
+    # 1 回目の「操作を返す」は、実行中の行動を続ける
+    assert h.sender.pressed_now() == {"B"}
+    h.set_time(0.6)
+    h.jev.respond(answer(h.wait_request(3), return_control=0.9))
+    h.wait_neutral()
+    # 操作権を返した後は、委任の要求を送らない
+    h.set_time(1.0)
+    h.wait_rounds()
+    assert h.jev.request_count() == 3
+
+
+def test_delegate_return_by_jev_is_told_to_the_main_loop_and_recorded(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), return_control=0.9))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), return_control=0.9))
+    h.wait_until(lambda: run_rows_of(h, "delegate_end"), "the delegate_end row")
+    [end_row] = run_rows_of(h, "delegate_end")
+    assert end_row["reason"] == "jev_return"
+    events = h.controller.take_events()
+    assert [end.reason for end in events.delegate_ends] == ["jev_return"]
+    assert events.delegation is not None
+    assert events.delegation.active is False
+
+
+def test_delegate_stop_from_the_main_loop_ends_the_delegation_with_neutral(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), guard=0.9))
+    h.wait_pressed({"B"})
+    h.controller.apply(stop_delegation())
+    h.wait_neutral()
+    events = h.controller.take_events()
+    assert [(end.reason, end.detail) for end in events.delegate_ends] == [
+        ("main_stop", MAIN_STOP_DETAIL)
+    ]
+    assert [row["reason"] for row in run_rows_of(h, "delegate_end")] == ["main_stop"]
+
+
+def test_delegate_failures_up_to_the_limit_end_the_delegation_but_the_run_continues(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups, max_errors=2)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.jev.respond(JevError("HTTP 500"))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    h.wait_request(2)
+    h.jev.respond(JevError("HTTP 500"))
+    h.wait_until(lambda: run_rows_of(h, "delegate_end"), "the delegate_end row")
+    events = h.controller.take_events()
+    assert [end.reason for end in events.delegate_ends] == ["errors"]
+    # 実行は続ける: 委任を終えた後の主ループの操作は送る
+    h.controller.apply(act(tap("X")))
+    h.wait_pressed({"X"})
+
+
+def test_delegate_main_loop_actions_are_discarded_while_delegating(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.controller.apply(act(tap("X"), tap("Y")))
+    # 主ループは待つ列が無いので、待たずに次の入力を作る
+    assert h.controller.main_actions_run() is None
+    h.wait_rounds()
+    assert h.sender.press_starts("X") == []
+    assert h.controller.take_events().delegate_discarded_action_count == 2
+
+
+def test_delegate_macros_of_a_json_with_discarded_actions_are_applied(
+    tmp_path, cleanups
+):
+    # 委任中の JSON の actions は捨てるが、同じ JSON の macros は当てる
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.controller.apply(
+        Decision(actions=(tap("X"),), macros_set={"dodge": (tap("UP"),)})
+    )
+    assert "dodge" in h.controller.macro_names()
+    assert h.controller.take_events().delegate_discarded_action_count == 1
+
+
+def test_delegate_update_changes_the_next_request_and_keeps_the_omitted_values(
+    tmp_path, cleanups
+):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    first = h.wait_request(1)
+    h.controller.apply(Decision(delegate=DelegateUpdate(tasks=("前に出すぎない",))))
+    h.jev.respond(answer(first, none=0.9))
+    wait_delegate_rows(h, 1)
+    h.set_time(0.3)
+    second = h.wait_request(2)
+    assert second.state["tasks"] == ["前に出すぎない"]
+    assert second.state["cautions"] == ["衝撃波は横一列に進む"]
+
+
+def test_delegate_answer_after_the_delegation_ends_is_not_used(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    request = h.wait_request(1)
+    h.controller.apply(stop_delegation())
+    h.jev.respond(answer(request, attack=0.9))
+    wait_delegate_rows(h, 1)
+    h.wait_rounds()
+    assert h.sender.press_starts("A") == []
+    assert delegate_rows(h)[0]["handling"] == "ignored"
+
+
+def test_delegate_status_is_in_the_events(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.jev.respond(answer(h.wait_request(1), attack=0.9))
+    h.wait_pressed({"A"})
+    h.set_time(0.3)
+    h.jev.respond(answer(h.wait_request(2), return_control=0.9))
+    wait_delegate_rows(h, 2)
+    assert h.controller.take_events().delegation == DelegationStatus(
+        active=True,
+        started_t=0.0,
+        values=delegate_start(),
+        last_pick=DelegatePick(name="attack", t=0.0),
+        return_streak=1,
+    )
+
+
+def test_delegate_context_follows_the_delegation(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    assert h.controller.delegate_context() == DelegateContext(
+        active=False, previous=None, macros={}
+    )
+    h.controller.apply(start_delegation())
+    started = h.controller.delegate_context()
+    assert started.active is True
+    assert started.previous == delegate_start()
+    assert dict(started.macros) == DELEGATE_MACROS
+    h.controller.apply(stop_delegation())
+    stopped = h.controller.delegate_context()
+    assert stopped.active is False
+    # 前の委任の値は残す (次の start で省いたキーに使う)
+    assert stopped.previous == delegate_start()
+
+
+def test_delegate_each_request_is_recorded_in_delegate_jsonl(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    request = h.wait_request(1)
+    h.jev.respond(answer(request, {"input_tokens": 10}, attack=0.9))
+    wait_delegate_rows(h, 1)
+    [row] = delegate_rows(h)
+    assert row == {
+        "t_sent": 0.0,
+        "t_received": 0.0,
+        "frame_ts": list(DELEGATE_FRAME_TIMES),
+        "probabilities": {
+            "none": 0.0,
+            "attack": 0.9,
+            "guard": 0.0,
+            "return_control": 0.0,
+        },
+        "chosen": "attack",
+        "handling": "started",
+        "usage": {"input_tokens": 10},
+        "error": None,
+    }
+
+
+def test_delegate_failed_request_is_recorded_with_the_error(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.jev.respond(JevError("HTTP 500"))
+    wait_delegate_rows(h, 1)
+    [row] = delegate_rows(h)
+    assert row["probabilities"] is None
+    assert row["chosen"] is None
+    assert row["handling"] == "continued"
+    assert row["error"] is not None
+    assert "HTTP 500" in row["error"]
+
+
+def test_delegate_start_is_recorded_in_run_jsonl(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    [row] = run_rows_of(h, "delegate_start")
+    assert row["tasks"] == ["最重要: HP を 0 にせずに敵をすべて倒す"]
+    assert row["cautions"] == ["衝撃波は横一列に進む"]
+    assert row["choices"] == [
+        {"name": "attack", "description": "前の敵を攻撃する"},
+        {"name": "guard", "description": "B を押し続けて守る"},
+    ]
+
+
+def test_delegate_stop_of_the_run_while_delegating_records_the_end(tmp_path, cleanups):
+    h = make_delegate_harness(tmp_path, cleanups)
+    h.controller.apply(start_delegation())
+    h.wait_request(1)
+    h.shutdown()
+    assert [
+        (row["reason"], row["detail"]) for row in run_rows_of(h, "delegate_end")
+    ] == [("stop", RUN_STOP_DETAIL)]

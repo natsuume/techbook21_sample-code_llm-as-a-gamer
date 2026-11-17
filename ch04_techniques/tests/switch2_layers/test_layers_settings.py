@@ -45,6 +45,7 @@ from switch2_layers.settings import (
     SurfaceKind,
     SurfaceMapMode,
     deep_once_settings_errors,
+    delegate_api_key_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
     orchestrator_api_key_errors,
@@ -720,7 +721,7 @@ def test_run_settings_to_json_has_the_task_arguments():
 
 
 def test_run_mode_values_and_default():
-    assert [mode.value for mode in RunMode] == ["advisor", "orchestrator"]
+    assert [mode.value for mode in RunMode] == ["advisor", "orchestrator", "delegate"]
     assert DEFAULT_RUN_MODE is RunMode.ADVISOR
     assert ORCHESTRATOR_EFFORTS == ("low", "medium", "high", "xhigh", "max")
 
@@ -840,3 +841,87 @@ def test_orchestrator_without_typesafe_api_key_is_an_error(environ):
 def test_orchestrator_with_typesafe_api_key_has_no_error():
     # OPENAI_API_KEY は確かめない
     assert orchestrator_api_key_errors({"TYPESAFE_API_KEY": "ts-x"}) == []
+
+
+# --- 委任型 (--mode delegate) の値 ---
+
+
+def test_delegate_settings_defaults_are_1280_and_5():
+    settings = RunSettings()
+    assert settings.delegate_image_width == 1280
+    assert settings.max_delegate_errors == 5
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"delegate_image_width": 498},
+        {"delegate_image_width": 1280},
+        {"max_delegate_errors": 1},
+    ],
+)
+def test_delegate_boundary_values_are_valid(changes):
+    settings = RunSettings(mode=RunMode.DELEGATE, **changes)
+    assert run_settings_errors(settings) == []
+
+
+@pytest.mark.parametrize("mode", list(RunMode))
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"delegate_image_width": 497}, "--delegate-image-width"),
+        ({"delegate_image_width": 1281}, "--delegate-image-width"),
+        ({"max_delegate_errors": 0}, "--max-delegate-errors"),
+    ],
+)
+def test_delegate_out_of_range_values_are_reported_with_option_name(
+    mode, changes, option
+):
+    # 範囲は mode に依らず確かめる
+    errors = run_settings_errors(RunSettings(mode=mode, **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_delegate_errors_follow_the_orchestrator_errors_in_order():
+    errors = run_settings_errors(
+        RunSettings(
+            max_delegate_errors=0,
+            delegate_image_width=0,
+            max_monitor_errors=0,
+        )
+    )
+    assert len(errors) == 3
+    assert "--max-monitor-errors" in errors[0]
+    assert "--delegate-image-width" in errors[1]
+    assert "--max-delegate-errors" in errors[2]
+
+
+def test_run_settings_to_json_writes_delegate_mode_with_the_delegate_values():
+    value = run_settings_to_json(
+        RunSettings(
+            mode=RunMode.DELEGATE, delegate_image_width=640, max_delegate_errors=3
+        )
+    )
+    # run.jsonl の start の args に、--mode と 2 つの値を書く
+    assert value["mode"] == "delegate"
+    assert type(value["mode"]) is str
+    assert value["delegate_image_width"] == 640
+    assert value["max_delegate_errors"] == 3
+    assert json.loads(json.dumps(value)) == value
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [{}, {"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": " \n"}, {"OTHER": "x"}],
+)
+def test_delegate_without_typesafe_api_key_is_an_error(environ):
+    errors = delegate_api_key_errors(environ)
+    assert len(errors) == 1
+    assert "--mode delegate" in errors[0]
+    assert TYPESAFE_API_KEY_ENV in errors[0]
+
+
+def test_delegate_with_typesafe_api_key_has_no_error():
+    # OPENAI_API_KEY は確かめない
+    assert delegate_api_key_errors({"TYPESAFE_API_KEY": "ts-x"}) == []
