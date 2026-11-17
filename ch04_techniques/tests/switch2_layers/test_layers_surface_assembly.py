@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+from switch2_layers.buttons import allowed_buttons
 from switch2_layers.settings import RunSettings, SurfaceKind
 from switch2_layers.surface.box_tracking_state import BoxTrackingState
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
@@ -24,13 +25,13 @@ def test_fake_surface_has_no_hooks():
 
 def test_jev_surface_connects_tracking_and_run_directory():
     http = httpx.Client(transport=httpx.MockTransport(unused_transport))
-    settings = RunSettings(threshold_advisor=0.7, box_requery_every=3, allow_home=True)
+    settings = RunSettings(threshold_advisor=0.7, box_requery_every=3)
     assembly = build_surface_assembly(settings, "test-key", http_client=http)
     decider = assembly.decider
     assert isinstance(decider, JevSurfaceDecider)
     assert decider.settings.threshold_advisor == 0.7
     assert decider.settings.box_requery_every == 3
-    assert "HOME" in decider.settings.allowed_buttons
+    assert decider.settings.allowed_buttons == allowed_buttons()
     assert isinstance(decider.tracking, BoxTrackingState)
     # キャプチャーのフレームと、送る画像の box は、decider と同じ追跡の状態につなぐ
     assert assembly.on_frame == decider.tracking.on_frame
@@ -51,7 +52,7 @@ def test_jev_surface_connects_plan_boxes_and_fake_has_none():
     assert fake.plan_boxes is None
 
 
-def test_jev_surface_without_buttons_home_by_default():
+def test_jev_surface_never_asks_about_home():
     http = httpx.Client(transport=httpx.MockTransport(unused_transport))
     assembly = build_surface_assembly(RunSettings(), "test-key", http_client=http)
     assert "HOME" not in assembly.decider.settings.allowed_buttons

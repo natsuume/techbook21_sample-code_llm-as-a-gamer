@@ -39,8 +39,10 @@ from switch2_layers.middle.system_screen_types import (
     SystemScreenOutput,
 )
 
-# FakeSystemScreenMiddle が、渡された出力を使い切った後に返す出力 (操作が空で done が偽)
+# FakeSystemScreenMiddle が、渡された出力を使い切った後に返す出力の既定値 (操作が空で done が偽)
 FAKE_EXHAUSTED_OUTPUT = SystemScreenOutput(observation="", operations=(), done=False)
+# 操作が空で done が真の出力。run の --middle fake の本体の画面の middle は、使い切った後 (最初から) これを返し続ける
+FAKE_DONE_OUTPUT = SystemScreenOutput(observation="", operations=(), done=True)
 
 
 class SystemScreenMiddleError(Exception):
@@ -125,17 +127,26 @@ class LunaSystemScreenMiddle:
 
 
 class FakeSystemScreenMiddle:
-    """SystemScreenMiddle のフェイク。作るときに渡した出力の列を、decide のたびに 1 つずつ順に返す。"""
+    """SystemScreenMiddle のフェイク。作るときに渡した出力の列を、decide のたびに 1 つずつ順に返す。
 
-    def __init__(self, outputs: Iterable[SystemScreenOutput] = ()) -> None:
-        """outputs を、返す順の列として持つ (作るときに一度だけ読む)。"""
+    run の --middle fake では FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT) を使う (操作なしで done を
+    真で返し続ける)。
+    """
+
+    def __init__(
+        self,
+        outputs: Iterable[SystemScreenOutput] = (),
+        exhausted_output: SystemScreenOutput = FAKE_EXHAUSTED_OUTPUT,
+    ) -> None:
+        """outputs を、返す順の列として持つ (作るときに一度だけ読む)。exhausted_output は使い切った後に返す出力。"""
         self._outputs: deque[SystemScreenOutput] = deque(outputs)
+        self._exhausted_output = exhausted_output
 
     def decide(self, screen_input: SystemScreenInput) -> SystemScreenOutput:
-        """持っている列の次の出力を返す。列を使い切ったら FAKE_EXHAUSTED_OUTPUT を返す (何度呼んでも同じ)。
+        """持っている列の次の出力を返す。列を使い切ったら exhausted_output を返す (何度呼んでも同じ)。
 
         screen_input は使わない。例外は出さない。
         """
         if self._outputs:
             return self._outputs.popleft()
-        return FAKE_EXHAUSTED_OUTPUT
+        return self._exhausted_output

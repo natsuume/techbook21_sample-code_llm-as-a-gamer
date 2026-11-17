@@ -18,6 +18,8 @@
     - その文書の前回のジョブの終了 (まだ無ければ、その文書が対象になった時刻) から auto_seconds 秒たった
 - 画面の停滞の計測による呼び出し (check_progress) は、新しい画面が出ていない秒数が stuck_advice_seconds を超えたら、
   advice の文書をきっかけ progress で要求する (progress.stuck_advice_trigger の規則。最小の起動間隔は request が当てる)
+- 自動の呼び出しと画面の停滞の計測による呼び出しは、run の段階が play のときだけ行う (部品の is_play で確かめる。
+  タイムアウトの判定 check_timeouts は段階に依らず続ける)
 - ジョブを始めるときに deep/<種類>-<連番3桁>/ と job.json を用意し (deep_job_directory)、
   別スレッドで DeepRunner.run を呼ぶ。開始と終了を run.jsonl に deep_start・deep_end で書く
 - ジョブを止める手順は、タイムアウト (起動から timeout_s 秒) でも終了時 (close) でも同じ:
@@ -205,6 +207,11 @@ def no_progress_state() -> ProgressState | None:
     return None
 
 
+def always_play() -> bool:
+    """いつも True (段階が play) を返す (DeepSchedulerParts.is_play の既定値)。"""
+    return True
+
+
 @dataclass(frozen=True)
 class DeepSchedulerSettings:
     """deep のスケジューラーの設定。
@@ -245,6 +252,9 @@ class DeepSchedulerParts:
     progress_state     画面の停滞の計測の最新の値を返す関数 (run では progress/state.json を
                        progress.progress_state.read_progress_state で読む)。値が無ければ None。
                        既定は、いつも None を返す関数 (きっかけ progress で要求しない)
+    is_play            run の段階が play なら True を返す関数 (run では app の段階を読む)。False の間は、自動の呼び出し
+                       (check_auto) と画面の停滞の計測による呼び出し (check_progress) をしない。既定は、いつも True を
+                       返す関数
     """
 
     paths: RunPaths
@@ -257,6 +267,7 @@ class DeepSchedulerParts:
     sleep: Callable[[float], None] = time.sleep
     prepare_job_directory: Callable[[RunPaths, DeepJob], Path] = create_job_directory
     progress_state: Callable[[], ProgressState | None] = no_progress_state
+    is_play: Callable[[], bool] = always_play
 
 
 @dataclass
@@ -476,11 +487,14 @@ class DeepScheduler:
             5. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "auto",
                "kind", "trigger": "auto", "scene_id", "error": 説明} を書き、残りの種類の判定を続ける。
                request が失敗を前回の終了として記録するため、その文書は失敗した時刻から auto_seconds の間、再び要求しない
-        close の後は何もせず空のリストを返す。
+        close の後と、is_play() が False (段階が play でない) の間は、何もせず空のリストを返す (対象の文書が対象に
+        なった時刻も変えない)。
         """
         with self._lock:
             if self._closed:
                 return []
+        if not self.parts.is_play():
+            return []
         scene_id = self.parts.current_scene_id()
         results: list[DeepRequestResult] = []
         for kind in DOCUMENT_KINDS:
@@ -518,12 +532,15 @@ class DeepScheduler:
                DeepRequestResult(started=False, ...))
             4. request が例外 (Exception) を出したら、外に出さずに run_log に deep_request_error {"source": "progress",
                "kind": "advice", "trigger": "progress", "scene_id": null, "error": 説明} を書き、None を返す
-        要求しなければ None を返す。close の後は何もせず None を返す。
+        要求しなければ None を返す。close の後と、is_play() が False (段階が play でない) の間は、何もせず None を
+        返す (StuckAdviceTrigger も呼ばない)。
         判定の状態 (前回の要求の時刻) を持つため、1 つのスレッド (start で起動する判定のスレッド) からだけ呼ぶ。
         """
         with self._lock:
             if self._closed:
                 return None
+        if not self.parts.is_play():
+            return None
         state = self.parts.progress_state()
         now = self.parts.clock.now()
         if state is not None and now - state.t > PROGRESS_STATE_MAX_AGE_S:

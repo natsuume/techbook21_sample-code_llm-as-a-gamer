@@ -6,7 +6,7 @@
                           "to_tile": 座標か null}, ...],
      "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列,
                            "tile": 座標か null}, ...],
-     "is_stuck": 真偽, "stuck_description": 文字列,
+     "is_stuck": 真偽, "stuck_description": 文字列, "press_home": 真偽,
      "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列, "tasks": 文字列}
 座標は {"x": 整数, "y": 整数} (入力のマップのその場所の座標。x は右に、y は下に増える)。座標か null の値は、
 スキーマでは anyOf で座標の object と {"type": "null"} を並べる (_tile_or_null_schema)。
@@ -15,6 +15,8 @@ new_connections と new_observations の要素と、座標の object も、す�
 scene_name が空 (空白だけを含む) なら、場面を決められなかったものとして MiddleOutput の scene_name を None にする。
 place_name も同じく、空なら場所を決められなかった (ゲームの世界の中の場所が映っていない場合を含む) ものとして None にする。
 tasks は Markdown の箇条書き。
+press_home は、HOME を押して本体の画面に出るか (ゲームが操作を受け付けないなど、本体の画面に出る必要があるときだけ真)。
+詰まり (is_stuck・stuck_description) の直後に書かせる。
 要求の text.format には {"type": "json_schema", "name": OUTPUT_FORMAT_NAME, "schema": MIDDLE_OUTPUT_SCHEMA,
 "strict": true} を入れる (build_text_format)。
 """
@@ -146,6 +148,13 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
             "type": "string",
             "description": "どのように詰まっているかの説明。詰まっていなければ空文字列",
         },
+        "press_home": {
+            "type": "boolean",
+            "description": (
+                "HOME を押して本体の画面に出るなら true。ゲームが操作を受け付けないなど、"
+                "本体の画面に出る必要があるときだけ true にする"
+            ),
+        },
         "surface_wait_s": {
             "type": "number",
             "minimum": SURFACE_WAIT_MIN_S,
@@ -169,6 +178,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         "new_observations",
         "is_stuck",
         "stuck_description",
+        "press_home",
         "surface_wait_s",
         "timeline",
         "tasks",
@@ -184,6 +194,7 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "new_observations",
     "is_stuck",
     "stuck_description",
+    "press_home",
     "surface_wait_s",
     "timeline",
     "tasks",
@@ -214,7 +225,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
     次のときは ValueError にする (スキーマに合わない出力):
         - JSON として読めない、JSON の object でない
         - キーが MIDDLE_OUTPUT_SCHEMA の properties と一致しない (足りない・余分なキーがある)
-        - scene_name・place_name・stuck_description・timeline・tasks が文字列でない、is_stuck が真偽でない、
+        - scene_name・place_name・stuck_description・timeline・tasks が文字列でない、is_stuck・press_home が真偽でない、
           surface_wait_s が数 (bool を除く) でないか有限でない (NaN・Infinity を含む)
         - surface_wait_s が SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S (両端を含む) の外
         - new_connections・new_observations が配列でない。要素が object でない、要素のキーがスキーマと一致しない
@@ -227,7 +238,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
     scene_name と place_name は、空 (前後の空白を除くと空) なら None、それ以外は文字列のまま。new_connections と
     new_observations は、出力の順に並べた MapConnection と MapObservation のタプルにする (値は書かれたまま)。
     座標は notes.map_document.TilePosition、null は None にする (current_tile は place_name が None でもそのまま)。
-    ほかの値はそのまま (surface_wait_s は float) にする。
+    ほかの値はそのまま (surface_wait_s は float、press_home は MiddleOutput.press_home) にする。
     """
     value = _json_object(text)
     _check_keys(value)
@@ -237,6 +248,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
         scene_name=scene_name if scene_name.strip() else None,
         is_stuck=_boolean(value, "is_stuck"),
         stuck_description=_string(value, "stuck_description"),
+        press_home=_boolean(value, "press_home"),
         surface_wait_s=_surface_wait(value["surface_wait_s"]),
         timeline=_string(value, "timeline"),
         tasks=_string(value, "tasks"),

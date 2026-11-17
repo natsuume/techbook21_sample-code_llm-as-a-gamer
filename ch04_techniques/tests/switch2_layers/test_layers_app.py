@@ -32,12 +32,16 @@ from switch2_layers.hardware.capture_watcher import REASON_STALE_FRAME
 from switch2_layers.middle.fake_middle import FAKE_SCENE_NAME, FakeMiddleAnalyzer
 from switch2_layers.middle.middle_loop import middle_failure_reason
 from switch2_layers.middle.middle_types import MiddleInput, MiddleOutput
+from switch2_layers.middle.system_screen_middle import (
+    FAKE_DONE_OUTPUT,
+    FakeSystemScreenMiddle,
+)
 from switch2_layers.pad_action import PadAction
 from switch2_layers.run_directory import RunPaths
 from switch2_layers.safety.fake_safety import FakeSafetyChecker
 from switch2_layers.safety.safety_questions import SAFETY_QUESTION_NAMES
 from switch2_layers.safety.safety_types import SafetyAnswer
-from switch2_layers.settings import DeepRunnerChoice, RunSettings
+from switch2_layers.settings import SAFETY_INTERVAL_MIN_S, DeepRunnerChoice, RunSettings
 from switch2_layers.surface.box_targets import DEFAULT_BOX_TARGETS, parse_box_targets
 from switch2_layers.surface.fake_surface import FakeSurfaceDecider
 from switch2_layers.surface.jev_client import DEFAULT_JEV_MODEL, IMAGES_HEADER
@@ -46,6 +50,14 @@ from switch2_layers.surface.surface_assembly import build_surface_assembly
 from switch2_layers.surface.surface_loop import surface_failure_reason
 from switch2_layers.surface.surface_questions import ADVISOR_KINDS
 from switch2_layers.surface.surface_types import Box, SurfaceInput, SurfaceOutput
+from switch2_layers.system_screen.run_phase import (
+    PHASE_REASON_PREPARED,
+    PHASE_REASON_PRESS_HOME,
+    PHASE_REASON_START_CHECK_PASSED,
+    CleanUpResult,
+    PhaseTimings,
+    RunPhase,
+)
 from switch2_layers.system_screen.screen_judgment import LatestSystemScreen
 from switch2_layers.system_screen.system_screen_references import (
     SYSTEM_SCREEN_CHOICE_NAMES,
@@ -57,6 +69,11 @@ PROGRESS_RUN_SECONDS = 5.0
 SAFETY_TIMEOUT_S = 20.0  # 止まらないときに、テストを終わらせるために止める秒数
 SAFETY_REASON = "test safety timeout"
 HOME_BIT = 0x10  # レポートの b2
+# テストの段階の判定: 本体の画面の middle が done を返した後、照合の結果が 1 回 None になったら play に移り、
+# 片付けは 0.5 秒で時間切れにする (既定の部品なら、準備をすぐ抜け、止めるときの片付けも短く終わる)
+TEST_PHASE_TIMINGS = PhaseTimings(exit_streak=1, clean_up_timeout_s=0.5)
+SOFTWARE = "テストのソフト"
+USER = "テストのユーザー"
 
 
 class FakeFrameReader:
@@ -113,6 +130,14 @@ class FailingSurface:
         raise RuntimeError("decision model failed")
 
 
+class HomePressingMiddle:
+    """middle の偽物。フェイクの middle の出力の press_home を真にして返す。"""
+
+    def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
+        output = FakeMiddleAnalyzer().analyze(middle_input)
+        return dataclasses.replace(output, press_home=True)
+
+
 class FailingMiddle:
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
         raise RuntimeError("luna failed")
@@ -147,8 +172,14 @@ class BlockingDeepRunner:
 
 
 def settings(tmp_path: Path, **changes: int) -> RunSettings:
+    """テストの起動引数。安全の監視の間隔を範囲の下限にして、照合の結果が早く届くようにする (準備をすぐ抜ける)。"""
     base = RunSettings(
-        runs_dir=tmp_path / "runs", interval_width=160, middle_interval_s=1.0
+        software_name=SOFTWARE,
+        user_name=USER,
+        runs_dir=tmp_path / "runs",
+        interval_width=160,
+        middle_interval_s=1.0,
+        safety_interval_s=SAFETY_INTERVAL_MIN_S,
     )
     return dataclasses.replace(base, **changes)
 
@@ -161,7 +192,9 @@ def parts(
     middle=None,
     deep=None,
     safety=None,
+    system_middle=None,
 ) -> LayersParts:
+    """テストの部品。本体の画面の middle は、既定では操作なしで done を返し続けるフェイク (run の --middle fake と同じ)。"""
     return LayersParts(
         frame_reader=reader or FakeFrameReader(),
         report_sender=sender,
@@ -170,6 +203,9 @@ def parts(
         middle=middle or FakeMiddleAnalyzer(),
         deep=deep or FakeDeepRunner(),
         safety=safety or FakeSafetyChecker(),
+        system_middle=system_middle
+        or FakeSystemScreenMiddle(exhausted_output=FAKE_DONE_OUTPUT),
+        phase_timings=TEST_PHASE_TIMINGS,
     )
 
 
@@ -202,6 +238,11 @@ def read_rows(path: Path) -> list[dict]:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def phase_rows(root: Path) -> list[dict]:
+    """run.jsonl の phase の行を書かれた順に返す。"""
+    return [row for row in read_rows(root / "run.jsonl") if row["event"] == "phase"]
 
 
 def test_run_with_fake_layers_for_a_few_seconds(tmp_path):
@@ -313,6 +354,64 @@ def test_keyboard_interrupt_stops_with_interrupted(tmp_path):
     assert sender.reports[-1] == NEUTRAL_REPORT
 
 
+def interrupting_sleep(offsets_s: list[float]) -> Callable[[float], None]:
+    """wait の見張りの待ちの代わり。最初の呼び出しから offsets_s の各秒数がたった後の最初の待ちで、KeyboardInterrupt を
+    1 回ずつ出す (Ctrl+C の SIGINT が届いたときと同じ)。"""
+    started: list[float] = []
+    pending = list(offsets_s)
+
+    def sleep(seconds: float) -> None:
+        now = time.monotonic()
+        if not started:
+            started.append(now)
+        if pending and now - started[0] >= pending[0]:
+            pending.pop(0)
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    return sleep
+
+
+def run_with_interrupts(
+    app: LayersApp,
+) -> tuple[str, list[dict]]:
+    """app を run で動かし、(止まった理由, run.jsonl の行) を返す。止まらなければ SAFETY_TIMEOUT_S 秒で止める。"""
+    safety = threading.Timer(SAFETY_TIMEOUT_S, app.request_stop, args=(SAFETY_REASON,))
+    safety.start()
+    try:
+        reason = app.run()
+    finally:
+        safety.cancel()
+    assert app.paths is not None
+    return reason, read_rows(app.paths.root / "run.jsonl")
+
+
+def test_interrupt_repeated_within_the_window_does_not_end_the_clean_up(tmp_path):
+    # timeout -s INT と uv run の下では、1 回の割り込みで SIGINT が 0.2 秒ほどの間をあけて 2 回届く。2 回目は数えない
+    app = LayersApp(
+        settings(tmp_path), parts(FakeSender()), sleep=interrupting_sleep([1.5, 1.7])
+    )
+    reason, run_rows = run_with_interrupts(app)
+    assert reason == REASON_INTERRUPTED
+    [end] = [row for row in run_rows if row["event"] == "clean_up_end"]
+    # 片付けは 2 回目の SIGINT では終わらず、時間切れ (TEST_PHASE_TIMINGS の 0.5 秒) まで続く
+    assert end["result"] == CleanUpResult.TIMEOUT.value
+
+
+def test_interrupt_after_the_window_ends_the_clean_up(tmp_path):
+    long_clean_up = dataclasses.replace(
+        parts(FakeSender()),
+        phase_timings=PhaseTimings(exit_streak=1, clean_up_timeout_s=10.0),
+    )
+    app = LayersApp(
+        settings(tmp_path), long_clean_up, sleep=interrupting_sleep([1.5, 3.0])
+    )
+    reason, run_rows = run_with_interrupts(app)
+    assert reason == REASON_INTERRUPTED
+    [end] = [row for row in run_rows if row["event"] == "clean_up_end"]
+    assert end["result"] == CleanUpResult.INTERRUPTED.value
+
+
 class InterruptOnceSender(FakeSender):
     """armed の後、テストのスレッドからの最初の送信で KeyboardInterrupt を出す (停止の処理の途中の Ctrl+C)。"""
 
@@ -334,7 +433,8 @@ def test_close_redoes_stop_output_interrupted_inside_request_stop(tmp_path):
     try:
         time.sleep(1.0)
         sender.armed_thread = threading.current_thread()
-        # 中立のレポートを送る途中で割り込まれ、理由だけが決まった状態になる
+        # play の途中の Ctrl+C で片付けに移るときの中立のレポートを送る途中で割り込まれ、理由だけが決まり、
+        # 出力を止めていない状態になる
         try:
             app.request_stop(REASON_INTERRUPTED)
         except KeyboardInterrupt:
@@ -344,7 +444,7 @@ def test_close_redoes_stop_output_interrupted_inside_request_stop(tmp_path):
         count_before_close = len(sender.reports)
     finally:
         app.close()
-    # close が停止の処理をやり直し、中立のレポートを送った
+    # close が片付けの途中でも止める処理を行い、中立のレポートを送った
     assert len(sender.reports) > count_before_close
     assert sender.reports[-1] == NEUTRAL_REPORT
     assert app.stop_reason == REASON_INTERRUPTED
@@ -439,6 +539,122 @@ def test_close_stops_running_deep_jobs(tmp_path):
     events = [row["event"] for row in run_rows]
     assert events[-1] == "stop"
     assert max(i for i, e in enumerate(events) if e == "deep_end") < len(events) - 1
+
+
+# --- 段階と片付け ---
+# 段階の移り変わりの境界 (続けた数・時間切れ・片付けの終わり) は test_layers_run_phase で、本体の画面の middle の
+# 呼び方は test_layers_system_screen_loop で確かめる。ここでは、3 層と組み合わせたときの段階と止まり方を確かめる
+
+
+def test_prepare_moves_to_play_and_starts_the_surface(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    phases = phase_rows(root)
+    # 実行を始めるときの確かめが通ったら prepare に入り、本体の画面の middle の done の後に照合の結果が None になって
+    # play に移る
+    assert [(row["phase"], row["reason"]) for row in phases[:2]] == [
+        (RunPhase.PREPARE.value, PHASE_REASON_START_CHECK_PASSED),
+        (RunPhase.PLAY.value, PHASE_REASON_PREPARED),
+    ]
+    play_t = phases[1]["t"]
+    # 本体の画面の middle は目的 prepare で呼び、記録を middle/system_calls.jsonl に書く
+    calls = [
+        row
+        for row in read_rows(root / "middle" / "system_calls.jsonl")
+        if row["kind"] == "call"
+    ]
+    assert calls
+    assert calls[0]["goal"] == "prepare"
+    assert calls[0]["output"]["done"] is True
+    # surface と middle のゲーム用のループは play に入ってから動く
+    surface_rows = read_rows(root / "surface.jsonl")
+    assert surface_rows
+    assert all(row["t_sent"] >= play_t for row in surface_rows)
+    middle_rows = read_rows(root / "middle" / "calls.jsonl")
+    assert middle_rows
+    assert all(row["t_sent"] >= play_t for row in middle_rows)
+    # 起動引数に、指定のソフトとユーザーの名前を書く
+    args = read_rows(root / "run.jsonl")[0]["args"]
+    assert args["software_name"] == SOFTWARE
+    assert args["user_name"] == USER
+    assert "allow_home" not in args
+
+
+def test_interrupt_while_playing_cleans_up_before_stopping(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    # 止まる理由は、片付けを始めた理由のまま
+    assert reason == REASON_INTERRUPTED
+    run_rows = read_rows(root / "run.jsonl")
+    phases = phase_rows(root)
+    assert phases[-1]["phase"] == RunPhase.CLEAN_UP.value
+    assert phases[-1]["reason"] == REASON_INTERRUPTED
+    assert phases[-2]["phase"] == RunPhase.PLAY.value
+    clean_up_t = phases[-1]["t"]
+    # 片付けの本体の画面の middle は目的 clean_up で呼ぶ
+    goals = [
+        row["goal"]
+        for row in read_rows(root / "middle" / "system_calls.jsonl")
+        if row["kind"] == "call"
+    ]
+    assert "clean_up" in goals
+    # フェイクの安全の監視は HOME メニューを返さないので、片付けは時間切れで終わる。clean_up_end を書いてから止める
+    [end] = [row for row in run_rows if row["event"] == "clean_up_end"]
+    assert end["result"] == CleanUpResult.TIMEOUT.value
+    assert end["t"] >= clean_up_t
+    events = [row["event"] for row in run_rows]
+    assert events.index("clean_up_end") < events.index("frames_dropped")
+    assert events[-2:] == ["frames_dropped", "stop"]
+    assert run_rows[-1]["reason"] == REASON_INTERRUPTED
+    # 片付けの間は surface の操作を送らない
+    applied = [
+        row for row in read_rows(root / "operations.jsonl") if row["source"] == "apply"
+    ]
+    assert applied
+    assert all(row["t"] <= clean_up_t for row in applied)
+    assert sender.reports[-1] == NEUTRAL_REPORT
+
+
+def test_press_home_taps_home_after_the_neutral_report_of_leaving_play(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender, middle=HomePressingMiddle()))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    recover = [row for row in phase_rows(root) if row["phase"] == "recover"]
+    assert recover
+    assert recover[0]["reason"] == PHASE_REASON_PRESS_HOME
+    # recover に移して play から離れる中立のレポートを送ってから、HOME を短押しする (中立のレポートで短押しを
+    # 取り消さない)
+    rows = read_rows(root / "operations.jsonl")
+    homes = [
+        index
+        for index, row in enumerate(rows)
+        if row["source"] == "system" and row["taps"] == ["HOME"]
+    ]
+    assert homes
+    assert rows[homes[0] - 1]["source"] == "neutral"
+    assert rows[homes[0]]["t"] >= recover[0]["t"]
+    assert any(report[1] & HOME_BIT for report in sender.reports)
+
+
+def test_unsafe_screen_stops_without_cleaning_up(tmp_path):
+    sender = FakeSender()
+    safety = ScriptedSafety([safety_answer(), safety_answer(online=0.9)])
+    app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
+    reason, root = run_app(app, stop_after=5.0)
+    assert reason == "unsafe screen: online"
+    run_rows = read_rows(root / "run.jsonl")
+    # 安全の監視の理由では片付けをせず、すぐに中立のレポートを送って止める
+    assert RunPhase.CLEAN_UP.value not in [row["phase"] for row in phase_rows(root)]
+    assert "clean_up_end" not in [row["event"] for row in run_rows]
+    assert "clean_up" not in [
+        row.get("goal") for row in read_rows(root / "middle" / "system_calls.jsonl")
+    ]
+    assert run_rows[-1]["reason"] == reason
+    assert sender.reports[-1] == NEUTRAL_REPORT
 
 
 # --- start の途中の例外 ---
@@ -1106,35 +1322,21 @@ def test_consecutive_safety_failures_stop_everything(tmp_path):
 
 
 @pytest.mark.parametrize("screen", ["home_menu", "user_select"])
-def test_system_screen_at_start_keeps_running_without_allow_home(tmp_path, screen):
-    # HOME メニューやユーザー選択が映っていても、3 つの問いが超えなければ止めない (--allow-home は要らない)
+def test_system_screen_keeps_running_in_prepare(tmp_path, screen):
+    # HOME メニューやユーザー選択が映っていても、3 つの問いが超えなければ止めない。本体の画面が映っている間は、
+    # middle が done を返しても play に移らず、surface は操作を送らない
     sender = FakeSender()
     safety = ScriptedSafety([safety_answer(screen=screen)])
     app = LayersApp(safety_settings(tmp_path), parts(sender, safety=safety))
     reason, root = run_app(app, stop_after=1.5)
     assert reason == REASON_INTERRUPTED
-    assert read_rows(root / "surface.jsonl")
+    assert read_rows(root / "surface.jsonl") == []
     rows = read_rows(root / "safety.jsonl")
     assert rows[0]["phase"] == "start"
     assert len(rows) >= 3
     assert all(row["phase"] == "monitor" for row in rows[1:])
     assert all(row["system_screen_result"] == screen for row in rows)
-
-
-def test_allow_home_does_not_change_the_safety_monitor(tmp_path):
-    # --allow-home は押せるボタンに HOME を足すだけで、安全の監視の止め方は変えない
-    sender = FakeSender()
-    safety = ScriptedSafety(
-        [safety_answer(screen="home_menu"), safety_answer(online=0.9)]
-    )
-    app = LayersApp(
-        safety_settings(tmp_path, allow_home=True), parts(sender, safety=safety)
-    )
-    reason, root = run_app(app, stop_after=5.0)
-    assert reason == "unsafe screen: online"
-    rows = read_rows(root / "safety.jsonl")
-    assert [row["phase"] for row in rows] == ["start", "monitor", "monitor"]
-    assert [row["system_screen_result"] for row in rows] == ["home_menu", None, None]
+    assert [row["phase"] for row in phase_rows(root)] == ["prepare", "clean_up"]
 
 
 class LatestSystemScreenRecorder:

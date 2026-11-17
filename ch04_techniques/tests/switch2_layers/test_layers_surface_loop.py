@@ -8,8 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from switch2_remote.controller_state import BUTTON_ORDER, NEUTRAL_REPORT
+from switch2_remote.controller_state import NEUTRAL_REPORT
 
+from switch2_layers.buttons import ALL_BUTTONS
 from switch2_layers.deep.deep_scheduler import (
     DeepDocumentStatus,
     DeepJobEnd,
@@ -42,6 +43,7 @@ from switch2_layers.surface.surface_loop import (
     SurfaceStepOutcome,
     surface_failure_reason,
 )
+from switch2_layers.surface.surface_output_gate import SurfaceOutputGate
 from switch2_layers.surface.surface_questions import (
     ADVISOR_KINDS,
     QuestionKind,
@@ -60,7 +62,6 @@ from switch2_layers.surface.surface_types import (
 
 ORIGIN = 1000.0  # 偽の time.monotonic の起点 (t = 0)
 NOW = 10.0  # step を呼ぶときの t
-ALLOWED_WITHOUT_HOME = frozenset(BUTTON_ORDER) - {"HOME"}
 COMMON_CONTROLS = "# 操作説明 (共通)\n\n- A: unknown\n"
 COMMON_TIPS = "# 攻略情報 (共通)\n"
 ADVICE = "# 助言\n"
@@ -162,6 +163,15 @@ class Harness:
     store: FrameStore
     stops: list[str] = field(default_factory=list)
     bridge: dict[str, str] = field(default_factory=lambda: {"state": "ok"})
+    # 段階が play か (SurfaceOutputGate の is_play が返す値)
+    phase: dict[str, bool] = field(default_factory=lambda: {"play": True})
+
+
+def make_gate(pad_output: PadOutput, phase: dict[str, bool]) -> SurfaceOutputGate:
+    """pad_output に送る SurfaceOutputGate を、phase["play"] を段階の値として作る。"""
+    return SurfaceOutputGate(
+        pad_output, is_play=lambda: phase["play"], lock=threading.Lock()
+    )
 
 
 def make_run(tmp_path: Path) -> Path:
@@ -183,10 +193,12 @@ def make_harness(
     tmp_path: Path,
     decider: ScriptedDecider,
     max_errors: int = 5,
-    allowed: frozenset[str] = ALLOWED_WITHOUT_HOME,
     boxes_at: Callable[[float], Sequence[Box]] | None = None,
 ) -> Harness:
-    """surface のループと偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = NOW にしておく。"""
+    """surface のループと偽の部品を組み立てる (テストの本体から呼ぶ)。時計は t = NOW にしておく。
+
+    PadOutput は app と同じく HOME を含む 17 個を押せるように作り、段階が play の SurfaceOutputGate を通して送る。
+    """
     root = make_run(tmp_path)
     paths = RunPaths(root)
     monotonic = FakeMonotonic(ORIGIN + NOW)
@@ -194,16 +206,17 @@ def make_harness(
     buffer = FrameBuffer()
     store = FrameStore(paths, interval_fps=5.0, interval_width=64, start_thread=False)
     sender = FakeSender()
-    output = PadOutput(sender, allowed, clock=monotonic, start_timer=False)
+    output = PadOutput(sender, ALL_BUTTONS, clock=monotonic, start_timer=False)
     deep_sink = FakeDeepSink()
     stops: list[str] = []
     bridge = {"state": "ok"}
+    phase = {"play": True}
     parts = SurfaceLoopParts(
         paths=paths,
         decider=decider,
         frame_buffer=buffer,
         frame_store=store,
-        pad_output=output,
+        output_gate=make_gate(output, phase),
         deep_requests=deep_sink,
         deep_status=deep_sink,
         run_log=RunLog(paths.run_log, clock),
@@ -216,7 +229,7 @@ def make_harness(
         parts, SurfaceLoopSettings(max_errors=max_errors, image_width=320)
     )
     return Harness(
-        root, monotonic, loop, sender, deep_sink, buffer, store, stops, bridge
+        root, monotonic, loop, sender, deep_sink, buffer, store, stops, bridge, phase
     )
 
 
@@ -330,14 +343,34 @@ def test_successful_step_sends_filtered_action_and_writes_row(tmp_path):
     assert row["error"] is None
 
 
-def test_home_is_sent_with_allow_home(tmp_path):
+def test_home_is_never_sent_although_the_pad_output_can_press_it(tmp_path):
+    # PadOutput は HOME を押せるが、surface の操作は関門が 16 個に絞る
     decider = ScriptedDecider(SurfaceOutput(action=PadAction(held=frozenset({"HOME"}))))
-    harness = make_harness(tmp_path, decider, allowed=frozenset(BUTTON_ORDER))
+    harness = make_harness(tmp_path, decider)
     add_frames(harness, [9.9])
     result = harness.loop.step()
-    assert harness.sender.reports[-1][1] & HOME_BIT
+    assert harness.sender.reports
+    assert all(report[1] & HOME_BIT == 0 for report in harness.sender.reports)
     assert result.row is not None
-    assert result.row["blocked_buttons"] == []
+    assert result.row["blocked_buttons"] == ["HOME"]
+
+
+def test_action_outside_play_is_recorded_without_being_sent(tmp_path):
+    decider = ScriptedDecider(
+        SurfaceOutput(action=PadAction(held=frozenset({"A", "HOME"})))
+    )
+    harness = make_harness(tmp_path, decider)
+    harness.phase["play"] = False
+    add_frames(harness, [9.9])
+    result = harness.loop.step()
+    assert result.outcome is SurfaceStepOutcome.SENT
+    assert harness.sender.reports == []
+    assert result.row is not None
+    assert result.row["error"] is not None
+    # 送らなかった操作も、押せるボタンに絞った後の値を記録する
+    assert result.row["action"]["held"] == ["A"]
+    assert result.row["blocked_buttons"] == ["HOME"]
+    assert harness.loop.consecutive_errors == 0
 
 
 def test_sent_images_are_saved_once_per_frame(tmp_path):
@@ -818,13 +851,13 @@ class StopBeforeApplyPadOutput(PadOutput):
     """apply の直前に全体が止められた場合の PadOutput (止める合図を立ててから出力を止める。app.request_stop の順)。"""
 
     def __init__(self, stop: threading.Event, sender: FakeSender):
-        super().__init__(sender, ALLOWED_WITHOUT_HOME, start_timer=False)
+        super().__init__(sender, ALL_BUTTONS, start_timer=False)
         self.stop = stop
 
-    def apply(self, action: PadAction):
+    def apply(self, action: PadAction, *, source="apply"):
         self.stop.set()
         self.stop_output()
-        return super().apply(action)
+        return super().apply(action, source=source)
 
 
 def test_stop_between_decide_and_apply_writes_nothing(tmp_path):
@@ -835,7 +868,10 @@ def test_stop_between_decide_and_apply_writes_nothing(tmp_path):
     )
     harness = make_harness(tmp_path, ScriptedDecider(output))
     harness.loop.parts = dataclasses.replace(
-        harness.loop.parts, pad_output=StopBeforeApplyPadOutput(stop, harness.sender)
+        harness.loop.parts,
+        output_gate=make_gate(
+            StopBeforeApplyPadOutput(stop, harness.sender), harness.phase
+        ),
     )
     add_frames(harness, [9.9])
     result = harness.loop.step(stop)

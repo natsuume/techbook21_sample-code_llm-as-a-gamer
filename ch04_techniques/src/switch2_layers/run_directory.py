@@ -15,6 +15,8 @@
     middle/state.json                       middle の最新の出力
     middle/calls.jsonl                      middle の 1 回ごとの記録
     middle/map_records.jsonl                middle のマップの記録 (middle.map_records)
+    middle/system_calls.jsonl               本体の画面の middle の呼び出しと、操作の列の実行の結果
+                                            (middle.system_call_record)
     deep/<種類>-<連番3桁>/job.json            deep のジョブ (deep.deep_job_directory)。
                                             Claude Code で動かしたジョブには stream.jsonl・result.json も置く
                                             (deep.claude_stream_log)
@@ -72,6 +74,8 @@ MIDDLE_STATE_FILE = "state.json"
 MIDDLE_CALLS_FILE = "calls.jsonl"
 # middle のマップの記録 (middle.map_records)
 MIDDLE_MAP_RECORDS_FILE = "map_records.jsonl"
+# 本体の画面の middle の呼び出しと、操作の列の実行の結果 (middle.system_call_record)
+MIDDLE_SYSTEM_CALLS_FILE = "system_calls.jsonl"
 DEEP_DIR = "deep"
 # 画面の停滞の計測 (progress.progress_loop)
 PROGRESS_DIR = "progress"
@@ -175,6 +179,11 @@ class RunPaths:
     def middle_map_records(self) -> Path:
         """root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE"""
         return self.root / MIDDLE_DIR / MIDDLE_MAP_RECORDS_FILE
+
+    @property
+    def system_calls(self) -> Path:
+        """root / MIDDLE_DIR / MIDDLE_SYSTEM_CALLS_FILE"""
+        return self.root / MIDDLE_DIR / MIDDLE_SYSTEM_CALLS_FILE
 
     @property
     def deep_dir(self) -> Path:

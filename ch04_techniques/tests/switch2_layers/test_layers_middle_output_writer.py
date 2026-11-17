@@ -30,6 +30,7 @@ STATE_KEYS = [
     "first_task_since_t",
     "place_name",
     "current_tile",
+    "press_home",
 ]
 EMPTY_LABELS = {"scenes": []}
 
@@ -153,6 +154,7 @@ def test_first_scene_name_adds_label_tasks_and_state(tmp_path):
         # 場所を出力しない回は null
         "place_name": None,
         "current_tile": None,
+        "press_home": False,
     }
 
 
@@ -496,3 +498,18 @@ def test_place_is_written_without_scene(tmp_path):
     assert result.state.place_name == "家の 1 階"
     assert result.state.current_tile == TilePosition(2, 3)
     assert not (root / "notes" / "scenes").exists()
+
+
+@pytest.mark.parametrize("press_home", [True, False])
+def test_press_home_is_written_to_state(tmp_path, press_home):
+    root = make_run(tmp_path)
+    result = write_middle_output(
+        RunPaths(root),
+        middle_input(12.0),
+        dataclasses.replace(output("町"), press_home=press_home),
+        12.8,
+    )
+    assert result.state.press_home is press_home
+    state = read_json(root / "middle" / "state.json")
+    assert list(state) == STATE_KEYS
+    assert state["press_home"] is press_home

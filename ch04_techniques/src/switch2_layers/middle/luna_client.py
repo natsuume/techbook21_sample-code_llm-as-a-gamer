@@ -3,11 +3,14 @@
 応答の本文の形 (使う部分):
     {"status": "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress",
      "incomplete_details": {"reason": ...} | null,
-     "output": [{"type": "message", "content": [{"type": "output_text", "text": ...}
-                                                | {"type": "refusal", "refusal": ...}, ...]}, ...],
+     "output": [{"type": "message", "phase": "commentary" | "final_answer" | null (省略もある),
+                 "content": [{"type": "output_text", "text": ...}
+                             | {"type": "refusal", "refusal": ...}, ...]}, ...],
      "usage": {...}}
 構造化出力の JSON の文は、output の type が "message" の要素の content の output_text にある。最上位の output_text は
 SDK が作る値で、HTTP の応答の本文には無い。output の並びには頼らず、type が "message" の要素を探す。
+message が 2 つ返ることがあり、phase が "commentary" の message (途中の文。JSON の後に意味の無い文字が続くことが
+ある) と "final_answer" の message (最終の答え) に分かれる。final_answer の message があれば、それだけを読む。
 status が "completed" でも、content が拒否 (refusal) のことがある。
 
 失敗はすべて LunaCallError にする。再試行はしない (middle のループが次の間隔で呼び直す)。
@@ -22,6 +25,8 @@ RESPONSES_URL = "https://api.openai.com/v1/responses"
 LUNA_TIMEOUT_S = 30.0
 # 記録に残すエラーの本文の先頭の文字数
 ERROR_BODY_HEAD_CHARS = 1000
+# 最終の答えの message の phase の値
+FINAL_ANSWER_PHASE = "final_answer"
 
 
 class LunaCallError(Exception):
@@ -106,7 +111,8 @@ def read_output_text(body: Mapping[str, object]) -> str:
 
     1. body["status"] が "completed" でなければ LunaCallError にする。説明には status と、
        incomplete_details が object なら その reason を含める
-    2. output のうち type が "message" の要素の content を、output と content の順に見る。
+    2. output のうち type が "message" の要素の content を、output と content の順に見る。phase が
+       FINAL_ANSWER_PHASE の message が 1 つでもあれば、その message だけを見る (無ければ、すべての message を見る)。
        type が "refusal" の要素があれば、その refusal の文を説明に含めた LunaCallError にする
     3. type が "output_text" の要素の text を順につないだ文を返す。1 つも無ければ LunaCallError にする
     output がリストでないとき、要素や content が期待の形 (object・リスト・文字列) でないものは読み飛ばす
@@ -141,16 +147,24 @@ def read_output_text(body: Mapping[str, object]) -> str:
 
 
 def _message_contents(output: object) -> list[object]:
-    """output のうち type が "message" の要素の content の要素を、output と content の順に並べて返す。
+    """output のうち読む message の content の要素を、output と content の順に並べて返す。
 
-    output がリストでないとき、要素が object でないとき、content がリストでないときは、その分を読み飛ばす。
+    読む message は、type が "message" の要素のうち、phase が FINAL_ANSWER_PHASE のもの。そのような要素が無ければ、
+    type が "message" の要素のすべて。output がリストでないとき、要素が object でないとき、content がリストでないときは、
+    その分を読み飛ばす。
     """
     if not isinstance(output, list):
         return []
+    messages = [
+        item
+        for item in output
+        if isinstance(item, Mapping) and item.get("type") == "message"
+    ]
+    final_answers = [
+        item for item in messages if item.get("phase") == FINAL_ANSWER_PHASE
+    ]
     contents: list[object] = []
-    for item in output:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
-            continue
+    for item in final_answers or messages:
         content = item.get("content")
         if isinstance(content, list):
             contents.extend(content)

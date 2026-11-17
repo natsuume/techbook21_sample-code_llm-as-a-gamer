@@ -252,23 +252,27 @@ uv run pytest        # テストを実行する (実機、ネットワーク、c
 
 surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。`--surface fake` を付けると surface はフェイクになり、何も押さない中立の操作を返して deep を求めません。middle は、既定では OpenAI の gpt-6-luna を呼びます (`--middle luna`)。`--middle fake` を付けると middle もフェイクになり、固定の場面名 `fake scene` と待ち時間 0.2 秒を返します。deep は、既定では Claude Code を起動します (`--deep claude`)。`--deep fake` を付けると deep もフェイクになり、文書を変えずに成功を返します。3 層と安全の監視をすべてフェイクにしても (`--surface fake --middle fake --deep fake --safety fake`。API キーは要りません)、フレームの保存、操作の送信と記録、場面の一覧への追加、deep のジョブのディレクトリーの用意は動きます。各層は Protocol (`SurfaceDecider`・`MiddleAnalyzer`・`DeepRunner`) で受け取るため、フェイクをほかの実装に差し替えられます。
 
-3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。オンライン・通報・購入・本体の設定などの画面を見つけたら、操作を中立にして実行全体を止めます。同じ要求で、今の画面が本体のどの画面 (HOME メニュー・ユーザー選択など) かを見本の画像と照合して記録します。照合の結果では止めません。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視は、止める問いの確率をすべて 0 とし、どの見本の画面でもないと答えるフェイクになります。
+3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。オンライン・通報・購入・本体の設定などの画面を見つけたら、操作を中立にして実行全体を止めます。同じ要求で、今の画面が本体のどの画面 (HOME メニュー・ユーザー選択など) かを見本の画像と照合して記録します。照合の結果では止めず、段階の移り変わりと本体の画面の操作に使います。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視は、止める問いの確率をすべて 0 とし、どの見本の画面でもないと答えるフェイクになります。
+
+run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`recover`)・片付け (`clean_up`) の 4 つの段階に分けて動きます (「本体の画面の扱い」の節)。surface と middle のゲーム用のループと deep の自動の呼び出しは、play の段階の間だけ動きます。本体の画面 (HOME メニュー・ユーザー選択など) を操作する準備・復帰・片付けの段階では、middle が本体の画面の操作の列を決め、コードが送ります。
 
 ### サブコマンド
 
 | コマンド | 内容 |
 |---|---|
-| `switch2-layers run [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで 3 層を動かします。Ctrl+C で止まります |
+| `switch2-layers run --software NAME --user NAME [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで、指定のソフトを指定のユーザーで起動する準備から始め、3 層を動かします。Ctrl+C で止めると、HOME メニューに戻って指定のソフトを終了する片付けをしてから止まります |
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map`・`game` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
 middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
 
-run を始める前に、対象のゲームの起動と、ユーザー選択の画面で AI に遊ばせるユーザー (AIプレイヤー) を選ぶことは、人が行います。ゲームの画面になってから run を始めてください。run は、最初のフレームが届いた後、surface と middle を始める前に画面を確かめ、オンライン・購入・本体の設定などの画面なら、操作を 1 つも送らずに止まります。HOME メニューやユーザー選択の画面では止まらず、そのまま surface と middle を始めます。
+run は、Switch 2 がスリープしておらず、コントローラーのブリッジ (Pico 2 W) を Windows とペアリングした状態で始めます (第2章の [README](../ch02_setup/README.md) の「2. Windows とのペアリング」)。Pico 2 W の入力ではスリープを解除できないため、スリープしていたら本体を操作して復帰させてください (第2章の README の「既知の問題」)。ブリッジを 1P に登録すること、指定のソフトを起動すること、ユーザー選択で指定のユーザーを選ぶことは、run が準備の段階で行います (「本体の画面の扱い」の節)。`--software` には HOME メニューでソフトの絵の上に出る名前を、`--user` にはユーザー選択に出る、AI に遊ばせるユーザーの名前を指定します。どちらも必須です。
+
+run は、最初のフレームが届いた後、準備の段階に入る前に画面を確かめ、オンライン・購入・本体の設定などの画面なら、操作を 1 つも送らずに止まります。HOME メニューやユーザー選択の画面では止まらず、準備の段階に入ります。
 
 ```bash
-uv run --env-file .env switch2-layers run
-uv run switch2-layers run --surface fake --middle fake --safety fake
+uv run --env-file .env switch2-layers run --software '<ソフトの名前>' --user '<ユーザーの名前>'
+uv run switch2-layers run --software '<ソフトの名前>' --user '<ユーザーの名前>' --surface fake --middle fake --safety fake
 uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
 uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
@@ -283,8 +287,8 @@ run と middle-once は、`--middle` で middle の実装を選びます。
 
 | 値 | 内容 |
 |---|---|
-| `luna` (既定) | OpenAI の gpt-6-luna を Responses API で呼びます。環境変数 `OPENAI_API_KEY` に API キーが要ります |
-| `fake` | 固定の場面名 `fake scene` と待ち時間 0.2 秒を返すフェイクです。API キーは要りません |
+| `luna` (既定) | OpenAI の gpt-6-luna を Responses API で呼びます。run では、本体の画面の middle (「本体の画面の扱い」の節) も gpt-6-luna を呼びます。環境変数 `OPENAI_API_KEY` に API キーが要ります |
+| `fake` | 固定の場面名 `fake scene` と待ち時間 0.2 秒を返すフェイクです。run では、本体の画面の middle も、操作の列を空にして `done` を真で返し続けるフェイクになります。API キーは要りません |
 
 `--middle luna` で `OPENAI_API_KEY` が無いとき (値が空か空白だけのときを含む) は、実機に触れず、実行ディレクトリーにも何も書かずに、エラーを表示して終了します (終了コード 2)。API キーは、`switch2-agent` と同じく `.env` に書き、`uv run --env-file .env` で読み込ませることもできます。
 
@@ -545,7 +549,7 @@ surface とは別のスレッドで、安全の監視を動かします。安全
 | `system_settings` | Noul | 本体の設定、またはセーブデータの削除などのデータの管理の画面か |
 | `system_screen` | Choice | 今のフレームが、どの見本の本体の画面か。選択肢は、`none` (どの見本の画面でもない) を先頭に、見本の名前を「本体の画面の見本」の表の順に並べます |
 
-止める条件に使うのは、`online`・`purchase`・`system_settings` の 3 つの問いだけです。`system_screen` の照合の結果は、記録して安全の監視の外に渡します。そのため、実行を始めるときに HOME メニューやユーザー選択の画面が映っていても、3 つの問いが超えなければ止まりません。
+止める条件に使うのは、`online`・`purchase`・`system_settings` の 3 つの問いだけです。`system_screen` の照合の結果は、記録して、段階の移り変わりと本体の画面の操作に渡します (「本体の画面の扱い」の節)。そのため、実行を始めるときに HOME メニューやユーザー選択の画面が映っていても、3 つの問いが超えなければ止まりません。
 
 要求の state は `{"instructions": <役割の説明>, "frame": <今のフレーム>, "references": {<見本の名前>: <見本の画像>, ...}}` です。役割の説明には、`references` が本体の画面の一部を切り出した見本であることを書いています。画像の参照文字列は要求ごとに新しく振り、state の中に 1 回ずつ置きます。問いの文と選択肢の説明は、画像を state の中のパス (`frame`・`references`・`references.<見本の名前>`) で指します。見本の画像は run の始めに 1 回だけ読みます。実行を始めるときの確かめと監視の確かめは、同じ形の要求を送ります。
 
@@ -556,24 +560,24 @@ surface とは別のスレッドで、安全の監視を動かします。安全
 - いちばん高い確率の選択肢が複数あれば、選択肢の並びで先のものを選びます (`none` と並んだときは、照合の結果なしです)。確率の合計は確かめません
 - しきい値の 0.5 は、起動引数ではなくコードの定数 (`SYSTEM_SCREEN_THRESHOLD`) です
 
-答えのあった確かめのたびに、照合の結果を、確かめたフレームの時刻とともに、最新の照合の結果を持つ部品 (`system_screen.screen_judgment.LatestSystemScreen`) に渡します。この部品は、受け取った結果のうち、フレームの時刻がいちばん新しいものを持ちます。失敗した確かめと、止まることが決まった後に受け取った応答では渡しません。
+答えのあった確かめのたびに、照合の結果を、確かめたフレームの時刻とともに、最新の照合の結果を持つ部品 (`system_screen.screen_judgment.LatestSystemScreen`) と、段階の判定 (`system_screen.run_phase.PhaseTracker`) に渡します。この部品は、受け取った結果のうち、フレームの時刻がいちばん新しいものを持ちます。段階の判定に渡すのは、準備の段階に入った後の結果だけです。失敗した確かめと、止まることが決まった後に受け取った応答では渡しません。
 
 | `--safety` の値 | 内容 |
 |---|---|
 | `jev` (既定) | TypeSafe の Jev (`jev-1.14.0`) に問います。API キーは surface と同じ環境変数 `TYPESAFE_API_KEY` から読みます。HTTP のクライアントは surface と別に作ります。見本の画像は、組み立てるときに 1 回読みます (ファイルが無ければ、実機に触れる前に例外 `FileNotFoundError` で終わります) |
 | `fake` | 画像を見ずに、3 つの問いの確率を 0、`system_screen` の確率を `none` が 1・ほかの選択肢が 0 として返すフェイクです (照合の結果は常に null)。API キーは要りません |
 
-安全の監視は、次の 2 つの確かめをします。どちらも、3 つの問いの確率が `--threshold-safety` (既定 0.7) より大きいときに「超えた」とします (ちょうど同じ値は超えません)。`--allow-home` は surface の押せるボタンに HOME を足すだけで、安全の監視には関係しません。
+安全の監視は、次の 2 つの確かめをします。どちらも、3 つの問いの確率が `--threshold-safety` (既定 0.7) より大きいときに「超えた」とします (ちょうど同じ値は超えません)。
 
 | 確かめ | いつ | 止める条件 |
 |---|---|---|
-| 実行を始めるときの確かめ | 最初のフレームが届いた後に 1 回。surface と middle のループは、この確かめで止まる条件に当たらないと分かるまで始めません | どれかの問いが 1 回超えた、または確かめが失敗した。止まるまでに操作を 1 つも送りません (送るのは、止めるときの中立のレポートだけです) |
+| 実行を始めるときの確かめ | 最初のフレームが届いた後に 1 回。この確かめで止まる条件に当たらないと分かったら、準備の段階に入ります | どれかの問いが 1 回超えた、または確かめが失敗した。止まるまでに操作を 1 つも送りません (送るのは、止めるときの中立のレポートだけです) |
 | 監視の確かめ | 実行を始めるときの確かめの後、止まるまで `--safety-interval` 秒 (既定 1.0) ごと | 同じ問いが、答えのあった確かめで続けて 2 回超えた、または確かめの失敗が `--max-safety-errors` 回 (既定 3) 続いた |
 
 - 監視の確かめは、前の確かめを送ってから `--safety-interval` 秒たったら次を送ります。前の確かめの応答を待ってから次を送り、応答がそれより遅ければ、受け取ってすぐに次を送ります
 - 「続けて 2 回超えた」は、答えのあった確かめだけを並べて数えます。失敗した確かめは数えず、それまでに続けて超えた回数も消しません。たとえば「超えた → 失敗 → 超えた」で止まり、超えた・失敗が交互に続いても止まります。答えのあった確かめで超えなければ、その問いは数え直します
 - 確かめの失敗は、接続できない・タイムアウト (10 秒)・HTTP のエラー、JSON として読めない応答、3 つの問いか `system_screen` の答えが無い・`system_screen` の選択肢の確率が欠けている・確率が数でない・0〜1 の外の応答です。再試行はしません。失敗の回数は、答えのあった確かめで数え直します
-- ブリッジの復旧中も、安全の監視は続けます
+- ブリッジの復旧中と片付けの段階の間も、安全の監視は続けます
 - 安全の監視のスレッドが想定外の例外で終わったときも、全体を止めます
 - 止め方は、ほかの止まる条件と同じです (「止まる条件」の節)。理由は `unsafe screen at start: <問いの名前>`・`safety check failed at start`・`unsafe screen: <問いの名前>`・`safety check failed <回数> times in a row`・`safety monitor failed: <例外の説明>` です。同時に複数の問いが条件に当たったら、`online`・`purchase`・`system_settings` の順で先の問いの名前を書きます
 
@@ -606,6 +610,188 @@ surface とは別のスレッドで、安全の監視を動かします。安全
 | `user_select` | ソフトを起動したときのユーザー選択。HOME メニューでソフトを起動すると出ます | 「だれがソフトをあそびますか？」の見出しの帯 (30, 312, 1250, 400) |
 | `software_close` | HOME メニューでソフトを終了するときの確認。HOME メニューで「プレイ中」のソフトを選んで X (ソフトをおわる) を押して出し、撮った後に決定せずに B で閉じました。出たときは「終了する」が選ばれています | 「プレイ中のソフトを終了します。」「セーブしていない内容は消えてしまいます。」の文 (560, 262, 990, 352) と、「キャンセル」のボタン (292, 466, 637, 542)、「終了する」のボタン (637, 466, 998, 545) の 3 か所。ダイアログの左のソフトのアイコンと、ダイアログの外の背後の HOME メニューは含めません |
 
+### 本体の画面の扱い
+
+run は、次の 4 つの段階に分けて動きます。段階はコードが持ち、安全の監視の照合の結果 (「安全のための規則と安全の監視」の節) から、本体の画面に出たことと、ゲームの画面に戻ったことを見つけます。本体の画面にいる間は surface が操作を送らず、本体の画面用の middle が操作の列を決め、コードが照合の結果を確かめながら送ります。
+
+| 段階 | surface と middle のゲーム用のループ | deep の自動の呼び出しと、画面の停滞による助言の要求 | 本体の画面の操作 |
+|---|---|---|---|
+| `prepare` (準備) | 動かさない | しない | 目的 `prepare` で本体の画面の middle を呼び、操作の列を送る |
+| `play` (プレイ) | 動かす | する | しない |
+| `recover` (復帰) | 止める | しない | 目的 `recover` で本体の画面の middle を呼び、操作の列を送る |
+| `clean_up` (片付け) | 止める | しない | 目的 `clean_up` で本体の画面の middle を呼び、操作の列を送る |
+
+- play から離れるときは、中立のレポートを送り、surface が押していたボタンを離します。surface が判断の応答を待つ間に play から離れたときは、その操作を送らず、`surface.jsonl` の行の `error` に理由を書きます
+- 実行中の deep のジョブは、段階が変わっても止めません
+- 安全の監視と画面の停滞の計測は、段階に依らず動きます
+
+目的ごとの手順は、本体の画面の middle の変わらない指示 ([`middle/system_screen_instructions.py`](./src/switch2_layers/middle/system_screen_instructions.py)) に書いています。
+
+| 目的 | 手順 |
+|---|---|
+| `prepare` | ブリッジのコントローラーが 1P になっていることを「コントローラー」の画面で確かめ、なっていなければ「持ちかた/順番を変える」で L と R を同時に押して登録します。その後、HOME メニューで指定のソフトの絵を選んで起動し、ユーザー選択で指定のユーザーを選んで、ゲームの画面にします |
+| `recover` | 指定のソフトのゲームの画面に戻ります。HOME メニューで指定のソフトが「プレイ中」なら再開し、どのソフトも「プレイ中」でなければ起動します。ほかのソフトが「プレイ中」なら、指定のソフトを起動せず、操作の列を空にします |
+| `clean_up` | HOME メニューに戻り、指定のソフトを終了します。指定のソフトの「プレイ中」の絵を選んで X を押し、出てきた終了の確認で「終了する」を A で決定します |
+
+#### 段階の移り変わり
+
+照合の結果は、安全の監視の答えのあった確かめ 1 回ごとに 1 件と数えます。失敗した確かめは数えず、それまでに続けた数も消しません。続けた数は、段階が変わるたびに 0 に戻します。次の表の null は、照合の結果が見本のどの画面でもないこと (ゲームの画面など) です。
+
+| 移り変わり | 条件 | `phase` の行の `reason` |
+|---|---|---|
+| 実行の始め → `prepare` | 実行を始めるときの安全の確かめが通った。確かめで止まったら、どの段階にも入りません | `start check passed` |
+| `prepare` → `play` | 本体の画面の middle が `done` を真で返した後、照合の結果が続けて 3 回 (`EXIT_STREAK`) null になった。この間は middle を呼びません。3 回になる前に見本の画面が出たら、`done` を取り消して middle をもう一度呼びます | `prepared` |
+| `play` → `recover` | 照合の結果が続けて 2 回 (`ENTER_STREAK`) 見本の画面 (どの見本でもよい) になった。null が出たら数え直します | `system screen` |
+| `play` → `recover` | middle のゲーム用の出力の `press_home` が真だった。照合の結果を待たずに移り、中立のレポートを送ってから HOME を短押しします | `press_home` |
+| `recover` → `play` | 操作の列を送っていない間に、照合の結果が続けて 3 回 (`EXIT_STREAK`) null になった。見本の画面が出たら数え直し、列を送っている間の結果は数えずに 0 に戻します (操作が 0 個の列は、送っている間に含めません)。middle の `done` は条件にしません | `recovered` |
+| `prepare`・`play`・`recover` → `clean_up` | 片付けを行う理由で止まることになった (「片付け」の項) | 片付けを始めた理由 (`interrupted` など) |
+
+段階に入ってから次の秒数がたつと、時間切れになります。時間切れは、止まる条件と同じく 0.1 秒ごとに確かめます。
+
+| 段階 | 秒数 | 時間切れのとき |
+|---|---|---|
+| `prepare` | 180 (`PREPARE_TIMEOUT_S`) | `preparation timed out` で止まります (片付けはしません) |
+| `recover` | 180 (`RECOVER_TIMEOUT_S`) | `recovery timed out` で止まります (片付けはしません) |
+| `clean_up` | 45 (`CLEAN_UP_TIMEOUT_S`) | 片付けを `timeout` で終えます |
+
+middle のゲーム用の出力には、HOME を押して本体の画面に出るかを表す `press_home` (真偽) があります。変わらない指示には、真にするのはゲームが操作を受け付けないなど本体の画面に出る必要があるときだけで、詰まっている (`is_stuck` が真) だけでは真にしないことと、真にするとコードが HOME を押して復帰の段階に移ることを書いています。`press_home` が真の出力は、段階が play のときだけ扱います。`press_home` は、`middle/state.json` と `middle/calls.jsonl` にも書きます。
+
+`--middle fake` の本体の画面の middle は、操作の列を空にして `done` を真で返し続けます。`--safety fake` では照合の結果がいつも null のため、準備は、middle が `done` を真で返した後の 3 回の照合の結果で play に移ります。片付けは `done` では終わらず、45 秒の時間切れか 2 回目の Ctrl+C などで終わります。
+
+#### 本体の画面の操作
+
+準備・復帰・片付けの段階では、本体の画面のループ ([`system_screen/system_screen_loop.py`](./src/switch2_layers/system_screen/system_screen_loop.py)) が次の 1〜4 を繰り返します。
+
+1. 照合の結果を待ちます。待つ結果のフレームは、段階に入った時刻より後に撮ったものです。さらに、前の列の最後の操作を終えてから 0.5 秒 (`SETTLE_S`) より後に撮ったものです。前の段階で送った列の後に段階が変わったときも、その列の 0.5 秒後より前のフレームは使いません。前の回の middle が失敗したときは、その回に渡した照合の結果より新しいフレームの結果を待ちます。届くまで middle を呼びません。反映前の画面で、カーソルの位置を読ませないためです
+2. 本体の画面の middle を呼びます。入力の画像は、その照合のフレーム以降の最新のフレーム 1 枚 (幅 1280 まで縮小) です
+3. middle が返した操作の列を、コード ([`system_screen/system_operation_runner.py`](./src/switch2_layers/system_screen/system_operation_runner.py)) が、照合の結果を確かめながら前から順に送ります
+4. 送り終えたら (打ち切りを含む)、間を置かずに 1 に戻ります。`--middle-interval` は使いません
+
+本体の画面の middle は、ゲーム用の middle と同じ gpt-6-luna を、同じ reasoning effort (`none`) で呼び、出力を Structured Outputs の JSON Schema で受け取ります。変わらない指示 (developer メッセージ) はゲーム用とは別の文で、その直後にキャッシュの区切りを置きます。応答の待ちは 30 秒までです。HTTP のエラー、完了しなかった応答、拒否、出力の決まり (下の出力の表) に合わない出力は middle の失敗として数え、再試行せず、操作を 1 つも送りません。
+
+変わらない指示には、見本の画面ごとの見た目と使う操作、目的ごとの手順、決定の A の置き方、カーソルの動かし方、してはいけない操作、安全のための規則を書いています。してはいけない操作には、目的の手順に無いアイコンで A を押すこと、指定のソフト以外を起動すること、指定のユーザー以外で決定すること、ユーザーの追加・ソフトの削除・データの削除に進むことを挙げ、迷ったら操作の列を空にするよう指示しています。X (ソフトをおわる) と終了の確認の A は、片付けで指定のソフトを終了するときだけ使わせます。ソフトの名前とユーザーの名前は、指示には書かずに user メッセージに入れます。user メッセージの節は次のとおりです。
+
+| 節 | 中身 |
+|---|---|
+| 現在の時刻 | 入力を作った時刻 |
+| 目的 | 目的の名前 (`prepare`・`recover`・`clean_up`) と、その目的の手順の文 |
+| 指定のソフト | `--software` の値 (書かれたまま) |
+| 指定のユーザー | `--user` の値 (書かれたまま) |
+| 照合の結果 | 照合の結果の画面の名前 (null なら `none`) と、照合したフレームの時刻 |
+| この段階のこれまでの呼び出し | 同じ段階で middle が返した操作の列のうち、新しい方から 10 件 (`MAX_HISTORY_ENTRIES`) を古い順に並べたもの。呼び出しの時刻、そのときの照合の結果、操作の列、送った操作の数、最後まで送ったか打ち切った理由を書きます |
+| この段階で送った A・B・X | 同じ段階のすべての呼び出しで実際に送った A・B・X を、送った順に 1 つ 1 行 (`t=<呼び出しの時刻> <操作の screen> で <ボタン>`) で並べたもの。打ち切りで送らなかった操作は入れず、送信に失敗した操作は、届いたかもしれないものとして入れます。準備の手順では「controllers で B」(登録を確かめた) の行の有無で、片付けの手順では「home_menu で X」の行の有無で、次の操作を決めさせます |
+| 今の画像 | 最新のフレーム 1 枚と、その時刻のラベル |
+
+段階が変わると、これまでの呼び出しの履歴を空にします。出力のキーは次のとおりです。
+
+| キー | 内容 |
+|---|---|
+| `observation` | 今の画像の画面と、カーソルの位置 |
+| `operations` | 送る操作の列 (0〜10 個。`MAX_OPERATIONS`)。各操作は、`screen` (その操作を送る前に映っているはずの画面の名前。`none` か見本の名前)、`type` (`press` か `wait`)、`buttons` (`press` で同時に押すボタン。HOME を含む 17 個の名前から 1 個以上で、十字キーは 1 方向まで。`wait` では空)、`seconds` (`press` では、null なら短押し、数なら押し続けの秒数で 0 より大きく 60 以下。`wait` では待つ秒数で 0 より大きく 10 以下) を持ちます |
+| `done` | 目的を果たしたら真。真にするときは `operations` を空にさせます |
+
+コードは、列の操作を前から順に 1 つずつ送り、送った操作を終えてから次に進みます。press は、押す長さ (短押しは 0.12 秒) の後に、ボタンを離したことを確かめた時刻を、操作を終えた時刻にします。離したことを確かめられないまま 1 秒 (`RELEASE_WAIT_S`) たったら、その時刻を操作を終えた時刻にします。wait は、何も送らずに秒数だけ待ちます。本体の画面の操作では、HOME を含む 17 個のボタンを押せます。送った操作は、`operations.jsonl` にきっかけ `system` で書きます。
+
+次のときは、その操作から後を送らずに打ち切ります。`send_failed` のほかは、その操作を送る前に確かめます。
+
+| 打ち切りの理由 (`cut_reason`) | 当たるとき |
+|---|---|
+| `screen_mismatch` | 先頭の操作では、操作の `screen` が、middle に渡した照合の結果の画面と違うとき。2 つ目以降の操作では、前の操作を終えてから 0.5 秒 (`SETTLE_S`) より後に撮ったフレームの照合の結果の画面が、操作の `screen` と違うとき |
+| `no_judgment` | 2 つ目以降の操作の前に、上限まで待っても照合の結果が届かなかったとき |
+| `decision_not_first` | 2 つ目以降の操作に A があるとき (押し続けと同時押しの中の A も含みます)。照合の結果を待たずに打ち切ります |
+| `stopped` | 全体を止める合図が立ったとき |
+| `send_failed` | press の送信 (押すレポートか、離すレポートなど) が失敗したとき。失敗した press は届いたかもしれないため、送った操作の数に入れます |
+
+2 つ目以降の操作の前に照合の結果を待つ上限は、前の操作を終えてから 0.5 秒後から数えて、`max(JUDGMENT_WAIT_S, --safety-interval + 2 秒)` 秒です。`JUDGMENT_WAIT_S` は 3 秒で、既定の `--safety-interval 1.0` では 3 秒、最大の 10 秒では 12 秒になります。照合の結果は安全の監視の間隔で届くため、3 秒に固定すると、間隔が長いときに 2 つ目以降の操作が `no_judgment` で打ち切られやすくなります。
+
+決定の A は、列の先頭にだけ置けます。変わらない指示には、今回の画像でカーソルが目的の項目 (指定のソフトの絵・コントローラーのアイコン・「持ちかた/順番を変える」・指定のユーザーなど) にあると確かめたときだけ A を置くことと、カーソルを動かした後の決定は、次の呼び出しで画像を見てから返すことを書いています。A は短押しにし、ほかのボタンと同時に押させません。コードは、2 つ目以降の操作の A を送らずに打ち切り (`decision_not_first`)、先頭の A は、操作の `screen` が middle に渡した照合の結果と同じときだけ送ります。
+
+列を送る途中で送信が失敗したら (`send_failed`)、中立のレポートを送ります。ブリッジ側でボタンが押されたまま残っているおそれがあるためです。その後は、ブリッジの状態が `ok` に戻るまで、本体の画面の middle を呼びません。待つ間も段階の時間切れと止まる条件は確かめ、ブリッジの復旧が失敗したら `bridge recovery failed` で止まります。送信の失敗は、middle の失敗に数えません。
+
+本体の画面の middle の失敗が `--max-middle-errors` 回続いたら、`middle failed <回数> times in a row` で止まることになり、片付けに移ります。失敗の数は成功で数え直し、段階が変わっても数え直しません。片付けの段階では、1 回の失敗で片付けを終えます (`middle_failed`)。middle を呼んでいる間に段階が変わったら、その出力は送らずに捨てます。
+
+#### 片付け
+
+次の 3 つの理由で止まることになったときは、すぐには止まらずに片付けの段階に移ります。準備・プレイ・復帰のどの段階からでも移ります。実行を始めるときの確かめが通る前 (どの段階にも入っていないとき) は、片付けをせずに止まります。
+
+- `interrupted` (Ctrl+C。SIGINT)
+- `surface failed <回数> times in a row`
+- `middle failed <回数> times in a row` (ゲーム用の middle と本体の画面の middle のどちらの失敗でも)
+
+片付けをしない理由は、安全の監視の理由 (`unsafe screen*`・`safety check failed*`・`safety monitor failed*`)、キャプチャーとブリッジの理由、`preparation timed out`・`recovery timed out`、起動の途中の失敗 (`start failed: <例外の説明>`)、ループの想定外の例外 (`surface loop failed: <例外の説明>`・`middle loop failed: <例外の説明>`・`system screen loop failed: <例外の説明>`) です。これらの理由では、すぐ操作を中立に戻して止まります。
+
+片付けの段階では、surface と middle のゲーム用のループを止めたまま、本体の画面の middle を目的 `clean_up` で呼び、操作の列を送ります。安全の監視は、片付けの間も続けます。run は、ブリッジ (PowerShell) と ffmpeg のプロセスを新しいセッションで起動します。端末の Ctrl+C の SIGINT は前面のプロセスグループのすべてに届くため、同じグループのままだとブリッジと ffmpeg も終わり、片付けの操作を送れないためです。
+
+片付けは、次のどれかで終わります。終わり方は、`run.jsonl` の `clean_up_end` の行の `result` に書きます。
+
+| `result` | 終わるとき |
+|---|---|
+| `done` | 本体の画面の middle が `done` を真で返し、そのときの最新の照合の結果が `home_menu` だった |
+| `timeout` | 片付けを始めてから 45 秒 (`CLEAN_UP_TIMEOUT_S`) たった |
+| `middle_failed` | 片付けの本体の画面の middle が 1 回失敗した |
+| `interrupted` | 片付けの間に、2 回目の Ctrl+C (SIGINT) を受けた |
+| `unsafe` | 片付けの間に、安全の監視の理由で止まることになった |
+| `stopped` | 片付けの間に、キャプチャーかブリッジの理由で止まることになった |
+
+前に数えた SIGINT から 1 秒 (`INTERRUPT_REPEAT_WINDOW_S`) 以内に届いた SIGINT は、同じ割り込みとして数えません。`timeout -s INT` と `uv run` の下では、1 回の割り込みで SIGINT が 2 回届くことがあるためです (`timeout` がプロセスグループに送るものと、`uv` が子に転送するもの)。片付けの間に来た、ほかの止まる理由では、片付けを終えません。
+
+片付けを終えたら、`clean_up_end` の行を書き、操作を中立に戻して以後の操作を送らないようにしてから止まります。`run.jsonl` の `stop` の理由は、片付けを始めた理由のままです (Ctrl+C なら `interrupted` で、終了コードは 0 です)。
+
+#### 定数
+
+段階と本体の画面の操作の回数と秒数は、起動引数ではなくコードの定数です。
+
+| 定数 | 値 | 定義の場所 (`src/switch2_layers/` から) | 意味 |
+|---|---|---|---|
+| `ENTER_STREAK` | 2 | `system_screen/run_phase.py` | play から recover に移る、照合の結果が続けて見本の画面になった回数 |
+| `EXIT_STREAK` | 3 | `system_screen/run_phase.py` | prepare (`done` の後) と recover から play に移る、照合の結果が続けて null になった回数 |
+| `PREPARE_TIMEOUT_S` | 180 秒 | `system_screen/run_phase.py` | 準備の時間切れ |
+| `RECOVER_TIMEOUT_S` | 180 秒 | `system_screen/run_phase.py` | 復帰の時間切れ |
+| `CLEAN_UP_TIMEOUT_S` | 45 秒 | `system_screen/run_phase.py` | 片付けの時間切れ |
+| `SETTLE_S` | 0.5 秒 | `system_screen/system_operation_runner.py` | 操作を終えてから、照合に使うフレームとして認めるまでの秒数 |
+| `JUDGMENT_WAIT_S` | 3 秒 | `system_screen/system_operation_runner.py` | 2 つ目以降の操作の前に照合の結果を待つ上限の既定値。run は `max(JUDGMENT_WAIT_S, --safety-interval + 2 秒)` を使います |
+| `RELEASE_WAIT_S` | 1 秒 | `system_screen/system_operation_runner.py` | press のボタンを離したことを確かめるのを待つ上限 |
+| `JUDGMENT_WAIT_MARGIN_S` | 2 秒 | `app.py` | 照合の結果を待つ上限で、`--safety-interval` に足す秒数 |
+| `INTERRUPT_REPEAT_WINDOW_S` | 1 秒 | `app.py` | 前に数えた SIGINT から、この秒数以内の SIGINT を同じ割り込みとして数えない |
+| `MAX_OPERATIONS` | 10 | `middle/system_screen_schema.py` | 1 回の出力の操作の最大の数 |
+| `MAX_WAIT_SECONDS` | 10 秒 | `middle/system_screen_schema.py` | wait の秒数の上限 |
+| `MAX_HISTORY_ENTRIES` | 10 | `middle/system_screen_types.py` | 入力の「この段階のこれまでの呼び出し」に入れる呼び出しの数 |
+
+#### 記録
+
+`run.jsonl` には、段階について次の行を書きます。
+
+| `event` | 書くとき | 項目 |
+|---|---|---|
+| `phase` | 段階が変わった | `phase` (移った後の段階。`prepare`・`play`・`recover`・`clean_up`)・`reason` (「段階の移り変わり」の表の理由) |
+| `clean_up_end` | 片付けが終わった | `result` (`done`・`timeout`・`middle_failed`・`interrupted`・`unsafe`・`stopped`) |
+
+準備を終えて play に移り、play の途中で Ctrl+C を押して片付けた実行では、次の行が並びます (ほかの行は省いています)。
+
+```text
+{"t": 2.1, "event": "phase", "phase": "prepare", "reason": "start check passed"}
+{"t": 56.445, "event": "phase", "phase": "play", "reason": "prepared"}
+{"t": 93.032, "event": "phase", "phase": "clean_up", "reason": "interrupted"}
+{"t": 110.243, "event": "clean_up_end", "result": "done"}
+{"t": 110.285, "event": "stop", "reason": "interrupted"}
+```
+
+`middle/system_calls.jsonl` には、本体の画面の middle の呼び出しごとに 1 行 (`kind` が `call`) と、操作の列を送り終えるごと (打ち切りを含みます) に 1 行 (`kind` が `run`) を書きます。
+
+| 行 | 内容 |
+|---|---|
+| 呼び出しの行 | `{"kind": "call", "t_sent", "t_received", "goal", "frame_t", "judged_screen", "judged_frame_t", "output", "error", "usage", "cost_usd", "response", "error_body_head"}`。`goal` は目的、`frame_t` は入力の画像の時刻、`judged_screen` と `judged_frame_t` は入力の照合の結果 (null は見本のどの画面でもないこと) と照合したフレームの時刻です。`output` は出力 (`observation`・`operations`・`done`) で、失敗した行では null にし、`error` に説明を書きます。`usage`・`cost_usd`・`response`・`error_body_head` は `middle/calls.jsonl` と同じ形で、`--middle fake` では null です |
+| 実行の結果の行 | `{"kind": "run", "t", "sent_count", "cut_index", "cut_reason", "blocked_buttons"}`。`t` は送り終えた時刻、`sent_count` は送った操作の数、`cut_index` と `cut_reason` は打ち切った操作の位置 (0 から数えます) と理由で、最後まで送ったら null です。`send_failed` のときは、`cut_index` は送信に失敗した press の位置で、`sent_count` はその次の数です。`blocked_buttons` は、押せないボタンとして外したボタンです。操作が 0 個の列でも書きます |
+
+middle を呼んでいる間に段階が変わった回は、呼び出しの行だけを書きます。止める合図が立った後は、どちらの行も書きません。本体の画面の middle の失敗は、`run.jsonl` には書かず、`middle/system_calls.jsonl` の呼び出しの行の `error` に書きます。
+
+#### ソフトの名前とユーザーの名前
+
+本書では、どの層にもゲームの名前を渡さない条件で試します。`switch2-layers run` には、この条件に次の例外があります。
+
+- `--software` と `--user` の名前を、本体の画面の middle の入力 (user メッセージの「指定のソフト」「指定のユーザー」の節) に入れます。本体の画面の middle の変わらない指示と、surface・ゲーム用の middle・deep に渡す入力には入れません
+- HOME メニューとユーザー選択の画面には、ソフトの名前とユーザーの名前が映ります。これらの画面のフレームと、名前が入る記録 (`run.jsonl` の `start` の行の `args`、`middle/system_calls.jsonl` の出力と応答など) から、ゲームの名前がどの層にも届くことがあります。たとえば deep は、実行ディレクトリーの中のファイルを読めます
+
 ### 画面の停滞の計測
 
 run は、3 層とは別のスレッドで、一定間隔のフレームの画面のハッシュから、画面の停滞をコードで測ります ([`src/switch2_layers/progress/`](./src/switch2_layers/progress/))。計算は I/O を持たない部品 (`screen_hash`・`screen_progress`) に分けてあり、時刻と画像を渡して試せます。計測のスレッドは操作を送らないため、安全の監視の「実行を始めるときの確かめ」を待たずに始めます。
@@ -629,7 +815,7 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | middle | user メッセージの「画面の停滞 (コードの計測)」の節に、計測した時刻と同じ文を入れます。変わらない指示では、最初のタスクの進み具合とあわせて、この節を `is_stuck` を決める手がかりにさせます。出力の形は変えません |
 | deep | `advice` のジョブのプロンプトの読んでよい記録に `progress/state.json` を足します |
 
-`no_novel_s` が `--stuck-advice-seconds` (既定 60 秒) を超えたら、deep のスケジューラーが、助言 (`advice`) の deep を新しいきっかけ `progress` で求めます (`job.json` と `run.jsonl` の `trigger` が `progress` になります)。判定は、自動の呼び出しと同じく 0.5 秒ごとに行います。
+`no_novel_s` が `--stuck-advice-seconds` (既定 60 秒) を超えたら、deep のスケジューラーが、助言 (`advice`) の deep を新しいきっかけ `progress` で求めます (`job.json` と `run.jsonl` の `trigger` が `progress` になります)。判定は、自動の呼び出しと同じく、段階が play の間だけ 0.5 秒ごとに行います。
 
 - 超えたまま続く間は、前回このきっかけで求めてから `--stuck-advice-seconds` 秒たつごとに求めます。前回の時刻は、ジョブを起動したか、保留したか、最小の間隔で捨てたかに依らず、求めた時刻です
 - 新しい画面が出て `no_novel_s` がしきい値以下に戻ったら、次に超えたときにすぐ求めます
@@ -640,10 +826,12 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 
 ### run の起動引数
 
-`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
+`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、run が準備の段階で行います。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
+| `--software NAME` | 起動するソフトの名前 (必須)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
+| `--user NAME` | ソフトを遊ぶユーザーの名前 (必須)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
 | `--interval-fps N` | 一定間隔のフレームを `frames/interval/` に保存するフレームレート | 5 | 0 より大きく 10 以下 |
 | `--interval-width N` | 一定間隔のフレームを縮小する幅 | 640 | 64〜1280 の整数 |
@@ -654,7 +842,6 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | `--deep-min-start-interval S` | 同じ文書の deep を、前回の起動からこの秒数たつまで、起動も保留もしません | 30 | 0 以上の有限の値 |
 | `--deep-auto-seconds S` | 同じ文書の前回の deep の終了からこの秒数たったら、自動で deep を呼びます | 60 | 0 より大きい有限の値で、`--deep-min-start-interval` 以上 |
 | `--deep-timeout S` | deep のジョブの実行時間の上限 (秒) | 300 | 0 より大きい有限の値 |
-| `--allow-home` | surface の押せるボタンに HOME を足します (「押せるボタン」の節)。安全の監視には関係しません | オフ | なし (付けるとオン) |
 | `--middle {fake,luna}` | middle の実装 (「middle の実装」の節)。`luna` は gpt-6-luna を呼び、環境変数 `OPENAI_API_KEY` が要ります | `luna` | `fake`、`luna` |
 | `--surface {jev,fake}` | surface の実装 (「surface の実装」の節)。`jev` は TypeSafe の Jev を呼び、環境変数 `TYPESAFE_API_KEY` が要ります | `jev` | `jev`、`fake` |
 | `--threshold-advisor P` | surface の advisor 判定のしきい値。確率がこれを超えた文書の deep を求めます | 0.5 | 0〜1 |
@@ -667,7 +854,7 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | `--progress-window S` | 画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数。「画面の停滞の計測」の節) | 300 | 0 より大きい有限の値 |
 | `--stuck-advice-seconds S` | 新しい画面が出ていない秒数がこれを超えたら、助言の deep を求めます。超えたまま続く間は、この秒数ごとに求めます | 60 | 0 より大きい有限の値 |
 
-範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--software` か `--user` が無いときと、値が空か空白だけのときも、引数の誤りとして使い方を表示し、実機に触れずに終了します (終了コード 2)。2 つの名前は、書かれたまま本体の画面の middle の入力に入れ、`run.jsonl` の `start` の行の `args` (`software_name`・`user_name`) にも書きます。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
 同じ文書 (種類と場面の組) の deep のジョブは、同時に 1 件までです。同じ文書への要求は、きっかけ (`surface`・`new_scene`・`auto`・`progress`) に依らず、次の順に確かめて扱います。
 
@@ -697,16 +884,17 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
-| `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、段階 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
-| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`neutral`・`stop`)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
+| `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、確かめの種類 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
+| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`system`・`neutral`・`stop`。`apply` は surface の操作、`system` は本体の画面の操作と `press_home` の HOME)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
-| `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置、最初のタスクの文とその文になった時刻、現在地の場所とマス)。surface は要求ごとにこのファイルを読みます |
-| `middle/calls.jsonl` | middle の実行ごとの記録。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
+| `middle/state.json` | middle の最新の出力 (場面、詰まっているか、surface の待ち時間、系列情報、次に読む記録の位置、最初のタスクの文とその文になった時刻、現在地の場所とマス、HOME を押して本体の画面に出るか `press_home`)。surface は要求ごとにこのファイルを読みます |
+| `middle/calls.jsonl` | middle の実行ごとの記録。`press_home` も書きます。`--middle luna` では、トークン数、概算の費用、応答の本文も書きます |
+| `middle/system_calls.jsonl` | 本体の画面の middle の呼び出しごとの行 (`kind` が `call`) と、操作の列を送り終えるごとの行 (`kind` が `run`)。「本体の画面の扱い」の節 |
 | `progress/state.json` | 画面の停滞の計測の最新の値 (`t`・`static_s`・`no_novel_s`・`window_s`。「画面の停滞の計測」の節)。まだフレームが無いときは無く、surface と middle は要求ごとに、deep のスケジューラーは 0.5 秒ごとに読みます |
 | `middle/map_records.jsonl` | middle のマップの記録。現在地の場所の名前とマス、新しく分かった場所のつながりと観察 (マス目型のマップではマスの座標を含みます) を、判断に使った画像の時刻と場面 ID とともに、1 行 1 回の JSON で足します (「middle の実装」の節)。deep の `map` のジョブが読みます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書の `notes/` からのパス、`map` のジョブで書くマップの型 `map_layout`) を置きます。Claude Code で動かしたジョブには、`stream.jsonl` (Claude Code の stream-json の出力。1 行に、起動からの秒と出力の 1 行) と `result.json` (終了コード、所要時間、費用、最後のメッセージ、エラーで終わったか、拒まれたツールの呼び出し、停止・強制終了したか、標準エラー出力) も置きます。起動前に止めたときは、`result.json` の `error` に理由を書きます |
@@ -718,7 +906,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `notes/common/controls.md` | 共通の操作説明。押せるボタンを、まだ確かめていない印 `unknown` を付けて並べます |
+| `notes/common/controls.md` | 共通の操作説明。surface の押せるボタン (HOME を除く 16 個) を、まだ確かめていない印 `unknown` を付けて並べます |
 | `notes/common/tips.md` | 共通の攻略情報 (見出しだけ) |
 | `notes/common/box_targets.md` | surface が box で取る対象の共通の一覧。固定の 4 つ (自機・敵・敵の攻撃・目標地点) を `- 名前: 説明` の行で並べます |
 | `notes/scenes/<場面ID>/` | 場面ごとの操作説明 (`controls.md`)・攻略情報 (`tips.md`)・短期のタスクリスト (`tasks.md`)・box で取る対象 (`box_targets.md`)。起動時は空で、`tasks.md` は middle が、ほかは deep が書きます。場面の操作説明・攻略情報・box で取る対象が無いか空なら、surface は共通の文書を使います |
@@ -731,7 +919,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 ### 押せるボタン
 
-surface が決めた操作は、コントローラーに送る直前に、押せるボタンに制限します。既定では HOME を押せません。`--allow-home` を付けると押せます。`--allow-home` は押せるボタン (surface の問いと、起動時の `notes/common/controls.md` のボタンの並びを含みます) だけを変え、安全の監視の止め方は変えません。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーを 1 方向に絞ってから送ります。これは、ほかの実装から来る操作のための処理です)。
+surface が決めた操作は、コントローラーに送る直前に、surface の押せるボタンに制限し、段階が play のときだけ送ります。surface の押せるボタンは HOME を除く 16 個で、surface は HOME を押しません (Jev のボタンの問いと、起動時の `notes/common/controls.md` のボタンの並びも 16 個です)。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。本体の画面の操作と、middle のゲーム用の出力の `press_home` で押す HOME は、HOME を含む 17 個を押せます (「本体の画面の扱い」の節)。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーを 1 方向に絞ってから送ります。これは、ほかの実装から来る操作のための処理です)。
 
 短押しは 120 ミリ秒押して離します。秒数を指定した押し続け (`hold_short` は 0.3 秒、`hold_long` は 1.0 秒) は、押したレポートの送信が戻ってからその秒数がたったら、次の操作を待たずに離します。押し続けているボタンを次の操作でも押し続けにすると、離さずに、その操作の送信が戻った時刻から新しい秒数を数え直します。秒数の無い押し続けは、次の操作まで押したままにします。秒数が 0 以下・nan・無限大の押し続けは、押さずに外します (`blocked_buttons` には書きません)。秒数の上限は 60 秒で、超えた値は 60 秒として扱います。スティックは次の操作まで倒したままにします。
 
@@ -739,26 +927,28 @@ surface が決めた操作は、コントローラーに送る直前に、押せ
 
 ### 止まる条件
 
-次のどれかが起きると、操作を中立に戻して以後の操作を送らないようにし、3 層を止めて、`run.jsonl` の `stop` に理由を書きます。
+次のどれかが起きると止まり、`run.jsonl` の `stop` に理由を書きます。片付けの列に ○ を付けた理由では、準備・プレイ・復帰のどれかの段階に入っていれば、すぐには止まらずに片付け (「本体の画面の扱い」の節) をしてから止まります。ほかの理由では、すぐに操作を中立に戻して以後の操作を送らないようにし、3 層を止めます。
 
-| 条件 | `stop` の理由 |
-|---|---|
-| Ctrl+C を押した | `interrupted` |
-| キャプチャーの出力が終わった | `capture ended` |
-| 最後のフレームから 2 秒以上、新しいフレームが届かない | `no new frame for 2 seconds` |
-| 起動から 10 秒たっても、最初のフレームが届かない | `no first frame within 10 seconds` |
-| コントローラーのブリッジが復旧できない状態 (第2章の `failed`) になった | `bridge recovery failed` |
-| surface の失敗が `--max-surface-errors` 回続いた | `surface failed <回数> times in a row` |
-| middle の失敗が `--max-middle-errors` 回続いた | `middle failed <回数> times in a row` |
-| 実行を始めるときの安全の確かめで、3 つの問い (`online`・`purchase`・`system_settings`) のどれかの確率が `--threshold-safety` を超えた | `unsafe screen at start: <問いの名前>` |
-| 実行を始めるときの安全の確かめが失敗した | `safety check failed at start` |
-| 安全の監視で、3 つの問いの同じ問いの確率が、答えのあった確かめで続けて 2 回 `--threshold-safety` を超えた | `unsafe screen: <問いの名前>` |
-| 安全の監視の失敗が `--max-safety-errors` 回続いた | `safety check failed <回数> times in a row` |
-| 安全の監視のスレッドが想定外の例外で終わった | `safety monitor failed: <例外の説明>` |
+| 条件 | `stop` の理由 | 片付け |
+|---|---|---|
+| Ctrl+C を押した | `interrupted` | ○ |
+| キャプチャーの出力が終わった | `capture ended` | |
+| 最後のフレームから 2 秒以上、新しいフレームが届かない | `no new frame for 2 seconds` | |
+| 起動から 10 秒たっても、最初のフレームが届かない | `no first frame within 10 seconds` | |
+| コントローラーのブリッジが復旧できない状態 (第2章の `failed`) になった | `bridge recovery failed` | |
+| surface の失敗が `--max-surface-errors` 回続いた | `surface failed <回数> times in a row` | ○ |
+| middle の失敗 (ゲーム用の middle と本体の画面の middle のそれぞれ) が `--max-middle-errors` 回続いた | `middle failed <回数> times in a row` | ○ |
+| 準備の段階に入ってから 180 秒たっても、play に移れない | `preparation timed out` | |
+| 復帰の段階に入ってから 180 秒たっても、play に戻れない | `recovery timed out` | |
+| 実行を始めるときの安全の確かめで、3 つの問い (`online`・`purchase`・`system_settings`) のどれかの確率が `--threshold-safety` を超えた | `unsafe screen at start: <問いの名前>` | |
+| 実行を始めるときの安全の確かめが失敗した | `safety check failed at start` | |
+| 安全の監視で、3 つの問いの同じ問いの確率が、答えのあった確かめで続けて 2 回 `--threshold-safety` を超えた | `unsafe screen: <問いの名前>` | |
+| 安全の監視の失敗が `--max-safety-errors` 回続いた | `safety check failed <回数> times in a row` | |
+| 安全の監視のスレッドが想定外の例外で終わった | `safety monitor failed: <例外の説明>` | |
 
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
-止まるときは、surface と middle のループと安全の監視のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。surface は操作を送らず、どちらも記録を書きません。`run` の終了コードは、Ctrl+C で止まったときは 0、ほかの理由では 1 です。
+止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
 
 ## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
 

@@ -10,7 +10,7 @@ import httpx
 import numpy as np
 import pytest
 
-from switch2_layers.buttons import allowed_buttons
+from switch2_layers.buttons import ALL_BUTTONS, allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
     REQUEST_PENDING,
     SKIP_CLOSED,
@@ -84,7 +84,7 @@ DOCUMENTS = SurfaceDocuments(
     uses_common_tips=True,
 )
 JEV_BOX = JevBox(top=0.2, bottom=0.4, left=0.1, right=0.3, confidence=None)
-ALLOWED = allowed_buttons(allow_home=False)
+ALLOWED = allowed_buttons()
 FAKE_MODEL = "jev-test"
 # FRAME_TIMES の画像の保存を予約したファイル (2 枚目は保存を捨てた)
 FILES = ("frames/surface/000009000.jpg", None, "frames/surface/000010000-2.jpg")
@@ -747,7 +747,7 @@ def test_request_sends_state_images_and_all_question_kinds(tmp_path):
 
 def test_home_question_is_sent_only_when_allowed(tmp_path):
     asker = FakeAsker()
-    decider, _ = make_decider(tmp_path, asker, allowed=allowed_buttons(allow_home=True))
+    decider, _ = make_decider(tmp_path, asker, allowed=frozenset(ALL_BUTTONS))
     decider.decide(surface_input())
     assert "button_HOME" in names_of(asker.questions_of(0), QuestionKind.BUTTON)
 

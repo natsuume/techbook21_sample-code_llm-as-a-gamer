@@ -216,6 +216,7 @@ def make_harness(
     arrivals: Iterable[tuple[float, FakeJudgment]] = (),
     allowed: frozenset[str] = ALLOWED_WITHOUT_HOME,
     timer_running: bool = True,
+    judgment_wait_s: float = JUDGMENT_WAIT_S,
 ) -> Harness:
     """偽の時計 (t = START_T から)・送信先・照合の結果・待ちを使う SystemOperationRunner を作る。
 
@@ -235,7 +236,13 @@ def make_harness(
     timer.running = timer_running
     judgments = FakeJudgments(monotonic, clock, timer, arrivals)
     waits = FakeWaits(timer)
-    runner = SystemOperationRunner(pad_output, judgments, clock, wait_or_stop=waits)
+    runner = SystemOperationRunner(
+        pad_output,
+        judgments,
+        clock,
+        wait_or_stop=waits,
+        judgment_wait_s=judgment_wait_s,
+    )
     return Harness(
         monotonic=monotonic,
         clock=clock,
@@ -505,6 +512,32 @@ def test_judgment_arriving_after_the_wait_limit_is_too_late():
     result = run(harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
     assert result == cut(1, SystemCutReason.NO_JUDGMENT)
     assert len(system_actions(harness)) == 1
+
+
+def test_judgment_wait_limit_can_be_given():
+    # run では、安全の監視の間隔に合わせて上限を長くする (既定は JUDGMENT_WAIT_S)
+    harness = make_harness(judgment_wait_s=5.0)
+    assert harness.runner.judgment_wait_s == 5.0
+    assert make_harness().runner.judgment_wait_s == JUDGMENT_WAIT_S
+    after = first_after_frame_t(press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
+    arrival = after + JUDGMENT_WAIT_S + 1.0
+    harness = make_harness(
+        [(arrival, FakeJudgment(frame_t=arrival - 0.1, screen="home_menu"))],
+        judgment_wait_s=5.0,
+    )
+    result = run(harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
+    assert result == sent_all(2)
+
+
+def test_judgment_arriving_after_the_given_wait_limit_is_too_late():
+    after = first_after_frame_t(press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
+    arrival = after + 1.0 + 0.05
+    harness = make_harness(
+        [(arrival, FakeJudgment(frame_t=arrival - 0.1, screen="home_menu"))],
+        judgment_wait_s=1.0,
+    )
+    result = run(harness, press("home_menu", "DOWN"), press("home_menu", "RIGHT"))
+    assert result == cut(1, SystemCutReason.NO_JUDGMENT)
 
 
 # --- 照合の結果が違う・届かない ---

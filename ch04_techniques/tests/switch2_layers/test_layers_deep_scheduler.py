@@ -116,6 +116,8 @@ class Harness:
     progress: dict[str, ProgressState | None] = field(
         default_factory=lambda: {"state": None}
     )
+    # is_play が返す値 (run の段階が play か)
+    phase: dict[str, bool] = field(default_factory=lambda: {"play": True})
 
     def stuck_for(self, no_novel_s: float | None) -> None:
         """progress_state が、新しい画面が出ていない秒数 no_novel_s の値を返すようにする (None なら値が無い)。"""
@@ -216,6 +218,7 @@ def make_scheduler(
     sleeps: list[float] = []
     on_sleep: list[Callable[[], None]] = []
     progress: dict[str, ProgressState | None] = {"state": None}
+    phase = {"play": True}
     holder: list[Harness] = []
     parts = DeepSchedulerParts(
         paths=paths,
@@ -230,6 +233,7 @@ def make_scheduler(
         sleep=lambda seconds: holder[0].sleep(seconds),
         prepare_job_directory=prepare_job_directory,
         progress_state=lambda: progress["state"],
+        is_play=lambda: phase["play"],
     )
     settings = DeepSchedulerSettings(
         min_start_interval_s=min_start_interval_s,
@@ -248,6 +252,7 @@ def make_scheduler(
         sleeps,
         on_sleep,
         progress,
+        phase,
     )
     holder.append(harness)
     return harness
@@ -1125,6 +1130,32 @@ def test_auto_starts_all_documents_after_auto_seconds_from_start(tmp_path):
         value = job_json(result.job_dir)
         assert value["trigger"] == "auto"
         assert value["scene_id"] is None
+
+
+def test_auto_and_progress_requests_wait_while_not_playing(tmp_path):
+    # 段階が play でない間 (準備・復帰・片付け) は、自動の呼び出しも advice の要求もしない
+    harness = make_scheduler(tmp_path)
+    harness.phase["play"] = False
+    harness.at(100.0)
+    harness.stuck_for(61.0)
+    assert harness.scheduler.check_auto() == []
+    assert harness.scheduler.check_progress() is None
+    assert list((harness.root / "deep").iterdir()) == []
+    assert run_rows(harness.root) == []
+    # play に戻ったら行う
+    harness.phase["play"] = True
+    assert started_kinds(harness.scheduler.check_auto()) == [
+        kind.value for kind in DOCUMENT_KINDS
+    ]
+
+
+def test_timeouts_are_checked_while_not_playing(tmp_path):
+    harness = make_scheduler(tmp_path, timeout_s=10.0)
+    harness.scheduler.request(DocumentKind.TIPS, DeepTrigger.SURFACE, None)
+    harness.phase["play"] = False
+    harness.at(10.0)
+    harness.scheduler.check_timeouts()
+    assert [row["reason"] for row in run_rows(harness.root, "deep_stop")] == ["timeout"]
 
 
 def test_auto_starts_a_game_job_for_the_game_note(tmp_path):

@@ -302,7 +302,7 @@ def test_apply_removes_home_right_before_sending():
     assert events[-1].action == PadAction(held=frozenset({"B"}))
 
 
-def test_apply_sends_home_with_allow_home():
+def test_apply_sends_home_when_home_is_allowed():
     output, sender, _, _ = make_output(ALLOWED_WITH_HOME)
     result = output.apply(PadAction(held=frozenset({"HOME"})))
     assert result.blocked_buttons == ()
