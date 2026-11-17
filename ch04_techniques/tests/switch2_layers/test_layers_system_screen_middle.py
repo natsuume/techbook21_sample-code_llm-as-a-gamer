@@ -345,8 +345,8 @@ def test_user_message_history_counts_the_operation_whose_send_failed():
     assert "最後まで送った" not in joined
 
 
-# この段階で送った決定 (A) の節の見出し
-SENT_DECISIONS_TITLE = "この段階で送った決定 (A)"
+# この段階で送った A・B・X の節の見出し
+SENT_BUTTONS_TITLE = "この段階で送った A・B・X"
 HISTORY_TITLE = "この段階のこれまでの呼び出し"
 
 
@@ -362,9 +362,67 @@ def press_a(screen: str) -> SystemOperation:
     return SystemOperation(screen=screen, kind="press", buttons=("A",), seconds=None)
 
 
+def press(screen: str, *buttons: str) -> SystemOperation:
+    return SystemOperation(screen=screen, kind="press", buttons=buttons, seconds=None)
+
+
+def test_sent_buttons_section_lists_a_b_and_x_in_sent_order():
+    # 準備は controllers での B の前後の A で、片付けは home_menu での X で次の操作を決めるため、1 本の並びに置く
+    history = (
+        history_record(
+            50.0, judged_screen="controllers", operations=(press("controllers", "B"),)
+        ),
+        history_record(
+            51.0,
+            operations=(press("home_menu", "UP"), press("home_menu", "RIGHT")),
+            sent_count=2,
+        ),
+        history_record(52.0, operations=(press("home_menu", "X"),)),
+        history_record(
+            53.0,
+            judged_screen="software_close",
+            operations=(press("software_close", "A"),),
+        ),
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
+    assert section.split("\n") == [
+        "t=50.000 controllers で B",
+        "t=52.000 home_menu で X",
+        "t=53.000 software_close で A",
+    ]
+
+
+def test_sent_buttons_section_includes_b_older_than_ten():
+    # 準備が長引くと、controllers で B を送った回は履歴の節の 10 件から外れる
+    history = (
+        history_record(
+            40.0, judged_screen="controllers", operations=(press("controllers", "B"),)
+        ),
+        *(history_record(41.0 + index) for index in range(11)),
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
+    payload = sent_payload(screen_input)
+    assert "t=40.000" not in user_section(payload, HISTORY_TITLE)
+    assert user_section(payload, SENT_BUTTONS_TITLE) == "t=40.000 controllers で B"
+
+
+def test_sent_buttons_section_skips_b_that_was_not_sent():
+    record = history_record(
+        60.0,
+        judged_screen="controllers",
+        operations=(PRESS_DOWN, press("controllers", "B")),
+        sent_count=1,
+        cut_reason=SystemCutReason.SCREEN_MISMATCH,
+    )
+    screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
+    assert section == "まだ送っていません"
+
+
 def test_sent_decisions_section_follows_the_history_section():
     titles = [text.split("\n", 1)[0] for text in user_texts(sent_payload())]
-    assert titles.index(f"## {SENT_DECISIONS_TITLE}") == (
+    assert titles.index(f"## {SENT_BUTTONS_TITLE}") == (
         titles.index(f"## {HISTORY_TITLE}") + 1
     )
 
@@ -376,7 +434,7 @@ def test_sent_decisions_section_follows_the_history_section():
 )
 def test_sent_decisions_section_without_a(history):
     screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
-    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
     assert section == "まだ送っていません"
 
 
@@ -402,7 +460,7 @@ def test_sent_decisions_section_lists_each_sent_a_in_order():
         ),
     )
     screen_input = dataclasses.replace(SCREEN_INPUT, history=history)
-    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
     assert section.split("\n") == [
         "t=50.000 controller_order で A",
         "t=52.000 home_menu で A",
@@ -423,9 +481,7 @@ def test_sent_decisions_section_includes_history_older_than_ten():
     payload = sent_payload(screen_input)
     # 履歴の節には新しい方から 10 件だけが入り、t=40.000 の呼び出しは入らない
     assert "t=40.000" not in user_section(payload, HISTORY_TITLE)
-    assert (
-        user_section(payload, SENT_DECISIONS_TITLE) == "t=40.000 controller_order で A"
-    )
+    assert user_section(payload, SENT_BUTTONS_TITLE) == "t=40.000 controller_order で A"
 
 
 def test_sent_decisions_section_skips_a_that_was_not_sent():
@@ -436,7 +492,7 @@ def test_sent_decisions_section_skips_a_that_was_not_sent():
         cut_reason=SystemCutReason.DECISION_NOT_FIRST,
     )
     screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
-    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
     assert section == "まだ送っていません"
 
 
@@ -455,19 +511,19 @@ def test_sent_decisions_section_includes_a_whose_send_failed():
         cut_reason=SystemCutReason.SEND_FAILED,
     )
     screen_input = dataclasses.replace(SCREEN_INPUT, history=(record,))
-    section = user_section(sent_payload(screen_input), SENT_DECISIONS_TITLE)
+    section = user_section(sent_payload(screen_input), SENT_BUTTONS_TITLE)
     assert section == "t=61.000 user_select で A"
 
 
 def test_developer_message_describes_the_sent_decisions_section():
-    assert SENT_DECISIONS_TITLE in developer_text(sent_payload())
+    assert SENT_BUTTONS_TITLE in developer_text(sent_payload())
 
 
 def test_developer_message_describes_the_send_failed_reason():
     text = developer_text(sent_payload())
     assert "- send_failed: 操作の送信に失敗した。" in text
     assert (
-        "送信に失敗した A (send_failed) は、届いたかもしれないものとして入ります。"
+        "送信に失敗した操作 (send_failed) は、届いたかもしれないものとして入ります。"
         in text
     )
 

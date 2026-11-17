@@ -217,7 +217,7 @@ class SystemOperationRunner:
         どちらの失敗でも、失敗した press は届いたかもしれないものとして送った数に入れ、SystemOutputError の属性 result に
         SystemRunResult(sent_count=その press の位置 + 1, cut_index=その press の位置, cut_reason=SEND_FAILED,
         blocked_buttons=その press までに外したボタン) を持たせる (その press が列の最後の操作でも、cut_index を None に
-        しない)。呼び出し側は、この result で履歴 (送った操作の数と、この段階で送った決定) を作る前提とする。また、
+        しない)。呼び出し側は、この result で履歴 (送った操作の数と、この段階で送った A・B・X) を作る前提とする。また、
         ブリッジ側でボタンが押されたまま残っているおそれがあるため、呼び出し側は PadOutput.neutral() で押下の状態を
         そろえてから次の入力を作る前提とする。
 

@@ -30,11 +30,11 @@ def test_goal_text_mentions_done():
         assert "done" in goal_text(goal)
 
 
-def test_prepare_text_decides_by_the_sent_decisions():
+def test_prepare_text_decides_by_the_sent_buttons():
     text = goal_text(SystemGoal.PREPARE)
     condition = (
         "登録を確かめた後の home_menu か user_select での A が"
-        "「この段階で送った決定」に"
+        "「この段階で送った A・B・X」に"
     )
     # 手順 1 (HOME を押す) と手順 8 (done) は、登録を確かめた後に送った決定で見分ける
     assert (
@@ -44,8 +44,8 @@ def test_prepare_text_decides_by_the_sent_decisions():
         "ゲームの画面 (ソフトの起動の演出やタイトル画面を含む) が映っていて、"
         f"{condition}あれば、done を true にします"
     ) in text
-    # 登録を確かめたかは、コントローラーの画面で B を送ったかで決める
-    assert "コントローラーの画面 (controllers) で B を送った回" in text
+    # 登録を確かめたかは、送った A・B・X の節に controllers での B があるかで決める
+    assert "「この段階で送った A・B・X」に「controllers で B」の行がある" in text
     # 最初の呼び出しかどうかと、最後に送った操作による見分けは使わない
     assert "最初の呼び出し" not in text
     assert "最後に送った操作" not in text
@@ -58,8 +58,8 @@ def test_prepare_text_judges_registration_by_the_usb_controller_on_the_left():
     assert "A を押さずに、B を短押しして HOME メニューに戻ります" in text
 
 
-def test_developer_instructions_describe_the_sent_decisions_section():
-    assert "この段階で送った決定 (A)" in SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS
+def test_developer_instructions_describe_the_sent_buttons_section():
+    assert "この段階で送った A・B・X" in SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS
     assert "まだ送っていません" in SYSTEM_SCREEN_DEVELOPER_INSTRUCTIONS
 
 
@@ -89,6 +89,17 @@ def test_clean_up_text_uses_x_and_the_close_confirmation():
     # 終了の確認では、最初に選ばれている「終了する」で A を押す
     assert "終了する" in CLEAN_UP_TEXT
     assert "A" in CLEAN_UP_TEXT
+
+
+def test_clean_up_text_decides_the_close_confirmation_by_the_sent_x():
+    # 終了の確認で A を押すか B で閉じるかは、送った A・B・X の節に home_menu での X があるかで決める
+    assert "「この段階で送った A・B・X」に「home_menu で X」の行があれば" in (
+        CLEAN_UP_TEXT
+    )
+    assert "「この段階で送った A・B・X」に「home_menu で X」の行が無ければ" in (
+        CLEAN_UP_TEXT
+    )
+    assert "この段階のこれまでの呼び出し" not in CLEAN_UP_TEXT
 
 
 def test_clean_up_text_is_done_on_the_home_menu():
