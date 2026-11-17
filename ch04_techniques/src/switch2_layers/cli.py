@@ -113,6 +113,7 @@ from switch2_layers.settings import (
     DEFAULT_MAX_MONITOR_ERRORS,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MAX_SURFACE_ERRORS,
+    DEFAULT_MIDDLE_EFFORT,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
@@ -145,6 +146,7 @@ from switch2_layers.settings import (
     TYPESAFE_API_KEY_ENV,
     DeepOnceSettings,
     DeepRunnerChoice,
+    MiddleEffort,
     MiddleKind,
     MiddleOnceSettings,
     RunMode,
@@ -381,6 +383,15 @@ def add_run_parser(
         ),
     )
     add_middle_kind_argument(parser)
+    parser.add_argument(
+        "--middle-effort",
+        choices=[effort.value for effort in MiddleEffort],
+        default=DEFAULT_MIDDLE_EFFORT.value,
+        help=(
+            "ゲーム用の middle (luna) の要求の reasoning effort。本体の画面の middle と --middle fake には使わない "
+            f"(既定 {DEFAULT_MIDDLE_EFFORT.value})"
+        ),
+    )
     parser.add_argument(
         "--surface",
         choices=[kind.value for kind in SurfaceKind],
@@ -737,6 +748,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         deep_auto_seconds=args.deep_auto_seconds,
         deep_timeout_s=args.deep_timeout,
         middle=MiddleKind(args.middle),
+        middle_effort=MiddleEffort(args.middle_effort),
         surface=SurfaceKind(args.surface),
         threshold_advisor=args.threshold_advisor,
         box_requery_every=args.box_requery_every,
@@ -779,7 +791,9 @@ def deep_once_settings_from_args(args: argparse.Namespace) -> DeepOnceSettings:
 
 
 def create_middle_analyzer(
-    kind: MiddleKind, environ: Mapping[str, str]
+    kind: MiddleKind,
+    environ: Mapping[str, str],
+    effort: MiddleEffort = DEFAULT_MIDDLE_EFFORT,
 ) -> MiddleAnalyzer:
     """--middle の値 kind の MiddleAnalyzer を作って返す。要求はまだ送らない。
 
@@ -797,7 +811,7 @@ def create_middle_analyzer(
     api_key = environ.get(OPENAI_API_KEY_ENV, "").strip()
     if not api_key:
         raise ValueError(f"the environment variable {OPENAI_API_KEY_ENV} is not set")
-    return LunaMiddleAnalyzer(api_key=api_key)
+    return LunaMiddleAnalyzer(api_key=api_key, reasoning_effort=effort.value)
 
 
 def create_system_screen_middle(
@@ -898,7 +912,7 @@ def run_command(args: argparse.Namespace) -> int:
     if typesafe_key_errors:
         _print_errors(typesafe_key_errors)
         return EXIT_USAGE
-    middle = create_middle_analyzer(settings.middle, os.environ)
+    middle = create_middle_analyzer(settings.middle, os.environ, settings.middle_effort)
     system_middle = create_system_screen_middle(settings.middle, os.environ)
     surface = build_surface_assembly(
         settings, _typesafe_api_key(settings.surface is SurfaceKind.JEV)

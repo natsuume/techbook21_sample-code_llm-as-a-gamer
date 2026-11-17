@@ -412,7 +412,9 @@ def build_user_message(middle_input: MiddleInput) -> dict[str, object]:
     return {"role": "user", "content": content}
 
 
-def build_luna_payload(middle_input: MiddleInput) -> dict[str, object]:
+def build_luna_payload(
+    middle_input: MiddleInput, reasoning_effort: str = REASONING_EFFORT
+) -> dict[str, object]:
     """middle_input から、要求の本文 (モジュールの docstring の形) を作って返す。
 
     reasoning_effort (キーワード引数。既定 REASONING_EFFORT の "none") を、そのまま reasoning の effort に入れる
@@ -420,7 +422,7 @@ def build_luna_payload(middle_input: MiddleInput) -> dict[str, object]:
     """
     return {
         "model": LUNA_MODEL,
-        "reasoning": {"effort": REASONING_EFFORT},
+        "reasoning": {"effort": reasoning_effort},
         "text": {"format": build_text_format()},
         "prompt_cache_options": {"mode": "explicit"},
         "input": [build_developer_message(), build_user_message(middle_input)],

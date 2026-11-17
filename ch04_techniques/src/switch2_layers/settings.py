@@ -259,6 +259,7 @@ class RunSettings:
     deep_auto_seconds: float = DEFAULT_DEEP_AUTO_SECONDS
     deep_timeout_s: float = DEFAULT_DEEP_TIMEOUT_S
     middle: MiddleKind = DEFAULT_MIDDLE_KIND
+    middle_effort: MiddleEffort = DEFAULT_MIDDLE_EFFORT
     surface: SurfaceKind = DEFAULT_SURFACE
     threshold_advisor: float = DEFAULT_THRESHOLD_ADVISOR
     box_requery_every: int = DEFAULT_BOX_REQUERY_EVERY
@@ -599,6 +600,7 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
     value["middle"] = settings.middle.value
+    value["middle_effort"] = settings.middle_effort.value
     value["surface"] = settings.surface.value
     value["surface_map"] = settings.surface_map.value
     value["deep"] = settings.deep.value

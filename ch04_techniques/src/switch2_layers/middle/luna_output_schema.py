@@ -84,13 +84,6 @@ _TILE_CONDITION = (
 MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
-        "scene_name": {
-            "type": "string",
-            "description": (
-                "現在の場面ラベル。場面ラベルの一覧に当てはまるものがあれば、その名前をそのまま書く。"
-                "当てはまるものが無いときだけ新しい名前を作る。決められなければ空文字列"
-            ),
-        },
         "place_name": {
             "type": "string",
             "description": (
@@ -176,6 +169,15 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
             "type": "string",
             "description": "系列情報。決められた節に分けて書く",
         },
+        "scene_name": {
+            "type": "string",
+            "description": (
+                "現在の場面ラベル。最新のフレームが前回の場面と同じ種類の画面なら、前回の場面名をそのまま書く。"
+                "違う種類の画面なら、場面ラベルの一覧から当てはまる名前を探して、そのまま書く。一覧に当てはまる"
+                "名前が無ければ新しい名前を作る (一覧に無いことを理由に前回の場面名を保たない)。"
+                "決められなければ空文字列"
+            ),
+        },
         "cancel_task_ids": {
             "type": "array",
             "description": (
@@ -223,7 +225,6 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         },
     },
     "required": [
-        "scene_name",
         "place_name",
         "current_tile",
         "new_connections",
@@ -233,6 +234,7 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         "press_home",
         "surface_wait_s",
         "timeline",
+        "scene_name",
         "cancel_task_ids",
         "new_tasks",
     ],
@@ -240,7 +242,6 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
 }
 # 出力のキー。MIDDLE_OUTPUT_SCHEMA の properties (と required) と同じキーを同じ順に並べる
 _OUTPUT_KEYS: tuple[str, ...] = (
-    "scene_name",
     "place_name",
     "current_tile",
     "new_connections",
@@ -250,6 +251,7 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "press_home",
     "surface_wait_s",
     "timeline",
+    "scene_name",
     "cancel_task_ids",
     "new_tasks",
 )

@@ -28,7 +28,7 @@ from switch2_layers.middle.luna_client import (
     read_output_text,
 )
 from switch2_layers.middle.luna_output_schema import parse_middle_output
-from switch2_layers.middle.luna_request import build_luna_payload
+from switch2_layers.middle.luna_request import REASONING_EFFORT, build_luna_payload
 from switch2_layers.middle.luna_usage import (
     estimate_cost_usd,
     read_usage,
@@ -76,11 +76,13 @@ class LunaMiddleAnalyzer:
         api_key: str,
         client: httpx.Client | None = None,
         timeout_s: float = LUNA_TIMEOUT_S,
+        reasoning_effort: str = REASONING_EFFORT,
     ) -> None:
         """属性を入れる。client が None なら httpx.Client() を作る。ここでは要求を送らない。"""
         self.api_key = api_key
         self.client = httpx.Client() if client is None else client
         self.timeout_s = timeout_s
+        self.reasoning_effort = reasoning_effort
         # 直前の analyze の記録。analyze を呼んでいないか、渡した後なら空
         self._call_details: dict[str, object] = {}
 
@@ -93,7 +95,9 @@ class LunaMiddleAnalyzer:
         build_call_details(例外の response_body, 例外の error_body_head) に置き換えてから、例外を外に出す。
         """
         self._call_details = build_call_details(None, None)
-        payload = build_luna_payload(middle_input)
+        payload = build_luna_payload(
+            middle_input, reasoning_effort=self.reasoning_effort
+        )
         try:
             body = post_responses(self.client, self.api_key, payload, self.timeout_s)
             # 出力を読めなくても (スキーマに合わない出力を含む)、費用のかかった応答を記録に残す
