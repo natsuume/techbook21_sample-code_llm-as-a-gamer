@@ -12,15 +12,18 @@ from switch2_layers.run_directory import (
     INITIAL_STRATEGY,
     MIDDLE_MAP_RECORDS_FILE,
     MIDDLE_SYSTEM_CALLS_FILE,
+    ORCHESTRATOR_INSTRUCTION_FILE,
     SURFACE_REQUESTS_LOG_FILE,
     TASKS_LOG_FILE,
     RunPaths,
+    create_empty_notes,
     create_run_directory,
     frame_file_name,
     initial_common_controls,
     open_run_directory,
     run_directory_name,
     session_directory_name,
+    write_initial_instruction,
     write_initial_notes,
 )
 from switch2_layers.surface.box_targets import (
@@ -156,6 +159,30 @@ def test_orchestrator_paths():
     )
     assert paths.claude_skills_dir == root / ".claude" / "skills"
     assert paths.orchestrator_monitor_log == root / "orchestrator" / "monitor.jsonl"
+
+
+def test_orchestrator_instruction_path():
+    root = Path("/runs/20261115-142233")
+    assert ORCHESTRATOR_INSTRUCTION_FILE == "instruction.md"
+    assert RunPaths(root).orchestrator_instruction == (
+        root / "orchestrator" / "instruction.md"
+    )
+
+
+def test_create_empty_notes_creates_only_an_empty_notes_directory(tmp_path):
+    # Orchestrator 型の run は、write_initial_notes の初期ファイルを書かずに空の notes/ で始める
+    paths = create_run_directory(tmp_path, STARTED_AT)
+    create_empty_notes(paths)
+    assert paths.notes_dir.is_dir()
+    assert list(paths.notes_dir.iterdir()) == []
+
+
+def test_write_initial_instruction_creates_the_orchestrator_directory(tmp_path):
+    paths = create_run_directory(tmp_path, STARTED_AT)
+    text = "RPG のソフトを起動して冒険を始めてください\n"
+    write_initial_instruction(paths, text)
+    assert paths.orchestrator_dir.is_dir()
+    assert paths.orchestrator_instruction.read_text(encoding="utf-8") == text
 
 
 def test_session_directory_name_uses_three_digits():

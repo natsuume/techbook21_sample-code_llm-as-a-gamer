@@ -254,25 +254,27 @@ surface は、既定では TypeSafe の Jev を呼びます (`--surface jev`)。
 
 3 層とは別のスレッドで、安全の監視が動きます (「安全のための規則と安全の監視」の節)。オンライン・通報・購入・本体の設定などの画面を見つけたら、操作を中立にして実行全体を止めます。同じ要求で、今の画面が本体のどの画面 (HOME メニュー・ユーザー選択など) かを見本の画像と照合して記録します。照合の結果では止めず、段階の移り変わりと本体の画面の操作に使います。既定では TypeSafe の Jev に問います (`--safety jev`)。`--safety fake` を付けると、安全の監視は、止める問いの確率をすべて 0 とし、どの見本の画面でもないと答えるフェイクになります。
 
-run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`recover`)・片付け (`clean_up`) の 4 つの段階に分けて動きます (「本体の画面の扱い」の節)。surface と middle のゲーム用のループと deep の自動の呼び出しは、play の段階の間だけ動きます。本体の画面 (HOME メニュー・ユーザー選択など) を操作する準備・復帰・片付けの段階では、middle が本体の画面の操作の列を決め、コードが送ります。
+advisor 型の run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`recover`)・片付け (`clean_up`) の 4 つの段階に分けて動きます (「本体の画面の扱い」の節)。surface と middle のゲーム用のループと deep の自動の呼び出しは、play の段階の間だけ動きます。本体の画面 (HOME メニュー・ユーザー選択など) を操作する準備・復帰・片付けの段階では、middle が本体の画面の操作の列を決め、コードが送ります。Orchestrator 型の run は段階に分けません (「Orchestrator 型」の節)。
 
 ### サブコマンド
 
 | コマンド | 内容 |
 |---|---|
-| `switch2-layers run --software NAME --user NAME [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで、指定のソフトを指定のユーザーで起動する準備から始め、3 層を動かします。Ctrl+C で止めると、HOME メニューに戻って指定のソフトを終了する片付けをしてから止まります |
+| `switch2-layers run [--mode advisor] --software NAME --user NAME [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで、指定のソフトを指定のユーザーで起動する準備から始め、3 層を動かします (advisor 型。`--mode` の既定)。Ctrl+C で止めると、HOME メニューに戻って指定のソフトを終了する片付けをしてから止まります |
+| `switch2-layers run --mode orchestrator [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、Claude Code の主ループと、操作の実行と監視を動かします (「Orchestrator 型」の節)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map`・`game` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
-middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。
+middle-once・deep-once は実機を使わないため、保存済みの実行ディレクトリーに対して試せます。結果は標準出力に JSON の 1 行で書きます。run と middle-once は、既定の `--middle luna` では OpenAI の API キーを環境変数 `OPENAI_API_KEY` から読みます (「middle の実装」の節)。run は、既定の `--surface jev` では TypeSafe の API キーも環境変数 `TYPESAFE_API_KEY` から読みます (「surface の実装」の節)。既定の `--safety jev` でも、同じ `TYPESAFE_API_KEY` を読みます (「安全のための規則と安全の監視」の節)。run と deep-once は、既定の `--deep claude` では Claude Code を起動します (「deep の実装」の節)。`run --mode orchestrator` が確かめる API キーは `TYPESAFE_API_KEY` だけで、`--safety fake` でも要ります (「Orchestrator 型」の節)。
 
-run は、Switch 2 がスリープしておらず、コントローラーのブリッジ (Pico 2 W) を Windows とペアリングした状態で始めます (第2章の [README](../ch02_setup/README.md) の「2. Windows とのペアリング」)。Pico 2 W の入力ではスリープを解除できないため、スリープしていたら本体を操作して復帰させてください (第2章の README の「既知の問題」)。ブリッジを 1P に登録すること、指定のソフトを起動すること、ユーザー選択で指定のユーザーを選ぶことは、run が準備の段階で行います (「本体の画面の扱い」の節)。`--software` には HOME メニューでソフトの絵の上に出る名前を、`--user` にはユーザー選択に出る、AI に遊ばせるユーザーの名前を指定します。どちらも必須です。
+run は、Switch 2 がスリープしておらず、コントローラーのブリッジ (Pico 2 W) を Windows とペアリングした状態で始めます (第2章の [README](../ch02_setup/README.md) の「2. Windows とのペアリング」)。Pico 2 W の入力ではスリープを解除できないため、スリープしていたら本体を操作して復帰させてください (第2章の README の「既知の問題」)。ブリッジを 1P に登録すること、指定のソフトを起動すること、ユーザー選択で指定のユーザーを選ぶことは、advisor 型では run が準備の段階で行い (「本体の画面の扱い」の節)、Orchestrator 型では主ループがスキルで行います。`--software` には HOME メニューでソフトの絵の上に出る名前を、`--user` にはユーザー選択に出る、AI に遊ばせるユーザーの名前を指定します。advisor 型ではどちらも必須です。Orchestrator 型では使わず、起動するソフトと遊ぶユーザーは人の初期指示に書きます。
 
-run は、最初のフレームが届いた後、準備の段階に入る前に画面を確かめ、オンライン・購入・本体の設定などの画面なら、操作を 1 つも送らずに止まります。HOME メニューやユーザー選択の画面では止まらず、準備の段階に入ります。
+run は、最初のフレームが届いた後、準備の段階に入る前に画面を確かめ、オンライン・購入・本体の設定などの画面なら、操作を 1 つも送らずに止まります。HOME メニューやユーザー選択の画面では止まらず、advisor 型では準備の段階に入り、Orchestrator 型では主ループと、操作の実行と監視を始めます。
 
 ```bash
 uv run --env-file .env switch2-layers run --software '<ソフトの名前>' --user '<ユーザーの名前>'
 uv run switch2-layers run --software '<ソフトの名前>' --user '<ユーザーの名前>' --surface fake --middle fake --safety fake
+uv run --env-file .env switch2-layers run --mode orchestrator --instruction '<ソフトの名前> を <ユーザーの名前> で起動して、冒険を始めてください'
 uv run --env-file .env switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS>
 uv run switch2-layers middle-once --run-dir runs/<YYYYmmdd-HHMMSS> --middle fake
 uv run switch2-layers deep-once --run-dir runs/<YYYYmmdd-HHMMSS> --doc strategy
@@ -826,14 +828,143 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 - 同じ文書の起動の最小間隔 (`--deep-min-start-interval`) と保留など、deep のほかの規則はそのまま当てます。求めたときの失敗は、`run.jsonl` の `deep_request_error` (`source` は `progress`) に書きます
 - `--deep fake` でも同じ規則で求めます (フェイクが成功を返します)。Jev の advisor 判定と、ほかのきっかけ (`surface`・`new_scene`・`auto`) は変わりません
 
-### run の起動引数
+### Orchestrator 型 (`--mode orchestrator`)
 
-`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、run が準備の段階で行います。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
+`switch2-layers run --mode orchestrator` は、surface・middle・deep の 3 層の代わりに、Claude Code を主ループにしてゲームを遊びます (Orchestrator 型)。主ループの Claude Code が画面の画像と出来事を見て判断し、各ターンの答えの最後に、操作・マクロ・監視を JSON で書きます。コードはその JSON を読んで操作の列を送り、「画面の条件 → 操作」の監視を Jev で動かします。部品は [`src/switch2_layers/orchestrator/`](./src/switch2_layers/orchestrator/) にあります。`--mode` を省いたときと `--mode advisor` では、ここまでの節の 3 層で動きます (advisor 型)。
+
+動かし方の例は次のとおりです。
+
+```bash
+uv run --env-file .env switch2-layers run --mode orchestrator --instruction '<ソフトの名前> を <ユーザーの名前> で起動して、冒険を始めてください'
+uv run --env-file .env switch2-layers run --mode orchestrator --instruction-file instruction.md --safety fake
+```
+
+1 つ目は、起動するソフトと遊ぶユーザーを、人の初期指示の文で渡します。2 つ目は、初期指示をファイルから読み、安全の監視をフェイクにします。
+
+準備・復帰・片付けの段階 (「本体の画面の扱い」の節) は使いません。実行を始めるときの安全の確かめが通ったら、主ループと、操作の実行と監視を始めます。ソフトの起動、ユーザー選択、HOME メニューからゲームの画面への戻りは、主ループが本体の操作のスキル (`switch-launch-software`・`switch-select-user` など。[`orchestrator/skills/`](./src/switch2_layers/orchestrator/skills/)) で行います。起動するソフトと遊ぶユーザーは、人の初期指示に書きます。`--software` と `--user` は advisor 型だけで使い、Orchestrator 型では指定しても動きは変わりません。
+
+| 部品 | 受け持ち |
+|---|---|
+| 主ループ (`orchestrator/main_loop.py`) | Claude Code (`claude -p`) を stream-json の入出力で開いたままにし、前のターンが終わるとすぐ、次の画面と出来事を渡します。各ターンの最後の JSON を読み、操作の実行と監視の部品に渡します |
+| 操作の実行と監視 (`orchestrator/orchestrator_controller.py`) | JSON の操作の列を 1 つずつコントローラーに送り、マクロと監視を持ちます。監視があれば、主ループの操作が無い間に最新のフレームを Jev に問い、当たった条件の操作を送ります |
+| 共有の部品 | キャプチャー、フレームの保存、キャプチャーの見張り、コントローラーへの送信、安全の監視、画面の停滞の計測、記録です。advisor 型と同じものを使います |
+
+surface・middle・deep (deep のスケジューラーを含む) と、本体の画面のループは起動しません。`notes/` は空のディレクトリーで始め、advisor 型の初期の文書は作りません。主ループの Claude Code が使えるツールは Read・Glob・Grep・Write・Edit・Skill だけで、書き込めるのは `notes/` の下だけです。ゲームの内容の手順は、`notes/skills/game-<名前>/SKILL.md` にスキルとして書かせ、コードが中身を確かめてから `.claude/skills/` に写します。
+
+#### Claude Code が受け取るものと書く JSON
+
+主ループの Claude Code には、毎ターン 1 つの user メッセージでテキストと画像を渡します。変わらない指示 (`--append-system-prompt`) には、JSON の形、コードの手順、マクロ・監視・スキルの使い方、安全のための規則を書いています ([`orchestrator/orchestrator_instructions.py`](./src/switch2_layers/orchestrator/orchestrator_instructions.py))。
+
+| 入力 | 内容 |
+|---|---|
+| 画面 | 前の入力を送ってから今までの一定間隔のフレーム (`frames/interval/` の縮小画像) から、最大 3 枚を選びます。セッションの最初の入力では最新の 1 枚です。画像ごとに時刻のラベルを付けます |
+| 出来事 | 前の判断の後に監視の条件に当たった回数と、行った操作、監視の終わり、新しい `actions` で捨てた操作の数、押せずに外したボタンです。主ループの操作の残りの数、今の監視とマクロ、写さなかったゲームの内容のスキルとその理由も入れます |
+| 画面の停滞 | `progress/state.json` の値 (「画面の停滞の計測」の節) |
+| 前の JSON の誤り | 前のターンの JSON の誤りの説明 |
+| 人の初期指示 | セッションの最初の入力だけに入れます。初期指示を渡さなかったときは「無し」と書きます |
+| `notes/` の一覧と引き継ぎ | セッションの最初の入力だけに入れます。`notes/` のファイルの一覧と、`notes/handoff.md` の中身です |
+
+JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/switch2_layers/orchestrator/decision_parser.py))。最上位のキーはどれも省けます。
+
+```json
+{
+  "actions": [
+    {"type": "press", "buttons": ["A"]},
+    {"type": "press", "buttons": ["B", "LEFT"], "seconds": 0.5},
+    {"type": "wait", "seconds": 0.3},
+    {"type": "procedure", "name": "walk", "args": {"direction": "UP", "count": 3, "seconds": 0.2, "interval_seconds": 0.1}},
+    {"type": "macro", "name": "next_message"}
+  ],
+  "macros": {"set": {"next_message": [{"type": "press", "buttons": ["A"]}]}, "delete": []},
+  "monitor": {"action": "create", "name": "dialog", "cases": [
+    {"condition": "画面の下に会話の枠がある", "actions": [{"type": "press", "buttons": ["A"]}], "repeat": "every"}
+  ]}
+}
+```
+
+| キー | 内容 |
+|---|---|
+| `actions` | 操作の列です。`press` (ボタン・スティック・押す秒数。秒数を省くと短押し)、`wait` (待つ秒数)、`procedure` (コードの手順 `tap_repeat`・`walk`)、`macro` (登録したマクロ) の 4 種類があります。ボタンは HOME を含む 17 個を書けます。空でない `actions` は前の操作の残りを捨てて置き換え、空なら前の操作を続けます |
+| `macros` | マクロの登録 (`set`) と削除 (`delete`) です。マクロは実行の間残り、後のターンの `actions` と監視の条件の操作から呼べます |
+| `monitor` | 監視を作る (`create`。名前と、条件の文・操作・`every` か `once` の組を 1〜8 個) か、止めます (`stop`) |
+
+コードは、答えの最後の ```` ```json ```` のブロックだけを読みます。ブロックが無い、知らないキーがある、値が範囲の外にある、登録に無いマクロを呼ぶなどの誤りがあると、操作・マクロ・監視のどれも変えず、次の入力に誤りの説明を書きます。
+
+#### 監視の動き
+
+監視は同時に 1 つだけ動きます。主ループの操作の残りが無く、監視の操作も実行していない間、最新のフレーム 1 枚 (安全の監視と同じく、時刻も box も書き込まない画像) を Jev に送り、どの条件に当たるかを Choice の 1 問で問います。選択肢は、どの条件にも当たらない `NONE` と、条件ごとの `C0`・`C1`… です。要求は 1 つずつ送り、前の要求の応答を受け取ってから次を送ります。最後に操作を離してから 0.3 秒より後に撮ったフレームで問います。
+
+いちばん確率の高い選択肢が `NONE` でなく、その確率が `--monitor-threshold` (既定 0.5) を超えたら、その条件の操作を送ります。`every` の条件は当たるたびに操作を送り、`once` の条件は操作を 1 回送り終えたら監視を終えます。Jev の失敗が `--max-monitor-errors` 回 (既定 5) 続いたら監視を止めます (実行全体は止めません)。当たった回数と監視の終わりは、次の入力の出来事で主ループに知らせます。主ループが新しい `actions` を書くと、実行中の監視の操作を捨てて主ループの操作を始めます。
+
+#### セッションの入れ替え
+
+主ループのセッション (1 つの claude の子プロセス) の使用量が `--rotate-tokens` (既定 120,000) を超えたら、引き継ぎを `notes/handoff.md` に書くよう依頼します。その応答を受け取ったらセッションを終え、新しいセッションを始めます。使用量は、最後の assistant の行の入力のトークン (キャッシュの読み書きを含む) の和です。新しいセッションの最初の入力には、人の初期指示、`notes/` の一覧、`notes/handoff.md` の中身を入れます。入れ替えの間も、操作の実行と監視は動き続けます。
+
+1 ターンが `--turn-timeout` 秒 (既定 120) を超えたとき、子プロセスが終わったときも、そのセッションを終えて新しいセッションを始めます。新しいセッションが最初のターンを終えずに終わることが 3 回続くと、実行全体を止めます。
+
+主ループの Claude Code は、サブスクリプションのログインで動かします (子プロセスの環境変数から `ANTHROPIC_API_KEY` と `ANTHROPIC_AUTH_TOKEN` を除きます)。そのため、主ループの使用量は、同じアカウントのほかの Claude Code と Claude のアプリ (claude.ai・デスクトップ・モバイル) の利用と、同じ使用量の枠を共有します。Pro と Max のプランでは、5 時間ごとの枠と週ごとの枠です (2026-11-17 に Claude のヘルプセンターで確認)。
+
+#### 人の初期指示とゲームの名前
+
+本書では、どの層にもゲームの名前を渡さない条件で試します (「ソフトの名前とユーザーの名前」の項)。Orchestrator 型では、人の初期指示に限って、起動するソフトの名前 (ゲームの名前) を書いてよいことにしています。変わらない指示と引き継ぎの依頼の文には、ゲームの名前を書いていません。初期指示は、主ループの各セッションの最初の入力に入れ、`orchestrator/instruction.md` にも写して残します。
+
+#### Orchestrator 型の起動引数
+
+次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。ただし、値の範囲は advisor 型でも確かめます (下の段落)。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--software NAME` | 起動するソフトの名前 (必須)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
-| `--user NAME` | ソフトを遊ぶユーザーの名前 (必須)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
+| `--instruction TEXT` | 人の初期指示。起動するソフトと遊ぶユーザーなどを書きます。`--instruction-file` と一緒には使えません | なし | 空でない文字列 (空か空白だけは誤り) |
+| `--instruction-file PATH` | 人の初期指示を書いた UTF-8 のファイル。`--instruction` と一緒には使えません | なし | 読めるファイルで、中身が空か空白だけでないもの |
+| `--orchestrator-effort {low,medium,high,xhigh,max}` | 主ループの Claude Code の `--effort` | `medium` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `--rotate-tokens N` | 主ループのセッションの使用量がこれを超えたら、引き継ぎを書かせてセッションを入れ替えます | 120000 | 1 以上 1000000 未満の整数 |
+| `--turn-timeout S` | 主ループの 1 ターン (入力を作ってから result を受け取るまで) の上限の秒数 | 120 | 0 より大きい有限の値 |
+| `--max-decision-errors N` | 主ループの JSON の誤りが続けてこの回数になったら止まります | 3 | 1 以上の整数 |
+| `--monitor-threshold P` | 監視の当たりのしきい値 | 0.5 | 0 より大きく 1 より小さい値 |
+| `--max-monitor-errors N` | 監視の Jev の失敗がこの回数続いたら、監視を止めます | 5 | 1 以上の整数 |
+
+初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
+
+advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds` は使いません。
+
+#### Orchestrator 型の記録
+
+実行ディレクトリー (「実行ディレクトリー」の節) には、advisor 型と共通のファイルのほかに、次のファイルを書きます。
+
+| ファイル | 内容 |
+|---|---|
+| `orchestrator/instruction.md` | 渡した人の初期指示の写し。初期指示を渡さなければ作りません |
+| `orchestrator/sessions.jsonl` | セッションの開始 (`start`)、終了 (`end`。理由 `rotate`・`timeout`・`exit`・`close`、使用量、終了コード、result を受け取ったターンの数)、自動の要約 (`compact`) を 1 行ずつ書きます |
+| `orchestrator/turns.jsonl` | ターンごとに 1 行。送ったテキストと画像、最後の JSON、誤りの説明、終わり方 (`applied`・`invalid`・`handoff`・`error_result`・`timeout`・`exited`・`stopped`)、使用量を書きます |
+| `orchestrator/session-<NNN>/stream.jsonl` | セッションごとの Claude Code の stream-json の出力。deep の `stream.jsonl` と同じ形です |
+| `orchestrator/monitor.jsonl` | 監視が Jev に送った要求ごとに 1 行。監視の名前、フレームの時刻、選択肢ごとの確率、当たって操作を始めた条件 (`hit`)、Jev の応答の `usage`、失敗の説明を書きます |
+| `operations.jsonl` | advisor 型と同じファイルです。主ループの操作は `source` が `orchestrator`、監視の操作は `monitor` の行になります |
+| `.claude/skills/` | 主ループの Claude Code に読ませるスキル。本体の操作のスキルと、確かめて写したゲームの内容のスキルです |
+
+`run.jsonl` の `start` の行の `args` には、`mode` と 6 つの値を書きます。主ループのセッションの開始と終了 (`orchestrator_session_start`・`orchestrator_session_end`) と、JSON の誤り (`orchestrator_decision_error`) も `run.jsonl` に書きます。段階の行 (`phase`・`clean_up_end`) は書きません。
+
+#### Orchestrator 型の止まる理由
+
+止まる理由には、advisor 型と同じもの (Ctrl+C の `interrupted`、キャプチャー・ブリッジ・安全の監視の理由。「止まる条件」の節) と、次のものがあります。どの理由でも片付けをせず、すぐに操作を中立に戻して止まります。起動したソフトはそのまま残ります。
+
+| 条件 | `stop` の理由 |
+|---|---|
+| 主ループの JSON の誤りが `--max-decision-errors` 回続いた | `orchestrator decision invalid <回数> times in a row` |
+| 新しいセッションが最初のターンを終えずに終わることが 3 回続いた (claude を起動できない、最初のターンが `--turn-timeout` を超えた、子プロセスが終わったなど) | `orchestrator session failed <回数> times in a row` |
+| 主ループのスレッドが想定外の例外で終わった | `orchestrator main loop failed: <例外の説明>` |
+| 操作の実行と監視のループのスレッドが想定外の例外で終わった (`orchestrator/monitor.jsonl` に書けないときなど) | `monitor loop failed: <例外の説明>` |
+
+安全の監視は advisor 型と同じく、オンライン・購入・本体の設定の画面で止まり、HOME メニューとユーザー選択の画面では止まりません。
+
+### run の起動引数
+
+`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、advisor 型では run が準備の段階で行います。Orchestrator 型では、コントローラーの持ちかたと順番を変える画面が出たときに、主ループが本体の操作のスキル (`switch-controller-order`) でコントローラーを認識させます。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
+
+| 引数 | 内容 | 既定値 | 範囲 |
+|---|---|---|---|
+| `--mode {advisor,orchestrator}` | run の型。`advisor` は surface・middle・deep の 3 層、`orchestrator` は Claude Code の主ループと、操作の実行と監視を動かします (「Orchestrator 型」の節) | `advisor` | `advisor`、`orchestrator` |
+| `--software NAME` | 起動するソフトの名前 (advisor 型では必須。Orchestrator 型では使いません)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
+| `--user NAME` | ソフトを遊ぶユーザーの名前 (advisor 型では必須。Orchestrator 型では使いません)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
 | `--interval-fps N` | 一定間隔のフレームを `frames/interval/` に保存するフレームレート | 5 | 0 より大きく 10 以下 |
 | `--interval-width N` | 一定間隔のフレームを縮小する幅 | 640 | 64〜1280 の整数 |
@@ -857,7 +988,9 @@ run は、3 層とは別のスレッドで、一定間隔のフレームの画�
 | `--progress-window S` | 画面の停滞の計測で、新しい画面かを決めるときに見る範囲 (直近の秒数。「画面の停滞の計測」の節) | 300 | 0 より大きい有限の値 |
 | `--stuck-advice-seconds S` | 新しい画面が出ていない秒数がこれを超えたら、助言の deep を求めます。超えたまま続く間は、この秒数ごとに求めます | 60 | 0 より大きい有限の値 |
 
-範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。`--software` か `--user` が無いときと、値が空か空白だけのときも、引数の誤りとして使い方を表示し、実機に触れずに終了します (終了コード 2)。2 つの名前は、書かれたまま本体の画面の middle の入力に入れ、`run.jsonl` の `start` の行の `args` (`software_name`・`user_name`) にも書きます。`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
+Orchestrator 型だけで使う引数 (`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors`・`--monitor-threshold`・`--max-monitor-errors`) は、「Orchestrator 型」の節の「Orchestrator 型の起動引数」の項にあります。
+
+範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。advisor 型で `--software` か `--user` が無いときと、値が空か空白だけのときも、引数の誤りとして使い方を表示し、実機に触れずに終了します (終了コード 2)。2 つの名前は、書かれたまま本体の画面の middle の入力に入れ、`run.jsonl` の `start` の行の `args` (`software_name`・`user_name`) にも書きます。Orchestrator 型で 2 つの名前を渡さなかったときは、`args` に空文字列を書きます。advisor 型で、`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
 同じ文書 (種類と場面の組) の deep のジョブは、同時に 1 件までです。同じ文書への要求は、きっかけ (`surface`・`new_scene`・`auto`・`progress`) に依らず、次の順に確かめて扱います。
 
@@ -887,11 +1020,11 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです。`args` の `mode` は run の型 (`advisor` か `orchestrator`) で、Orchestrator 型の 6 つの値も `--mode` に依らず入ります)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節。advisor 型だけ)、Orchestrator 型の主ループのセッションの開始・終了と JSON の誤り (「Orchestrator 型」の節)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
 | `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、確かめの種類 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
-| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`system`・`neutral`・`stop`。`apply` は surface の操作、`system` は本体の画面の操作と `press_home` の HOME)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
+| `operations.jsonl` | コントローラーに操作を送ろうとした記録。きっかけ (`apply`・`system`・`orchestrator`・`monitor`・`neutral`・`stop`。`apply` は surface の操作、`system` は本体の画面の操作と `press_home` の HOME、`orchestrator` と `monitor` は Orchestrator 型の主ループと監視の操作)、操作 (押し続けるボタン `held`、押し続けの秒数 `hold_seconds`、短押し `taps`、スティック `sticks`)、成否を書きます |
 | `frames.jsonl` | 保存した画像の一覧。時刻、種類 (`interval`・`surface`)、ファイル名、幅と高さを、画像を書き終えた後に 1 行ずつ足します |
 | `frames/interval/` | 一定間隔で保存した画像 (JPEG)。ファイル名は、時刻をミリ秒にした 9 桁の数です (例: `000012345.jpg`) |
 | `frames/surface/` | surface に送った画像 (JPEG。左上に時刻を、追えている対象の枠と名前を書き込んだもの)。時刻と、書き込んだ box の内容 (対象の名前・枠の色の番号・座標) の組ごとに 1 回だけ保存します。ファイル名は、その時刻で最初に保存した画像は `frames/interval/` と同じ 9 桁の数で、同じ時刻で書き込んだ box が違う 2 つ目以降は末尾に `-2`・`-3` … を付けます (例: `000012345-2.jpg`) |
@@ -902,10 +1035,11 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 | `middle/map_records.jsonl` | middle のマップの記録。現在地の場所の名前とマス、新しく分かった場所のつながりと観察 (マス目型のマップではマスの座標を含みます) を、判断に使った画像の時刻と場面 ID とともに、1 行 1 回の JSON で足します (「middle の実装」の節)。deep の `map` のジョブが読みます |
 | `deep/<種類>-<連番>/` | deep のジョブごとのディレクトリー (連番は種類ごと)。`job.json` (きっかけ、時刻、対象の文書の `notes/` からのパス、`map` のジョブで書くマップの型 `map_layout`) を置きます。Claude Code で動かしたジョブには、`stream.jsonl` (Claude Code の stream-json の出力。1 行に、起動からの秒と出力の 1 行) と `result.json` (終了コード、所要時間、費用、最後のメッセージ、エラーで終わったか、拒まれたツールの呼び出し、停止・強制終了したか、標準エラー出力) も置きます。起動前に止めたときは、`result.json` の `error` に理由を書きます |
 | `notes/` | 文書 (次の表) |
+| `orchestrator/` | Orchestrator 型の記録 (「Orchestrator 型」の節の「Orchestrator 型の記録」の項)。人の初期指示の写し (`instruction.md`。初期指示を渡さなければ無い)、主ループのセッションとターンの記録 (`sessions.jsonl`・`turns.jsonl`・`session-<NNN>/stream.jsonl`)、監視の要求の記録 (`monitor.jsonl`) を置きます。advisor 型では作りません |
 
 `surface.jsonl` に書く画像のファイル名は、その要求で送った画像の保存を予約したものです。書き込みに失敗したときや、終了時に書き終えられずに捨てたときは、その画像はありません。書けた画像は `frames.jsonl` に載ります。画像の保存は裏のスレッドで行い、溜めておける件数 (64 件) を超えた分は捨てて、捨てた件数を `frames_dropped` に書きます。
 
-`notes/` には、起動時に次の文書を作ります。
+advisor 型では、`notes/` に起動時に次の文書を作ります。Orchestrator 型では、`notes/` は空のディレクトリーで始め、主ループの Claude Code が書きます。
 
 | ファイル | 内容 |
 |---|---|
@@ -922,7 +1056,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 ### 押せるボタン
 
-surface が決めた操作は、コントローラーに送る直前に、surface の押せるボタンに制限し、段階が play のときだけ送ります。surface の押せるボタンは HOME を除く 16 個で、surface は HOME を押しません (起動時の `notes/common/controls.md` のボタンの並びも 16 個です。Jev へのボタンの問いは、このうち十字キーの 4 方向を除いた 12 個で、十字キーは方向と押し方の 2 問にしています)。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。本体の画面の操作と、middle のゲーム用の出力の `press_home` で押す HOME は、HOME を含む 17 個を押せます (「本体の画面の扱い」の節)。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーの方向を 1 つの問いで選ぶため、相反する方向を同時に押す指示を出しません。これは、ほかの実装から来る操作のための処理です)。
+surface が決めた操作は、コントローラーに送る直前に、surface の押せるボタンに制限し、段階が play のときだけ送ります。surface の押せるボタンは HOME を除く 16 個で、surface は HOME を押しません (起動時の `notes/common/controls.md` のボタンの並びも 16 個です。Jev へのボタンの問いは、このうち十字キーの 4 方向を除いた 12 個で、十字キーは方向と押し方の 2 問にしています)。外したボタンは `surface.jsonl` の `blocked_buttons` に書きます。本体の画面の操作と、middle のゲーム用の出力の `press_home` で押す HOME は、HOME を含む 17 個を押せます (「本体の画面の扱い」の節)。十字キーの相反する方向 (UP と DOWN、LEFT と RIGHT) を同時に押す指示は、両方とも外します (Jev の surface は十字キーの方向を 1 つの問いで選ぶため、相反する方向を同時に押す指示を出しません。これは、ほかの実装から来る操作のための処理です)。Orchestrator 型では、主ループと監視の操作を、surface の制限を通さずに HOME を含む 17 個のボタンで送ります (段階は使わないため、play の確かめもしません)。
 
 短押しは 120 ミリ秒押して離します。秒数の無い押し続けは、次の操作まで押したままにします。Jev の surface が `hold` を選んだボタンには秒数を付けず (`hold_seconds` は空の object です)、次の判断でも `hold` を選ぶと離さずに続けます。秒数を指定した押し続けは、押したレポートの送信が戻ってからその秒数がたったら、次の操作を待たずに離します。押し続けているボタンを次の操作でも押し続けにすると、離さずに、その操作の送信が戻った時刻から新しい秒数を数え直します。秒数が 0 以下・nan・無限大の押し続けは、押さずに外します (`blocked_buttons` には書きません)。秒数の上限は 60 秒で、超えた値は 60 秒として扱います。スティックは次の操作まで倒したままにします。
 
@@ -931,6 +1065,8 @@ surface が決めた操作は、コントローラーに送る直前に、surfac
 ### 止まる条件
 
 次のどれかが起きると止まり、`run.jsonl` の `stop` に理由を書きます。片付けの列に ○ を付けた理由では、準備・プレイ・復帰のどれかの段階に入っていれば、すぐには止まらずに片付け (「本体の画面の扱い」の節) をしてから止まります。ほかの理由では、すぐに操作を中立に戻して以後の操作を送らないようにし、3 層を止めます。
+
+Orchestrator 型では段階に入らないため、どの理由でも片付けをせずにすぐ止まります。次の表のうち、surface・middle の失敗と、準備・復帰の時間切れの行は advisor 型だけの理由です。Orchestrator 型だけの理由 (主ループと、操作の実行と監視のループの理由) は、「Orchestrator 型」の節の「Orchestrator 型の止まる理由」の項にあります。
 
 | 条件 | `stop` の理由 | 片付け |
 |---|---|---|
@@ -951,7 +1087,7 @@ surface が決めた操作は、コントローラーに送る直前に、surfac
 
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
-止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
+止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、claude のセッションを閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
 
 ## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
 

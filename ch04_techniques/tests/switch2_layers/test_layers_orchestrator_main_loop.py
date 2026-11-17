@@ -861,14 +861,14 @@ def test_first_input_has_the_opening_the_turn_text_and_the_latest_frame(tmp_path
     assert images_of(message) == [frame_bytes(10.0)]
 
 
-def test_first_input_without_initial_instruction_has_no_instruction_section(tmp_path):
+def test_first_input_without_initial_instruction_says_there_is_none(tmp_path):
     fake = FakeClaude([[Hang()]])
     harness = make_harness(tmp_path, fake)
     harness.start()
     assert wait_until(lambda: len(inputs_of(fake, 0)) == 1)
     harness.finish()
     text = text_of(inputs_of(fake, 0)[0])
-    assert "## 人の初期指示" not in text
+    assert "## 人の初期指示\n無し\n" in text
     assert "## notes/ のファイル" in text
 
 

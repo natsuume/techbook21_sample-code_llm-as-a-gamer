@@ -3,6 +3,10 @@
 
 主ループ (Claude Code を stream-json の入出力で開いたままにし、使用量がしきい値を超えたらセッションを入れ替える):
     main_loop                   主ループ (OrchestratorMainLoop)。セッションの開始・ターンの送受信・入れ替え・停止
+run --mode orchestrator の組み立て (app と cli が使う):
+    orchestrator_assembly       主ループと OrchestratorController を作ってつなぎ、監視のループのスレッドの本体を持つ
+                                (app.LayersApp が Orchestrator 型の start で使う)
+    initial_instruction         人の初期指示を --instruction か --instruction-file から読む (cli が使う)
 I/O を持たない部品:
     decision_types              主ループが書く JSON を読んだ結果の型 (操作・マクロ・監視の指示)
     decision_parser             応答の本文の最後の ```json のブロックを読み、確かめて Decision にする (parse_decision)
