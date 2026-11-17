@@ -33,10 +33,10 @@ def test_goal_text_mentions_done():
 def test_prepare_text_decides_by_the_sent_decisions():
     text = goal_text(SystemGoal.PREPARE)
     condition = (
-        "「この段階で送った決定」に、controller_order での A より後の home_menu か "
-        "user_select での A が"
+        "登録を確かめた後の home_menu か user_select での A が"
+        "「この段階で送った決定」に"
     )
-    # 手順 1 (HOME を押す) と手順 8 (done) は、送った決定の一覧で見分ける
+    # 手順 1 (HOME を押す) と手順 8 (done) は、登録を確かめた後に送った決定で見分ける
     assert (
         f"ゲームの画面 (none) が映っていて、{condition}無ければ、HOME を短押し" in text
     )
@@ -44,9 +44,18 @@ def test_prepare_text_decides_by_the_sent_decisions():
         "ゲームの画面 (ソフトの起動の演出やタイトル画面を含む) が映っていて、"
         f"{condition}あれば、done を true にします"
     ) in text
+    # 登録を確かめたかは、コントローラーの画面で B を送ったかで決める
+    assert "コントローラーの画面 (controllers) で B を送った回" in text
     # 最初の呼び出しかどうかと、最後に送った操作による見分けは使わない
     assert "最初の呼び出し" not in text
     assert "最後に送った操作" not in text
+
+
+def test_prepare_text_judges_registration_by_the_usb_controller_on_the_left():
+    # 登録が済んでいるかは、コントローラーの画面のいちばん左に USB のコントローラーが映っているかで決める
+    text = goal_text(SystemGoal.PREPARE)
+    assert "いちばん左に USB のコントローラーが映っていれば、登録は済んでいます" in text
+    assert "A を押さずに、B を短押しして HOME メニューに戻ります" in text
 
 
 def test_developer_instructions_describe_the_sent_decisions_section():
