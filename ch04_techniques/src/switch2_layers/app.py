@@ -1,4 +1,8 @@
-"""3 層をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
+"""run の部品をすべて依存注入で組み立てて、1 つのプロセスのスレッドとして起動・停止する (LayersApp)。
+
+run の型は settings.RunSettings.mode で決まる。advisor 型 (RunMode.ADVISOR) は surface・middle・deep の 3 層を
+LayersParts で、Orchestrator 型 (RunMode.ORCHESTRATOR) は主ループと、操作の実行と監視を OrchestratorLayersParts で
+組み立てる。Orchestrator 型の組み立て・起動するもの・止まる理由は LayersApp の docstring に書く。以下は advisor 型の説明。
 
 実機の部品 (キャプチャーの読み取り元・ブリッジ) と各層 (surface・middle・deep)、本体の画面の middle は LayersParts で
 受け取る。cli の run は実機の部品と各層 (surface は --surface、middle と本体の画面の middle は --middle、deep は --deep で
@@ -14,7 +18,10 @@
     目的 (prepare・recover・clean_up) で操作の列を決めさせて送る。surface と middle のゲーム用のループは play の間だけ
     1 回分ずつ進め、deep の自動の呼び出しと画面の停滞による advice の要求も play の間だけ行う。prepare・recover が
     --system-advice-seconds を超えて続いたら、deep のスケジューラーが advice をきっかけ system で求める。prepare と
-    recover には時間切れが無い。play から離れるときは中立のレポートを送る。
+    recover には時間切れが無い。play から離れるときは中立のレポートを送り、タスクのキューの部品の現在の場面を場面なしに
+    する (play に戻ったら、次の middle の出力で場面が設定される)。middle の 1 回の途中で play から離れたときは、その回が
+    終わった後にも場面なしにし直す (その回の出力の書き込みが場面を設定し直しても、play 以外の段階で続いた秒数を
+    進めないため)。
     middle のゲーム用の出力の press_home が真なら、play のときだけ recover に移し (phase の行を書き、play から離れる
     中立のレポートを送る)、その後で HOME を短押しする (中立のレポートで短押しを取り消さないため)。
 押せるボタン: hardware.pad_output.PadOutput は HOME を含む 17 個 (buttons.ALL_BUTTONS) で 1 つだけ作り、本体の画面の操作と
@@ -59,9 +66,10 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from switch2_layers.buttons import ALL_BUTTONS, HOME_BUTTON, allowed_buttons
 from switch2_layers.deep.deep_scheduler import (
@@ -89,8 +97,20 @@ from switch2_layers.middle.middle_loop import (
     MiddleLoopParts,
     MiddleLoopSettings,
 )
+from switch2_layers.middle.middle_trigger import MiddleCallReason, MiddleTrigger
 from switch2_layers.middle.middle_types import MiddleAnalyzer
 from switch2_layers.middle.system_screen_middle import SystemScreenMiddle
+from switch2_layers.orchestrator.claude_stream_session import (
+    SESSION_CLOSE_GRACE_S,
+    StreamProcessStarter,
+)
+from switch2_layers.orchestrator.monitor_loop import MonitorAsker
+from switch2_layers.orchestrator.orchestrator_assembly import (
+    OrchestratorLoopParts,
+    build_orchestrator_loops,
+    run_monitor_loop,
+)
+from switch2_layers.orchestrator.skill_copy import DEFAULT_SWITCH_SKILLS_DIR
 from switch2_layers.pad_action import PadAction
 from switch2_layers.progress.progress_loop import ProgressLoop
 from switch2_layers.progress.progress_state import read_progress_state
@@ -107,7 +127,9 @@ from switch2_layers.records.run_log import (
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import (
     RunPaths,
+    create_empty_notes,
     create_run_directory,
+    write_initial_instruction,
     write_initial_notes,
 )
 from switch2_layers.safety.safety_monitor import (
@@ -116,7 +138,7 @@ from switch2_layers.safety.safety_monitor import (
     SafetyMonitorSettings,
 )
 from switch2_layers.safety.safety_types import SafetyChecker
-from switch2_layers.settings import RunSettings, run_settings_to_json
+from switch2_layers.settings import RunMode, RunSettings, run_settings_to_json
 from switch2_layers.surface.middle_state_reader import read_surface_context
 from switch2_layers.surface.surface_loop import (
     SurfaceLoop,
@@ -148,6 +170,7 @@ from switch2_layers.system_screen.system_screen_loop import (
     SystemScreenLoopParts,
     SystemScreenLoopSettings,
 )
+from switch2_layers.tasks.task_board import TaskBoard
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -159,9 +182,12 @@ MONITOR_INTERVAL_S = 0.1  # 止まる条件を確かめる間隔 (秒)
 # 数えた Ctrl+C (SIGINT) からこの秒数以内に届いた SIGINT は、同じ割り込みとして数えない。timeout -s INT と uv run の
 # 下では、1 回の割り込みで SIGINT が 2 回 (プロセスグループへの送信と uv の転送) 届くため
 INTERRUPT_REPEAT_WINDOW_S = 1.0
-# 終了時に surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッドの終わりを待つ
-# 上限 (秒)
+# 終了時に surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループ (Orchestrator 型では
+# 主ループ以外のループ) のスレッドの終わりを待つ上限 (秒)
 LOOP_JOIN_TIMEOUT_S = 5.0
+# 終了時に Orchestrator 型の主ループのスレッドの終わりを待つ上限 (秒)。主ループは止めるときに claude のセッションを閉じ、
+# 標準入力を閉じてから SIGTERM まで・SIGTERM から SIGKILL までに、それぞれ SESSION_CLOSE_GRACE_S 秒待つため、その分を足す
+MAIN_LOOP_JOIN_TIMEOUT_S = 2 * SESSION_CLOSE_GRACE_S + LOOP_JOIN_TIMEOUT_S
 # surface と middle のゲーム用のループが、段階が play でない間に、段階を確かめ直す間隔 (秒)
 PLAY_POLL_S = 0.05
 BRIDGE_FAILED = "failed"  # bridge_state が返す、ブリッジの復旧が失敗した状態
@@ -223,8 +249,55 @@ class LayersParts:
 
 
 @dataclass(frozen=True)
+class OrchestratorLayersParts:
+    """Orchestrator 型の run (settings.mode が orchestrator) で LayersApp に注入する部品。
+
+    frame_reader           キャプチャーの最新フレームの読み取り元 (run では hardware.capture_source.SwitchCaptureReader)
+    report_sender          レポートの送信先 (run では switch2_remote.bridge_supervisor.BridgeSupervisor)
+    bridge_state           ブリッジの状態 ("ok" / "recovering" / "failed") を返す関数 (run では BridgeSupervisor.state を
+                           読む)
+    safety                 安全の監視が画面を確かめるもの (run では --safety の safety.safety_assembly の checker)
+    monitor                監視の要求の送り先 (orchestrator.monitor_loop.MonitorAsker。run では surface.jev_client.JevClient)
+    initial_instruction    人の初期指示 (orchestrator.initial_instruction.load_initial_instruction の値)。無ければ None
+    monotonic              単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
+    local_now              実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
+    start_process          主ループの claude の子プロセスを起動する関数 (None なら subprocess.Popen)
+    signal_process_group   主ループの claude のプロセスグループにシグナルを送る関数 (pgid, signal) (None なら os.killpg)
+    environ                主ループの claude の環境変数の元 (None ならセッションを始めるときの os.environ)
+    switch_skills_dir      本体の操作のスキルを写す元 (既定 orchestrator.skill_copy.DEFAULT_SWITCH_SKILLS_DIR)
+    start_process から switch_skills_dir までの 4 つは、orchestrator.main_loop.OrchestratorMainLoopParts にそのまま渡す
+    (テストでは偽の claude を使う)。
+    """
+
+    frame_reader: LatestFrameReader
+    report_sender: ReportSender
+    bridge_state: Callable[[], str]
+    safety: SafetyChecker
+    monitor: MonitorAsker
+    initial_instruction: str | None = None
+    monotonic: Callable[[], float] = time.monotonic
+    local_now: Callable[[], datetime] = datetime.now
+    start_process: StreamProcessStarter | None = None
+    signal_process_group: Callable[[int, int], None] | None = None
+    environ: Mapping[str, str] | None = None
+    switch_skills_dir: Path = DEFAULT_SWITCH_SKILLS_DIR
+
+
+def monitor_loop_failure_reason(description: str) -> str:
+    """Orchestrator 型の監視のループ (OrchestratorController.run) が想定外の例外で終わるときの理由
+    `monitor loop failed: <description>` を返す (description は error_text.describe_exception(例外) の値)。"""
+    return f"monitor loop failed: {description}"
+
+
+@dataclass(frozen=True)
 class _StartedParts:
-    """start で組み立てた部品 (close で後片付けするもの)。"""
+    """start で組み立てた部品 (close で後片付けするもの)。
+
+    deep_scheduler     advisor 型の DeepScheduler。Orchestrator 型では None
+    loop_threads       ループのスレッド (起動する順)
+    main_loop_thread   loop_threads のうち、Orchestrator 型の主ループのスレッド。advisor 型では None
+    board              advisor 型のタスクのキューの部品 (TaskBoard)。Orchestrator 型では None
+    """
 
     paths: RunPaths
     clock: RunClock
@@ -233,21 +306,25 @@ class _StartedParts:
     frame_store: FrameStore
     capture_source: CaptureSource
     capture_watcher: CaptureWatcher
-    deep_scheduler: DeepScheduler
+    deep_scheduler: DeepScheduler | None
     loop_threads: tuple[threading.Thread, ...]
+    main_loop_thread: threading.Thread | None = None
+    board: TaskBoard | None = None
 
 
 @dataclass
 class _PartsBuiltSoFar:
     """start が途中までに作った部品。start の途中で例外が出たときに、作ったものだけを後片付けするために使う。
 
-    run_log          run.jsonl に start を書き終えた RunLog (書き終える前は None)
-    pad_output       PadOutput (作る前は None)
-    frame_store      FrameStore (作る前は None)
-    capture_source   CaptureSource (作る前は None)
-    deep_scheduler   DeepScheduler (作る前は None)
-    loop_threads     作った surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループのスレッド
-                     (起動したかどうかは Thread.is_alive で見分ける)
+    run_log            run.jsonl に start を書き終えた RunLog (書き終える前は None)
+    pad_output         PadOutput (作る前は None)
+    frame_store        FrameStore (作る前は None)
+    capture_source     CaptureSource (作る前は None)
+    deep_scheduler     DeepScheduler (作る前と、Orchestrator 型では None)
+    loop_threads       作ったループのスレッド (advisor 型は surface と middle のループ・安全の監視・本体の画面のループ・
+                       画面の停滞の計測のループ、Orchestrator 型は監視のループ・主ループ・安全の監視・停滞の計測のループ。
+                       起動したかどうかは Thread.is_alive で見分ける)
+    main_loop_thread   loop_threads のうち、Orchestrator 型の主ループのスレッド (作る前と、advisor 型では None)
     """
 
     run_log: RunLog | None = None
@@ -256,6 +333,45 @@ class _PartsBuiltSoFar:
     capture_source: CaptureSource | None = None
     deep_scheduler: DeepScheduler | None = None
     loop_threads: list[threading.Thread] = field(default_factory=list)
+    main_loop_thread: threading.Thread | None = None
+
+
+@dataclass(frozen=True)
+class _OutputAndCapture:
+    """start の 4 と 5 で作る、advisor 型と Orchestrator 型が共有する部品。"""
+
+    pad_output: PadOutput
+    frame_buffer: FrameBuffer
+    frame_store: FrameStore
+    capture_source: CaptureSource
+    capture_watcher: CaptureWatcher
+
+
+def _loop_join_timeout_s(
+    thread: threading.Thread, main_loop_thread: threading.Thread | None
+) -> float:
+    """終了時にループのスレッド thread の終わりを待つ上限 (秒) を返す。
+
+    Orchestrator 型の主ループのスレッドなら MAIN_LOOP_JOIN_TIMEOUT_S、ほかは LOOP_JOIN_TIMEOUT_S。
+    """
+    if thread is main_loop_thread:
+        return MAIN_LOOP_JOIN_TIMEOUT_S
+    return LOOP_JOIN_TIMEOUT_S
+
+
+def _ignore_system_screen(judgment: SystemScreenJudgment) -> None:
+    """Orchestrator 型の安全の監視の on_system_screen。照合の結果を使わない (段階の判定も本体の画面のループも無い)。"""
+
+
+def _current_scene_oldest_active_s(board: TaskBoard, t: float) -> float | None:
+    """board の現在の場面の、最も古いタスクの時刻 t での続いた秒数を返す。現在の場面が無ければ None。
+
+    middle.middle_trigger.MiddleTrigger の oldest_active_s に渡す。
+    """
+    scene_id = board.current_scene_id
+    if scene_id is None:
+        return None
+    return board.oldest_active_s(scene_id, t)
 
 
 def _start_failure_reason(error: BaseException) -> str:
@@ -358,23 +474,80 @@ class _SystemScreenPhases:
 
 
 class LayersApp:
-    """3 層を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
+    """run の型 (settings.mode) の部品を組み立てて動かす。start → wait → close の順に呼ぶ (run はこれをまとめたもの)。
 
     settings       run の起動引数
-    parts          注入する部品
+    parts          注入する部品。settings.mode が advisor なら LayersParts、orchestrator なら OrchestratorLayersParts
     sleep          wait の見張りの間隔の待ちに使う関数 (既定 time.sleep)。テストでは KeyboardInterrupt を出す関数を渡せる
-    start_thread   start が surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測のループの
-                   スレッドを起動する関数 (既定 threading.Thread.start)。テストでは、起動の途中で例外を出す関数を渡せる
+    start_thread   start がループのスレッド (advisor 型は surface と middle のループ・安全の監視・本体の画面のループ・
+                   画面の停滞の計測のループ、Orchestrator 型は下の 4 つ) を起動する関数 (既定 threading.Thread.start)。
+                   テストでは、起動の途中で例外を出す関数を渡せる
+
+    advisor 型の組み立ては start の docstring の 1〜10 のとおり。
+
+    Orchestrator 型 (settings.mode が orchestrator) の組み立て (start):
+        1. RunClock(parts.monotonic) を作る (ここが t = 0)
+        2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
+           run_directory.create_empty_notes(paths) (notes/ は空のディレクトリーで始める。write_initial_notes は呼ばない)。
+           parts.initial_instruction があれば run_directory.write_initial_instruction(paths, 初期指示) で
+           orchestrator/instruction.md に写す (無ければ書かない)
+        3. RunLog を作り、start {"run_dir": 実行ディレクトリー, "args": settings.run_settings_to_json(settings)} を書く
+           (mode と Orchestrator 型の 6 つの値を含む)
+        4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個),
+           on_operation=OperationLog.write) を作る。surface.surface_output_gate.SurfaceOutputGate は通さない
+        5. FrameBuffer、FrameStore(interval_fps, interval_width)、CaptureSource(frame_reader, …)、CaptureWatcher を作る
+           (advisor 型と同じ。on_frame は渡さない)
+        6〜7 は orchestrator.orchestrator_assembly.build_orchestrator_loops で作る。
+        6. orchestrator.orchestrator_controller.OrchestratorController(OrchestratorParts(pad_output = 4 の PadOutput,
+           jev = parts.monitor, latest_frame = FrameBuffer.latest, clock, paths),
+           OrchestratorSettings(monitor_threshold, max_monitor_errors))
+        7. orchestrator.main_loop.OrchestratorMainLoop(OrchestratorMainLoopParts(paths, clock,
+           claude = ClaudeSessionOptions(effort = orchestrator_effort),
+           parse_decision = text を decision_parser.parse_decision(text, 6 の macro_names()) で読む関数,
+           controller = 6 の OrchestratorController, initial_instruction = parts.initial_instruction, run_log,
+           on_stop = request_stop, start_process・signal_process_group・environ・switch_skills_dir は parts の値),
+           OrchestratorMainLoopSettings(rotate_tokens, turn_timeout_s, max_decision_errors))
+        8. SafetyMonitor (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
+           on_stop = request_stop、on_start_passed = 6 と 7 の set_started を呼ぶ関数、on_system_screen = 何もしない
+           関数。interval_s・threshold・max_errors は advisor 型と同じ)
+        9. 画面の停滞の計測の ProgressLoop (advisor 型と同じ)
+        スレッドは、監視のループ (orchestrator_assembly.run_monitor_loop で 6 の run を包み、想定外の例外 (Exception) で
+        抜けたら request_stop(monitor_loop_failure_reason(error_text.describe_exception(例外))) を呼ぶ)、主ループ
+        (7 の run)、安全の監視 (8)、停滞の計測のループ (9) の順に start_thread で起動する。
+        起動しないもの: DeepScheduler・SurfaceLoop・MiddleLoop・SystemScreenLoop (本体の画面の middle も使わない)。
+        段階 (system_screen.run_phase.PhaseTracker) にも入らない (run.jsonl に phase と clean_up_end を書かない)。
+        実行を始めるときの安全の確かめが通って set_started が呼ばれるまで、主ループは claude を起動せず、操作の実行と
+        監視のループは操作も監視の要求も送らない。確かめで止まったら、どちらも始めない。
+        止まる理由 (run.jsonl の stop に書く。どれも片付けを行わず、すぐに操作を中立にして出力を止める。起動したソフトは
+        そのまま残る):
+            - Ctrl+C (REASON_INTERRUPTED)、キャプチャー・ブリッジ・安全の監視の理由、start の途中の例外は advisor 型と同じ
+            - 主ループの理由: main_loop.decision_failure_reason (JSON の誤りが続いた)・session_failure_reason (セッションが
+              最初のターンを終えずに終わることが続いた)・main_loop_failure_reason (主ループの想定外の例外)
+            - 監視のループの想定外の例外: monitor_loop_failure_reason
+        close と start の途中の例外の後片付けは、advisor 型と同じ順に行う (DeepScheduler は無いので飛ばす)。主ループの
+        スレッドの終わりは、セッションを閉じる時間 (claude_stream_session.SESSION_CLOSE_GRACE_S の 2 倍) に
+        LOOP_JOIN_TIMEOUT_S を足した MAIN_LOOP_JOIN_TIMEOUT_S 秒まで待ち、ほかのループのスレッドは LOOP_JOIN_TIMEOUT_S 秒
+        ずつ待つ。
     """
 
     def __init__(
         self,
         settings: RunSettings,
-        parts: LayersParts,
+        parts: LayersParts | OrchestratorLayersParts,
         sleep: Callable[[float], None] = time.sleep,
         start_thread: Callable[[threading.Thread], None] = threading.Thread.start,
     ) -> None:
-        """属性を持つ。ディレクトリーとスレッドは start で作る。"""
+        """属性を持つ。ディレクトリーとスレッドは start で作る。
+
+        settings.mode と parts の型が合わなければ (orchestrator なのに LayersParts、advisor なのに
+        OrchestratorLayersParts)、ValueError にする。
+        """
+        if settings.mode is RunMode.ORCHESTRATOR and isinstance(parts, LayersParts):
+            raise ValueError("the orchestrator mode needs OrchestratorLayersParts")
+        if settings.mode is RunMode.ADVISOR and isinstance(
+            parts, OrchestratorLayersParts
+        ):
+            raise ValueError("the advisor mode needs LayersParts")
         self.settings = settings
         self.parts = parts
         self.sleep = sleep
@@ -401,6 +574,7 @@ class LayersApp:
     def start(self) -> RunPaths:
         """実行ディレクトリーを作り、部品を組み立ててスレッドを起動し、実行ディレクトリーの RunPaths を返す。
 
+        Orchestrator 型の組み立てはクラスの docstring のとおり。advisor 型は次の 1〜10 のとおり。
         1. RunClock(parts.monotonic) を作る (ここが t = 0)
         2. run_directory.create_run_directory(settings.runs_dir, parts.local_now()) と
            write_initial_notes(paths, buttons.allowed_buttons()) (surface の押せる 16 個。HOME は書かない)
@@ -417,15 +591,22 @@ class LayersApp:
            None)、timeout_s は deep_timeout_s、stuck_advice_seconds は stuck_advice_seconds、system_advice_seconds は
            system_advice_seconds) を作って start する (タイムアウト・自動の呼び出し・きっかけ progress と system の判定の
            スレッド)
-        7. SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
+        7. タスクのキューの部品 TaskBoard(paths) を 1 つ作り、middle.middle_trigger.MiddleTrigger(middle_interval_s,
+           task_stuck_seconds, clock, oldest_active_s = 時刻 t を受け取り、TaskBoard.current_scene_id の場面の
+           TaskBoard.oldest_active_s(場面, t) を返す関数 (現在の場面が無ければ None)) を作る。
+           SurfaceLoop (output_gate = SurfaceOutputGate(4 の PadOutput, 段階が play かを返す関数, 段階のロック)、
            deep_requests と deep_status は 6 の DeepScheduler、max_errors = max_surface_errors、
-           boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes) と
-           MiddleLoop (interval_s・window_s・max_errors。on_press_home は、段階のロックの中で、段階が play のときだけ
+           threshold_task = threshold_task、boxes_at = parts.surface_boxes_at、plan_boxes = parts.surface_plan_boxes、
+           board = その TaskBoard、trigger_notify = MiddleTrigger.notify) と
+           MiddleLoop (interval_s・window_s・max_errors、board = その TaskBoard、trigger = その MiddleTrigger。
+           on_press_home は、段階のロックの中で、段階が play のときだけ
            次の順に行う関数: PhaseTracker.on_press_home で recover に移し、run.jsonl に phase を書き、play から離れる
            PadOutput.neutral() を送ってから、HOME を短押しする (PadOutput.apply(PadAction(taps={"HOME"}),
            source="system"))。中立のレポートを短押しの後に送ると、短押しが取り消されるため) を作り、それぞれのスレッドを
            start_thread で起動する。on_stop には request_stop を渡す。2 つのループは、段階が play の間だけ 1 回分ずつ
-           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ --middle-interval で呼ぶ
+           進め (play でなければ短い間隔で待つ)、middle のループは play の間だけ、MiddleTrigger のきっかけで呼ぶ。
+           middle の 1 回が終わったときに段階が play でなければ、TaskBoard.set_current_scene(None, clock.now()) を呼ぶ
+           (_run_middle_while_playing)
         8. 最新の照合の結果を持つ system_screen.screen_judgment.LatestSystemScreen と、SafetyMonitor
            (checker = parts.safety、latest_frame = FrameBuffer.latest、safety_log = paths.safety_log、
            on_stop = request_stop、on_start_passed = prepare に入る関数 (PhaseTracker(clock.now(),
@@ -443,8 +624,8 @@ class LayersApp:
             start_thread で起動する
         段階の判定 (PhaseTracker) の入力と読み取りは、すべて段階のロックの中で行う。入力の戻り値 (run_phase.PhaseEvent) は
         次のように扱う: 段階が変わったら run.jsonl に phase {"phase", "reason"} を書き (play から離れるときは、同じロックの
-        中で PadOutput.neutral() を送る)、止める理由なら request_stop(理由)、片付けの終わりなら片付けを終える
-        (request_stop の docstring)。
+        中で PadOutput.neutral() を送り、TaskBoard.set_current_scene(None, clock.now()) で現在の場面を場面なしにする)、
+        止める理由なら request_stop(理由)、片付けの終わりなら片付けを終える (request_stop の docstring)。
         7 の surface と middle は、prepare に入るまで (実行を始めるときの確かめが通るまで) 操作を 1 つも送らない。
         確かめで止まったら、どの段階にも入らない。10 の計測のループは操作を送らないため、段階に依らず動く。
         2 回目以降の呼び出しは RuntimeError にする。
@@ -474,9 +655,13 @@ class LayersApp:
             raise
 
     def _build_and_start(self, built: _PartsBuiltSoFar) -> RunPaths:
-        """start の 1〜10 を行う。作った部品は、作った直後に built に記録する。"""
+        """start の 1〜10 (Orchestrator 型ではクラスの docstring の 1〜9) を行う。作った部品は、作った直後に built に
+        記録する。"""
         settings = self.settings
         parts = self.parts
+        if isinstance(parts, OrchestratorLayersParts):
+            # settings.mode が orchestrator のとき (__init__ で mode と parts の型をそろえてある)
+            return self._build_and_start_orchestrator(parts, built)
         # 1〜3: 時計・実行ディレクトリー・run.jsonl
         clock = RunClock(parts.monotonic)
         paths = create_run_directory(settings.runs_dir, parts.local_now())
@@ -488,30 +673,15 @@ class LayersApp:
         built.run_log = run_log
         if parts.on_run_directory is not None:
             parts.on_run_directory(paths)
-        # 4: 操作の送信
-        operation_log = OperationLog(paths.operations_log, clock)
-        pad_output = PadOutput(
-            parts.report_sender,
-            ALL_BUTTONS,
-            clock=parts.monotonic,
-            on_operation=operation_log.write,
+        # 4〜5: 操作の送信とキャプチャーのフレーム
+        shared = self._build_output_and_capture(
+            parts, parts.on_frame, paths, clock, built
         )
-        built.pad_output = pad_output
-        # 5: キャプチャーのフレーム
-        frame_buffer = FrameBuffer()
-        frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
-        built.frame_store = frame_store
-        capture_source = CaptureSource(
-            parts.frame_reader,
-            clock,
-            frame_buffer,
-            frame_store,
-            on_frame=parts.on_frame,
-        )
-        built.capture_source = capture_source
-        capture_watcher = CaptureWatcher(
-            parts.frame_reader.is_ended, capture_source.latest_t, clock
-        )
+        pad_output = shared.pad_output
+        frame_buffer = shared.frame_buffer
+        frame_store = shared.frame_store
+        capture_source = shared.capture_source
+        capture_watcher = shared.capture_watcher
         # 6: deep
         deep_scheduler = DeepScheduler(
             DeepSchedulerParts(
@@ -537,7 +707,14 @@ class LayersApp:
         )
         built.deep_scheduler = deep_scheduler
         deep_scheduler.start()
-        # 7: surface と middle のループ
+        # 7: タスクのキューの部品と middle を呼ぶきっかけ、surface と middle のループ
+        board = TaskBoard(paths)
+        trigger = MiddleTrigger(
+            settings.middle_interval_s,
+            settings.task_stuck_seconds,
+            clock,
+            lambda t: _current_scene_oldest_active_s(board, t),
+        )
         surface_loop = SurfaceLoop(
             SurfaceLoopParts(
                 paths=paths,
@@ -555,8 +732,13 @@ class LayersApp:
                 on_stop=self.request_stop,
                 boxes_at=parts.surface_boxes_at,
                 plan_boxes=parts.surface_plan_boxes,
+                board=board,
+                trigger_notify=trigger.notify,
             ),
-            SurfaceLoopSettings(max_errors=settings.max_surface_errors),
+            SurfaceLoopSettings(
+                max_errors=settings.max_surface_errors,
+                threshold_task=settings.threshold_task,
+            ),
         )
         middle_loop = MiddleLoop(
             MiddleLoopParts(
@@ -566,6 +748,8 @@ class LayersApp:
                 run_log=run_log,
                 deep_requests=deep_scheduler,
                 on_stop=self.request_stop,
+                board=board,
+                trigger=trigger,
                 on_press_home=self._press_home,
             ),
             MiddleLoopSettings(
@@ -676,10 +860,175 @@ class LayersApp:
                 capture_watcher=capture_watcher,
                 deep_scheduler=deep_scheduler,
                 loop_threads=loop_threads,
+                board=board,
             )
         for thread in loop_threads:
             self.start_thread(thread)
         return paths
+
+    def _build_output_and_capture(
+        self,
+        parts: LayersParts | OrchestratorLayersParts,
+        on_frame: Callable[[CapturedFrame], None] | None,
+        paths: RunPaths,
+        clock: RunClock,
+        built: _PartsBuiltSoFar,
+    ) -> _OutputAndCapture:
+        """start の 4 と 5 (advisor 型と Orchestrator 型で同じ) を行う。作った部品は、作った直後に built に記録する。
+
+        4. OperationLog と PadOutput(report_sender, buttons.ALL_BUTTONS (HOME を含む 17 個), clock = parts.monotonic,
+           on_operation = OperationLog.write)
+        5. FrameBuffer、FrameStore(paths, interval_fps, interval_width)、CaptureSource(frame_reader, clock, FrameBuffer,
+           FrameStore, on_frame = on_frame)、CaptureWatcher(frame_reader.is_ended, CaptureSource.latest_t, clock)
+        """
+        settings = self.settings
+        operation_log = OperationLog(paths.operations_log, clock)
+        pad_output = PadOutput(
+            parts.report_sender,
+            ALL_BUTTONS,
+            clock=parts.monotonic,
+            on_operation=operation_log.write,
+        )
+        built.pad_output = pad_output
+        frame_buffer = FrameBuffer()
+        frame_store = FrameStore(paths, settings.interval_fps, settings.interval_width)
+        built.frame_store = frame_store
+        capture_source = CaptureSource(
+            parts.frame_reader,
+            clock,
+            frame_buffer,
+            frame_store,
+            on_frame=on_frame,
+        )
+        built.capture_source = capture_source
+        capture_watcher = CaptureWatcher(
+            parts.frame_reader.is_ended, capture_source.latest_t, clock
+        )
+        return _OutputAndCapture(
+            pad_output=pad_output,
+            frame_buffer=frame_buffer,
+            frame_store=frame_store,
+            capture_source=capture_source,
+            capture_watcher=capture_watcher,
+        )
+
+    def _build_and_start_orchestrator(
+        self, parts: OrchestratorLayersParts, built: _PartsBuiltSoFar
+    ) -> RunPaths:
+        """Orchestrator 型の start (クラスの docstring の 1〜9 とスレッドの起動) を行う。
+
+        作った部品は、作った直後に built に記録する。段階 (PhaseTracker) には入らず、DeepScheduler・SurfaceLoop・
+        MiddleLoop・SystemScreenLoop は作らない。
+        """
+        settings = self.settings
+        # 1〜3: 時計・実行ディレクトリー (空の notes/ と初期指示の写し)・run.jsonl
+        clock = RunClock(parts.monotonic)
+        paths = create_run_directory(settings.runs_dir, parts.local_now())
+        create_empty_notes(paths)
+        if parts.initial_instruction is not None:
+            write_initial_instruction(paths, parts.initial_instruction)
+        run_log = RunLog(paths.run_log, clock)
+        run_log.write(
+            EVENT_START, run_dir=str(paths.root), args=run_settings_to_json(settings)
+        )
+        built.run_log = run_log
+        # 4〜5: 操作の送信 (surface の関門を通さない 17 個のボタン) とキャプチャーのフレーム
+        shared = self._build_output_and_capture(parts, None, paths, clock, built)
+        # 6〜7: 操作の実行と監視・主ループ
+        loops = build_orchestrator_loops(
+            OrchestratorLoopParts(
+                paths=paths,
+                clock=clock,
+                run_log=run_log,
+                pad_output=shared.pad_output,
+                latest_frame=shared.frame_buffer.latest,
+                monitor=parts.monitor,
+                initial_instruction=parts.initial_instruction,
+                on_stop=self.request_stop,
+                start_process=parts.start_process,
+                signal_process_group=parts.signal_process_group,
+                environ=parts.environ,
+                switch_skills_dir=parts.switch_skills_dir,
+            ),
+            settings,
+        )
+        # 8: 安全の監視 (実行を始めるときの確かめが通ったら 6 と 7 を始める。照合の結果は使わない)
+        safety_monitor = SafetyMonitor(
+            SafetyMonitorParts(
+                checker=parts.safety,
+                latest_frame=shared.frame_buffer.latest,
+                clock=clock,
+                safety_log=paths.safety_log,
+                on_stop=self.request_stop,
+                on_start_passed=loops.set_started,
+                on_system_screen=_ignore_system_screen,
+            ),
+            SafetyMonitorSettings(
+                interval_s=settings.safety_interval_s,
+                threshold=settings.threshold_safety,
+                max_errors=settings.max_safety_errors,
+            ),
+        )
+        # 9: 画面の停滞の計測
+        progress_loop = ProgressLoop(
+            paths, ScreenProgressTracker(settings.progress_window_s)
+        )
+        main_loop_thread = threading.Thread(
+            target=loops.main_loop.run,
+            args=(self._stop_event,),
+            name="orchestrator-main-loop",
+            daemon=True,
+        )
+        loop_threads = (
+            threading.Thread(
+                target=run_monitor_loop,
+                args=(
+                    loops.controller,
+                    self._stop_event,
+                    self._stop_for_monitor_loop_failure,
+                ),
+                name="orchestrator-monitor-loop",
+                daemon=True,
+            ),
+            main_loop_thread,
+            threading.Thread(
+                target=safety_monitor.run,
+                args=(self._stop_event,),
+                name="safety-monitor",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=progress_loop.run,
+                args=(self._stop_event,),
+                name="progress-loop",
+                daemon=True,
+            ),
+        )
+        built.loop_threads.extend(loop_threads)
+        built.main_loop_thread = main_loop_thread
+        with self._lock:
+            self._started = _StartedParts(
+                paths=paths,
+                clock=clock,
+                run_log=run_log,
+                pad_output=shared.pad_output,
+                frame_store=shared.frame_store,
+                capture_source=shared.capture_source,
+                capture_watcher=shared.capture_watcher,
+                deep_scheduler=None,
+                loop_threads=loop_threads,
+                main_loop_thread=main_loop_thread,
+            )
+        for thread in loop_threads:
+            self.start_thread(thread)
+        return paths
+
+    def _stop_for_monitor_loop_failure(self, description: str) -> None:
+        """Orchestrator 型の監視のループが想定外の例外で終わったときに呼ぶ (監視のループのスレッド)。
+
+        request_stop(monitor_loop_failure_reason(description)) で全体を止める。
+        """
+        self.request_stop(monitor_loop_failure_reason(description))
 
     def _is_play(self) -> bool:
         """段階が play なら True を返す (段階のロックを持っているときに呼ぶ)。prepare に入る前は False。"""
@@ -750,8 +1099,10 @@ class LayersApp:
                 reason=event.change.reason,
             )
             if was_play and event.change.phase is not RunPhase.PLAY:
-                # play から離れるので、surface の操作を中立にする
+                # play から離れるので、surface の操作を中立にし、タスクの現在の場面を場面なしにする
                 started.pad_output.neutral()
+                if started.board is not None:
+                    started.board.set_current_scene(None, started.clock.now())
         if event.stop_reason is not None:
             self.request_stop(event.stop_reason)
         if event.clean_up_end is not None:
@@ -825,11 +1176,18 @@ class LayersApp:
     ) -> None:
         """middle のゲーム用のループのスレッドの本体。段階が play の間だけ MiddleLoop.run_once を呼ぶ。
 
-        最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。呼んだ後は --middle-interval 秒待つ。
+        最初のフレームが frames.jsonl に載るまでと、play でない間は呼ばない。最初の実行の理由は
+        MiddleTrigger.first_reasons() (最初の実行の直前に呼び、それまでに届いたきっかけは捨てる)。
+        run_once が戻ったら (止める合図で抜けたときを除く)、段階のロックの中で段階を確かめ、play でなければ
+        TaskBoard.set_current_scene(None, clock.now()) で現在の場面を場面なしにする (run_once の途中で play から出たとき、
+        その回の出力の書き込みが場面を設定し直しても、play 以外の段階で続いた秒数を進めないため)。
+        続けて、戻った時刻 (clock.now()) を前回の応答の時刻として、MiddleTrigger.wait_next で次の理由を待つ (None なら戻る)。
         run_once の想定外の例外 (Exception) は外に出さず、request_stop(`middle loop failed: <例外の説明>`) を
         呼んでから戻る (MiddleLoop.run と同じ扱い)。
         """
         stop = self._stop_event
+        trigger = middle_loop.parts.trigger
+        reasons: tuple[MiddleCallReason, ...] | None = None
         try:
             while not stop.is_set() and not has_recorded_frame(paths):
                 stop.wait(FIRST_FRAME_POLL_S)
@@ -837,10 +1195,20 @@ class LayersApp:
                 if not self._playing():
                     stop.wait(PLAY_POLL_S)
                     continue
-                result = middle_loop.run_once(stop)
+                if reasons is None:
+                    reasons = trigger.first_reasons()
+                result = middle_loop.run_once(reasons, stop)
                 if result.stopped:
                     return
-                stop.wait(self.settings.middle_interval_s)
+                with self._phase_lock:
+                    if not self._is_play():
+                        # run_once の途中で play から出た: その回の書き込みが設定した場面を、場面なしに戻す
+                        middle_loop.parts.board.set_current_scene(
+                            None, middle_loop.parts.clock.now()
+                        )
+                reasons = trigger.wait_next(stop, middle_loop.parts.clock.now())
+                if reasons is None:
+                    return
         except Exception as error:
             logger.warning("middle loop failed", exc_info=True)
             self.request_stop(f"middle loop failed: {describe_exception(error)}")
@@ -868,7 +1236,7 @@ class LayersApp:
         # close と同じ順に閉じる
         for thread in built.loop_threads:
             if thread.is_alive():  # 起動したスレッドだけを待つ
-                thread.join(LOOP_JOIN_TIMEOUT_S)
+                thread.join(_loop_join_timeout_s(thread, built.main_loop_thread))
         if built.deep_scheduler is not None:
             _run_cleanup_step(built.deep_scheduler.close, "close the deep scheduler")
         if built.capture_source is not None:
@@ -981,12 +1349,36 @@ class LayersApp:
         待っている間の KeyboardInterrupt (Ctrl+C) は外に出さずに確かめを続ける。1 回目は request_stop(REASON_INTERRUPTED)
         にし、片付けの間の 2 回目は片付けを interrupted で終える。前に数えた KeyboardInterrupt から
         INTERRUPT_REPEAT_WINDOW_S 秒以内 (parts.monotonic で測る) のものは、同じ割り込みとして数えない。
+        KeyboardInterrupt を数えたことがあれば、合図が立った後も、最後に数えた KeyboardInterrupt から
+        INTERRUPT_REPEAT_WINDOW_S 秒たつまで sleep で待ち、その間の KeyboardInterrupt を捨ててから戻る。片付けをしない
+        止まり方 (Orchestrator 型の Ctrl+C など) では、1 回の割り込みの 2 回目の SIGINT が close の途中に届き、後片付けを
+        途中で終わらせるため。
         start の前に呼んだら RuntimeError にする。
         """
         with self._lock:
             started = self._started
         if started is None:
             raise RuntimeError("LayersApp.wait must be called after start")
+        counted_interrupt_t = self._watch_until_stopped(started)
+        if counted_interrupt_t is not None:
+            self._absorb_repeated_interrupts(counted_interrupt_t)
+        return self._current_reason()
+
+    def _absorb_repeated_interrupts(self, counted_interrupt_t: float) -> None:
+        """counted_interrupt_t から INTERRUPT_REPEAT_WINDOW_S 秒たつまで sleep で待ち、届いた KeyboardInterrupt を捨てる。"""
+        while True:
+            remaining = (
+                counted_interrupt_t + INTERRUPT_REPEAT_WINDOW_S - self.parts.monotonic()
+            )
+            if remaining <= 0:
+                return
+            try:
+                self.sleep(min(remaining, MONITOR_INTERVAL_S))
+            except KeyboardInterrupt:
+                continue
+
+    def _watch_until_stopped(self, started: _StartedParts) -> float | None:
+        """wait の見張りのループ (wait の docstring)。最後に数えた KeyboardInterrupt の時刻を返す。数えていなければ None。"""
         counted_interrupt_t: float | None = None
         while not self._stop_event.is_set():
             try:
@@ -1010,14 +1402,17 @@ class LayersApp:
                     self._end_clean_up_by_interrupt()
                 else:
                     self.request_stop(REASON_INTERRUPTED)
-        return self._current_reason()
+        return counted_interrupt_t
 
     def close(self) -> None:
         """全体を止めて後片付けをする。止まる条件より前に呼ばれたら、request_stop(REASON_CLOSED) と同じに扱う。
 
-        1. ループの停止の合図を立て、surface と middle のループ・安全の監視・本体の画面のループ・画面の停滞の計測の
-           ループのスレッドの終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ
-        2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)
+        1. ループの停止の合図を立て、ループのスレッド (advisor 型は surface と middle のループ・安全の監視・本体の画面の
+           ループ・画面の停滞の計測のループ、Orchestrator 型は監視のループ・主ループ・安全の監視・停滞の計測のループ) の
+           終わりを最大 LOOP_JOIN_TIMEOUT_S 秒ずつ待つ。Orchestrator 型の主ループのスレッドだけは、claude のセッションを
+           閉じる時間を足した MAIN_LOOP_JOIN_TIMEOUT_S 秒まで待つ
+        2. DeepScheduler.close() (以後の要求を捨て、実行中の deep のジョブを stop し、5 秒たっても終わらなければ kill する)。
+           Orchestrator 型には DeepScheduler が無いので飛ばす
         3. CaptureSource.close()、FrameStore.close()
         4. run_log に frames_dropped {"count": FrameStore.dropped} を書き、続けて stop {"reason": 止まった理由} を書いて、
            RunLog.close() で閉じる (止まり切らなかったスレッドが、stop の後ろに行を書かないようにする)
@@ -1047,9 +1442,10 @@ class LayersApp:
                 self._output_stopped = True
         # 1. ループの終わりを待つ
         for thread in started.loop_threads:
-            thread.join(LOOP_JOIN_TIMEOUT_S)
-        # 2. deep
-        started.deep_scheduler.close()
+            thread.join(_loop_join_timeout_s(thread, started.main_loop_thread))
+        # 2. deep (Orchestrator 型には無い)
+        if started.deep_scheduler is not None:
+            started.deep_scheduler.close()
         # 3. キャプチャーと画像の保存
         started.capture_source.close()
         started.frame_store.close()

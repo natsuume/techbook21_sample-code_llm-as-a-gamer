@@ -106,6 +106,7 @@ STATE = MiddleState(
     timeline="",
     surface_rows_offset=0,
     operations_rows_offset=0,
+    tasks_rows_offset=0,
     place_name="家の 1 階",
     current_tile=TilePosition(7, 1),
 )

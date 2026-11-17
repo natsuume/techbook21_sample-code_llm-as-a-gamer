@@ -2,6 +2,8 @@ import json
 import math
 import os
 import signal
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
+    FAKE_STAGNATION_ALERT,
     FakeClock,
     FakeDaemon,
     FakeProcessStarter,
@@ -38,7 +41,7 @@ from switch2_harness.commands import (
     release_not_confirmed_message,
 )
 from switch2_harness.event_log import CommandEvent, append_event, read_events
-from switch2_harness.features import BASE_AGENT_COMMANDS
+from switch2_harness.features import BASE_AGENT_COMMANDS, STAGNATION_ALERT_FEATURE
 from switch2_harness.signal_guard import RunTerminated
 from switch2_harness.workspace import WorkspacePaths
 
@@ -1079,3 +1082,128 @@ def test_run_uses_the_deadline_clock_for_the_deadline(paths):
     assert result.exit_code == 0
     assert len(sleep.calls) == 60
     assert {event.time for event in read_events(paths.events_file)} == {START_TIME}
+
+
+# --- run の画面の記録 (停滞の知らせ) ---
+
+# 停滞の知らせの要素を含む、run のテスト用の要素
+FEATURES_WITH_STAGNATION_ALERT = (*FAKE_FEATURES, FAKE_STAGNATION_ALERT)
+
+
+class FakeScreenRecording:
+    """screen_recording の fake。呼ばれた paths と、記録の開始 (enter)・終了 (exit) の順を記録する。
+
+    開始のときに起動済みのプロセスの数を launches_at_enter に、終了のときにデーモンに送った引数を sent_at_exit に控え、
+    記録が最初の起動の前に始まり、後片付けの up ALL の後に止まることを確かめられるようにする。
+    with の中で起きた例外は握りつぶさず、そのまま外に出す。
+    """
+
+    def __init__(self, starter: FakeProcessStarter, daemon: FakeDaemon) -> None:
+        self.starter = starter
+        self.daemon = daemon
+        self.calls: list[WorkspacePaths] = []
+        self.order: list[str] = []
+        self.launches_at_enter: int | None = None
+        self.sent_at_exit: list[list[str]] | None = None
+
+    def __call__(self, paths: WorkspacePaths) -> AbstractContextManager[object]:
+        self.calls.append(paths)
+        return self._recording()
+
+    @contextmanager
+    def _recording(self) -> Iterator[None]:
+        self.order.append("enter")
+        self.launches_at_enter = len(self.starter.launches)
+        try:
+            yield
+        finally:
+            self.order.append("exit")
+            self.sent_at_exit = [list(args) for args in self.daemon.sent]
+
+
+def test_run_with_stagnation_alert_records_screens_around_the_agent(paths, clock):
+    write_harness_json(paths, [STAGNATION_ALERT_FEATURE])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    recording = FakeScreenRecording(starter, daemon)
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FEATURES_WITH_STAGNATION_ALERT,
+        screen_recording=recording,
+    )
+    assert result.exit_code == 0
+    assert recording.calls == [paths]
+    assert recording.order == ["enter", "exit"]
+    # 記録は最初の起動の前に始まり、後片付けの up ALL を送った後に止まる
+    assert recording.launches_at_enter == 0
+    assert len(starter.launches) == 1
+    assert recording.sent_at_exit == [["up", "ALL"]]
+
+
+def test_run_without_stagnation_alert_does_not_record_screens(paths, clock):
+    write_harness_json(paths, [])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    recording = FakeScreenRecording(starter, daemon)
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FEATURES_WITH_STAGNATION_ALERT,
+        screen_recording=recording,
+    )
+    assert result.exit_code == 0
+    assert recording.calls == []
+
+
+@pytest.mark.parametrize(
+    ("interruption", "message"),
+    [
+        (RunTerminated(signal.SIGTERM), "error run terminated by signal"),
+        (KeyboardInterrupt(), "error run interrupted"),
+    ],
+    ids=["sigterm", "ctrl-c"],
+)
+def test_run_stops_recording_screens_when_interrupted(
+    paths, clock, interruption, message
+):
+    write_harness_json(paths, [STAGNATION_ALERT_FEATURE])
+    starter, daemon, _ = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    recording = FakeScreenRecording(starter, daemon)
+    sleep_calls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        # 3 回目の待ちの間に SIGTERM か Ctrl-C を受けたことにする
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 3:
+            raise interruption
+        clock.advance(seconds)
+
+    result = handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FEATURES_WITH_STAGNATION_ALERT,
+        screen_recording=recording,
+    )
+    assert result == CommandResult(exit_code=1, stderr_lines=(message,))
+    assert recording.order == ["enter", "exit"]
+    assert recording.sent_at_exit == [["up", "ALL"]]

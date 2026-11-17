@@ -1,19 +1,30 @@
 """コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once を持つ。
 
-    switch2-layers run --software NAME --user NAME [--runs-dir DIR] [--interval-fps N] [--interval-width N]
+    switch2-layers run [--mode advisor] --software NAME --user NAME [--runs-dir DIR] [--interval-fps N]
+                       [--interval-width N]
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--surface fake|jev] [--threshold-advisor P] [--box-requery-every N]
                        [--hold-margin P] [--deep claude|fake] [--safety jev|fake] [--safety-interval S] [--threshold-safety P]
                        [--max-safety-errors N] [--progress-window S] [--stuck-advice-seconds S]
-                       [--system-advice-seconds S]
-        実機で 3 層を動かす。準備 (コントローラーの登録・指定のソフト (--software) を指定のユーザー (--user) で
-        起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
+                       [--threshold-task P] [--task-stuck-seconds S] [--system-advice-seconds S]
+        実機で 3 層を動かす (advisor 型。--mode の既定)。準備 (コントローラーの登録・指定のソフト (--software) を
+        指定のユーザー (--user) で起動する) から始め、止めるときは片付けを行う (app と system_screen.run_phase の段階)。
         surface は --surface で選ぶ (既定 jev は TypeSafe Jev、fake は surface.fake_surface)。
         middle は --middle で選ぶ (既定 luna は gpt-6-luna、fake は middle.fake_middle)。本体の画面の middle も
         --middle で選ぶ (luna は middle.system_screen_middle.LunaSystemScreenMiddle、fake は操作なしで done を
         真で返し続けるフェイク)。deep は --deep で選ぶ (既定 claude = Claude Code、fake = deep.fake_deep)。
         安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、fake は safety.fake_safety)
+    switch2-layers run --mode orchestrator [--instruction TEXT | --instruction-file PATH]
+                       [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
+                       [--max-decision-errors N] [--monitor-threshold P] [--max-monitor-errors N]
+                       [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--safety jev|fake] [--safety-interval S]
+                       [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
+        実機で Orchestrator 型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と監視
+        (orchestrator.orchestrator_controller) を、キャプチャー・安全の監視・停滞の計測と組み立てる (app)。
+        準備と片付けの段階は使わない (ソフトの起動とユーザー選択は、主ループが本体の操作のスキルで行う)。
+        起動するソフトと遊ぶユーザーは、人の初期指示 (--instruction か --instruction-file) に書く。--software と
+        --user は使わない (指定しても動きは変わらない)。surface・middle・deep の引数も使わない
     switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake|luna]
         保存済みの実行に対して middle を 1 回動かし、middle の出力ファイルを書く
     switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude|fake]
@@ -29,9 +40,12 @@ fake は骨組みのフェイク (middle.fake_middle) を使う。luna で環境
 --safety (run) は安全の監視の実装を選ぶ。既定の jev は TypeSafe Jev に問い (safety.jev_safety)、fake はすべての
 確率を 0 として返す (safety.fake_safety)。jev で環境変数 TYPESAFE_API_KEY が無い (空を含む) ときも、--surface jev と
 同じく終了コード 2 を返す。
+run --mode orchestrator は、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (監視は常に Jev を使うため、
+--safety fake でも要る)。OPENAI_API_KEY は確かめない。無ければ、実機と実行ディレクトリーに触れる前に終了コード 2 を返す。
 
-引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値、run の --software・--user が
-無い・空か空白だけ、など) は argparse が使い方とともに表示し、SystemExit (終了コード 2) にする。値の範囲の誤りは、
+引数の形の誤り (知らない引数、数として読めない値、--doc や --middle の知らない値、run --mode advisor の --software・
+--user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
+SystemExit (終了コード 2) にする。値の範囲の誤りと人の初期指示の誤り (空か空白だけ、ファイルが読めない) は、
 各サブコマンドの処理が標準エラー出力に書いて終了コード 2 を返す。
 """
 
@@ -46,13 +60,21 @@ from switch2_remote.bridge_supervisor import BridgeSupervisor
 from switch2_remote.capture import Capture
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
-from switch2_layers.app import REASON_INTERRUPTED, LayersApp, LayersParts
+from switch2_layers.app import (
+    REASON_INTERRUPTED,
+    LayersApp,
+    LayersParts,
+    OrchestratorLayersParts,
+)
 from switch2_layers.deep.claude_code_runner import ClaudeCodeDeepRunner
 from switch2_layers.deep.deep_scheduler import DeepJobStatus, run_deep_once
 from switch2_layers.deep.deep_types import DOCUMENT_KINDS, DeepRunner, DocumentKind
 from switch2_layers.deep.fake_deep import FakeDeepRunner
 from switch2_layers.file_io import format_json_line
-from switch2_layers.hardware.capture_source import SwitchCaptureReader
+from switch2_layers.hardware.capture_source import (
+    LatestFrameReader,
+    SwitchCaptureReader,
+)
 from switch2_layers.middle.fake_middle import FakeMiddleAnalyzer
 from switch2_layers.middle.luna_middle import LunaMiddleAnalyzer
 from switch2_layers.middle.middle_loop import run_middle_once
@@ -63,9 +85,14 @@ from switch2_layers.middle.system_screen_middle import (
     LunaSystemScreenMiddle,
     SystemScreenMiddle,
 )
+from switch2_layers.orchestrator.initial_instruction import (
+    InitialInstructionError,
+    load_initial_instruction,
+)
 from switch2_layers.safety.safety_assembly import build_safety_assembly
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import (
+    AUTOCOMPACT_MAX_TOKENS,
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
     DEFAULT_BOX_REQUERY_EVERY,
@@ -76,27 +103,37 @@ from switch2_layers.settings import (
     DEFAULT_HOLD_MARGIN,
     DEFAULT_INTERVAL_FPS,
     DEFAULT_INTERVAL_WIDTH,
+    DEFAULT_MAX_DECISION_ERRORS,
     DEFAULT_MAX_MIDDLE_ERRORS,
+    DEFAULT_MAX_MONITOR_ERRORS,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MAX_SURFACE_ERRORS,
     DEFAULT_MIDDLE_INTERVAL_S,
     DEFAULT_MIDDLE_KIND,
     DEFAULT_MIDDLE_WINDOW_S,
+    DEFAULT_MONITOR_THRESHOLD,
     DEFAULT_PROGRESS_WINDOW_S,
+    DEFAULT_ROTATE_TOKENS,
+    DEFAULT_RUN_MODE,
     DEFAULT_RUNS_DIR,
     DEFAULT_SAFETY,
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_STUCK_ADVICE_SECONDS,
     DEFAULT_SURFACE,
     DEFAULT_SYSTEM_ADVICE_SECONDS,
+    DEFAULT_TASK_STUCK_SECONDS,
     DEFAULT_THRESHOLD_ADVISOR,
     DEFAULT_THRESHOLD_SAFETY,
+    DEFAULT_THRESHOLD_TASK,
+    DEFAULT_TURN_TIMEOUT_S,
     INTERVAL_FPS_MAX,
     INTERVAL_WIDTH_MAX,
     INTERVAL_WIDTH_MIN,
     MIDDLE_INTERVAL_MAX_S,
     MIDDLE_INTERVAL_MIN_S,
     OPENAI_API_KEY_ENV,
+    ORCHESTRATOR_EFFORT,
+    ORCHESTRATOR_EFFORTS,
     SAFETY_INTERVAL_MAX_S,
     SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
@@ -104,16 +141,19 @@ from switch2_layers.settings import (
     DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
+    RunMode,
     RunSettings,
     SafetyKind,
     SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
+    orchestrator_api_key_errors,
     run_settings_errors,
     safety_api_key_errors,
     typesafe_api_key_errors,
 )
+from switch2_layers.surface.jev_client import JevClient
 from switch2_layers.surface.surface_assembly import (
     SurfaceAssembly,
     build_surface_assembly,
@@ -123,6 +163,48 @@ from switch2_layers.system_screen.system_screen_references import SYSTEM_SCREEN_
 PROG = "switch2-layers"
 # 範囲の誤りで返す終了コード (argparse の使い方の誤りと同じ)
 EXIT_USAGE = 2
+# run --mode advisor だけで必須にする引数 (Namespace の属性名, 起動引数の名前)
+ADVISOR_REQUIRED_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("software", "--software"),
+    ("user", "--user"),
+)
+
+
+class LayersArgumentParser(argparse.ArgumentParser):
+    """switch2-layers の最上位の ArgumentParser。run の --software と --user を、--mode advisor のときだけ必須にする。
+
+    argparse の required は、ほかの引数 (--mode) の値を見て決められない。そのため、引数を解釈し終えた後
+    (parse_known_args。parse_args もこれを通る) に確かめ、--mode advisor で無い引数があれば、run の parser の誤り
+    (`the following arguments are required: --software, --user` の形。使い方を表示して SystemExit 2) にする。
+
+    run_parser   サブコマンド run の ArgumentParser (build_parser が入れる)。None なら確かめない
+    """
+
+    run_parser: argparse.ArgumentParser | None = None
+
+    def parse_known_args(
+        self,
+        args: list[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> tuple[argparse.Namespace, list[str]]:
+        """引数を解釈し (argparse.ArgumentParser.parse_known_args)、run --mode advisor の必須の引数を確かめる。"""
+        parsed, extras = super().parse_known_args(args, namespace)
+        run_parser = self.run_parser
+        if (
+            run_parser is not None
+            and parsed.command == "run"
+            and parsed.mode == RunMode.ADVISOR.value
+        ):
+            missing = [
+                option
+                for name, option in ADVISOR_REQUIRED_OPTIONS
+                if getattr(parsed, name) is None
+            ]
+            if missing:
+                run_parser.error(
+                    f"the following arguments are required: {', '.join(missing)}"
+                )
+        return parsed, extras
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,15 +212,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     各サブコマンドの Namespace には、処理の関数 (handler: Namespace → 終了コード) を持たせる。
     サブコマンドは必須 (無ければ argparse が SystemExit 2 にする)。知らないサブコマンドは argparse が SystemExit 2 にする。
+    最上位は LayersArgumentParser (run --mode advisor の --software と --user を必須にする)、サブコマンドの parser は
+    argparse.ArgumentParser にする。
     """
-    parser = argparse.ArgumentParser(
+    parser = LayersArgumentParser(
         prog=PROG,
         description=(
-            "surface・middle・deep の 3 層のエージェントで Nintendo Switch 2 のゲームを遊ぶ"
+            "surface・middle・deep の 3 層 (advisor 型) か、Claude Code の主ループ (Orchestrator 型) で "
+            "Nintendo Switch 2 のゲームを遊ぶ"
         ),
     )
-    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    add_run_parser(commands)
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="COMMAND",
+        parser_class=argparse.ArgumentParser,
+    )
+    parser.run_parser = add_run_parser(commands)
     add_middle_once_parser(commands)
     add_deep_once_parser(commands)
     return parser
@@ -146,37 +236,57 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_run_parser(
     commands: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """サブコマンド run の引数を定義する。既定値は settings の DEFAULT_* と同じ。
+) -> argparse.ArgumentParser:
+    """サブコマンド run の引数を定義し、run の ArgumentParser を返す。既定値は settings の DEFAULT_* と同じ。
 
-    --software NAME と --user NAME は必須 (無ければ argparse の誤り)。空か空白だけの値も argparse の誤り
-    (SystemExit 2) にする。値は書かれたまま Namespace の software と user に入る。
+    --mode は settings.RunMode の値 (advisor / orchestrator) から選ぶ (既定 advisor)。Namespace の mode には文字列が
+    入る。
+    --software NAME と --user NAME は、--mode advisor のときだけ必須 (無ければ LayersArgumentParser が argparse の誤り
+    にする)。空か空白だけの値は、どちらの --mode でも argparse の誤り (SystemExit 2) にする。値は書かれたまま
+    Namespace の software と user に入る (無ければ None)。
     --surface は settings.SurfaceKind の値 (jev / fake) から選び (既定 jev)、--threshold-advisor は float (既定 0.5)、
     --box-requery-every は int (既定 5)、--hold-margin は float (既定 0.1)。
     --safety は settings.SafetyKind の値 (jev / fake) から選び (既定 jev)、--safety-interval は float (既定 1.0)、
     --threshold-safety は float (既定 0.7)、--max-safety-errors は int (既定 3)。
+    --threshold-task は float (既定 0.5)、--task-stuck-seconds は float (既定 30)。
+    Orchestrator 型の引数 (add_orchestrator_arguments) も足す。
     """
     parser = commands.add_parser(
         "run",
-        help="実機で 3 層を動かす",
+        help="実機で 3 層 (advisor 型) か Orchestrator 型を動かす",
         description=(
-            "実機で 3 層を動かす。surface は --surface、middle は --middle、deep は --deep で選ぶ。"
-            "Ctrl+C で止まる"
+            "実機で動かす。--mode advisor (既定) は 3 層 (surface は --surface、middle は --middle、deep は --deep で"
+            "選ぶ)、--mode orchestrator は Claude Code の主ループと、操作の実行と監視を動かす。Ctrl+C で止まる"
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in RunMode],
+        default=DEFAULT_RUN_MODE.value,
+        help=(
+            "run の型。advisor は surface・middle・deep の 3 層、orchestrator は Claude Code の主ループと、"
+            f"操作の実行と監視を動かす (既定 {DEFAULT_RUN_MODE.value})"
         ),
     )
     parser.add_argument(
         "--software",
         metavar="NAME",
         type=_non_blank_name,
-        required=True,
-        help="起動するソフトの名前 (HOME メニューの絵の上に出る名前。必須)",
+        default=None,
+        help=(
+            "起動するソフトの名前 (HOME メニューの絵の上に出る名前。--mode advisor では必須。"
+            "orchestrator では使わない)"
+        ),
     )
     parser.add_argument(
         "--user",
         metavar="NAME",
         type=_non_blank_name,
-        required=True,
-        help="ソフトを遊ぶユーザーの名前 (ユーザー選択に出る名前。必須)",
+        default=None,
+        help=(
+            "ソフトを遊ぶユーザーの名前 (ユーザー選択に出る名前。--mode advisor では必須。"
+            "orchestrator では使わない)"
+        ),
     )
     parser.add_argument(
         "--runs-dir",
@@ -353,6 +463,25 @@ def add_run_parser(
         ),
     )
     parser.add_argument(
+        "--threshold-task",
+        type=float,
+        default=DEFAULT_THRESHOLD_TASK,
+        help=(
+            "surface の先頭のタスクの完了と取り消しの要求の問いのしきい値。確率がこれを超えた要求が、"
+            f"同じタスクについて続けて 2 回あったら成立にする (0〜1。既定 {DEFAULT_THRESHOLD_TASK:g})"
+        ),
+    )
+    parser.add_argument(
+        "--task-stuck-seconds",
+        type=float,
+        default=DEFAULT_TASK_STUCK_SECONDS,
+        help=(
+            "現在の場面の最も古いタスクがキューに入ってからの秒数がこれを超えたら、間隔を待たずに middle を呼ぶ。"
+            "超えたまま続く間は、この秒数ごとに呼ぶ "
+            f"(0 より大きい値。既定 {DEFAULT_TASK_STUCK_SECONDS:g})"
+        ),
+    )
+    parser.add_argument(
         "--system-advice-seconds",
         type=float,
         default=DEFAULT_SYSTEM_ADVICE_SECONDS,
@@ -362,7 +491,93 @@ def add_run_parser(
             f"(0 より大きい値。既定 {DEFAULT_SYSTEM_ADVICE_SECONDS:g})"
         ),
     )
+    add_orchestrator_arguments(parser)
     parser.set_defaults(handler=run_command)
+    return parser
+
+
+def add_orchestrator_arguments(parser: argparse.ArgumentParser) -> None:
+    """run の parser に、--mode orchestrator だけで使う引数を足す (使い方の表示では 1 つのグループにまとめる)。
+
+    --instruction TEXT と --instruction-file PATH は相互排他 (両方なら argparse の誤り)。Namespace の instruction
+    (str か None) と instruction_file (Path か None) に入る。中身の確かめ (空か空白だけ・読めないファイル) は
+    run_command が行う。
+    --orchestrator-effort は settings.ORCHESTRATOR_EFFORTS から選び (既定 medium)、--rotate-tokens は int
+    (既定 120000)、--turn-timeout は float (既定 120)、--max-decision-errors は int (既定 3)、--monitor-threshold は
+    float (既定 0.5)、--max-monitor-errors は int (既定 5)。
+    """
+    group = parser.add_argument_group(
+        "Orchestrator 型 (--mode orchestrator) の引数",
+        "--mode advisor では使わない (指定しても動きは変わらない)",
+    )
+    instruction = group.add_mutually_exclusive_group()
+    instruction.add_argument(
+        "--instruction",
+        metavar="TEXT",
+        default=None,
+        help=(
+            "人の初期指示 (起動するソフトと遊ぶユーザーなど。ゲーム名を書いてよい)。"
+            "--instruction-file と一緒には使えない"
+        ),
+    )
+    instruction.add_argument(
+        "--instruction-file",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="人の初期指示を書いた UTF-8 のファイル。--instruction と一緒には使えない",
+    )
+    group.add_argument(
+        "--orchestrator-effort",
+        choices=ORCHESTRATOR_EFFORTS,
+        default=ORCHESTRATOR_EFFORT,
+        help=f"主ループの Claude Code の --effort (既定 {ORCHESTRATOR_EFFORT})",
+    )
+    group.add_argument(
+        "--rotate-tokens",
+        type=int,
+        default=DEFAULT_ROTATE_TOKENS,
+        help=(
+            "主ループのセッションの使用量 (トークン) がこれを超えたら、引き継ぎを書かせてセッションを入れ替える "
+            f"(1 以上 {AUTOCOMPACT_MAX_TOKENS} 未満。既定 {DEFAULT_ROTATE_TOKENS})"
+        ),
+    )
+    group.add_argument(
+        "--turn-timeout",
+        type=float,
+        default=DEFAULT_TURN_TIMEOUT_S,
+        help=(
+            "主ループの 1 ターンの上限の秒数 "
+            f"(0 より大きい値。既定 {DEFAULT_TURN_TIMEOUT_S:g})"
+        ),
+    )
+    group.add_argument(
+        "--max-decision-errors",
+        type=int,
+        default=DEFAULT_MAX_DECISION_ERRORS,
+        help=(
+            "主ループの JSON の誤りが続けてこの回数になったら全体を止める "
+            f"(1 以上。既定 {DEFAULT_MAX_DECISION_ERRORS})"
+        ),
+    )
+    group.add_argument(
+        "--monitor-threshold",
+        type=float,
+        default=DEFAULT_MONITOR_THRESHOLD,
+        help=(
+            "監視の当たりのしきい値。確率がこれを超えた条件の操作を行う "
+            f"(0 より大きく 1 より小さい値。既定 {DEFAULT_MONITOR_THRESHOLD:g})"
+        ),
+    )
+    group.add_argument(
+        "--max-monitor-errors",
+        type=int,
+        default=DEFAULT_MAX_MONITOR_ERRORS,
+        help=(
+            "監視の Jev の失敗がこの回数続いたら監視を止める "
+            f"(1 以上。既定 {DEFAULT_MAX_MONITOR_ERRORS})"
+        ),
+    )
 
 
 def _non_blank_name(value: str) -> str:
@@ -481,12 +696,14 @@ def add_deep_once_parser(
 def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     """run の Namespace を RunSettings にする (範囲は確かめない)。
 
-    --software と --user は software_name と user_name にする。--middle は MiddleKind に、--surface は SurfaceKind に、
-    --deep は DeepRunnerChoice に、--safety は SafetyKind にする。
+    --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator では
+    使わないため無くてよい)。--middle は MiddleKind に、--surface は SurfaceKind に、--deep は DeepRunnerChoice に、
+    --safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値は、--mode に依らず写す。
+    --instruction と --instruction-file は写さない (run_command が orchestrator のときだけ読む)。
     """
     return RunSettings(
-        software_name=args.software,
-        user_name=args.user,
+        software_name=args.software if args.software is not None else "",
+        user_name=args.user if args.user is not None else "",
         runs_dir=args.runs_dir,
         interval_fps=args.interval_fps,
         interval_width=args.interval_width,
@@ -506,10 +723,19 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         safety=SafetyKind(args.safety),
         safety_interval_s=args.safety_interval,
         threshold_safety=args.threshold_safety,
+        threshold_task=args.threshold_task,
         max_safety_errors=args.max_safety_errors,
         progress_window_s=args.progress_window,
         stuck_advice_seconds=args.stuck_advice_seconds,
+        task_stuck_seconds=args.task_stuck_seconds,
         system_advice_seconds=args.system_advice_seconds,
+        mode=RunMode(args.mode),
+        orchestrator_effort=args.orchestrator_effort,
+        rotate_tokens=args.rotate_tokens,
+        turn_timeout_s=args.turn_timeout,
+        max_decision_errors=args.max_decision_errors,
+        monitor_threshold=args.monitor_threshold,
+        max_monitor_errors=args.max_monitor_errors,
     )
 
 
@@ -578,11 +804,25 @@ def start_isolated_bridge() -> Bridge:
     return Bridge(new_session=True)
 
 
+def create_monitor_client(environ: Mapping[str, str]) -> JevClient:
+    """--mode orchestrator の監視の要求の送り先 (TypeSafe Jev のクライアント) を作って返す。要求はまだ送らない。
+
+    API キーは environ[TYPESAFE_API_KEY_ENV] の前後の空白を除いたもの。キーが無いか空なら ValueError (呼ぶ前に
+    settings.orchestrator_api_key_errors で確かめておく)。安全の監視のクライアントとは別に作り、閉じるのは run_command。
+    run_command は、environ に os.environ を渡してこの関数で作る (テストはこの関数を差し替えられる)。
+    """
+    api_key = environ.get(TYPESAFE_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ValueError(f"the environment variable {TYPESAFE_API_KEY_ENV} is not set")
+    return JevClient(api_key)
+
+
 def run_command(args: argparse.Namespace) -> int:
     """run の処理。終了コードを返す。
 
     1. run_settings_from_args → settings.run_settings_errors。誤りがあれば 1 行ずつ標準エラー出力に書き、EXIT_USAGE を返す
-       (実機には触れない)
+       (実機には触れない。Orchestrator 型の 6 つの値も、--mode に依らず確かめる)
+    --mode orchestrator なら、ここから _run_orchestrator_command の流れに進む。以下の 2〜9 は --mode advisor の流れ。
     2. settings.openai_api_key_errors(settings.middle, os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
        (実機にも実行ディレクトリーにも触れない)
     3. settings.typesafe_api_key_errors(settings.surface, os.environ) と
@@ -610,6 +850,8 @@ def run_command(args: argparse.Namespace) -> int:
        (settings.deep は --deep の値。run.jsonl の start の args にも deep として書く)
     9. 止まったら、作れた部品を capture.close()、supervisor.close()、安全の監視の部品の close()、surface の部品の close()
        の順に閉じる (5 の後に 6 で失敗しても、surface と安全の監視の部品は閉じる)
+    6〜7 と、止まった後の capture と supervisor を閉じるところは、_run_with_hardware で Orchestrator 型と共有する。
+    advisor では --instruction と --instruction-file を読まない (指定しても動きは変わらない)。
     止まった理由が app.REASON_INTERRUPTED (Ctrl+C) なら 0、ほかの理由なら 1 を返す。止まった理由は標準エラー出力に 1 行で書く。
     """
     settings = run_settings_from_args(args)
@@ -617,6 +859,8 @@ def run_command(args: argparse.Namespace) -> int:
     if errors:
         _print_errors(errors)
         return EXIT_USAGE
+    if settings.mode is RunMode.ORCHESTRATOR:
+        return _run_orchestrator_command(settings, args)
     key_errors = openai_api_key_errors(settings.middle, os.environ)
     if key_errors:
         _print_errors(key_errors)
@@ -638,12 +882,71 @@ def run_command(args: argparse.Namespace) -> int:
         )
         try:
             return _run_with_hardware(
-                settings, middle, system_middle, surface, safety.checker
+                settings,
+                lambda frame_reader, supervisor: _advisor_parts(
+                    settings,
+                    frame_reader,
+                    supervisor,
+                    middle,
+                    system_middle,
+                    surface,
+                    safety.checker,
+                ),
             )
         finally:
             safety.close()
     finally:
         surface.close()
+
+
+def _run_orchestrator_command(settings: RunSettings, args: argparse.Namespace) -> int:
+    """run_command の --mode orchestrator の流れ (1 の範囲の確かめの後)。終了コードを返す。
+
+    2. orchestrator.initial_instruction.load_initial_instruction(--instruction, --instruction-file)。
+       InitialInstructionError なら標準エラー出力に書き、EXIT_USAGE を返す (実機にも実行ディレクトリーにも触れない)
+    3. settings.orchestrator_api_key_errors(os.environ)。誤りがあれば標準エラー出力に書き、EXIT_USAGE を返す
+       (OPENAI_API_KEY は確かめない。surface・middle・本体の画面の middle の部品も作らない)
+    4. safety.safety_assembly.build_safety_assembly(settings.safety, jev なら環境変数 TYPESAFE_API_KEY の前後の空白を
+       除いたもの、fake なら None) で安全の監視の部品を作り、create_monitor_client(os.environ) で監視の Jev の
+       クライアントを作る
+    5. ブリッジとキャプチャーを advisor と同じく作る (_run_with_hardware)
+    6. app.LayersApp(settings, OrchestratorLayersParts(frame_reader=SwitchCaptureReader(capture),
+       report_sender=supervisor, bridge_state=supervisor の state を返す関数, safety=4 の部品の checker,
+       monitor=4 のクライアント, initial_instruction=2 の値)).run() で動かし、止まるまで待つ
+    7. 止まったら、作れた部品を capture.close()、supervisor.close()、監視のクライアントの close()、安全の監視の部品の
+       close() の順に閉じる (5 で失敗しても、4 で作ったものは閉じる)
+    終了コードは advisor と同じ (REASON_INTERRUPTED なら 0、ほかの理由なら 1。ブリッジの起動の失敗も 1)。
+    """
+    try:
+        instruction = load_initial_instruction(args.instruction, args.instruction_file)
+    except InitialInstructionError as error:
+        _print_errors([str(error)])
+        return EXIT_USAGE
+    key_errors = orchestrator_api_key_errors(os.environ)
+    if key_errors:
+        _print_errors(key_errors)
+        return EXIT_USAGE
+    safety = build_safety_assembly(
+        settings.safety, _typesafe_api_key(settings.safety is SafetyKind.JEV)
+    )
+    try:
+        monitor = create_monitor_client(os.environ)
+        try:
+            return _run_with_hardware(
+                settings,
+                lambda frame_reader, supervisor: OrchestratorLayersParts(
+                    frame_reader=frame_reader,
+                    report_sender=supervisor,
+                    bridge_state=lambda: supervisor.state,
+                    safety=safety.checker,
+                    monitor=monitor,
+                    initial_instruction=instruction,
+                ),
+            )
+        finally:
+            monitor.close()
+    finally:
+        safety.close()
 
 
 def _typesafe_api_key(needed: bool) -> str | None:
@@ -653,16 +956,47 @@ def _typesafe_api_key(needed: bool) -> str | None:
     return os.environ.get(TYPESAFE_API_KEY_ENV, "").strip()
 
 
-def _run_with_hardware(
+def _advisor_parts(
     settings: RunSettings,
+    frame_reader: LatestFrameReader,
+    supervisor: BridgeSupervisor,
     middle: MiddleAnalyzer,
     system_middle: SystemScreenMiddle,
     surface: SurfaceAssembly,
     safety: SafetyChecker,
-) -> int:
-    """run_command の 6〜9 (ブリッジとキャプチャーを作って LayersApp を動かし、閉じる)。終了コードを返す。
+) -> LayersParts:
+    """run_command の 8 の LayersParts (advisor 型の部品) を返す。"""
+    return LayersParts(
+        frame_reader=frame_reader,
+        report_sender=supervisor,
+        bridge_state=lambda: supervisor.state,
+        surface=surface.decider,
+        middle=middle,
+        deep=build_deep_runner(settings.deep),
+        safety=safety,
+        system_middle=system_middle,
+        on_frame=surface.on_frame,
+        surface_boxes_at=surface.boxes_at,
+        on_run_directory=surface.on_run_directory,
+        surface_plan_boxes=surface.plan_boxes,
+    )
 
-    surface と安全の監視の部品は閉じない (run_command が閉じる)。
+
+def _run_with_hardware(
+    settings: RunSettings,
+    build_parts: Callable[
+        [LatestFrameReader, BridgeSupervisor], LayersParts | OrchestratorLayersParts
+    ],
+) -> int:
+    """ブリッジとキャプチャーを作って LayersApp を動かし、閉じる (advisor と Orchestrator 型で共有)。終了コードを返す。
+
+    1. BridgeSupervisor(start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio) を作る。最初のブリッジの
+       起動に失敗したら (BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
+    2. Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True) を作る
+    3. LayersApp(settings, build_parts(SwitchCaptureReader(capture), supervisor)).run() で動かし、止まるまで待つ
+    4. 止まったら (途中の例外でも)、作れた capture と supervisor を閉じる
+    止まった理由を標準エラー出力に 1 行で書き、REASON_INTERRUPTED なら 0、ほかの理由なら 1 を返す。
+    build_parts に渡した部品 (surface・安全の監視・監視のクライアント) は閉じない (呼び出し側が閉じる)。
     """
     try:
         supervisor = BridgeSupervisor(
@@ -674,20 +1008,7 @@ def _run_with_hardware(
     capture: Capture | None = None
     try:
         capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True)
-        parts = LayersParts(
-            frame_reader=SwitchCaptureReader(capture),
-            report_sender=supervisor,
-            bridge_state=lambda: supervisor.state,
-            surface=surface.decider,
-            middle=middle,
-            deep=build_deep_runner(settings.deep),
-            safety=safety,
-            system_middle=system_middle,
-            on_frame=surface.on_frame,
-            surface_boxes_at=surface.boxes_at,
-            on_run_directory=surface.on_run_directory,
-            surface_plan_boxes=surface.plan_boxes,
-        )
+        parts = build_parts(SwitchCaptureReader(capture), supervisor)
         reason = LayersApp(settings, parts).run()
     finally:
         if capture is not None:

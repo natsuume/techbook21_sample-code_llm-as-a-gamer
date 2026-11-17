@@ -30,9 +30,12 @@ INPUT = MiddleInput(
     scene_labels=(),
     previous_state=None,
     strategy="",
-    current_tasks="",
+    task_queue=(),
+    task_events=(),
     surface_rows_offset=0,
     operations_rows_offset=0,
+    tasks_rows_offset=0,
+    reasons=("interval",),
 )
 CONNECTIONS = (
     MapConnection(
@@ -62,7 +65,8 @@ OUTPUT = MiddleOutput(
     stuck_description="",
     surface_wait_s=0.5,
     timeline="",
-    tasks="- 町へ出る\n",
+    new_tasks=(),
+    cancel_task_ids=(),
     place_name="家の 1 階",
     current_tile=TilePosition(7, 1),
     new_connections=CONNECTIONS,
@@ -238,7 +242,8 @@ def test_output_without_map_fields_is_not_recorded():
         stuck_description="",
         surface_wait_s=0.5,
         timeline="",
-        tasks="",
+        new_tasks=(),
+        cancel_task_ids=(),
     )
     assert build_map_record(INPUT, "scene-001", plain) is None
 

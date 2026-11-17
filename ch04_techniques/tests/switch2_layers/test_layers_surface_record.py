@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 from switch2_layers.deep.deep_types import DocumentKind
@@ -28,7 +29,8 @@ from switch2_layers.surface.surface_types import (
 )
 
 DOCUMENTS = SurfaceDocuments(
-    tasks="- 宿屋に入る",
+    tasks="宿屋に入っている",
+    task_id="task-003",
     tips="",
     controls="",
     advice="",
@@ -41,6 +43,7 @@ SURFACE_KEYS = [
     "t_received",
     "frames",
     "scene_id",
+    "task_id",
     "uses_common",
     "middle_generated_t",
     "action",
@@ -119,6 +122,7 @@ def test_surface_row_has_the_keys_of_the_issue():
             {"t": 10.0, "file": None},
         ],
         "scene_id": "scene-001",
+        "task_id": "task-003",
         "uses_common": {"controls": False, "tips": True},
         "middle_generated_t": 8.5,
         "action": {
@@ -172,6 +176,27 @@ def test_surface_row_of_failed_request():
     assert row["action"] is None
     assert row["error"] == "RuntimeError: model failed"
     assert row["deep_requests"] == []
+    # 先頭のタスクの ID は、失敗した要求の行にも書く
+    assert row["task_id"] == "task-003"
+
+
+def test_surface_row_without_head_task_has_null_task_id():
+    record = SurfaceRecord(
+        t_sent=1.0,
+        t_received=1.2,
+        frames=[],
+        documents=dataclasses.replace(DOCUMENTS, tasks="", task_id=None),
+        middle_generated_t=None,
+        action=None,
+        blocked_buttons=[],
+        deep_requests=[],
+        info_labels=[],
+        boxes=[],
+        scene_changed=False,
+        wait_s=1.0,
+        error=None,
+    )
+    assert surface_row(record)["task_id"] is None
 
 
 # --- 答えと usage・送った要求 ---

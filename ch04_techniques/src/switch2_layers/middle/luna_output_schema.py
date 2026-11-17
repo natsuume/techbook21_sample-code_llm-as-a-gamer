@@ -7,14 +7,20 @@
      "new_observations": [{"kind": "exit" | "landmark" | "blocked", "place": 文字列, "description": 文字列,
                            "tile": 座標か null}, ...],
      "is_stuck": 真偽, "stuck_description": 文字列, "press_home": 真偽,
-     "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列, "tasks": 文字列}
+     "surface_wait_s": 数 (SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S), "timeline": 文字列,
+     "cancel_task_ids": [文字列, ...],
+     "new_tasks": [{"text": 文字列, "destination": {"place": 文字列, "tile": 座標か null} か null}, ...]}
 座標は {"x": 整数, "y": 整数} (入力のマップのその場所の座標。x は右に、y は下に増える)。座標か null の値は、
-スキーマでは anyOf で座標の object と {"type": "null"} を並べる (_tile_or_null_schema)。
-new_connections と new_observations の要素と、座標の object も、すべて required で additionalProperties は false。
-場所の項目 (place_name・current_tile・new_connections・new_observations) は、短期タスクリスト (tasks) より前に書かせる。
+スキーマでは anyOf で座標の object と {"type": "null"} を並べる (_tile_or_null_schema)。行き先か null の値も同じく、
+anyOf で行き先の object と {"type": "null"} を並べる。
+new_connections・new_observations・new_tasks の要素と、座標と行き先の object も、すべて required で
+additionalProperties は false。
+場所の項目 (place_name・current_tile・new_connections・new_observations) は、タスクの項目 (cancel_task_ids・new_tasks)
+より前に書かせる。new_tasks の数の上限 (3 個まで) はスキーマ (maxItems) に置かず、説明文に書く。
+cancel_task_ids は取り消すタスクの ID (ID の形は確かめない)、new_tasks は現在の場面のキューの末尾に足すタスクで、
+行き先は MiddleOutput に入れる前には直さない (マップと照らして直すのは middle.task_destination_fix)。
 scene_name が空 (空白だけを含む) なら、場面を決められなかったものとして MiddleOutput の scene_name を None にする。
 place_name も同じく、空なら場所を決められなかった (ゲームの世界の中の場所が映っていない場合を含む) ものとして None にする。
-tasks は Markdown の箇条書き。
 press_home は、HOME を押して本体の画面に出るか (ゲームが操作を受け付けないなど、本体の画面に出る必要があるときだけ真)。
 詰まり (is_stuck・stuck_description) の直後に書かせる。
 要求の text.format には {"type": "json_schema", "name": OUTPUT_FORMAT_NAME, "schema": MIDDLE_OUTPUT_SCHEMA,
@@ -35,6 +41,7 @@ from switch2_layers.surface.middle_state_reader import (
     SURFACE_WAIT_MAX_S,
     SURFACE_WAIT_MIN_S,
 )
+from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
 OUTPUT_FORMAT_NAME = "middle_output"
 
@@ -165,9 +172,50 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
             "type": "string",
             "description": "系列情報。決められた節に分けて書く",
         },
-        "tasks": {
-            "type": "string",
-            "description": "現在の場面の短期タスクリスト (Markdown の箇条書き)",
+        "cancel_task_ids": {
+            "type": "array",
+            "description": (
+                "取り消すタスクの ID (入力のタスクのキューの ID)。取り消さなければ空の配列"
+            ),
+            "items": {"type": "string", "description": "取り消すタスクの ID"},
+        },
+        "new_tasks": {
+            "type": "array",
+            "description": (
+                "現在の場面のキューの末尾に足すタスク (3 個まで)。足さなければ空の配列"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "達成したときに画面で確かめられる状態を書いた 1 文",
+                    },
+                    "destination": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "place": {
+                                        "type": "string",
+                                        "description": "行き先の場所の名前 (入力のマップの場所の名前)",
+                                    },
+                                    "tile": _tile_or_null_schema(
+                                        "行き先の場所の中のマス。入力のマップと経路の節に載っている出口・"
+                                        "つながりの出たマス・目印から選ぶ。場所だけが分かるときは null"
+                                    ),
+                                },
+                                "required": ["place", "tile"],
+                                "additionalProperties": False,
+                            },
+                            {"type": "null"},
+                        ],
+                        "description": "行き先。場所に関わらないタスクは null",
+                    },
+                },
+                "required": ["text", "destination"],
+                "additionalProperties": False,
+            },
         },
     },
     "required": [
@@ -181,7 +229,8 @@ MIDDLE_OUTPUT_SCHEMA: dict[str, object] = {
         "press_home",
         "surface_wait_s",
         "timeline",
-        "tasks",
+        "cancel_task_ids",
+        "new_tasks",
     ],
     "additionalProperties": False,
 }
@@ -197,7 +246,8 @@ _OUTPUT_KEYS: tuple[str, ...] = (
     "press_home",
     "surface_wait_s",
     "timeline",
-    "tasks",
+    "cancel_task_ids",
+    "new_tasks",
 )
 # new_connections の要素のキー (スキーマの items の properties と同じ順)
 _CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how", "from_tile", "to_tile")
@@ -205,6 +255,10 @@ _CONNECTION_KEYS: tuple[str, ...] = ("from", "to", "how", "from_tile", "to_tile"
 _OBSERVATION_KEYS: tuple[str, ...] = ("kind", "place", "description", "tile")
 # 座標の object のキー (_tile_or_null_schema の object の properties と同じ順)
 _TILE_KEYS: tuple[str, ...] = ("x", "y")
+# new_tasks の要素のキー (スキーマの items の properties と同じ順)
+_NEW_TASK_KEYS: tuple[str, ...] = ("text", "destination")
+# 行き先の object のキー (スキーマの destination の object の properties と同じ順)
+_DESTINATION_KEYS: tuple[str, ...] = ("place", "tile")
 
 
 def build_text_format() -> dict[str, object]:
@@ -225,7 +279,7 @@ def parse_middle_output(text: str) -> MiddleOutput:
     次のときは ValueError にする (スキーマに合わない出力):
         - JSON として読めない、JSON の object でない
         - キーが MIDDLE_OUTPUT_SCHEMA の properties と一致しない (足りない・余分なキーがある)
-        - scene_name・place_name・stuck_description・timeline・tasks が文字列でない、is_stuck・press_home が真偽でない、
+        - scene_name・place_name・stuck_description・timeline が文字列でない、is_stuck・press_home が真偽でない、
           surface_wait_s が数 (bool を除く) でないか有限でない (NaN・Infinity を含む)
         - surface_wait_s が SURFACE_WAIT_MIN_S〜SURFACE_WAIT_MAX_S (両端を含む) の外
         - new_connections・new_observations が配列でない。要素が object でない、要素のキーがスキーマと一致しない
@@ -235,8 +289,14 @@ def parse_middle_output(text: str) -> MiddleOutput:
         - current_tile と、new_connections の要素の from_tile・to_tile、new_observations の要素の tile が、null でも
           座標の object でもない。座標の object のキーが x と y に一致しない (足りない・余分なキーがある)、x か y が
           整数でない (bool と小数 (1.0 を含む) は整数でない)
+        - cancel_task_ids が配列でない、要素が文字列でない (ID の形は確かめない)
+        - new_tasks が配列でない。要素が object でない、要素のキーが text と destination に一致しない、text が文字列で
+          ない、destination が null でも行き先の object でもない。行き先の object のキーが place と tile に一致しない、
+          place が文字列でない、tile が null でも座標の object でもない (座標の object は上と同じ規則)
     scene_name と place_name は、空 (前後の空白を除くと空) なら None、それ以外は文字列のまま。new_connections と
     new_observations は、出力の順に並べた MapConnection と MapObservation のタプルにする (値は書かれたまま)。
+    cancel_task_ids は出力の順の文字列のタプル、new_tasks は出力の順の tasks.task_queue.NewTask のタプル (text と
+    place は書かれたまま。行き先は tasks.task_queue.TaskDestination、null は None) にする。
     座標は notes.map_document.TilePosition、null は None にする (current_tile は place_name が None でもそのまま)。
     ほかの値はそのまま (surface_wait_s は float、press_home は MiddleOutput.press_home) にする。
     """
@@ -251,7 +311,10 @@ def parse_middle_output(text: str) -> MiddleOutput:
         press_home=_boolean(value, "press_home"),
         surface_wait_s=_surface_wait(value["surface_wait_s"]),
         timeline=_string(value, "timeline"),
-        tasks=_string(value, "tasks"),
+        new_tasks=tuple(_new_task(item) for item in _array(value, "new_tasks")),
+        cancel_task_ids=tuple(
+            _cancel_task_id(item) for item in _array(value, "cancel_task_ids")
+        ),
         place_name=place_name if place_name.strip() else None,
         current_tile=_tile(value["current_tile"], "'current_tile' in middle output"),
         new_connections=tuple(
@@ -335,6 +398,41 @@ def _observation(item: object) -> MapObservation:
         description=_string(value, "description"),
         tile=_tile(value["tile"], f"'tile' in {where}"),
     )
+
+
+def _new_task(item: object) -> NewTask:
+    """new_tasks の要素 item を NewTask にする。スキーマに合わなければ ValueError (parse_middle_output の規則)。"""
+    where = "an element of new_tasks"
+    value = _element_object(item, where)
+    _check_keys(value, _NEW_TASK_KEYS, where)
+    return NewTask(
+        text=_string(value, "text"),
+        destination=_destination(value["destination"]),
+    )
+
+
+def _destination(item: object) -> TaskDestination | None:
+    """new_tasks の要素の destination の値 item が null なら None、行き先の object なら TaskDestination にする。
+
+    object のキーが place と tile に一致しない、place が文字列でない、tile が null でも座標の object でもないとき、
+    null でも object でもないときは ValueError。
+    """
+    if item is None:
+        return None
+    where = "'destination' in new_tasks"
+    value = _element_object(item, where)
+    _check_keys(value, _DESTINATION_KEYS, where)
+    return TaskDestination(
+        place=_string(value, "place"),
+        tile=_tile(value["tile"], f"'tile' of {where}"),
+    )
+
+
+def _cancel_task_id(item: object) -> str:
+    """cancel_task_ids の要素 item が文字列ならその値を返す。それ以外は ValueError (ID の形は確かめない)。"""
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"an element of cancel_task_ids must be a string: {item!r}")
 
 
 def _tile(item: object, where: str) -> TilePosition | None:

@@ -76,8 +76,21 @@ from switch2_layers.surface.surface_types import (
 
 FRAME_TIMES = (9.0, 9.5, 10.0)
 REQUEST_T = 10.0
+# 先頭のタスクが無い文書 (先頭のタスクの 2 問を送らない)
 DOCUMENTS = SurfaceDocuments(
-    tasks="- 扉を開ける",
+    tasks="",
+    task_id=None,
+    tips="# 攻略情報",
+    controls="- A: 決定",
+    advice="# 助言",
+    scene_id=None,
+    uses_common_controls=True,
+    uses_common_tips=True,
+)
+# 先頭のタスクがある文書
+DOCUMENTS_WITH_TASK = SurfaceDocuments(
+    tasks="扉が開いている",
+    task_id="task-001",
     tips="# 攻略情報",
     controls="- A: 決定",
     advice="# 助言",
@@ -282,11 +295,11 @@ def test_relative_time_label():
 
 
 def test_documents_to_state():
-    value = documents_to_state(DOCUMENTS)
+    value = documents_to_state(DOCUMENTS_WITH_TASK)
     assert list(value) == ["tasks", "tips", "controls", "advice", "game"]
-    # ゲームの性質が無い (読めない) 文書は、ほかの文書と同じく空文字列
+    # tasks は先頭のタスクの文。ゲームの性質が無い (読めない) 文書は、ほかの文書と同じく空文字列
     assert value == {
-        "tasks": "- 扉を開ける",
+        "tasks": "扉が開いている",
         "tips": "# 攻略情報",
         "controls": "- A: 決定",
         "advice": "# 助言",
@@ -899,6 +912,51 @@ def test_output_follows_answers(tmp_path):
         InfoLabel("map", 0.0),
     )
     assert output.scene_changed is True
+
+
+# --- 先頭のタスクの 2 問 (task_done・task_cancel) ---
+
+
+def test_task_questions_are_added_last_when_there_is_a_head_task(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    decider.decide(surface_input(documents=DOCUMENTS_WITH_TASK))
+    state, questions, _ = asker.calls[0]
+    # 問いの一覧の最後 (box の問いの後) に足す
+    assert [question.name for question in questions[-2:]] == [
+        "task_done",
+        "task_cancel",
+    ]
+    assert questions[-3].kind is QuestionKind.BOX
+    assert questions[-2].instructions == "「扉が開いている」を達成した。"
+    assert questions[-1].instructions == (
+        "「扉が開いている」は、今の状況では達成できないか、状況に合わない。"
+    )
+    assert all(q.question_type is QuestionType.NOUL for q in questions[-2:])
+    # state の documents.tasks は先頭のタスクの文
+    assert state["documents"]["tasks"] == "扉が開いている"
+
+
+def test_no_task_questions_without_a_head_task(tmp_path):
+    asker = FakeAsker()
+    decider, _ = make_decider(tmp_path, asker)
+    output = decider.decide(surface_input(documents=DOCUMENTS))
+    kinds = {question.kind for question in asker.questions_of(0)}
+    assert QuestionKind.TASK_DONE not in kinds
+    assert QuestionKind.TASK_CANCEL not in kinds
+    assert output.task_done_p is None
+    assert output.task_cancel_p is None
+
+
+def test_task_answers_are_in_the_output(tmp_path):
+    asker = FakeAsker({"task_done": 0.7, "task_cancel": 0.2})
+    decider, _ = make_decider(tmp_path, asker)
+    output = decider.decide(surface_input(documents=DOCUMENTS_WITH_TASK))
+    assert output.task_done_p == 0.7
+    assert output.task_cancel_p == 0.2
+    # 記録の答えにも入る
+    assert output.exchange is not None
+    assert output.exchange.answers.nouls["task_done"] == 0.7
 
 
 def test_hold_margin_defaults_to_the_run_default():

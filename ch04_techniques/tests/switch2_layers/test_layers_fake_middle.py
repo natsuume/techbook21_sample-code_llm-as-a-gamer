@@ -16,9 +16,12 @@ def middle_input(t: float) -> MiddleInput:
         scene_labels=(),
         previous_state=None,
         strategy="",
-        current_tasks="",
+        task_queue=(),
+        task_events=(),
         surface_rows_offset=0,
         operations_rows_offset=0,
+        tasks_rows_offset=0,
+        reasons=("interval",),
     )
 
 
@@ -31,7 +34,8 @@ def test_fake_middle_returns_fixed_scene_and_wait():
         stuck_description="",
         surface_wait_s=0.2,
         timeline="",
-        tasks="",
+        new_tasks=(),
+        cancel_task_ids=(),
     )
     assert analyzer.analyze(middle_input(1.0)) == expected
     # 入力によらず同じ出力

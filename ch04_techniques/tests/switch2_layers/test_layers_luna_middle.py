@@ -26,9 +26,12 @@ MIDDLE_INPUT = MiddleInput(
     scene_labels=(),
     previous_state=None,
     strategy="",
-    current_tasks="",
+    task_queue=(),
+    task_events=(),
     surface_rows_offset=0,
     operations_rows_offset=0,
+    tasks_rows_offset=0,
+    reasons=("interval",),
 )
 OUTPUT = {
     "scene_name": "タイトル画面",
@@ -42,7 +45,8 @@ OUTPUT = {
     "press_home": False,
     "surface_wait_s": 1.5,
     "timeline": "## 操作のまとめ\n- まだ操作していない",
-    "tasks": "- A でゲームを始める\n",
+    "cancel_task_ids": [],
+    "new_tasks": [],
 }
 USAGE = {
     "input_tokens": 3000,
@@ -129,7 +133,8 @@ def test_analyze_returns_parsed_output():
         stuck_description="",
         surface_wait_s=1.5,
         timeline="## 操作のまとめ\n- まだ操作していない",
-        tasks="- A でゲームを始める\n",
+        new_tasks=(),
+        cancel_task_ids=(),
         place_name=None,
         current_tile=None,
         new_connections=(),
@@ -162,7 +167,8 @@ def test_analyze_sends_the_expected_request():
         "press_home",
         "surface_wait_s",
         "timeline",
-        "tasks",
+        "cancel_task_ids",
+        "new_tasks",
     ]
     assert text_format["schema"]["additionalProperties"] is False
     assert payload["prompt_cache_options"] == {"mode": "explicit"}
@@ -284,7 +290,7 @@ def test_refusal_raises_and_records_response():
     [
         {**OUTPUT, "surface_wait_s": 2.5},
         {**OUTPUT, "surface_wait_s": 0.1},
-        {key: value for key, value in OUTPUT.items() if key != "tasks"},
+        {key: value for key, value in OUTPUT.items() if key != "new_tasks"},
         {**OUTPUT, "is_stuck": "no"},
         {**OUTPUT, "extra": 1},
     ],

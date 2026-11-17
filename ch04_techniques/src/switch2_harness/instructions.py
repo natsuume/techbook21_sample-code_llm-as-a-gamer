@@ -2,7 +2,7 @@
 
 テンプレートはパッケージの instructions/ ディレクトリーにある Markdown で、$game と $goal を
 string.Template で置換する。基本のテンプレートは instructions/base.md で、有効な要素ごとに
-Feature.instruction_file の節を続ける。テンプレートの読み込みは引数 (read_template) で受け取り、
+Feature.instruction_file の節を続ける (instruction_file が None の要素は節を足さない)。テンプレートの読み込みは引数 (read_template) で受け取り、
 本番では read_package_template を使う。
 """
 
@@ -38,13 +38,16 @@ def render_instructions(
     """CLAUDE.md の本文を返す。
 
     1. read_template(BASE_TEMPLATE_FILE) を string.Template(...).substitute(game=config.game, goal=config.goal) で置換する
-    2. available のうち config.features に名前がある要素の instruction_file を、available の順に読み、同じ置換をする
+    2. available のうち config.features に名前がある要素の instruction_file を、available の順に読み、同じ置換をする。
+       instruction_file が None の要素は読まず、節を足さない
     3. 各部分の末尾の改行を除き、空行 1 つ ("\\n\\n") で区切ってつなぎ、末尾を改行 1 つで終える
     例: base が "# B $game\\n"、要素の節が "## F $goal\\n\\n" なら "# B G\\n\\n## F X\\n" (game="G", goal="X")。
     """
     enabled = set(config.features)
     file_names = [BASE_TEMPLATE_FILE] + [
-        feature.instruction_file for feature in available if feature.name in enabled
+        feature.instruction_file
+        for feature in available
+        if feature.name in enabled and feature.instruction_file is not None
     ]
     sections = [
         Template(read_template(file_name))

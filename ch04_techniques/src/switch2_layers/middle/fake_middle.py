@@ -11,7 +11,8 @@ class FakeMiddleAnalyzer:
 
     def analyze(self, middle_input: MiddleInput) -> MiddleOutput:
         """MiddleOutput(scene_name=FAKE_SCENE_NAME, is_stuck=False, stuck_description="",
-        surface_wait_s=FAKE_SURFACE_WAIT_S, timeline="", tasks="") を返す。middle_input は使わない。
+        surface_wait_s=FAKE_SURFACE_WAIT_S, timeline="", new_tasks=(), cancel_task_ids=()) を返す。
+        middle_input は使わない。
         """
         return MiddleOutput(
             scene_name=FAKE_SCENE_NAME,
@@ -19,5 +20,6 @@ class FakeMiddleAnalyzer:
             stuck_description="",
             surface_wait_s=FAKE_SURFACE_WAIT_S,
             timeline="",
-            tasks="",
+            new_tasks=(),
+            cancel_task_ids=(),
         )

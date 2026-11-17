@@ -14,9 +14,10 @@ from switch2_layers.middle.middle_types import (
     ObservationKind,
 )
 from switch2_layers.notes.map_document import MapConnection, TilePosition
+from switch2_layers.tasks.task_queue import NewTask, TaskDestination
 
-# 出力のキー。場所 (place_name・current_tile・new_connections・new_observations) は、短期タスクリスト (tasks) より前に
-# 書かせる。press_home は詰まり (is_stuck・stuck_description) の直後に書かせる
+# 出力のキー。場所 (place_name・current_tile・new_connections・new_observations) は、タスクの項目
+# (cancel_task_ids・new_tasks) より前に書かせる。press_home は詰まり (is_stuck・stuck_description) の直後に書かせる
 OUTPUT_KEYS = [
     "scene_name",
     "place_name",
@@ -28,7 +29,8 @@ OUTPUT_KEYS = [
     "press_home",
     "surface_wait_s",
     "timeline",
-    "tasks",
+    "cancel_task_ids",
+    "new_tasks",
 ]
 VALID_OUTPUT = {
     "scene_name": "フィールド",
@@ -68,7 +70,8 @@ VALID_OUTPUT = {
     "press_home": False,
     "surface_wait_s": 0.5,
     "timeline": "## 操作のまとめ\n- 上を押し続けた",
-    "tasks": "- 右の扉に入る\n- B を試す\n",
+    "cancel_task_ids": [],
+    "new_tasks": [],
 }
 VALID_PARSED = MiddleOutput(
     scene_name="フィールド",
@@ -76,7 +79,8 @@ VALID_PARSED = MiddleOutput(
     stuck_description="t=100.000 から 12 秒間、壁に向かって歩き続けている",
     surface_wait_s=0.5,
     timeline="## 操作のまとめ\n- 上を押し続けた",
-    tasks="- 右の扉に入る\n- B を試す\n",
+    new_tasks=(),
+    cancel_task_ids=(),
     place_name="家の 1 階",
     current_tile=TilePosition(7, 1),
     new_connections=(
@@ -147,7 +151,21 @@ def without_descriptions(node: object) -> object:
 # --- スキーマ ---
 
 
-def test_schema_has_eleven_required_fields_without_additional_properties():
+# 行き先か null の値のスキーマ (説明の注釈を除いたもの)
+DESTINATION_OR_NULL = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {"place": {"type": "string"}, "tile": TILE_OR_NULL},
+            "required": ["place", "tile"],
+            "additionalProperties": False,
+        },
+        {"type": "null"},
+    ]
+}
+
+
+def test_schema_has_twelve_required_fields_without_additional_properties():
     assert without_descriptions(MIDDLE_OUTPUT_SCHEMA) == {
         "type": "object",
         "properties": {
@@ -191,7 +209,20 @@ def test_schema_has_eleven_required_fields_without_additional_properties():
             "press_home": {"type": "boolean"},
             "surface_wait_s": {"type": "number", "minimum": 0.2, "maximum": 2.0},
             "timeline": {"type": "string"},
-            "tasks": {"type": "string"},
+            # 数の上限 (maxItems) は置かない (説明文に書く)
+            "cancel_task_ids": {"type": "array", "items": {"type": "string"}},
+            "new_tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "destination": DESTINATION_OR_NULL,
+                    },
+                    "required": ["text", "destination"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": OUTPUT_KEYS,
         "additionalProperties": False,
@@ -212,7 +243,24 @@ def test_schema_has_eleven_required_fields_without_additional_properties():
         "description",
         "tile",
     ]
+    new_task = properties["new_tasks"]["items"]["properties"]
+    assert list(new_task) == ["text", "destination"]
+    assert list(new_task["destination"]["anyOf"][0]["properties"]) == ["place", "tile"]
     assert json.loads(json.dumps(MIDDLE_OUTPUT_SCHEMA)) == MIDDLE_OUTPUT_SCHEMA
+
+
+def test_task_fields_have_descriptions():
+    properties = MIDDLE_OUTPUT_SCHEMA["properties"]
+    for key in ["cancel_task_ids", "new_tasks"]:
+        assert properties[key]["description"], key
+    # 足すタスクの数の上限は、説明文で伝える
+    assert "3 個まで" in properties["new_tasks"]["description"]
+    new_task = properties["new_tasks"]["items"]["properties"]
+    assert new_task["text"]["description"]
+    assert new_task["destination"]["description"]
+    destination = new_task["destination"]["anyOf"][0]["properties"]
+    assert destination["place"]["description"]
+    assert destination["tile"]["description"]
 
 
 def test_map_fields_have_descriptions():
@@ -311,7 +359,10 @@ def test_non_finite_wait_is_an_error(literal):
         {"surface_wait_s": "0.5"},
         {"surface_wait_s": True},
         {"timeline": ["a"]},
-        {"tasks": None},
+        {"cancel_task_ids": None},
+        {"cancel_task_ids": "task-001"},
+        {"new_tasks": None},
+        {"new_tasks": {}},
         {"place_name": None},
         {"place_name": 1},
         {"new_connections": None},
@@ -363,7 +414,7 @@ def test_empty_map_fields():
     assert result.new_observations == ()
     # ほかの項目はそのまま
     assert result.scene_name == "フィールド"
-    assert result.tasks == "- 右の扉に入る\n- B を試す\n"
+    assert result.timeline == "## 操作のまとめ\n- 上を押し続けた"
 
 
 @pytest.mark.parametrize("place_name", ["", "   ", "\n"])
@@ -539,3 +590,91 @@ def test_float_tile_literal_is_an_error():
     assert '"x": 7.0' in text
     with pytest.raises(ValueError):
         parse_middle_output(text)
+
+
+# --- タスクの項目 (cancel_task_ids・new_tasks) ---
+
+NEW_TASKS = [
+    {
+        "text": "宿屋に入っている",
+        "destination": {"place": "町", "tile": {"x": 3, "y": 4}},
+    },
+    {"text": "店の前にいる", "destination": {"place": "  町の北 ", "tile": None}},
+    {"text": "会話の枠が閉じている", "destination": None},
+]
+
+
+def test_task_fields_are_read_as_written():
+    result = parse_middle_output(
+        output_text(cancel_task_ids=["task-003", "task-9", ""], new_tasks=NEW_TASKS)
+    )
+    # ID の形は確かめない
+    assert result.cancel_task_ids == ("task-003", "task-9", "")
+    # 行き先はここでは直さない (place の空白も残す)
+    assert result.new_tasks == (
+        NewTask(
+            text="宿屋に入っている",
+            destination=TaskDestination(place="町", tile=TilePosition(3, 4)),
+        ),
+        NewTask(
+            text="店の前にいる",
+            destination=TaskDestination(place="  町の北 ", tile=None),
+        ),
+        NewTask(text="会話の枠が閉じている", destination=None),
+    )
+
+
+def test_more_than_three_new_tasks_are_all_read():
+    # 数の上限はスキーマにも読み取りにも置かない (キューの部品が limit で足さない)
+    items = [{"text": f"状態 {index}", "destination": None} for index in range(4)]
+    result = parse_middle_output(output_text(new_tasks=items))
+    assert [task.text for task in result.new_tasks] == [
+        "状態 0",
+        "状態 1",
+        "状態 2",
+        "状態 3",
+    ]
+
+
+@pytest.mark.parametrize("ids", [[1], [None], [["task-001"]], ["task-001", 2]])
+def test_wrong_cancel_task_ids_items_are_errors(ids):
+    assert_valid_output_parses()
+    with pytest.raises(ValueError):
+        parse_middle_output(output_text(cancel_task_ids=ids))
+
+
+def wrong_new_tasks() -> list[object]:
+    """スキーマに合わない new_tasks の要素 (どれも ValueError)。"""
+    return [
+        "宿屋に入っている",
+        None,
+        {"text": "宿屋に入っている"},
+        {"destination": None},
+        {"text": "宿屋に入っている", "destination": None, "extra": 1},
+        {"text": 1, "destination": None},
+        {"text": "宿屋に入っている", "destination": "町"},
+        {"text": "宿屋に入っている", "destination": {"place": "町"}},
+        {"text": "宿屋に入っている", "destination": {"tile": None}},
+        {
+            "text": "宿屋に入っている",
+            "destination": {"place": "町", "tile": None, "extra": 1},
+        },
+        {"text": "宿屋に入っている", "destination": {"place": 1, "tile": None}},
+        {"text": "宿屋に入っている", "destination": {"place": "町", "tile": "3,4"}},
+        {"text": "宿屋に入っている", "destination": {"place": "町", "tile": {"x": 3}}},
+        {
+            "text": "宿屋に入っている",
+            "destination": {"place": "町", "tile": {"x": 3.0, "y": 4}},
+        },
+        {
+            "text": "宿屋に入っている",
+            "destination": {"place": "町", "tile": {"x": True, "y": 4}},
+        },
+    ]
+
+
+@pytest.mark.parametrize("item", wrong_new_tasks())
+def test_wrong_new_task_items_are_errors(item):
+    assert_valid_output_parses()
+    with pytest.raises(ValueError):
+        parse_middle_output(output_text(new_tasks=[NEW_TASKS[0], item]))

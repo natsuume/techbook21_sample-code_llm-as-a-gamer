@@ -3,16 +3,21 @@ from pathlib import Path
 
 import pytest
 
+from switch2_layers.notes.map_document import TilePosition
 from switch2_layers.tasks.task_files import (
+    destination_from_json,
+    destination_to_json,
     read_saved_tasks,
     tasks_json_value,
     tasks_markdown,
     write_scene_task_files,
 )
-from switch2_layers.tasks.task_queue import TaskView
+from switch2_layers.tasks.task_queue import TaskDestination, TaskView
 
 SCENE = "scene-001"
 OTHER = "scene-002"
+INN = TaskDestination(place="町", tile=TilePosition(x=3, y=4))
+INN_JSON = {"place": "町", "tile": {"x": 3, "y": 4}}
 TASKS = (
     TaskView(
         id="task-001",
@@ -21,6 +26,7 @@ TASKS = (
         added_t=1.0,
         active_s=2.5,
         cancel_requested_t=None,
+        destination=INN,
     ),
     TaskView(
         id="task-002",
@@ -39,6 +45,7 @@ TASK_ITEMS = [
         "added_t": 1.0,
         "active_s": 2.5,
         "cancel_requested_t": None,
+        "destination": INN_JSON,
     },
     {
         "id": "task-002",
@@ -46,6 +53,7 @@ TASK_ITEMS = [
         "added_t": 1.5,
         "active_s": 2.0,
         "cancel_requested_t": 3.0,
+        "destination": None,
     },
 ]
 TASKS_MD = "- 宿屋に入る\n- 主人に話しかける\n"
@@ -66,6 +74,39 @@ def write_saved_tasks(
     )
 
 
+# --- 行き先の JSON の形 ---
+
+
+@pytest.mark.parametrize(
+    ("destination", "value"),
+    [
+        (INN, INN_JSON),
+        (TaskDestination(place="町", tile=None), {"place": "町", "tile": None}),
+        (None, None),
+    ],
+)
+def test_destination_json_round_trip(destination, value):
+    assert destination_to_json(destination) == value
+    assert destination_from_json(value) == destination
+
+
+def test_destination_json_has_the_keys_in_order():
+    value = destination_to_json(INN)
+    assert value is not None
+    assert list(value) == ["place", "tile"]
+    tile = value["tile"]
+    assert isinstance(tile, dict)
+    assert list(tile) == ["x", "y"]
+
+
+def test_destination_keeps_the_place_as_given():
+    # 部品は行き先の中身を確かめない (空白も残す)
+    destination = TaskDestination(place=" 町 ", tile=TilePosition(x=-1, y=0))
+    value = destination_to_json(destination)
+    assert value == {"place": " 町 ", "tile": {"x": -1, "y": 0}}
+    assert destination_from_json(value) == destination
+
+
 # --- tasks.json と tasks.md の中身 ---
 
 
@@ -76,7 +117,14 @@ def test_tasks_json_value_has_the_keys_in_order():
     items = value["tasks"]
     assert isinstance(items, list)
     for item in items:
-        assert list(item) == ["id", "text", "added_t", "active_s", "cancel_requested_t"]
+        assert list(item) == [
+            "id",
+            "text",
+            "added_t",
+            "active_s",
+            "cancel_requested_t",
+            "destination",
+        ]
 
 
 def test_tasks_json_value_without_tasks():
@@ -84,6 +132,7 @@ def test_tasks_json_value_without_tasks():
 
 
 def test_tasks_markdown():
+    # 行き先は書かない
     assert tasks_markdown(TASKS) == TASKS_MD
     assert tasks_markdown(()) == ""
 
@@ -142,6 +191,7 @@ def test_read_saved_tasks_reads_scenes_in_name_order(tmp_path):
                 "added_t": 6.0,
                 "active_s": 1.5,
                 "cancel_requested_t": None,
+                "destination": None,
             }
         ],
     )
@@ -169,6 +219,7 @@ def test_read_saved_tasks_skips_other_directories(tmp_path):
         "added_t": 6.0,
         "active_s": 1.5,
         "cancel_requested_t": None,
+        "destination": None,
     }
     write_saved_tasks(notes, "scene-01", [other_item])
     write_saved_tasks(notes, "other", [other_item])
@@ -179,6 +230,47 @@ def test_read_saved_tasks_skips_other_directories(tmp_path):
     )
     write_saved_tasks(notes, "scene-004", [])
     assert read_saved_tasks(notes) == list(TASKS)
+
+
+def test_read_saved_tasks_without_destination_key_has_no_destination(tmp_path):
+    notes = tmp_path / "notes"
+    item = {
+        "id": "task-001",
+        "text": "宿屋に入る",
+        "added_t": 1.0,
+        "active_s": 2.5,
+        "cancel_requested_t": None,
+    }
+    write_saved_tasks(notes, SCENE, [item])
+    assert read_saved_tasks(notes) == [
+        TaskView(
+            id="task-001",
+            text="宿屋に入る",
+            scene_id=SCENE,
+            added_t=1.0,
+            active_s=2.5,
+            cancel_requested_t=None,
+            destination=None,
+        )
+    ]
+
+
+def test_read_saved_tasks_skips_tasks_json_outside_of_notes(tmp_path):
+    notes = tmp_path / "notes"
+    saved = json.dumps({"t": 9.0, "tasks": TASK_ITEMS}, ensure_ascii=False)
+    # 場面の tasks.json が notes/ の外のファイルを指すシンボリックリンク
+    secret = tmp_path / "secret.json"
+    secret.write_text(saved, encoding="utf-8")
+    scene_dir = notes / "scenes" / SCENE
+    scene_dir.mkdir(parents=True)
+    (scene_dir / "tasks.json").symlink_to(secret)
+    # 場面のディレクトリーが notes/ の外のディレクトリーを指すシンボリックリンク
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "tasks.json").write_text(saved, encoding="utf-8")
+    (notes / "scenes" / OTHER).symlink_to(outside)
+    # どちらの場面も読まない
+    assert read_saved_tasks(notes) == []
 
 
 def test_read_saved_tasks_without_scenes_directory(tmp_path):
