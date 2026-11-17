@@ -7,6 +7,7 @@ from switch2_harness.features import (
     FEATURES,
     NOTES_FEATURE,
     NOTES_FILE_NAME,
+    STAGNATION_ALERT_FEATURE,
     Feature,
     WritableFile,
     agent_commands,
@@ -20,7 +21,7 @@ def test_features_has_action_history_and_notes():
     assert ACTION_HISTORY_FEATURE == "action-history"
     assert NOTES_FEATURE == "notes"
     assert NOTES_FILE_NAME == "notes.md"
-    assert FEATURES == (
+    assert FEATURES[:2] == (
         Feature(
             name="action-history",
             title="行動履歴",
@@ -37,6 +38,23 @@ def test_features_has_action_history_and_notes():
             ),
         ),
     )
+
+
+def test_features_has_stagnation_alert_last():
+    assert STAGNATION_ALERT_FEATURE == "stagnation-alert"
+    assert tuple(feature.name for feature in FEATURES) == (
+        "action-history",
+        "notes",
+        "stagnation-alert",
+    )
+    # CLAUDE.md に節を足さず、サブコマンドも書き換えられるファイルも増やさない
+    assert FEATURES[2] == Feature(
+        name="stagnation-alert",
+        title="停滞の知らせ",
+        instruction_file=None,
+        commands=(),
+    )
+    assert FEATURES[2].writable_files == ()
 
 
 def test_feature_has_no_writable_files_by_default():
@@ -101,7 +119,7 @@ def test_validate_feature_names_uses_features_by_default():
     with pytest.raises(ValueError) as error:
         validate_feature_names(["memo-files"])
     assert str(error.value) == (
-        "unknown feature: memo-files (available: action-history, notes)"
+        f"unknown feature: memo-files (available: {available_names_text(FEATURES)})"
     )
 
 

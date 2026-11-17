@@ -1,5 +1,6 @@
-from harness_fakes import FAKE_FEATURES, read_fake_template
+from harness_fakes import FAKE_FEATURES, FAKE_STAGNATION_ALERT, read_fake_template
 
+from switch2_harness.features import STAGNATION_ALERT_FEATURE
 from switch2_harness.harness_config import HarnessConfig
 from switch2_harness.instructions import (
     BASE_TEMPLATE_FILE,
@@ -51,6 +52,23 @@ def test_render_instructions_reads_only_enabled_templates():
 
     render_instructions(make_config(("memo-files",)), read_template, FAKE_FEATURES)
     assert requested == ["base.md", "memo-files.md"]
+
+
+def test_render_instructions_adds_no_section_for_feature_without_instruction_file():
+    available = (*FAKE_FEATURES, FAKE_STAGNATION_ALERT)
+    requested: list[str] = []
+
+    def read_template(file_name: str) -> str:
+        requested.append(file_name)
+        return read_fake_template(file_name)
+
+    with_alert = render_instructions(
+        make_config((STAGNATION_ALERT_FEATURE,)), read_template, available
+    )
+    without_features = render_instructions(make_config(()), read_template, available)
+    assert with_alert == without_features
+    # instruction_file が None の要素は、テンプレートを読みに行かない
+    assert requested == ["base.md", "base.md"]
 
 
 def test_render_instructions_ends_with_exactly_one_newline():

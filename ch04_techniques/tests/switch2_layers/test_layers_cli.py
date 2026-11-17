@@ -1,6 +1,7 @@
 import base64
 import json
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -8,7 +9,11 @@ import pytest
 from switch2_remote.controller_bridge import BridgeStartError
 
 from switch2_layers import cli
-from switch2_layers.app import REASON_INTERRUPTED, LayersParts
+from switch2_layers.app import (
+    REASON_INTERRUPTED,
+    LayersParts,
+    OrchestratorLayersParts,
+)
 from switch2_layers.cli import (
     build_parser,
     create_middle_analyzer,
@@ -54,6 +59,7 @@ from switch2_layers.settings import (
     DEFAULT_THRESHOLD_TASK,
     DeepRunnerChoice,
     MiddleKind,
+    RunMode,
     RunSettings,
     SafetyKind,
     SurfaceKind,
@@ -1597,3 +1603,318 @@ def test_run_passes_the_task_arguments_in_settings(monkeypatch):
     args = run_settings_to_json(settings)
     assert args["threshold_task"] == 0.8
     assert args["task_stuck_seconds"] == 45.0
+
+
+# --- run の型 (--mode) と Orchestrator 型の引数 ---
+
+# Orchestrator 型の run (--software と --user は使わないため付けない)
+ORCHESTRATOR = ["run", "--mode", "orchestrator"]
+INSTRUCTION = "RPG のソフトをユーザー 1 で起動し、冒険を始めてください"
+
+
+def test_run_mode_defaults_to_advisor():
+    args = build_parser().parse_args(RUN)
+    assert args.mode == "advisor"
+    assert run_settings_from_args(args).mode is RunMode.ADVISOR
+
+
+def test_run_orchestrator_defaults_follow_the_issue():
+    args = build_parser().parse_args(ORCHESTRATOR)
+    assert args.mode == "orchestrator"
+    assert args.orchestrator_effort == "medium"
+    assert args.rotate_tokens == 120_000
+    assert args.turn_timeout == 120.0
+    assert args.max_decision_errors == 3
+    assert args.monitor_threshold == 0.5
+    assert args.max_monitor_errors == 5
+    assert args.instruction is None
+    assert args.instruction_file is None
+
+
+def test_run_orchestrator_does_not_need_software_or_user():
+    settings = run_settings_from_args(build_parser().parse_args(ORCHESTRATOR))
+    assert settings.mode is RunMode.ORCHESTRATOR
+    assert settings.software_name == ""
+    assert settings.user_name == ""
+
+
+@pytest.mark.parametrize(
+    "argv, option, message",
+    [
+        ([*RUN, "--mode", "bogus"], "--mode", "invalid choice"),
+        (
+            [*ORCHESTRATOR, "--orchestrator-effort", "bogus"],
+            "--orchestrator-effort",
+            "invalid choice",
+        ),
+        (
+            [*ORCHESTRATOR, "--instruction", "x", "--instruction-file", "y"],
+            "--instruction-file",
+            "not allowed with argument --instruction",
+        ),
+    ],
+    ids=["mode", "orchestrator_effort", "both_instructions"],
+)
+def test_run_rejects_bad_mode_effort_and_both_instructions(
+    argv, option, message, capsys
+):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(argv)
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert option in err
+    assert message in err
+
+
+def test_run_settings_from_args_copy_the_mode_and_orchestrator_values():
+    args = build_parser().parse_args(
+        [
+            *ORCHESTRATOR,
+            "--orchestrator-effort",
+            "xhigh",
+            "--rotate-tokens",
+            "90000",
+            "--turn-timeout",
+            "30.5",
+            "--max-decision-errors",
+            "2",
+            "--monitor-threshold",
+            "0.6",
+            "--max-monitor-errors",
+            "4",
+        ]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.mode is RunMode.ORCHESTRATOR
+    assert settings.orchestrator_effort == "xhigh"
+    assert settings.rotate_tokens == 90_000
+    assert settings.turn_timeout_s == 30.5
+    assert settings.max_decision_errors == 2
+    assert settings.monitor_threshold == 0.6
+    assert settings.max_monitor_errors == 4
+
+
+def must_not_create_app(*args, **kwargs):
+    raise AssertionError("LayersApp must not be created")
+
+
+@pytest.fixture
+def orchestrator_key_without_app(no_hardware, monkeypatch):
+    """実機と LayersApp に触れたらテストを失敗させ、TYPESAFE_API_KEY を置く (API キーの誤りで先に終わらないようにする)。"""
+    monkeypatch.setattr(cli, "LayersApp", must_not_create_app)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\t\n"], ids=["empty", "spaces", "mixed"])
+def test_run_orchestrator_rejects_blank_instruction(
+    orchestrator_key_without_app, tmp_path, capsys, text
+):
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [
+            *ORCHESTRATOR,
+            "--runs-dir",
+            str(runs_dir),
+            "--safety",
+            "fake",
+            "--instruction",
+            text,
+        ]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--instruction" in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "content", [None, "  \n\t\n"], ids=["missing_file", "blank_file"]
+)
+def test_run_orchestrator_rejects_unusable_instruction_file(
+    orchestrator_key_without_app, tmp_path, capsys, content
+):
+    path = tmp_path / "instruction.md"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [
+            *ORCHESTRATOR,
+            "--runs-dir",
+            str(runs_dir),
+            "--safety",
+            "fake",
+            "--instruction-file",
+            str(path),
+        ]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--instruction-file" in captured.err
+    if content is None:
+        assert str(path) in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "extra, option",
+    [
+        (["--monitor-threshold", "1"], "--monitor-threshold"),
+        (["--rotate-tokens", "1000000"], "--rotate-tokens"),
+        (["--turn-timeout", "0"], "--turn-timeout"),
+        (["--max-decision-errors", "0"], "--max-decision-errors"),
+        (["--max-monitor-errors", "0"], "--max-monitor-errors"),
+    ],
+)
+def test_run_orchestrator_range_errors_exit_before_hardware(
+    orchestrator_key_without_app, tmp_path, capsys, extra, option
+):
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [*ORCHESTRATOR, "--runs-dir", str(runs_dir), "--safety", "fake", *extra]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert option in captured.err
+    assert not runs_dir.exists()
+
+
+@pytest.mark.parametrize("key", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_run_orchestrator_needs_typesafe_api_key_even_with_fake_safety(
+    no_hardware, monkeypatch, tmp_path, capsys, key
+):
+    # 監視は常に Jev を使うため、--safety fake でも TYPESAFE_API_KEY が要る
+    if key is not None:
+        monkeypatch.setenv("TYPESAFE_API_KEY", key)
+    monkeypatch.setattr(cli, "LayersApp", must_not_create_app)
+    runs_dir = tmp_path / "runs"
+    code = main([*ORCHESTRATOR, "--runs-dir", str(runs_dir), "--safety", "fake"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "TYPESAFE_API_KEY" in captured.err
+    assert "--mode orchestrator" in captured.err
+    assert not runs_dir.exists()
+
+
+class StubMonitorClient:
+    """監視の Jev のクライアントの偽物 (要求は送らない)。"""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def ask(self, state, questions, images):
+        raise AssertionError("the monitor must not be asked in the cli tests")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class OrchestratorRun:
+    """stub_orchestrator_run が記録するもの。
+
+    created         LayersApp に渡された (settings, parts)
+    clients         create_monitor_client が作った監視のクライアント
+    open_while_run  LayersApp.run の間、監視のクライアントがすべて閉じていなかったか (run のたびに 1 つ)
+    """
+
+    created: list = field(default_factory=list)
+    clients: list[StubMonitorClient] = field(default_factory=list)
+    open_while_run: list[bool] = field(default_factory=list)
+
+
+def stub_orchestrator_run(monkeypatch) -> OrchestratorRun:
+    """--mode orchestrator の run の実機の部品・LayersApp・監視のクライアントを偽物にする。
+
+    advisor 型の部品 (surface・middle・本体の画面の middle) を作ったら、テストを失敗させる。
+    """
+    stub_hardware_and_app(monkeypatch)
+    recorded = OrchestratorRun()
+
+    class StubApp:
+        def __init__(self, settings, parts):
+            recorded.created.append((settings, parts))
+
+        def run(self) -> str:
+            recorded.open_while_run.append(
+                all(not client.closed for client in recorded.clients)
+            )
+            return REASON_INTERRUPTED
+
+    def create_client(environ):
+        client = StubMonitorClient()
+        recorded.clients.append(client)
+        return client
+
+    def must_not_build(*args, **kwargs):
+        raise AssertionError("the advisor parts must not be built")
+
+    monkeypatch.setattr(cli, "LayersApp", StubApp)
+    monkeypatch.setattr(cli, "create_monitor_client", create_client)
+    monkeypatch.setattr(cli, "build_surface_assembly", must_not_build)
+    monkeypatch.setattr(cli, "create_middle_analyzer", must_not_build)
+    monkeypatch.setattr(cli, "create_system_screen_middle", must_not_build)
+    return recorded
+
+
+def test_run_orchestrator_reaches_the_app_without_openai_api_key(monkeypatch):
+    # OPENAI_API_KEY は、autouse の without_api_key が消してある
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    assert main([*ORCHESTRATOR, "--safety", "fake"]) == 0
+    [(settings, parts)] = recorded.created
+    assert settings.mode is RunMode.ORCHESTRATOR
+    assert isinstance(parts, OrchestratorLayersParts)
+    assert parts.initial_instruction is None
+
+
+def test_run_orchestrator_passes_the_instruction_and_the_monitor_client_to_app(
+    monkeypatch,
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    code = main(
+        [
+            *ORCHESTRATOR,
+            "--safety",
+            "fake",
+            "--instruction",
+            INSTRUCTION,
+            "--monitor-threshold",
+            "0.6",
+        ]
+    )
+    assert code == 0
+    [(settings, parts)] = recorded.created
+    assert settings.mode is RunMode.ORCHESTRATOR
+    assert settings.monitor_threshold == 0.6
+    assert isinstance(parts, OrchestratorLayersParts)
+    assert parts.initial_instruction == INSTRUCTION
+    assert isinstance(parts.safety, FakeSafetyChecker)
+    [client] = recorded.clients
+    assert parts.monitor is client
+    # 監視のクライアントは、app が止まった後に閉じる
+    assert recorded.open_while_run == [True]
+    assert client.closed
+
+
+def test_run_orchestrator_passes_the_instruction_file_content_to_app(
+    monkeypatch, tmp_path
+):
+    content = f"# 初期指示\n{INSTRUCTION}\n"
+    path = tmp_path / "instruction.md"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    assert (
+        main([*ORCHESTRATOR, "--safety", "fake", "--instruction-file", str(path)]) == 0
+    )
+    [(_, parts)] = recorded.created
+    assert parts.initial_instruction == content
+    [client] = recorded.clients
+    assert parts.monitor is client
+    assert client.closed

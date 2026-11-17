@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from switch2_layers.deep.deep_types import DocumentKind
+from switch2_layers.orchestrator.claude_session_command import AUTOCOMPACT_MAX_TOKENS
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
 from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.settings import (
@@ -15,6 +16,7 @@ from switch2_layers.settings import (
     DEFAULT_HOLD_MARGIN,
     DEFAULT_MAX_SAFETY_ERRORS,
     DEFAULT_MIDDLE_KIND,
+    DEFAULT_RUN_MODE,
     DEFAULT_SAFETY,
     DEFAULT_SAFETY_INTERVAL_S,
     DEFAULT_SURFACE,
@@ -23,6 +25,7 @@ from switch2_layers.settings import (
     DEFAULT_THRESHOLD_SAFETY,
     DEFAULT_THRESHOLD_TASK,
     OPENAI_API_KEY_ENV,
+    ORCHESTRATOR_EFFORTS,
     SAFETY_INTERVAL_MAX_S,
     SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
@@ -30,12 +33,14 @@ from switch2_layers.settings import (
     DeepRunnerChoice,
     MiddleKind,
     MiddleOnceSettings,
+    RunMode,
     RunSettings,
     SafetyKind,
     SurfaceKind,
     deep_once_settings_errors,
     middle_once_settings_errors,
     openai_api_key_errors,
+    orchestrator_api_key_errors,
     run_settings_errors,
     run_settings_to_json,
     safety_api_key_errors,
@@ -594,3 +599,129 @@ def test_run_settings_to_json_has_the_task_arguments():
     assert value["threshold_task"] == 0.7
     assert value["task_stuck_seconds"] == 12.5
     assert json.loads(json.dumps(value)) == value
+
+
+# --- run の型 (--mode) と Orchestrator 型の値 ---
+
+
+def test_run_mode_values_and_default():
+    assert [mode.value for mode in RunMode] == ["advisor", "orchestrator"]
+    assert DEFAULT_RUN_MODE is RunMode.ADVISOR
+    assert ORCHESTRATOR_EFFORTS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_orchestrator_settings_defaults_follow_the_issue():
+    settings = RunSettings()
+    assert settings.mode is RunMode.ADVISOR
+    assert settings.orchestrator_effort == "medium"
+    assert settings.rotate_tokens == 120_000
+    assert settings.turn_timeout_s == 120.0
+    assert settings.max_decision_errors == 3
+    assert settings.monitor_threshold == 0.5
+    assert settings.max_monitor_errors == 5
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        *({"orchestrator_effort": effort} for effort in ORCHESTRATOR_EFFORTS),
+        {"rotate_tokens": 1},
+        {"rotate_tokens": AUTOCOMPACT_MAX_TOKENS - 1},
+        {"turn_timeout_s": 0.001},
+        {"max_decision_errors": 1},
+        {"monitor_threshold": 0.001},
+        {"monitor_threshold": 0.999},
+        {"max_monitor_errors": 1},
+    ],
+)
+def test_orchestrator_boundary_values_are_valid(changes):
+    settings = RunSettings(mode=RunMode.ORCHESTRATOR, **changes)
+    assert run_settings_errors(settings) == []
+
+
+@pytest.mark.parametrize("mode", list(RunMode))
+@pytest.mark.parametrize(
+    "changes, option",
+    [
+        ({"orchestrator_effort": "huge"}, "--orchestrator-effort"),
+        ({"rotate_tokens": 0}, "--rotate-tokens"),
+        ({"rotate_tokens": 1_000_000}, "--rotate-tokens"),
+        ({"turn_timeout_s": 0.0}, "--turn-timeout"),
+        ({"turn_timeout_s": math.nan}, "--turn-timeout"),
+        ({"turn_timeout_s": math.inf}, "--turn-timeout"),
+        ({"max_decision_errors": 0}, "--max-decision-errors"),
+        ({"monitor_threshold": 0.0}, "--monitor-threshold"),
+        ({"monitor_threshold": 1.0}, "--monitor-threshold"),
+        ({"monitor_threshold": math.nan}, "--monitor-threshold"),
+        ({"max_monitor_errors": 0}, "--max-monitor-errors"),
+    ],
+)
+def test_orchestrator_out_of_range_values_are_reported_with_option_name(
+    mode, changes, option
+):
+    # 範囲は mode に依らず確かめる (advisor でも誤りにする)
+    errors = run_settings_errors(RunSettings(mode=mode, **changes))
+    assert len(errors) == 1
+    assert option in errors[0]
+
+
+def test_orchestrator_errors_follow_the_order_of_the_arguments():
+    errors = run_settings_errors(
+        RunSettings(
+            max_monitor_errors=0,
+            monitor_threshold=1.0,
+            max_decision_errors=0,
+            turn_timeout_s=0.0,
+            rotate_tokens=0,
+            orchestrator_effort="huge",
+            stuck_advice_seconds=0.0,
+        )
+    )
+    assert len(errors) == 7
+    assert "--stuck-advice-seconds" in errors[0]
+    assert "--orchestrator-effort" in errors[1]
+    assert "--rotate-tokens" in errors[2]
+    assert "--turn-timeout" in errors[3]
+    assert "--max-decision-errors" in errors[4]
+    assert "--monitor-threshold" in errors[5]
+    assert "--max-monitor-errors" in errors[6]
+
+
+def test_run_settings_to_json_writes_mode_as_string_with_the_orchestrator_values():
+    value = run_settings_to_json(
+        RunSettings(
+            mode=RunMode.ORCHESTRATOR,
+            orchestrator_effort="high",
+            rotate_tokens=90_000,
+            turn_timeout_s=30.0,
+            max_decision_errors=2,
+            monitor_threshold=0.6,
+            max_monitor_errors=4,
+        )
+    )
+    # run.jsonl の start の args に、値の文字列で書く (どちらの型で動かしたかを残す)
+    assert value["mode"] == "orchestrator"
+    assert type(value["mode"]) is str
+    assert value["orchestrator_effort"] == "high"
+    assert value["rotate_tokens"] == 90_000
+    assert value["turn_timeout_s"] == 30.0
+    assert value["max_decision_errors"] == 2
+    assert value["monitor_threshold"] == 0.6
+    assert value["max_monitor_errors"] == 4
+    assert json.loads(json.dumps(value)) == value
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [{}, {"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": " \n"}, {"OTHER": "x"}],
+)
+def test_orchestrator_without_typesafe_api_key_is_an_error(environ):
+    errors = orchestrator_api_key_errors(environ)
+    assert len(errors) == 1
+    assert "--mode orchestrator" in errors[0]
+    assert TYPESAFE_API_KEY_ENV in errors[0]
+
+
+def test_orchestrator_with_typesafe_api_key_has_no_error():
+    # OPENAI_API_KEY は確かめない
+    assert orchestrator_api_key_errors({"TYPESAFE_API_KEY": "ts-x"}) == []

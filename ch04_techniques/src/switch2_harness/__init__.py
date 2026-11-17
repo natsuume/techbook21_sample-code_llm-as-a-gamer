@@ -4,8 +4,8 @@
 すべてのコマンドを作業ディレクトリーの records/events.jsonl に記録する。
 先行研究の手法を「要素 (feature)」として有効/無効を切り替えられるようにし、
 要素の有効/無効で変わるのは、CLAUDE.md の節と、エージェントが使えるサブコマンドと、
-エージェント用のサブコマンドの出力だけにする。
-記録 (records/) は要素の有効/無効によらず常に取る。
+エージェント用のサブコマンドの出力と、run の間の画面の記録 (records/screen-samples/) だけにする。
+それ以外の記録 (records/) は要素の有効/無効によらず常に取る。
 
 モジュール:
     cli               argparse でサブコマンドを解釈し、各処理へ振り分ける (switch2-harness)
@@ -21,6 +21,7 @@
     screen_change     2 枚の画像の変化の割合と PNG の読み込み
     session_report    イベントから実験の集計を作り、表示用のテキストにする
     action_history    行動履歴の要素: look の後に表示する、直近の行動 (look と press) の行を作る
+    screen_recorder   停滞の知らせの要素: run の間に裏で画面を撮り、縮小画像と時刻を記録する
     agent_launcher    claude -p の起動引数の組み立てと、時間を区切った起動
     process_tree      SIGKILL で止める claude の子孫の控えと、pid の再利用を見分けた停止
     signal_guard     run の間の SIGTERM・SIGHUP の例外化と、後片付けの間の割り込みの無視

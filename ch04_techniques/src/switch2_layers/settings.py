@@ -9,8 +9,12 @@ middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キー�
 --deep (DeepRunnerChoice) で選ぶ。安全の監視の実装は --safety (SafetyKind) で選ぶ。jev に要る API キーは surface と
 同じ環境変数 TYPESAFE_API_KEY_ENV から読む (safety_api_key_errors で有無を確かめる)。
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
-run の指定のソフトの名前 (--software) と指定のユーザーの名前 (--user) は、cli が必須の引数にして、空か空白だけの値を
-引数の誤りにする (RunSettings の既定値の空文字列は、テストで作るときのため)。
+run の型は --mode (RunMode) で選ぶ。advisor は surface・middle・deep の 3 層、orchestrator は主ループ
+(orchestrator.main_loop) と、操作の実行と監視 (orchestrator.orchestrator_controller) を動かす。orchestrator の監視は
+常に Jev を使うため、--safety に依らず環境変数 TYPESAFE_API_KEY_ENV が要る (orchestrator_api_key_errors で有無を確かめる)。
+run の指定のソフトの名前 (--software) と指定のユーザーの名前 (--user) は、advisor では cli が必須の引数にして、空か
+空白だけの値を引数の誤りにする。orchestrator では使わず、無ければ空文字列にする (RunSettings の既定値の空文字列は、
+テストで作るときと orchestrator のため)。
 """
 
 import dataclasses
@@ -22,6 +26,19 @@ from pathlib import Path
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
+from switch2_layers.orchestrator.claude_session_command import (
+    AUTOCOMPACT_MAX_TOKENS,
+    ORCHESTRATOR_EFFORT,
+)
+from switch2_layers.orchestrator.main_loop import (
+    DEFAULT_MAX_DECISION_ERRORS,
+    DEFAULT_ROTATE_TOKENS,
+    DEFAULT_TURN_TIMEOUT_S,
+)
+from switch2_layers.orchestrator.orchestrator_controller import (
+    DEFAULT_MAX_MONITOR_ERRORS,
+    DEFAULT_MONITOR_THRESHOLD,
+)
 from switch2_layers.progress.screen_progress import DEFAULT_PROGRESS_WINDOW_S
 from switch2_layers.progress.stuck_advice_trigger import DEFAULT_STUCK_ADVICE_SECONDS
 from switch2_layers.surface.jev_client import API_KEY_ENV as JEV_API_KEY_ENV
@@ -112,12 +129,27 @@ DEFAULT_THRESHOLD_TASK = 0.5
 DEFAULT_TASK_STUCK_SECONDS = 30.0
 
 
+class RunMode(StrEnum):
+    """run の型 (--mode の値)。"""
+
+    ADVISOR = "advisor"  # surface・middle・deep の 3 層 (app.LayersParts を組み立てる)
+    # 主ループと、操作の実行と監視 (app.OrchestratorLayersParts を組み立てる)
+    ORCHESTRATOR = "orchestrator"
+
+
+DEFAULT_RUN_MODE = RunMode.ADVISOR
+# --orchestrator-effort で選べる値 (主ループの Claude Code の --effort に渡す)
+ORCHESTRATOR_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
 @dataclass(frozen=True)
 class RunSettings:
     """run の起動引数。
 
-    software_name               指定のソフトの名前 (--software。必須)。本体の画面の middle の入力に入れる
-    user_name                   指定のユーザーの名前 (--user。必須)。本体の画面の middle の入力に入れる
+    software_name               指定のソフトの名前 (--software。advisor では必須)。本体の画面の middle の入力に入れる。
+                                orchestrator では使わない
+    user_name                   指定のユーザーの名前 (--user。advisor では必須)。本体の画面の middle の入力に入れる。
+                                orchestrator では使わない
     runs_dir                    実行ディレクトリーを作る親 (--runs-dir、既定 runs)
     interval_fps                一定間隔のフレームの保存のフレームレート (--interval-fps、既定 5。0 より大きく INTERVAL_FPS_MAX 以下)
     interval_width              一定間隔のフレームを縮小する幅 (--interval-width、既定 640。INTERVAL_WIDTH_MIN〜INTERVAL_WIDTH_MAX)
@@ -159,6 +191,22 @@ class RunSettings:
     task_stuck_seconds          現在の場面の最も古いタスクの続いた秒数がこれを超えたら、間隔を待たずに middle を呼ぶ
                                 (きっかけ stuck)。超えたまま続く間は、この秒数ごとに呼ぶ (--task-stuck-seconds、既定 30。
                                 0 より大きい有限の値)
+    mode                     run の型 (--mode、既定 advisor。advisor か orchestrator)
+    orchestrator_effort         主ループの Claude Code の --effort の値 (--orchestrator-effort、既定
+                                claude_session_command.ORCHESTRATOR_EFFORT の medium。ORCHESTRATOR_EFFORTS のどれか)
+    rotate_tokens               主ループのセッションの使用量がこれを超えたら、引き継ぎを書かせてセッションを入れ替える
+                                (--rotate-tokens、既定 main_loop.DEFAULT_ROTATE_TOKENS の 120000。1 以上で
+                                claude_session_command.AUTOCOMPACT_MAX_TOKENS 未満)
+    turn_timeout_s              主ループの 1 ターンの上限の秒数 (--turn-timeout、既定 main_loop.DEFAULT_TURN_TIMEOUT_S の
+                                120。0 より大きい有限の値)
+    max_decision_errors         主ループの JSON の誤りが続けてこの回数になったら全体を止める (--max-decision-errors、
+                                既定 main_loop.DEFAULT_MAX_DECISION_ERRORS の 3。1 以上)
+    monitor_threshold           監視の当たりのしきい値 (--monitor-threshold、既定
+                                orchestrator_controller.DEFAULT_MONITOR_THRESHOLD の 0.5。0 より大きく 1 未満)
+    max_monitor_errors          監視の Jev の失敗がこの回数続いたら監視を止める (--max-monitor-errors、既定
+                                orchestrator_controller.DEFAULT_MAX_MONITOR_ERRORS の 5。1 以上)
+    orchestrator_effort から max_monitor_errors までの 6 つは orchestrator だけで使う。advisor では使わないが、範囲は
+    mode に依らず確かめる。
     """
 
     software_name: str = ""
@@ -187,6 +235,13 @@ class RunSettings:
     progress_window_s: float = DEFAULT_PROGRESS_WINDOW_S
     stuck_advice_seconds: float = DEFAULT_STUCK_ADVICE_SECONDS
     task_stuck_seconds: float = DEFAULT_TASK_STUCK_SECONDS
+    mode: RunMode = DEFAULT_RUN_MODE
+    orchestrator_effort: str = ORCHESTRATOR_EFFORT
+    rotate_tokens: int = DEFAULT_ROTATE_TOKENS
+    turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S
+    max_decision_errors: int = DEFAULT_MAX_DECISION_ERRORS
+    monitor_threshold: float = DEFAULT_MONITOR_THRESHOLD
+    max_monitor_errors: int = DEFAULT_MAX_MONITOR_ERRORS
 
 
 @dataclass(frozen=True)
@@ -233,6 +288,10 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     safety は値の型 (SafetyKind) で決まるため確かめない。
     --threshold-task は 0 以上 1 以下 (nan は誤り)。
     --progress-window・--stuck-advice-seconds・--task-stuck-seconds は 0 より大きい有限の値。
+    Orchestrator 型の 6 つの値 (_orchestrator_errors) は、mode に依らず確かめる: --orchestrator-effort は
+    ORCHESTRATOR_EFFORTS のどれか、--rotate-tokens は 1 以上で AUTOCOMPACT_MAX_TOKENS 未満、--turn-timeout は 0 より
+    大きい有限の値、--max-decision-errors と --max-monitor-errors は 1 以上、--monitor-threshold は 0 より大きく 1 より
+    小さい値 (0・1・nan は誤り)。mode は値の型 (RunMode) で決まるため確かめない。
     """
     errors: list[str] = []
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
@@ -321,6 +380,41 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         errors.append(
             "--task-stuck-seconds must be a finite number more than 0: "
             f"{settings.task_stuck_seconds}"
+        )
+    errors += _orchestrator_errors(settings)
+    return errors
+
+
+def _orchestrator_errors(settings: RunSettings) -> list[str]:
+    """Orchestrator 型の 6 つの値の範囲の誤りを、RunSettings の属性の順のメッセージのリストにする。"""
+    errors: list[str] = []
+    if settings.orchestrator_effort not in ORCHESTRATOR_EFFORTS:
+        errors.append(
+            f"--orchestrator-effort must be one of {', '.join(ORCHESTRATOR_EFFORTS)}: "
+            f"{settings.orchestrator_effort!r}"
+        )
+    if not 1 <= settings.rotate_tokens < AUTOCOMPACT_MAX_TOKENS:
+        errors.append(
+            f"--rotate-tokens must be 1 or more and less than {AUTOCOMPACT_MAX_TOKENS}: "
+            f"{settings.rotate_tokens}"
+        )
+    if not _is_finite_positive(settings.turn_timeout_s):
+        errors.append(
+            "--turn-timeout must be a finite number more than 0: "
+            f"{settings.turn_timeout_s}"
+        )
+    if settings.max_decision_errors < 1:
+        errors.append(
+            f"--max-decision-errors must be 1 or more: {settings.max_decision_errors}"
+        )
+    if not 0.0 < settings.monitor_threshold < 1.0:
+        errors.append(
+            "--monitor-threshold must be more than 0 and less than 1: "
+            f"{settings.monitor_threshold}"
+        )
+    if settings.max_monitor_errors < 1:
+        errors.append(
+            f"--max-monitor-errors must be 1 or more: {settings.max_monitor_errors}"
         )
     return errors
 
@@ -428,12 +522,33 @@ def safety_api_key_errors(safety: SafetyKind, environ: Mapping[str, str]) -> lis
     ]
 
 
+def orchestrator_api_key_errors(environ: Mapping[str, str]) -> list[str]:
+    """--mode orchestrator に要る API キーが環境変数 environ にあるかを確かめ、無ければメッセージのリストを返す。
+
+    environ の TYPESAFE_API_KEY_ENV が無いか、空か空白だけなら、--mode orchestrator と TYPESAFE_API_KEY を含む
+    メッセージを 1 つ返す (監視は常に Jev を使うため、--safety fake でも要る。キーなしで動かす方法は示さない)。
+    キーがあれば空のリスト。メッセージに API キーの値は含めない。cli は --mode orchestrator のとき、実機と実行
+    ディレクトリーに触れる前にこれを確かめ、誤りがあれば終了コード 2 で終わる。
+    """
+    if environ.get(TYPESAFE_API_KEY_ENV, "").strip():
+        return []
+    return [
+        (
+            f"--mode {RunMode.ORCHESTRATOR.value} needs the environment variable "
+            f"{TYPESAFE_API_KEY_ENV} for the monitor, which always uses Jev "
+            "(even with --safety fake)"
+        )
+    ]
+
+
 def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
-    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety は値の文字列。
-    middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake") にする。
-    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。
+    キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・surface・deep・safety・mode は値の
+    文字列。middle は "fake" / "luna"、surface は "jev" / "fake"、deep は "claude" / "fake"、safety は "jev" / "fake"、
+    mode は "advisor" / "orchestrator") にする。
+    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値は、
+    mode に依らず入れる。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
@@ -441,4 +556,5 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value["surface"] = settings.surface.value
     value["deep"] = settings.deep.value
     value["safety"] = settings.safety.value
+    value["mode"] = settings.mode.value
     return value
