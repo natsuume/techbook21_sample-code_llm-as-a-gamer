@@ -7,6 +7,7 @@ ID は `scene-` と 3 桁の連番 (1000 番目からは 4 桁)。一覧に足�
 """
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from switch2_layers.file_io import write_json_atomic
 from switch2_layers.notes.note_paths import is_scene_id
 
 SCENE_ID_PREFIX = "scene-"
+# 名前の末尾の場面 ID「(scene-<数字>)」。直前が空白か、文字列の先頭のもの (normalize_scene_name で取り除く)
+TRAILING_SCENE_ID_PATTERN = re.compile(rf"(?:^|\s)\({SCENE_ID_PREFIX}\d+\)$")
 
 
 @dataclass(frozen=True)
@@ -76,8 +79,17 @@ def write_scene_labels(path: Path, labels: Sequence[SceneLabel]) -> None:
 
 
 def normalize_scene_name(name: str) -> str:
-    """場面名の比較と記録に使う形 (前後の空白を除いたもの) を返す。"""
-    return name.strip()
+    """場面名の比較と記録に使う形を返す。
+
+    前後の空白を除き、末尾の場面 ID「(scene-<数字>)」(直前が空白か、文字列の先頭のもの) を取り除く。続けて付いて
+    いれば、すべて取り除き、残った前後の空白も除く。middle が入力の「名前 (場面 ID)」の形を場面名として書き返しても、
+    一覧の名前と同じにするため。全角の括弧、末尾以外の場面 ID、直前に空白の無い場面 ID は取り除かない。
+    例: 「メインメニュー (scene-004) (scene-005)」→「メインメニュー」、「(scene-004)」→ 空文字列
+    """
+    normalized = name.strip()
+    while (match := TRAILING_SCENE_ID_PATTERN.search(normalized)) is not None:
+        normalized = normalized[: match.start()].strip()
+    return normalized
 
 
 def find_scene_id(labels: Sequence[SceneLabel], name: str) -> str | None:
@@ -108,7 +120,7 @@ def resolve_scene(
     - 一覧にあれば (find_scene_id)、その SceneLabel と False を返す
     - 無ければ SceneLabel(next_scene_id(labels), normalize_scene_name(name), first_seen_t) と True を返す
       (一覧には足さない。足すのは add_scene_label)
-    name が空か空白だけなら ValueError にする。
+    normalize_scene_name(name) が空 (空・空白だけ・場面 ID だけ) なら ValueError にする。
     """
     normalized = normalize_scene_name(name)
     if not normalized:

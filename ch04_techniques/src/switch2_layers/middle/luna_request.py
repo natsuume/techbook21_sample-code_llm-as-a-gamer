@@ -153,15 +153,20 @@ def frame_label(t: float) -> str:
 
 
 def describe_scene_labels(labels: Sequence[SceneLabel]) -> str:
-    """場面ラベルの一覧を、1 件 1 行「- <name> (<id>。初めて名前を付けた時刻 t=<first_seen_t>)」の文にする。
+    """場面ラベルの一覧を、1 件につき次の 2 行の文にする (2 行目は 2 字下げる)。
 
+        - <name>
+          場面 ID: <id>、初めて名前を付けた時刻: t=<first_seen_t>
+
+    名前の後ろの括弧に場面 ID を書かないのは、middle が名前と一緒に場面 ID を場面名として書き返さないようにするため。
     t は format_frame_label の形。一覧が空なら EMPTY_TEXT を返す。
     """
     if not labels:
         return EMPTY_TEXT
     return "\n".join(
-        f"- {label.name} ({label.id}。初めて名前を付けた時刻 "
-        f"{format_frame_label(label.first_seen_t)})"
+        f"- {label.name}\n"
+        f"  場面 ID: {label.id}、初めて名前を付けた時刻: "
+        f"{format_frame_label(label.first_seen_t)}"
         for label in labels
     )
 
@@ -208,7 +213,8 @@ def describe_previous_state(state: MiddleState | None) -> str:
     """前回の middle の出力を、次の行の文にする。state が None なら EMPTY_TEXT を返す。
 
         作成時刻: t=<generated_t> (入力の時刻 t=<based_on_t>)
-        場面: <scene_name> (<scene_id>)        場面が決まっていなければ「場面: (決まっていない)」
+        場面: <scene_name>                     場面が決まっていなければ「場面: (決まっていない)」の 1 行だけ
+        場面 ID: <scene_id>                    (名前の後ろの括弧に書かない。describe_scene_labels と同じ理由)
         止まっているか: はい | いいえ
         詰まり方: <stuck_description>          空なら EMPTY_TEXT
         surface の待ち時間: <surface_wait_s> 秒        surface_wait_s は書式 g (例: 0.4)
@@ -219,16 +225,16 @@ def describe_previous_state(state: MiddleState | None) -> str:
     if state is None:
         return EMPTY_TEXT
     if state.scene_id is None or state.scene_name is None:
-        scene = "(決まっていない)"
+        scene_lines = ["場面: (決まっていない)"]
     else:
-        scene = f"{state.scene_name} ({state.scene_id})"
+        scene_lines = [f"場面: {state.scene_name}", f"場面 ID: {state.scene_id}"]
     return "\n".join(
         [
             (
                 f"作成時刻: {format_frame_label(state.generated_t)} "
                 f"(入力の時刻 {format_frame_label(state.based_on_t)})"
             ),
-            f"場面: {scene}",
+            *scene_lines,
             f"止まっているか: {'はい' if state.is_stuck else 'いいえ'}",
             f"詰まり方: {state.stuck_description or EMPTY_TEXT}",
             f"surface の待ち時間: {state.surface_wait_s:g} 秒",

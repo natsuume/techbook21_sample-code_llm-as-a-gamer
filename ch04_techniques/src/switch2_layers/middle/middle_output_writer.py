@@ -50,6 +50,7 @@ from switch2_layers.notes.note_paths import SCENE_LABELS_FILE
 from switch2_layers.notes.scene_labels import (
     SceneLabel,
     add_scene_label,
+    normalize_scene_name,
     read_scene_labels,
     resolve_scene,
 )
@@ -114,9 +115,10 @@ def write_middle_output(
     関数 (run では middle.middle_trigger.MiddleTrigger.notify)。None なら知らせない。stop は止める合図。None なら
     合図を確かめない。
 
-    1. output.scene_name が空でなければ (前後の空白を除いて)、notes.scene_labels.read_scene_labels で一覧を読み、
-       notes.scene_labels.resolve_scene(一覧, scene_name, first_seen_t=middle_input.t) で場面と、新しい場面かを決める
-       (一覧は書き換えない)。scene_name が None か空なら、場面 ID も場面名も None (一覧は書かない)
+    1. output.scene_name を notes.scene_labels.normalize_scene_name で整えた名前 (前後の空白と末尾の場面 ID を
+       除いたもの) が空でなければ、notes.scene_labels.read_scene_labels で一覧を読み、
+       notes.scene_labels.resolve_scene(一覧, 整えた名前, first_seen_t=middle_input.t) で場面と、新しい場面かを決める
+       (一覧は書き換えない)。scene_name が None か、整えた名前が空なら、場面 ID も場面名も None (一覧は書かない)
     2. stop を確かめてから、キューの部品を次の順に操作する (時刻はどれも generated_t):
        a. board.set_current_scene(1 の場面 ID か None, generated_t)
        b. reasons に cancel_requested か stuck があるか、output.is_stuck が真なら、
@@ -132,7 +134,7 @@ def write_middle_output(
           タスクがある回) は足さない (new_tasks_used = False)
        d. b で 1 つ以上取り消し、c の後に 1 の場面 ID があって board.tasks(1 の場面 ID, generated_t) が空なら、
           trigger_notify("queue_empty") を呼ぶ (trigger_notify が None なら呼ばない)
-    3. MiddleState(generated_t, based_on_t=middle_input.t, scene_id, scene_name (前後の空白を除いたもの), is_stuck,
+    3. MiddleState(generated_t, based_on_t=middle_input.t, scene_id, scene_name (1 の場面の一覧の名前), is_stuck,
        stuck_description, surface_wait_s, timeline, surface_rows_offset=middle_input.surface_rows_offset,
        operations_rows_offset=middle_input.operations_rows_offset, tasks_rows_offset=middle_input.tasks_rows_offset,
        place_name, current_tile, press_home=output.press_home) を middle/state.json に置き換えて書く。
@@ -149,7 +151,7 @@ def write_middle_output(
     """
     scene: SceneLabel | None = None
     is_new = False
-    scene_name = (output.scene_name or "").strip()
+    scene_name = normalize_scene_name(output.scene_name or "")
     if scene_name:
         labels = read_scene_labels(paths.notes_dir / SCENE_LABELS_FILE)
         scene, is_new = resolve_scene(labels, scene_name, first_seen_t=middle_input.t)

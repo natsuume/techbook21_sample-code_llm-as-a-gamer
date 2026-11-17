@@ -273,9 +273,40 @@ def test_another_new_scene_gets_next_id(tmp_path):
     assert result.new_scene == SceneLabel("scene-002", "草原", 6.0)
 
 
+@pytest.mark.parametrize("name", ["町 (scene-001)", "町 (scene-001) (scene-002)"])
+def test_scene_name_with_scene_id_is_the_known_scene(tmp_path, name):
+    # middle が入力の「名前 (場面 ID)」を書き返しても、新しい場面を作らない
+    root = make_run(tmp_path)
+    write_labels(root, "町")
+    labels_before = (root / "notes" / "scene_labels.json").read_bytes()
+    result = write(RunPaths(root), middle_input(6.0), output(name), 6.5)
+    assert result is not None
+    assert result.new_scene is None
+    assert result.state.scene_id == "scene-001"
+    # state.json には一覧の名前を書く
+    assert result.state.scene_name == "町"
+    assert read_json(root / "middle" / "state.json")["scene_name"] == "町"
+    assert (root / "notes" / "scene_labels.json").read_bytes() == labels_before
+
+
+def test_new_scene_name_with_scene_id_is_added_without_it(tmp_path):
+    root = make_run(tmp_path)
+    write_labels(root, "町")
+    result = write(RunPaths(root), middle_input(6.0), output("草原 (scene-001)"), 6.5)
+    assert result is not None
+    assert result.new_scene == SceneLabel("scene-002", "草原", 6.0)
+    assert result.state.scene_name == "草原"
+    assert read_json(root / "notes" / "scene_labels.json")["scenes"][-1] == {
+        "id": "scene-002",
+        "name": "草原",
+        "first_seen_t": 6.0,
+    }
+
+
 def test_no_scene_name_writes_only_state(tmp_path):
     root = make_run(tmp_path)
-    for name in [None, "", "   "]:
+    # 場面 ID だけの名前は、取り除くと空になる
+    for name in [None, "", "   ", "(scene-004)"]:
         result = write(RunPaths(root), middle_input(2.0), output(name), 2.5)
         assert result is not None
         assert result.new_scene is None

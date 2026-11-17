@@ -79,12 +79,53 @@ def test_normalize_scene_name():
     assert normalize_scene_name("  町 \n") == "町"
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("メインメニュー (scene-004)", "メインメニュー"),
+        # 続けて付いた場面 ID は、すべて取り除く
+        ("メインメニュー (scene-004) (scene-005)", "メインメニュー"),
+        ("メインメニュー (scene-1000)", "メインメニュー"),
+        # 取り除いた後に残った前後の空白も除く
+        (" 町  (scene-001) \n", "町"),
+        # 場面 ID だけなら空になる
+        ("(scene-004)", ""),
+    ],
+)
+def test_normalize_scene_name_removes_trailing_scene_ids(name, expected):
+    assert normalize_scene_name(name) == expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # 末尾以外の場面 ID
+        "(scene-004) 町",
+        "町 (scene-004) の前",
+        # 全角の括弧
+        "町（scene-004）",
+        # 直前に空白が無い
+        "町(scene-004)",
+        # 場面 ID の形でない
+        "町 (scene-abc)",
+        "町 (2 階)",
+    ],
+)
+def test_normalize_scene_name_keeps_other_parentheses(name):
+    assert normalize_scene_name(name) == name
+
+
 def test_find_scene_id():
     labels = [TOWN, FIELD]
     assert find_scene_id(labels, "草原") == "scene-002"
     assert find_scene_id(labels, " 町 ") == "scene-001"
     assert find_scene_id(labels, "洞窟") is None
     assert find_scene_id([], "町") is None
+
+
+def test_find_scene_id_ignores_trailing_scene_ids():
+    assert find_scene_id([TOWN, FIELD], "町 (scene-001)") == "scene-001"
+    assert find_scene_id([TOWN, FIELD], "町 (scene-001) (scene-003)") == "scene-001"
 
 
 def test_next_scene_id():
@@ -107,7 +148,18 @@ def test_resolve_scene_returns_existing_scene():
     assert resolve_scene([TOWN, FIELD], " 町 ", 99.0) == (TOWN, False)
 
 
-@pytest.mark.parametrize("name", ["", "   ", "\n"])
+def test_resolve_scene_ignores_trailing_scene_ids():
+    # middle が入力の「名前 (場面 ID)」を書き返しても、一覧の場面になる
+    assert resolve_scene([TOWN, FIELD], "町 (scene-001)", 99.0) == (TOWN, False)
+    assert resolve_scene([TOWN, FIELD], "町 (scene-001) (scene-003)", 99.0) == (
+        TOWN,
+        False,
+    )
+    # 新しい場面の名前は、場面 ID を取り除いた後の名前にする
+    assert resolve_scene([TOWN], "草原 (scene-001)", 30.0) == (FIELD, True)
+
+
+@pytest.mark.parametrize("name", ["", "   ", "\n", "(scene-004)", " (scene-004) "])
 def test_resolve_scene_rejects_blank_name(name):
     with pytest.raises(ValueError):
         resolve_scene([TOWN], name, 1.0)
