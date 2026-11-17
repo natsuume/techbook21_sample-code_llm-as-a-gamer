@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from switch2_harness.features import Feature, WritableFile
+from switch2_harness.features import STAGNATION_ALERT_FEATURE, Feature, WritableFile
 from switch2_harness.workspace import WorkspacePaths
 
 # テスト用の要素。本物の FEATURES に左右されずに、複数の要素の順やサブコマンドの追加を確かめるため、
@@ -29,6 +29,15 @@ FAKE_NOTES = Feature(
     writable_files=(WritableFile(name="memo.md", template_file="memo-initial.md"),),
 )
 FAKE_FEATURES: tuple[Feature, ...] = (FAKE_HISTORY, FAKE_NOTES)
+
+# テスト用の、CLAUDE.md に節を足さない要素 (instruction_file が None)。名前は本物の停滞の知らせと同じで、
+# run が画面を記録するかの判定 (要素の名前で決まる) にも使う。FAKE_FEATURES には含めず、使うテストで available に足す
+FAKE_STAGNATION_ALERT = Feature(
+    name=STAGNATION_ALERT_FEATURE,
+    title="停滞の知らせ",
+    instruction_file=None,
+    commands=(),
+)
 
 # テスト用のテンプレート (instructions/ の下のファイル名 → 本文)
 # memo-initial.md の $goal は、書き換えられるファイルの最初の内容が置換されないことを確かめるため

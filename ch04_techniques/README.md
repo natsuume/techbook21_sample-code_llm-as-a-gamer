@@ -985,6 +985,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
 | `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
 | `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
+| `records/screen-samples/run-<NNN>/` | 停滞の知らせ (`stagnation-alert`) を有効にしたときだけ作られる。`run` の間に裏で撮った画面の記録 (「停滞の知らせ」の節) |
 
 ### サブコマンド
 
@@ -1094,12 +1095,13 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 
 ### 要素
 
-要素は `init --enable <名前>` で有効にします。有効にした要素は `harness.json` に記録され、`CLAUDE.md` にその要素の節が加わります。
+要素は `init --enable <名前>` で有効にします。有効にした要素は `harness.json` に記録されます。停滞の知らせ (`stagnation-alert`) を除き、`CLAUDE.md` にその要素の節が加わります。
 
 | 名前 | 内容 |
 |---|---|
 | `action-history` | 行動履歴。`look` の出力に、直近の行動と、`press` の前後の画面の変化を付けます |
 | `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
+| `stagnation-alert` | 停滞の知らせ。今の実装は、`run` の間に裏で画面を撮り、縮小した画像と時刻を記録するだけです。エージェントへの知らせは出しません |
 
 #### 行動履歴 (`action-history`)
 
@@ -1137,6 +1139,21 @@ ok /home/user/ch04_techniques/plays/honogurashi/frames/000044.png
 | 今の状況と次にやること | 今の場面と、次に試すこと。状況が変わったら書き直す |
 
 `notes.md` への書き込みは `records/events.jsonl` には記録されません。Write・Edit の呼び出しは `records/agent.jsonl` (stream-json) に残ります。
+
+#### 停滞の知らせ (`stagnation-alert`)
+
+`run` の間、ハーネスが裏で 0.5 秒おきにデーモンへ `shot` を送って画面を撮ります。撮った画面は 160x90 のグレースケールに縮小し、時刻と一緒に `records/screen-samples/run-<NNN>/` に書きます。`run` を実行するたびに、番号を 1 つ増やしたディレクトリーを作ります。エージェントには何も知らせず、`CLAUDE.md` にも節を足しません。この記録は、先へ進めずに同じ画面のまわりで時間を使っている状態 (停滞) を、画面からどう見分けるかを決めるために使います。
+
+| パス (`run-<NNN>/` の中) | 内容 |
+|---|---|
+| `samples.jsonl` | 撮影ごとに 1 行の JSON。成功は `{"index": 番号, "time": 時刻, "file": ファイル名}`、失敗は `{"time": 時刻, "error": デーモンの応答}`。時刻は、デーモンの応答を受け取った後の `time.time()` の値です |
+| `000001.png` から | 縮小した画像。成功した撮影ごとの連番で、失敗した撮影では番号を進めません |
+| `shot.png` | デーモンに元の大きさで保存させる一時ファイル。撮影のたびに上書きし、記録を止めると消します |
+
+- 撮影の間隔は、撮影を始めてから次の撮影を始めるまでで数えます。撮影に 0.5 秒以上かかったときは待たずに次を撮ります。時計が戻ったときも、0.5 秒より長くは待ちません
+- 裏の撮影は、エージェントの `look`・`press` と同じデーモンに送ります。デーモンは接続を 1 つずつ順に処理します
+- デーモンの応答を 5 秒待っても返らない撮影は、失敗として次の撮影に進みます
+- 記録は、最初に Claude Code を起動する前に始まり、後片付けの `up ALL` の後か、`run` が中断されたときに止まります
 
 ### 既知の制限
 

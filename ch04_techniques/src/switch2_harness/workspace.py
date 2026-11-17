@@ -5,7 +5,8 @@
       harness.json   設定 (harness_config)
       CLAUDE.md      エージェントへの指示 (instructions)
       <要素のファイル>  要素が置き、エージェントが書き換えられるファイル (features.WritableFile。例: notes.md)
-      records/       events.jsonl (全コマンドの記録)、agent.jsonl (claude -p の stream-json)、agent-stderr.log
+      records/       events.jsonl (全コマンドの記録)、agent.jsonl (claude -p の stream-json)、agent-stderr.log、
+                     screen-samples/ (停滞の知らせの要素を有効にしたときの、run ごとの画面の記録。screen_recorder)
       frames/        撮影した PNG (000001.png から連番)
 """
 
