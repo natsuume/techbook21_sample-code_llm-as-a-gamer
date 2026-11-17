@@ -2,8 +2,9 @@
 
 要素は先行研究の手法を 1 つずつ足したもので、有効にすると、要素によって、CLAUDE.md に節が加わるか、
 エージェントが使えるサブコマンドが増えるか、エージェントが書き換えられるファイルが増えるか、
-サブコマンドの出力が変わる (行動履歴と停滞の知らせ。停滞の知らせは、run の間に裏で撮った画面をもとに、
-look の出力に知らせの行を足す)。
+サブコマンドの出力が変わる (行動履歴と停滞の知らせと複数フレーム。停滞の知らせは、run の間に裏で撮った画面をもとに、
+look の出力に知らせの行を足す。複数フレームは、look のときに続けて撮った画面を縮小して 1 枚に並べた画像を保存し、
+look の出力にそのパスの行を足す)。
 すべての要素を無効にした状態が、第3章と同じ基準条件になる。
 """
 
@@ -53,6 +54,10 @@ NOTES_FILE_NAME = "notes.md"
 # 撮影ごとに新しい画面かを判定する。新しい画面が 120 秒出ていないと、look が知らせの行を表示する (stagnation_alert)
 STAGNATION_ALERT_FEATURE = "stagnation-alert"
 
+# 複数フレームの要素の名前。有効にすると、look が 0.2 秒おきに 6 回画面を撮り、6 枚を縮小して 1 枚に並べた画像を
+# multi-frames/ に保存して、そのパスの行を表示する (multi_frame)
+MULTI_FRAME_FEATURE = "multi-frame"
+
 # 利用できる要素の一覧。この順が CLAUDE.md の節の順、サブコマンドの順、書き換えられるファイルの順になる
 FEATURES: tuple[Feature, ...] = (
     Feature(
@@ -74,6 +79,12 @@ FEATURES: tuple[Feature, ...] = (
         name=STAGNATION_ALERT_FEATURE,
         title="停滞の知らせ",
         instruction_file="stagnation-alert.md",
+        commands=(),
+    ),
+    Feature(
+        name=MULTI_FRAME_FEATURE,
+        title="複数フレーム",
+        instruction_file="multi-frame.md",
         commands=(),
     ),
 )

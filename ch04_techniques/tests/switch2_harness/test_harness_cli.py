@@ -17,11 +17,13 @@ import numpy as np
 import pytest
 from harness_fakes import (
     FAKE_FEATURES,
+    FAKE_MULTI_FRAME,
     FAKE_STAGNATION_ALERT,
     FakeClock,
     FakeDaemon,
     FakeProcessStarter,
     FakeSleep,
+    ImageWritingDaemon,
     ProcessPlan,
     make_paths,
     read_fake_template,
@@ -37,7 +39,11 @@ from switch2_harness.cli import (
     run_cli,
 )
 from switch2_harness.daemon_client import send_command
-from switch2_harness.features import FEATURES, STAGNATION_ALERT_FEATURE
+from switch2_harness.features import (
+    FEATURES,
+    MULTI_FRAME_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+)
 from switch2_harness.instructions import read_package_template
 from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
@@ -379,6 +385,39 @@ def test_look_prints_no_stagnation_alert_when_disabled(tmp_path, harness, capsys
     assert harness.run("look", "--workspace", str(workspace)) == 0
     frame_path = workspace / "frames" / "000001.png"
     assert capsys.readouterr().out == f"ok {frame_path}\n"
+
+
+# --- 複数フレーム (multi-frame) ---
+
+# 複数フレームの要素を含む、cli のテスト用の要素
+FEATURES_WITH_MULTI_FRAME = (*FAKE_FEATURES, FAKE_MULTI_FRAME)
+
+
+def test_look_prints_the_multi_frame_line_when_enabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play", [MULTI_FRAME_FEATURE])
+    # 撮影のたびに画像を書く送信と、時計を進める sleep に替える
+    sleep = FakeSleep(harness.clock)
+    harness.deps = replace(
+        harness.deps,
+        send=ImageWritingDaemon(harness.clock, step_s=0.05),
+        sleep=sleep,
+        available=FEATURES_WITH_MULTI_FRAME,
+    )
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    tile_path = workspace / "multi-frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {frame_path}\n複数フレーム: {tile_path}\n"
+    # 撮影の間の待ちには deps.sleep を使う
+    assert len(sleep.calls) == 5
+
+
+def test_look_prints_no_multi_frame_line_when_disabled(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play")
+    harness.deps = replace(harness.deps, available=FEATURES_WITH_MULTI_FRAME)
+    assert harness.run("look", "--workspace", str(workspace)) == 0
+    frame_path = workspace / "frames" / "000001.png"
+    assert capsys.readouterr().out == f"ok {frame_path}\n"
+    assert harness.daemon.sent == [["shot", str(frame_path)]]
 
 
 # --- メモファイル (notes) ---

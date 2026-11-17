@@ -11,14 +11,18 @@
     - 終了コードは成功 0、失敗 1
 
 look / press / status / finish は、成否によらず records/events.jsonl にイベントを 1 つずつ (finish は 2 つ) 記録する。
+複数フレームの要素で続けて撮る look も、look のイベントは 1 つにする。
 ただし停滞の知らせを出した look は、look のイベントの後に command が stagnation-alert のイベントも記録する
 (time は look のイベントと同じ、elapsed_s は 0.0)。
 イベントの time は送信の直前の clock()、elapsed_s は送信の直後の clock() との差、ok は応答が error で始まらないこと。
+複数フレームの look では、time は 1 回目の送信の直前の clock()、elapsed_s は最後に送った撮影の応答の直後の clock() との差
+(成功なら 6 回の撮影と、その間の待ちの全体) にする。
 これらの送信には待ち時間の上限を付けない (send に timeout_s を渡さない。長い tap はデーモンの応答まで時間がかかるため)。
 """
 
 import contextlib
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -226,8 +230,13 @@ def handle_look(
     clock: Callable[[], float],
     frames_changed: FramesChanged | None = None,
     last_new_screen_time: Callable[[], float | None] | None = None,
+    multi_frame: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> CommandResult:
     """look: 画面を撮影して frames/ に保存する。
+
+    multi_frame が False なら、下のとおり 1 回だけ撮る (送信は 1 回で、sleep は呼ばず、multi-frames/ も作らない)。
+    multi_frame が True の場合は、後ろの「複数フレーム」の段落のとおり続けて撮る。
 
     frame_files.reserve_next_frame_path(paths.frames_dir) で次の連番のパスを確保し (空のファイルを排他的に作る。
     Claude Code はツールを並行して呼ぶことがあり、重なった look が同じパスに上書きしないようにするため)、
@@ -256,6 +265,28 @@ def handle_look(
 
     stdout の行の順は、応答、知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。
     どの場合も終了コードは上と同じ。
+
+    複数フレーム: multi_frame は複数フレームの要素 (multi-frame) が有効なときに True にする。sleep は撮影の間の待ちに使う
+    (本番は time.sleep)。下の multi_frame.<名前> は、モジュール switch2_harness.multi_frame の定数と関数を指す。
+    True なら、上の 1 回の撮影の代わりに次のとおり撮る:
+        1. frame_path を、上と同じく frame_files.reserve_next_frame_path(paths.frames_dir) で確保する
+        2. multi_frames_dir = paths.root / multi_frame.MULTI_FRAMES_DIR_NAME を mkdir(exist_ok=True) で作る
+        3. started = clock()、
+           reply = multi_frame.shoot_burst(multi_frame.shot_paths(frame_path, multi_frames_dir),
+           send=send, clock=clock, sleep=sleep)、elapsed_s = clock() - started で、6 回撮る
+           (1〜5 回目は multi_frames_dir の一時ファイル、6 回目は frame_path に保存させる)
+        4. look のイベントを 1 つだけ記録する: time=started、command="look"、args=()、reply=reply、
+           ok=<reply が error で始まらないこと>、elapsed_s、frame=<成功なら上と同じ相対パス (例: "frames/000001.png")。
+           失敗なら None>
+        5. reply が error で始まれば、frame_path と 1〜5 回目のパスを unlink(missing_ok=True) で消し
+           (frames/ と multi-frames/ に画像を残さない)、上の失敗と同じく reply の 1 行を stdout に出して終了コード 1。
+           停滞の知らせと行動履歴は出さない
+        6. 成功なら、multi_frame.write_tile(<6 つのパス>, multi_frame.tile_path_for(frame_path, multi_frames_dir)) で
+           並べた画像を書き、1〜5 回目のパスを unlink(missing_ok=True) で消す
+        7. stdout の行の順は、応答、multi_frame.multi_frame_line(<並べた画像の絶対パス>)、
+           知らせの行 (出すときだけ)、行動履歴の行 (frames_changed を渡したときだけ)。終了コードは 0。
+           停滞の知らせと行動履歴の扱いは上と同じ (look のイベントは 1 つなので、今回の frame を持つ look のイベントを
+           後ろから探す処理がそのまま使える)
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()

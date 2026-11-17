@@ -10,7 +10,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from switch2_harness.features import STAGNATION_ALERT_FEATURE, Feature, WritableFile
+import cv2
+import numpy as np
+
+from switch2_harness.features import (
+    MULTI_FRAME_FEATURE,
+    STAGNATION_ALERT_FEATURE,
+    Feature,
+    WritableFile,
+)
 from switch2_harness.workspace import WorkspacePaths
 
 # テスト用の要素。本物の FEATURES に左右されずに、複数の要素の順やサブコマンドの追加を確かめるため、
@@ -36,6 +44,16 @@ FAKE_FEATURES: tuple[Feature, ...] = (FAKE_HISTORY, FAKE_NOTES)
 FAKE_STAGNATION_ALERT = Feature(
     name=STAGNATION_ALERT_FEATURE,
     title="停滞の知らせ",
+    instruction_file=None,
+    commands=(),
+)
+
+# テスト用の、CLAUDE.md に節を足さない複数フレームの要素 (本物の複数フレームは節を足す)。
+# 名前は本物の複数フレームと同じで、look が続けて撮るかの判定 (要素の名前で決まる) に使う。
+# FAKE_FEATURES には含めず、使うテストで available に足す
+FAKE_MULTI_FRAME = Feature(
+    name=MULTI_FRAME_FEATURE,
+    title="複数フレーム",
     instruction_file=None,
     commands=(),
 )
@@ -119,6 +137,66 @@ class FakeDaemon:
         if command == "up":
             return "ok held=none"
         return "ok " + " ".join(args)
+
+
+# ImageWritingDaemon が書く画面の大きさ (幅, 高さ)。デーモンが元の大きさで保存する画面の代わり
+SHOT_IMAGE_SIZE: tuple[int, int] = (1280, 720)
+
+
+def shot_color(n: int) -> tuple[int, int, int]:
+    """ImageWritingDaemon が n 回目 (1 から数える) の shot で書く画像の色 (B, G, R) を返す。
+
+    回ごとに青の値を 30 ずつ変える (256 以上にならないよう 256 で割った余りにする)。例: 1 回目は (30, 100, 200)。
+    """
+    return ((n * 30) % 256, 100, 200)
+
+
+def solid_image(
+    color: tuple[int, int, int], size: tuple[int, int] = SHOT_IMAGE_SIZE
+) -> np.ndarray:
+    """全画素が color (B, G, R) の、大きさ size (幅, 高さ) の uint8 の BGR 画像を返す。"""
+    width, height = size
+    return np.full((height, width, 3), color, dtype=np.uint8)
+
+
+class ImageWritingDaemon:
+    """send の fake。shot PATH を受けると、PATH に単色の画像を書いて "ok PATH" を返す。
+
+    n 回目 (1 から数える。失敗した回も数える) の shot では、solid_image(shot_color(n)) (1280x720) を
+    cv2.imwrite で PATH に書く。
+    fail_on_shot を渡すと、その回の shot では画像を書かずに "error no frame yet" を返す。
+    shot 以外の引数には "ok <引数を空白でつないだもの>" を返す。
+    clock を渡すと、FakeDaemon と同じく、送るたびに step_s 秒進める (送信にかかった時間の代わり)。
+    送った引数を sent に、受け取った timeout_s を timeouts に記録する。
+    """
+
+    def __init__(
+        self,
+        clock: FakeClock | None = None,
+        *,
+        step_s: float = 0.5,
+        fail_on_shot: int | None = None,
+    ) -> None:
+        self.clock = clock
+        self.step_s = step_s
+        self.fail_on_shot = fail_on_shot
+        self.shots = 0
+        self.sent: list[list[str]] = []
+        self.timeouts: list[float | None] = []
+
+    def __call__(self, args: list[str], *, timeout_s: float | None = None) -> str:
+        self.sent.append(list(args))
+        self.timeouts.append(timeout_s)
+        if self.clock is not None:
+            self.clock.advance(self.step_s)
+        if args[0] != "shot":
+            return "ok " + " ".join(args)
+        self.shots += 1
+        if self.shots == self.fail_on_shot:
+            return "error no frame yet"
+        if not cv2.imwrite(args[1], solid_image(shot_color(self.shots))):
+            raise AssertionError(f"cannot write the fake shot: {args[1]}")
+        return f"ok {args[1]}"
 
 
 class FakeSleep:

@@ -5,6 +5,7 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    MULTI_FRAME_FEATURE,
     NOTES_FEATURE,
     NOTES_FILE_NAME,
     STAGNATION_ALERT_FEATURE,
@@ -40,12 +41,13 @@ def test_features_has_action_history_and_notes():
     )
 
 
-def test_features_has_stagnation_alert_last():
+def test_features_has_stagnation_alert_after_notes():
     assert STAGNATION_ALERT_FEATURE == "stagnation-alert"
     assert tuple(feature.name for feature in FEATURES) == (
         "action-history",
         "notes",
         "stagnation-alert",
+        "multi-frame",
     )
     # CLAUDE.md に節を足し、サブコマンドも書き換えられるファイルも増やさない
     assert FEATURES[2] == Feature(
@@ -55,6 +57,18 @@ def test_features_has_stagnation_alert_last():
         commands=(),
     )
     assert FEATURES[2].writable_files == ()
+
+
+def test_features_has_multi_frame_last():
+    assert MULTI_FRAME_FEATURE == "multi-frame"
+    # CLAUDE.md に節を足し、サブコマンドも書き換えられるファイルも増やさない
+    assert FEATURES[3] == Feature(
+        name="multi-frame",
+        title="複数フレーム",
+        instruction_file="multi-frame.md",
+        commands=(),
+    )
+    assert FEATURES[3].writable_files == ()
 
 
 def test_feature_has_no_writable_files_by_default():

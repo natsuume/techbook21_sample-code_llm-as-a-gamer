@@ -46,6 +46,7 @@ from switch2_harness.features import (
     ACTION_HISTORY_FEATURE,
     BASE_AGENT_COMMANDS,
     FEATURES,
+    MULTI_FRAME_FEATURE,
     STAGNATION_ALERT_FEATURE,
     Feature,
 )
@@ -232,6 +233,16 @@ def _look_last_new_screen_time(
     return None
 
 
+def _look_multi_frame(paths: WorkspacePaths, available: tuple[Feature, ...]) -> bool:
+    """look に渡す multi_frame を返す。
+
+    harness_config.read_config(paths.harness_file, available) の features に複数フレームの要素
+    (features.MULTI_FRAME_FEATURE) があれば True、無ければ False。
+    """
+    config = read_config(paths.harness_file, available)
+    return MULTI_FRAME_FEATURE in config.features
+
+
 def _dispatch(
     args: argparse.Namespace, paths: WorkspacePaths, deps: CliDependencies
 ) -> CommandResult:
@@ -244,6 +255,8 @@ def _dispatch(
             clock=deps.clock,
             frames_changed=_look_frames_changed(paths, deps.available),
             last_new_screen_time=_look_last_new_screen_time(paths, deps.available),
+            multi_frame=_look_multi_frame(paths, deps.available),
+            sleep=deps.sleep,
         )
     if command == "press":
         return handle_press(
@@ -292,6 +305,9 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
     screen_recorder.read_latest_last_new_screen_time(<作業ディレクトリー>) を呼ぶ関数を last_new_screen_time として渡す
     (最後の新しい画面から stagnation_alert.STAGNATION_SECONDS 秒以上たっていたら、look の応答の直後に知らせの行を表示する)。
     無効なら渡さない。
+    また look は、複数フレームの要素 (features.MULTI_FRAME_FEATURE) が有効なら multi_frame=True を渡し
+    (続けて撮った画面を並べた画像を保存し、look の応答の直後にそのパスの行を表示する)、無効なら multi_frame=False を渡す。
+    どちらの場合も、撮影の間の待ちに使う deps.sleep を sleep として渡す。
     CommandResult の stdout_lines は標準出力に、stderr_lines は標準エラー出力に 1 行ずつ出す。
     """
     args = build_parser().parse_args(argv)
