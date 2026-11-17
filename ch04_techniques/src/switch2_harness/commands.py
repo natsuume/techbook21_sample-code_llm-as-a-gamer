@@ -55,6 +55,14 @@ from switch2_harness.harness_config import (
     read_config,
 )
 from switch2_harness.instructions import ReadTemplate, render_instructions
+from switch2_harness.multi_frame import (
+    MULTI_FRAMES_DIR_NAME,
+    multi_frame_line,
+    shoot_burst,
+    shot_paths,
+    tile_path_for,
+    write_tile,
+)
 from switch2_harness.press_args import press_args_error, split_press_args
 from switch2_harness.screen_change import load_sample
 from switch2_harness.screen_recorder import ScreenRecording, recording_screens
@@ -171,6 +179,51 @@ def _stagnation_alert_lines(
     return (alert_line(seconds),)
 
 
+def _shoot_multi_frame_and_record(
+    paths: WorkspacePaths,
+    frame_path: Path,
+    frame: str,
+    *,
+    send: SendCommand,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> tuple[CommandEvent, tuple[str, ...]]:
+    """複数フレームの look で 6 回撮って記録し、(look のイベント, 応答の後に出す行) を返す。
+
+    handle_look の「複数フレーム」の手順 2〜6 を行う。frame_path は確保した 6 回目の保存先、frame はその
+    作業ディレクトリーからの相対パス。
+    成功なら、並べた画像を書いて 1〜5 回目の一時ファイルを消し、出す行は (multi_frame_line(<並べた画像>),)。
+    失敗 (応答が error) なら、1〜5 回目の一時ファイルを消し、出す行は ()。
+    frame_path は消さない (失敗のときは、呼び出し側が一時ファイルの後に消す)。
+    """
+    multi_frames_dir = paths.root / MULTI_FRAMES_DIR_NAME
+    multi_frames_dir.mkdir(exist_ok=True)
+    burst_paths = shot_paths(frame_path, multi_frames_dir)
+    started = clock()
+    reply = shoot_burst(burst_paths, send=send, clock=clock, sleep=sleep)
+    elapsed_s = clock() - started
+    ok = not is_error_reply(reply)
+    event = CommandEvent(
+        time=started,
+        command="look",
+        args=(),
+        reply=reply,
+        ok=ok,
+        elapsed_s=elapsed_s,
+        frame=frame if ok else None,
+    )
+    append_event(paths.events_file, event)
+    lines: tuple[str, ...] = ()
+    if ok:
+        tile_path = tile_path_for(frame_path, multi_frames_dir)
+        write_tile(burst_paths, tile_path)
+        lines = (multi_frame_line(tile_path),)
+    # 6 回目 (frame_path) を除いた 1〜5 回目の一時ファイルを消す
+    for temporary_path in burst_paths[:-1]:
+        temporary_path.unlink(missing_ok=True)
+    return event, lines
+
+
 def _reply_result(*replies: str) -> CommandResult:
     """応答を stdout に出し、どれかが error なら終了コード 1 にした結果を返す。"""
     failed = any(is_error_reply(reply) for reply in replies)
@@ -278,9 +331,10 @@ def handle_look(
         4. look のイベントを 1 つだけ記録する: time=started、command="look"、args=()、reply=reply、
            ok=<reply が error で始まらないこと>、elapsed_s、frame=<成功なら上と同じ相対パス (例: "frames/000001.png")。
            失敗なら None>
-        5. reply が error で始まれば、frame_path と 1〜5 回目のパスを unlink(missing_ok=True) で消し
-           (frames/ と multi-frames/ に画像を残さない)、上の失敗と同じく reply の 1 行を stdout に出して終了コード 1。
-           停滞の知らせと行動履歴は出さない
+        5. reply が error で始まれば、1〜5 回目のパスを unlink(missing_ok=True) で消し、最後に frame_path を
+           unlink(missing_ok=True) で消す (frames/ と multi-frames/ に画像を残さない。frame_path を最後に消すのは、
+           確保した番号を、その番号から名付けた一時ファイルを消す前に手放さないため)。
+           上の失敗と同じく reply の 1 行を stdout に出して終了コード 1。停滞の知らせと行動履歴は出さない
         6. 成功なら、multi_frame.write_tile(<6 つのパス>, multi_frame.tile_path_for(frame_path, multi_frames_dir)) で
            並べた画像を書き、1〜5 回目のパスを unlink(missing_ok=True) で消す
         7. stdout の行の順は、応答、multi_frame.multi_frame_line(<並べた画像の絶対パス>)、
@@ -290,22 +344,31 @@ def handle_look(
     """
     frame_path = reserve_next_frame_path(paths.frames_dir)
     frame = frame_path.relative_to(paths.root).as_posix()
-    look = _send_and_record(
-        paths,
-        "look",
-        (),
-        ["shot", str(frame_path)],
-        send=send,
-        clock=clock,
-        frame_on_success=frame,
-    )
+    multi_frame_lines: tuple[str, ...] = ()
+    if multi_frame:
+        look, multi_frame_lines = _shoot_multi_frame_and_record(
+            paths, frame_path, frame, send=send, clock=clock, sleep=sleep
+        )
+    else:
+        look = _send_and_record(
+            paths,
+            "look",
+            (),
+            ["shot", str(frame_path)],
+            send=send,
+            clock=clock,
+            frame_on_success=frame,
+        )
     reply = look.reply
     if is_error_reply(reply):
+        # 複数フレームの一時ファイルは _shoot_multi_frame_and_record が先に消しているので、確保したパスは最後に消す
         frame_path.unlink(missing_ok=True)
         return _reply_result(reply)
     alert_lines = _stagnation_alert_lines(paths, look, frame, last_new_screen_time)
     if frames_changed is None:
-        return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines))
+        return CommandResult(
+            exit_code=0, stdout_lines=(reply, *multi_frame_lines, *alert_lines)
+        )
     events = read_events(paths.events_file)
     index = next(
         i
@@ -315,7 +378,9 @@ def handle_look(
     history = build_history_lines(
         events[:index], events[index].time, frame, frames_changed
     )
-    return CommandResult(exit_code=0, stdout_lines=(reply, *alert_lines, *history))
+    return CommandResult(
+        exit_code=0, stdout_lines=(reply, *multi_frame_lines, *alert_lines, *history)
+    )
 
 
 def handle_press(

@@ -13,6 +13,7 @@ commands はこのモジュールを import するため、このモジュール
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from switch2_harness.daemon_client import SendCommand
@@ -40,6 +41,22 @@ MULTI_FRAMES_DIR_NAME = "multi-frames"
 
 # look が表示する、並べた画像のパスの行の前半 (後半は並べた画像の絶対パス)
 LINE_PREFIX = "複数フレーム: "
+
+# 各コマの左上に描く番号の、文字の左下の位置 (コマの左上からの x, y。画素)。
+# 縁取りを含めて、コマの左上の 80x60 画素に収まるようにする
+LABEL_ORIGIN: tuple[int, int] = (12, 48)
+
+# 番号のフォントと大きさ (cv2.putText の fontFace と fontScale)
+LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
+LABEL_SCALE = 1.4
+
+# 番号の文字の色 (B, G, R) と線の太さ。白で描く
+LABEL_COLOR: tuple[int, int, int] = (255, 255, 255)
+LABEL_THICKNESS = 3
+
+# 番号の縁取りの色 (B, G, R) と線の太さ。文字より太い黒の線を先に描き、背景の色によらず読めるようにする
+LABEL_OUTLINE_COLOR: tuple[int, int, int] = (0, 0, 0)
+LABEL_OUTLINE_THICKNESS = 9
 
 
 def multi_frame_line(tile_path: Path) -> str:
@@ -93,7 +110,42 @@ def shoot_burst(
     すべて成功したら、最後のパスの応答を返す。
     例: 送信に 0.05 秒かかるなら、6 つのパスで send を 6 回、sleep(0.15) を 5 回呼び、各送信の始まりは 0.2 秒ずつずれる。
     """
-    raise NotImplementedError
+    reply = ""
+    last_index = len(shot_paths) - 1
+    for index, path in enumerate(shot_paths):
+        started = clock()
+        reply = send(["shot", str(path)])
+        if reply.startswith("error"):
+            return reply
+        if index < last_index:
+            wait = interval_s - (clock() - started)
+            if wait > 0:
+                sleep(wait)
+    return reply
+
+
+def _draw_number(tile: np.ndarray, number: int, left: int, top: int) -> None:
+    """tile の、左上が (left, top) のコマの左上に、番号 number を縁取りして描く (tile を書き換える)。
+
+    先に LABEL_OUTLINE_COLOR の太い線 (LABEL_OUTLINE_THICKNESS) で描き、その上に LABEL_COLOR の線
+    (LABEL_THICKNESS) で同じ文字を描く。
+    """
+    origin = (left + LABEL_ORIGIN[0], top + LABEL_ORIGIN[1])
+    text = str(number)
+    for color, thickness in (
+        (LABEL_OUTLINE_COLOR, LABEL_OUTLINE_THICKNESS),
+        (LABEL_COLOR, LABEL_THICKNESS),
+    ):
+        cv2.putText(
+            tile,
+            text,
+            origin,
+            LABEL_FONT,
+            LABEL_SCALE,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
 
 
 def tile_frames(images: Sequence[np.ndarray]) -> np.ndarray:
@@ -106,7 +158,18 @@ def tile_frames(images: Sequence[np.ndarray]) -> np.ndarray:
     3. 各コマの左上に、番号 k の数字を cv2.putText で描く。縁取りして (太い線で描いた上に別の色で描くなど)、
        コマの背景の色によらず読めるようにする
     """
-    raise NotImplementedError
+    tile = np.zeros(
+        (TILE_HEIGHT * TILE_ROWS, TILE_WIDTH * TILE_COLUMNS, 3), dtype=np.uint8
+    )
+    for number, image in enumerate(images, start=1):
+        row, column = divmod(number - 1, TILE_COLUMNS)
+        top, left = row * TILE_HEIGHT, column * TILE_WIDTH
+        small = cv2.resize(
+            image, (TILE_WIDTH, TILE_HEIGHT), interpolation=cv2.INTER_AREA
+        )
+        tile[top : top + TILE_HEIGHT, left : left + TILE_WIDTH] = small
+        _draw_number(tile, number, left, top)
+    return tile
 
 
 def write_tile(image_paths: Sequence[Path], tile_path: Path) -> None:
@@ -116,4 +179,5 @@ def write_tile(image_paths: Sequence[Path], tile_path: Path) -> None:
     各画像を cv2.imread(str(<パス>)) で BGR 画像として読み、tile_frames(<読んだ画像の列>) の結果を
     cv2.imwrite(str(tile_path), <並べた画像>) で書く。tile_path の親ディレクトリーはあるものとして呼ぶ。
     """
-    raise NotImplementedError
+    images = [cv2.imread(str(path)) for path in image_paths]
+    cv2.imwrite(str(tile_path), tile_frames(images))
