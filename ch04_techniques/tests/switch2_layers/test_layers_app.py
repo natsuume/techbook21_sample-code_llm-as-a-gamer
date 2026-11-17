@@ -54,6 +54,7 @@ from switch2_layers.system_screen.run_phase import (
     PHASE_REASON_PREPARED,
     PHASE_REASON_PRESS_HOME,
     PHASE_REASON_START_CHECK_PASSED,
+    PHASE_REASON_SYSTEM_SCREEN,
     CleanUpResult,
     PhaseTimings,
     RunPhase,
@@ -638,6 +639,75 @@ def test_press_home_taps_home_after_the_neutral_report_of_leaving_play(tmp_path)
     assert rows[homes[0] - 1]["source"] == "neutral"
     assert rows[homes[0]]["t"] >= recover[0]["t"]
     assert any(report[1] & HOME_BIT for report in sender.reports)
+
+
+class HoldingSurface:
+    """十字キーの上を秒数なしで押し続ける surface の偽物 (Jev の surface が hold を選んだときと同じ形)。"""
+
+    def decide(self, surface_input: SurfaceInput) -> SurfaceOutput:
+        return SurfaceOutput(action=PadAction(held=frozenset({"UP"})))
+
+
+def assert_hold_released_before_system_middle(
+    root: Path, phase: RunPhase, goal: str
+) -> dict:
+    """play から phase に移ったとき、本体の画面の middle を goal で最初に呼ぶ前に、surface の押し続けを中立の
+    レポートで離したことを確かめ、その phase の行を返す。"""
+    changes = [
+        row
+        for previous, row in itertools.pairwise(phase_rows(root))
+        if previous["phase"] == RunPhase.PLAY.value and row["phase"] == phase.value
+    ]
+    assert changes
+    change = changes[0]
+    rows = read_rows(root / "operations.jsonl")
+    applied = [
+        row for row in rows if row["source"] == "apply" and row["t"] <= change["t"]
+    ]
+    assert applied
+    # surface の押し続けには秒数が無く、期限で離れない
+    assert applied[-1]["held"] == ["UP"]
+    assert applied[-1]["hold_seconds"] == {}
+    calls = [
+        row
+        for row in read_rows(root / "middle" / "system_calls.jsonl")
+        if row["kind"] == "call"
+        and row["goal"] == goal
+        and row["t_sent"] >= change["t"]
+    ]
+    assert calls
+    assert any(
+        row["source"] == "neutral" and change["t"] <= row["t"] <= calls[0]["t_sent"]
+        for row in rows
+    )
+    return change
+
+
+def test_leaving_play_for_clean_up_releases_the_surface_hold_first(tmp_path):
+    sender = FakeSender()
+    app = LayersApp(settings(tmp_path), parts(sender, surface=HoldingSurface()))
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    change = assert_hold_released_before_system_middle(
+        root, RunPhase.CLEAN_UP, "clean_up"
+    )
+    assert change["reason"] == REASON_INTERRUPTED
+
+
+def test_leaving_play_for_recover_releases_the_surface_hold_first(tmp_path):
+    sender = FakeSender()
+    # 開始の確かめから play の途中まではゲームの画面、その後は HOME メニューが映り続ける (照合で recover に移る)
+    safety = ScriptedSafety([safety_answer()] * 8 + [safety_answer(screen="home_menu")])
+    app = LayersApp(
+        safety_settings(tmp_path),
+        parts(sender, surface=HoldingSurface(), safety=safety),
+    )
+    reason, root = run_app(app, stop_after=RUN_SECONDS)
+    assert reason == REASON_INTERRUPTED
+    change = assert_hold_released_before_system_middle(
+        root, RunPhase.RECOVER, "recover"
+    )
+    assert change["reason"] == PHASE_REASON_SYSTEM_SCREEN
 
 
 def test_unsafe_screen_stops_without_cleaning_up(tmp_path):
