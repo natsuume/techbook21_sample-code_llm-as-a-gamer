@@ -6,6 +6,7 @@ from switch2_layers.orchestrator.delegate_questions import (
     DELEGATE_QUESTION_NAME,
     DELEGATE_QUESTION_TEXT,
     MAX_RECENT_PICKS,
+    NONE_MIN_PROBABILITY,
     NONE_OPTION,
     RETURN_CONTROL_OPTION,
     DelegateStateFrame,
@@ -113,6 +114,50 @@ def test_delegate_choice_of_the_same_probability_is_the_earlier_option():
         "none": 0.1,
         "attack": 0.4,
         "move_up": 0.4,
+        "return_control": 0.1,
+    }
+    assert choose_option(probabilities, names) == "attack"
+
+
+def test_delegate_choice_skips_none_below_the_minimum_probability():
+    names = delegate_option_names([ATTACK, MOVE_UP])
+    probabilities = {
+        "none": 0.4,
+        "attack": 0.2,
+        "move_up": 0.3,
+        "return_control": 0.1,
+    }
+    assert choose_option(probabilities, names) == "move_up"
+
+
+def test_delegate_choice_keeps_none_at_the_minimum_probability():
+    names = delegate_option_names([ATTACK, MOVE_UP])
+    probabilities = {
+        "none": NONE_MIN_PROBABILITY,
+        "attack": 0.2,
+        "move_up": 0.2,
+        "return_control": 0.1,
+    }
+    assert choose_option(probabilities, names) == "none"
+
+
+def test_delegate_choice_below_the_minimum_does_not_pick_return_control():
+    names = delegate_option_names([ATTACK, MOVE_UP])
+    probabilities = {
+        "none": 0.4,
+        "attack": 0.1,
+        "move_up": 0.15,
+        "return_control": 0.35,
+    }
+    assert choose_option(probabilities, names) == "move_up"
+
+
+def test_delegate_choice_below_the_minimum_takes_the_earlier_action_on_a_tie():
+    names = delegate_option_names([ATTACK, MOVE_UP])
+    probabilities = {
+        "none": 0.4,
+        "attack": 0.25,
+        "move_up": 0.25,
         "return_control": 0.1,
     }
     assert choose_option(probabilities, names) == "attack"

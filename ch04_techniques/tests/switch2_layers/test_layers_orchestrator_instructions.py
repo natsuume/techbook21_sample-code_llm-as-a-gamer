@@ -310,6 +310,16 @@ def test_delegate_instructions_say_not_to_write_proper_names():
     )
 
 
+def test_delegate_instructions_say_to_name_choices_by_their_intent():
+    text = delegate_instructions()
+    assert sentences_with(text, ("ボタンの名前", "意図", "名前", "説明"))
+    assert sentences_with(text, ("説明", "選ぶ場面"))
+
+
+def test_delegate_instructions_say_moves_can_be_combined_with_attacks():
+    assert sentences_with(delegate_instructions(), ("移動", "攻撃", "1 つ", "マクロ"))
+
+
 def test_delegate_instructions_say_actions_are_discarded_while_delegating():
     assert sentences_with(delegate_instructions(), ("委任中", "actions", "捨て"))
 
