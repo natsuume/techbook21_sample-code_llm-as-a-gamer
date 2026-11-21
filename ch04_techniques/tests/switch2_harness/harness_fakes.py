@@ -4,9 +4,10 @@
 ファイル名が test_ で始まらないため、pytest はこのファイルをテストとして集めない。
 """
 
+import json
 import signal
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -407,3 +408,101 @@ class FakeCriticStarter:
         )
         self.processes.append(process)
         return process
+
+
+@dataclass(frozen=True)
+class CodexPrepareCall:
+    """FakeCodexPrepare が受け取った引数。"""
+
+    paths: WorkspacePaths
+    agent_commands: tuple[str, ...]
+    writable_files: tuple[str, ...]
+    environ: dict[str, str]
+    executable: Path
+
+
+@dataclass
+class FakeCodexPrepare:
+    """prepare_codex (codex_home.PrepareCodex) の fake。本物の CODEX_HOME と codex には触れない。
+
+    呼ばれるたびに引数を calls に記録し、codex_home を返す。error を渡すと、返す代わりにそれを送出する。
+    """
+
+    codex_home: Path
+    error: Exception | None = None
+    calls: list[CodexPrepareCall] = field(default_factory=list)
+
+    def __call__(
+        self,
+        paths: WorkspacePaths,
+        agent_commands: Sequence[str],
+        writable_files: Sequence[str],
+        environ: Mapping[str, str],
+        executable: Path,
+    ) -> Path:
+        self.calls.append(
+            CodexPrepareCall(
+                paths,
+                tuple(agent_commands),
+                tuple(writable_files),
+                dict(environ),
+                executable,
+            )
+        )
+        if self.error is not None:
+            raise self.error
+        return self.codex_home
+
+
+# codex exec --json の出力の行 (codex_log が読む形) を作る関数。2026-11-21 に codex-cli 0.171.0 で見た形に合わせる
+
+
+def codex_thread_line(thread_id: str) -> str:
+    """thread.started の行を返す。"""
+    return json.dumps({"type": "thread.started", "thread_id": thread_id})
+
+
+def codex_message_line(text: str) -> str:
+    """エージェントの発言 (agent_message の item.completed) の行を返す。"""
+    return json.dumps(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+        ensure_ascii=False,
+    )
+
+
+def codex_command_line(command: str, output: str = "", exit_code: int = 0) -> str:
+    """コマンドの実行 (command_execution の item.completed) の行を返す。"""
+    return json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": command,
+                "aggregated_output": output,
+                "exit_code": exit_code,
+                "status": "completed" if exit_code == 0 else "failed",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def codex_turn_completed_line(
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_output_tokens: int = 0,
+) -> str:
+    """turn.completed の行を返す (usage はスレッドの累計)。"""
+    return json.dumps(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": input_tokens,
+                "cached_input_tokens": cached_input_tokens,
+                "cache_write_input_tokens": 0,
+                "output_tokens": output_tokens,
+                "reasoning_output_tokens": reasoning_output_tokens,
+            },
+        }
+    )

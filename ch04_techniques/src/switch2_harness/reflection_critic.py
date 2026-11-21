@@ -1,10 +1,13 @@
-"""要素「振り返り」(reflection) のうち、run の間に批評役 (別の claude -p) を起動し、批評を notes.md に書く部分。
+"""要素「振り返り」(reflection) のうち、run の間に批評役 (別のエージェント) を起動し、批評を notes.md に書く部分。
 
 commands.handle_run が reflecting_with_critic で裏のスレッドを動かし、批評はエージェントの操作と並行に進む
 (プレイ中のエージェントの判断は止めない)。スレッドの中では批評役を 1 つずつ起動し、前の批評が長引いて
 起動の時刻を過ぎた回は起動しない (reflection.next_tick_index)。
 
-批評役の起動 (build_critic_args):
+批評役は、プレイヤーと同じ種類のエージェントにする。種類ごとの起動引数・入力・環境変数・出力の読み方は
+CriticAgent で受け取り、既定は Claude Code の実装 (CLAUDE_CRITIC = ClaudeCritic())、Codex の実装は codex_critic.CodexCritic。
+
+Claude Code の批評役の起動 (build_critic_args):
     プレイ中のエージェントと同じく、起動した人の設定・CLAUDE.md・MCP・Skill を読ませない。ツールは渡さない (--tools "")。
     入力は --input-format stream-json で、撮影の画像を含む 1 つのユーザーのメッセージ (reflection.critic_input_line) を
     標準入力に書いて閉じる。会話はディスクに残さない (--no-session-persistence)。
@@ -19,7 +22,7 @@ commands.handle_run が reflecting_with_critic で裏のスレッドを動かし
                      "status": "written" | "failed" | "timeout" | "stopped", "critique": <批評の本文。無ければ null>,
                      "elapsed_s": <起動から終わるまでの秒数>}
         飛ばした回: {"tick": <回の番号>, "time": <その回の起動の時刻>, "status": "skipped"}
-    critic-<NNN>.jsonl  批評役の標準出力 (stream-json)。NNN は通し番号を 3 桁以上の 0 埋めにしたもの (例: critic-001.jsonl)
+    critic-<NNN>.jsonl  批評役の標準出力 (Claude Code は stream-json、Codex は codex exec --json)。NNN は通し番号を 3 桁以上の 0 埋めにしたもの (例: critic-001.jsonl)
     critic-stderr.log   批評役の標準エラー出力 (追記)
 通し番号は、作業ディレクトリーの中で 1 から数える (run をまたいで続く)。
 
@@ -29,13 +32,16 @@ commands.handle_run が reflecting_with_critic で裏のスレッドを動かし
 """
 
 import base64
+import errno
 import json
 import os
 import re
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -122,15 +128,102 @@ class StartCritic(Protocol):
 
 
 @dataclass(frozen=True)
+class CriticRequest:
+    """批評役に渡すもの。
+
+    instructions: 批評役への指示 (reflection.CRITIC_INSTRUCTION_FILE を置換したもの)
+    frames: 渡す撮影 (base64 を含む。Claude Code の批評役が使う)
+    frame_paths: frames と同じ順の、撮影のファイルの絶対パス (Codex の批評役が -i で添付する)
+    action_lines: reflection.format_action_lines の行
+    statements: プレイヤーの発言
+    notes_text: notes.md の本文
+    """
+
+    instructions: str
+    frames: Sequence[CriticFrame]
+    frame_paths: Sequence[Path]
+    action_lines: Sequence[str]
+    statements: Sequence[str]
+    notes_text: str
+
+
+@dataclass(frozen=True)
+class CriticCommand:
+    """批評役の起動引数 args と、標準入力に書いて閉じる input_text。"""
+
+    args: list[str]
+    input_text: str
+
+
+class CriticAgent(Protocol):
+    """批評役のエージェントの種類ごとの、起動と出力の読み方。本番は ClaudeCritic と codex_critic.CodexCritic。"""
+
+    def statements(self, agent_log_lines: Sequence[str]) -> list[str]:
+        """プレイヤーの出力 (agent.jsonl) の行から、プレイヤーの発言を順に返す。"""
+        ...
+
+    def build_command(self, request: CriticRequest) -> CriticCommand:
+        """request を渡す批評役の起動引数と標準入力を返す。"""
+        ...
+
+    def build_env(
+        self, base_env: Mapping[str, str], workspace_root: Path
+    ) -> dict[str, str]:
+        """批評役の環境変数を返す。"""
+        ...
+
+    def critique(self, output_lines: Sequence[str]) -> str | None:
+        """批評役の出力の行から批評の本文を返す。取り出せなければ None。"""
+        ...
+
+
+@dataclass(frozen=True)
+class ClaudeCritic:
+    """CriticAgent の Claude Code の実装。
+
+    statements は reflection.assistant_texts、build_command は
+    CriticCommand(build_critic_args(), reflection.critic_input_line(reflection.build_critic_content(
+    instructions, frames, action_lines, statements, notes_text)))、build_env は agent_launcher.build_claude_env、
+    critique は reflection.critique_from_result。
+    """
+
+    def statements(self, agent_log_lines: Sequence[str]) -> list[str]:
+        return assistant_texts(agent_log_lines)
+
+    def build_command(self, request: CriticRequest) -> CriticCommand:
+        content = build_critic_content(
+            request.instructions,
+            request.frames,
+            request.action_lines,
+            request.statements,
+            request.notes_text,
+        )
+        return CriticCommand(build_critic_args(), critic_input_line(content))
+
+    def build_env(
+        self, base_env: Mapping[str, str], workspace_root: Path
+    ) -> dict[str, str]:
+        return build_claude_env(base_env, workspace_root)
+
+    def critique(self, output_lines: Sequence[str]) -> str | None:
+        return critique_from_result(output_lines)
+
+
+# 批評役の既定 (Claude Code)
+CLAUDE_CRITIC = ClaudeCritic()
+
+
+@dataclass(frozen=True)
 class CriticSetting:
     """批評役の起動に使う、run の間は変わらない値。
 
     paths: 作業ディレクトリー
     game, goal: harness.json のゲーム名と目標 (批評役への指示の $game と $goal に入れる)
-    base_env: 起動した人の環境変数 (agent_launcher.build_claude_env に渡す)
+    base_env: 起動した人の環境変数 (critic.build_env に渡す)
     start_critic: 批評役のプロセスを起動する関数
     clock: 壁時計
     read_template: instructions/ の下のテンプレートを読む関数 (批評役への指示 reflection.CRITIC_INSTRUCTION_FILE を読む)
+    critic: 批評役のエージェントの種類の実装 (既定は Claude Code)
     """
 
     paths: WorkspacePaths
@@ -140,6 +233,7 @@ class CriticSetting:
     start_critic: StartCritic
     clock: Callable[[], float]
     read_template: ReadTemplate
+    critic: CriticAgent = CLAUDE_CRITIC
 
 
 def build_critic_args() -> list[str]:
@@ -245,12 +339,26 @@ def critic_output_file_name(index: int) -> str:
 def write_notes(path: Path, text: str) -> None:
     """notes.md を text に書き換える。
 
-    path に ".tmp" を足したファイルに UTF-8 で書いてから、os.replace で path に置き換える
-    (プレイ中のエージェントに、書きかけの notes.md を読ませない)。
+    path と同じディレクトリーに、名前が `<path の名前>.<ランダムな文字列>.tmp` の一時ファイルを tempfile.mkstemp で
+    新しく作り (既にあるファイルやシンボリックリンクを開かない)、UTF-8 で書いてから、os.replace で path に置き換える
+    (プレイ中のエージェントに、書きかけの notes.md を読ませない)。書けなければ一時ファイルを消して、例外をそのまま出す。
+    Codex のエージェントは作業ディレクトリーの直下を書けるため、決まった名前の一時ファイルを使うと、エージェントが
+    その名前で作業ディレクトリーの外を指すシンボリックリンクを置き、サンドボックスの外で動くハーネスにリンク先を
+    書かせられる。それを防ぐため、名前を決めずに新しく作る。
     """
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        # mkstemp は 0600 で作るため、置き換える前の notes.md と同じ権限にする (無いか普通のファイルでなければ 0644)
+        os.fchmod(fd, _notes_mode(path))
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _signal_group_if_present(process: AgentProcess, sig: int) -> None:
@@ -278,12 +386,41 @@ def stop_critic(process: AgentProcess, wait: Callable[[float], bool]) -> None:
         process.wait()
 
 
-def _read_notes(path: Path) -> str:
-    """notes.md を UTF-8 で読んで返す。無ければ空の文字列。"""
+def _notes_mode(path: Path) -> int:
+    """path (notes.md) が普通のファイルならその権限のビットを、無いか普通のファイルでなければ 0o644 を返す。
+
+    シンボリックリンクはたどらない (os.lstat)。
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return 0o644
+    if stat.S_ISREG(status.st_mode):
+        return stat.S_IMODE(status.st_mode)
+    return 0o644
+
+
+def _read_notes(path: Path) -> str:
+    """notes.md を UTF-8 で読んで返す。無ければ空の文字列。
+
+    シンボリックリンク (O_NOFOLLOW で開けず ELOOP になる) と、普通のファイルでないもの (FIFO など。O_NONBLOCK で
+    開いて待たずに確かめる) は読まず、空の文字列を返す。ほかの OSError (読む権限が無いなど) はそのまま送出する。Codex のエージェントは作業ディレクトリーの直下を書けるため、
+    notes.md を作業ディレクトリーの外を指すリンクに置き換えて、サンドボックスの外で動くハーネスにリンク先を
+    読ませる (批評役に渡させ、notes.md に書き戻させる) ことができてしまうため。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return ""
+    except OSError as e:
+        # シンボリックリンク (ELOOP) はリンク先を読まない。ほかの誤り (読む権限が無いなど) はそのまま出す
+        if e.errno == errno.ELOOP:
+            return ""
+        raise
+    with os.fdopen(fd, "rb") as notes_file:
+        if not stat.S_ISREG(os.fstat(notes_file.fileno()).st_mode):
+            return ""
+        return notes_file.read().decode("utf-8")
 
 
 def _read_log_lines(path: Path, start: int, end: int | None = None) -> list[str]:
@@ -381,18 +518,21 @@ def reflect_once(
     3. 行動は reflection.format_action_lines(reflection.window_actions(events, window_start, started), window_start)
     4. agent_log_to = agent_launcher.agent_log_size(paths.agent_log_file) を控え、paths.agent_log_file の
        agent_log_offset バイト目から agent_log_to バイト目の手前までを、agent_launcher.read_agent_log_lines と同じ方法
-       (UTF-8 の errors="replace" でデコードし、"\\n" だけで分ける) で行に分け、reflection.assistant_texts で発言にする
-       (控えた後に書き足された行は次の回に回す)。ファイルが無ければ発言は無し
+       (UTF-8 の errors="replace" でデコードし、"\\n" だけで分ける) で行に分け、critic.statements で発言にする
+       (Claude Code は reflection.assistant_texts。控えた後に書き足された行は次の回に回す)。ファイルが無ければ発言は無し
     5. notes.md (paths.root / features.NOTES_FILE_NAME。無ければ空の文字列) を読む
     6. 指示は read_template(reflection.CRITIC_INSTRUCTION_FILE) を string.Template で game と goal に置換したもの。
-       reflection.build_critic_content と reflection.critic_input_line で入力の 1 行を作る
+       critic.build_command(CriticRequest(...)) で起動引数と標準入力を作る (Claude Code は build_critic_args と、
+       reflection.build_critic_content と reflection.critic_input_line で作る入力の 1 行)
     7. index = next_critic_index(<記録のディレクトリー>) (ディレクトリーは無ければ作る)。
-       start_critic(build_critic_args(), paths.root, agent_launcher.build_claude_env(base_env, paths.root), <入力の 1 行>,
+       start_critic(<起動引数>, paths.root, critic.build_env(base_env, paths.root), <標準入力>,
        <記録のディレクトリー>/critic_output_file_name(index), <記録のディレクトリー>/CRITIC_STDERR_FILE_NAME) で起動する
+       (Claude Code の build_env は agent_launcher.build_claude_env)
     8. poll() が None でなくなるまで、POLL_INTERVAL_S 秒ずつ wait で待つ。
        wait が True を返したら (止める合図) stop_critic で止めて status を "stopped" に、
        clock() - started が CRITIC_TIMEOUT_S 以上になったら stop_critic で止めて status を "timeout" にする
-    9. 終わったら、批評役の標準出力の行から reflection.critique_from_result で批評を取り出す。
+    9. 終わったら、批評役の標準出力の行から critic.critique (Claude Code は reflection.critique_from_result) で
+       批評を取り出す。
        取り出せれば、notes.md をもう一度読み (無ければ空の文字列)、
        reflection.replace_reflection_section(<notes.md>, reflection.section_body(<tick * 5>, <批評>)) を write_notes で書き、
        event_log.append_event(paths.events_file, reflection.build_reflection_event(clock(), index, <clock() - started>))
@@ -421,32 +561,40 @@ def reflect_once(
         window_actions(events, window_start, started), window_start
     )
     agent_log_to = agent_log_size(paths.agent_log_file)
-    statements = assistant_texts(
+    critic = setting.critic
+    statements = critic.statements(
         _read_log_lines(paths.agent_log_file, agent_log_offset, agent_log_to)
     )
     notes_path = paths.root / NOTES_FILE_NAME
     instructions = Template(setting.read_template(CRITIC_INSTRUCTION_FILE)).substitute(
         game=setting.game, goal=setting.goal
     )
-    content = build_critic_content(
-        instructions, frames, action_lines, statements, _read_notes(notes_path)
+    command = critic.build_command(
+        CriticRequest(
+            instructions=instructions,
+            frames=frames,
+            frame_paths=[paths.root / frame for frame in passed],
+            action_lines=action_lines,
+            statements=statements,
+            notes_text=_read_notes(notes_path),
+        )
     )
     directory = reflections_dir(paths)
     directory.mkdir(parents=True, exist_ok=True)
     index = next_critic_index(directory)
     output_path = directory / critic_output_file_name(index)
     process = setting.start_critic(
-        build_critic_args(),
+        command.args,
         paths.root,
-        build_claude_env(setting.base_env, paths.root),
-        critic_input_line(content),
+        critic.build_env(setting.base_env, paths.root),
+        command.input_text,
         output_path,
         directory / CRITIC_STDERR_FILE_NAME,
     )
     status: str | None = _wait_for_critic(process, started, clock, wait)
     critique: str | None = None
     if status is None:
-        critique = critique_from_result(_read_log_lines(output_path, 0))
+        critique = critic.critique(_read_log_lines(output_path, 0))
         if critique is None:
             status = "failed"
         else:
@@ -527,11 +675,12 @@ def reflecting_with_critic(
     base_env: Mapping[str, str],
     start_critic: StartCritic = start_critic_process,
     read_template: ReadTemplate = read_package_template,
+    critic: CriticAgent = CLAUDE_CRITIC,
 ) -> Iterator[None]:
     """with の中にいる間、裏のスレッドで run_reflections を動かす。
 
     1. stop = threading.Event() と CriticSetting(paths, config.game, config.goal, base_env, start_critic, clock,
-       read_template) を作る
+       read_template, critic) を作る (critic は批評役の種類。commands.handle_run がプレイヤーと同じ種類を渡す)
     2. threading.Thread(target=run_reflections, args=(setting, stop.wait), daemon=True) を start する
     3. yield する
     4. with を抜けるとき (例外で抜けるときも finally で)、stop.set() で止める合図をし、
@@ -548,6 +697,7 @@ def reflecting_with_critic(
         start_critic=start_critic,
         clock=clock,
         read_template=read_template,
+        critic=critic,
     )
     thread = threading.Thread(
         target=run_reflections, args=(setting, stop.wait), daemon=True

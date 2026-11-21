@@ -6,6 +6,11 @@ max_total_cost_usd)、終わったプロセスを起動し直すかの判定 (st
 時間を区切った起動 (run_agent_until) は、プロセスの起動・時計・待機・デーモンへの送信・記録・
 後片付けの間の割り込みの扱いをすべて引数で受け取る。
 
+run_agent_until は、エージェントの種類ごとの起動引数・環境変数・出力の読み方を PlayerAgent で受け取る。
+既定は Claude Code の実装 (CLAUDE_PLAYER = ClaudePlayer()) で、OpenAI Codex CLI の実装は codex_player.CodexPlayer。
+プロセスの起動 (StartProcess)・止め方 (stop_process)・起動し直しの判定は、どちらの種類でも同じものを使う。
+以下の claude のプロセスとの関係と設定の説明は、Claude Code の実装のもの。
+
 claude は新しいセッション (subprocess.Popen の start_new_session=True) で起動する。端末の Ctrl-C が claude に直接届かず、
 run の Python が KeyboardInterrupt を受けて、後片付けの順序 (claude を止めてから up ALL) で止めるためである。
 claude のプロセスとの関係は次のとおり (Claude Code 2.1.325 で 2026-11-17 に確かめた):
@@ -59,6 +64,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
+from switch2_harness.agent_kind import CLAUDE_AGENT, default_model
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.process_tree import (
@@ -76,8 +82,8 @@ from switch2_harness.workspace_pin import PINNED_WORKSPACE_ENV
 
 CLAUDE_COMMAND = "claude"
 
-# 第3章の試行と同じモデル
-DEFAULT_MODEL = "claude-opus-5-5"
+# 第3章の試行と同じモデル (agent_kind.DEFAULT_MODELS の claude の値)
+DEFAULT_MODEL = default_model(CLAUDE_AGENT)
 
 # エージェント用のサブコマンドを Bash で許可するときのコマンドの書き出し
 HARNESS_COMMAND_PREFIX = "uv run switch2-harness"
@@ -157,15 +163,17 @@ Shield = Callable[[], AbstractContextManager[None]]
 
 @dataclass(frozen=True)
 class LaunchOptions:
-    """claude に渡す指定。
+    """エージェントに渡す指定。
 
-    model: --model に渡すモデル
-    effort: --effort に渡す値。None なら --effort を付けない
+    model: --model (codex は -m) に渡すモデル。None なら、そのエージェントの既定のモデル
+        (agent_kind.DEFAULT_MODELS。commands.handle_run が harness.json を読んだ後に決める)
+    effort: --effort に渡す値 (codex は -c model_reasoning_effort)。None なら付けない
     max_budget_usd: run 全体の費用の上限 (USD)。--max-budget-usd に、小数 4 桁の文字列
-        (f"{値:.4f}"。例: 2.5 は "2.5000"、1.0 - 0.4 は "0.6000") にして渡す。None なら付けない
+        (f"{値:.4f}"。例: 2.5 は "2.5000"、1.0 - 0.4 は "0.6000") にして渡す。None なら付けない。
+        codex は費用を出さないため使えない (commands.handle_run が起動の前に拒む)
     """
 
-    model: str = DEFAULT_MODEL
+    model: str | None = DEFAULT_MODEL
     effort: str | None = None
     max_budget_usd: float | None = None
 
@@ -311,13 +319,14 @@ def build_claude_args(
           --restricted
           --settings <CLAUDE_SETTINGS_JSON>
           --append-system-prompt-file <str(instructions_path)>
-          --model <options.model>
+          --model <options.model。None なら DEFAULT_MODEL>
           [--effort <options.effort>] [--max-budget-usd <format_budget_usd(options.max_budget_usd)>]
           [--resume <resume_session_id>]
 
     プロンプトを -p の直後に置くのは、可変長の --allowedTools などが後ろの位置引数を取り込まないようにするため。
     [] の中は、値が None でないときだけ付ける。
     """
+    model = options.model if options.model is not None else DEFAULT_MODEL
     args = [
         CLAUDE_COMMAND,
         "-p",
@@ -341,7 +350,7 @@ def build_claude_args(
         "--append-system-prompt-file",
         str(instructions_path),
         "--model",
-        options.model,
+        model,
     ]
     if options.effort is not None:
         args += ["--effort", options.effort]
@@ -498,6 +507,94 @@ def read_last_result_subtype(path: Path, offset: int) -> str | None:
 def read_max_total_cost_usd(path: Path, offset: int) -> float | None:
     """read_agent_log_lines(path, offset) の行の max_total_cost_usd を返す。path が無ければ None。"""
     return max_total_cost_usd(read_agent_log_lines(path, offset))
+
+
+class PlayerAgent(Protocol):
+    """プレイするエージェントの種類ごとの、起動引数・環境変数・出力 (agent.jsonl) の読み方。
+
+    run_agent_until が使う。本番は ClaudePlayer (Claude Code) と codex_player.CodexPlayer (OpenAI Codex CLI)。
+    name: 記録の reply (`launched <name> launch=<回数>`) に書く名前
+    """
+
+    name: str
+
+    def build_args(
+        self,
+        prompt: str,
+        agent_commands: Sequence[str],
+        paths: WorkspacePaths,
+        options: LaunchOptions,
+        resume_id: str | None,
+        writable_files: Sequence[str],
+    ) -> list[str]:
+        """起動引数を返す。resume_id が None でなければ、その ID の会話を続ける起動にする。"""
+        ...
+
+    def build_env(
+        self, base_env: Mapping[str, str], workspace_root: Path
+    ) -> dict[str, str]:
+        """起動するプロセスの環境変数を返す (エージェント用のサブコマンドを workspace_root に固定する変数を含む)。"""
+        ...
+
+    def resume_id(self, lines: Sequence[str]) -> str | None:
+        """今回の run の出力の行から、起動し直しに使う ID の最後のものを返す。無ければ None。"""
+        ...
+
+    def result_subtype(self, lines: Sequence[str]) -> str | None:
+        """今回の run の出力の行から、最後の result の subtype を返す (予算切れの判定に使う)。無ければ None。"""
+        ...
+
+    def spent_usd(self, lines: Sequence[str]) -> float | None:
+        """今回の run の出力の行から、それまでに使った費用 (USD) を返す。分からなければ None。"""
+        ...
+
+
+@dataclass(frozen=True)
+class ClaudePlayer:
+    """PlayerAgent の Claude Code の実装。このモジュールの Claude Code の関数をそのまま使う。
+
+    build_args は build_claude_args(prompt, agent_commands, paths.instructions_file, options, resume_id,
+    writable_files=writable_files)、build_env は build_claude_env、resume_id は last_session_id、
+    result_subtype は last_result_subtype、spent_usd は max_total_cost_usd。
+    """
+
+    name: str = CLAUDE_AGENT
+
+    def build_args(
+        self,
+        prompt: str,
+        agent_commands: Sequence[str],
+        paths: WorkspacePaths,
+        options: LaunchOptions,
+        resume_id: str | None,
+        writable_files: Sequence[str],
+    ) -> list[str]:
+        return build_claude_args(
+            prompt,
+            agent_commands,
+            paths.instructions_file,
+            options,
+            resume_id,
+            writable_files=writable_files,
+        )
+
+    def build_env(
+        self, base_env: Mapping[str, str], workspace_root: Path
+    ) -> dict[str, str]:
+        return build_claude_env(base_env, workspace_root)
+
+    def resume_id(self, lines: Sequence[str]) -> str | None:
+        return last_session_id(lines)
+
+    def result_subtype(self, lines: Sequence[str]) -> str | None:
+        return last_result_subtype(lines)
+
+    def spent_usd(self, lines: Sequence[str]) -> float | None:
+        return max_total_cost_usd(lines)
+
+
+# run_agent_until の既定のエージェント
+CLAUDE_PLAYER = ClaudePlayer()
 
 
 def validate_minutes(minutes: float) -> None:
@@ -724,8 +821,16 @@ def run_agent_until(
     writable_files: Sequence[str] = (),
     shield: Shield = ignore_interrupts,
     defer: Shield = defer_interrupts,
+    agent: PlayerAgent = CLAUDE_PLAYER,
 ) -> RunOutcome:
-    """claude -p を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
+    """エージェント (既定は claude -p) を起動し、期限 (開始時刻 + minutes 分) になったら止める。minutes は正の数を渡す。
+
+    起動引数・環境変数・出力の読み方は agent (PlayerAgent) で決まる。以下の説明は既定の Claude Code
+    (CLAUDE_PLAYER) のもので、関数名は ClaudePlayer が使う関数を指す。ほかの種類では、build_claude_args は
+    agent.build_args、build_claude_env は agent.build_env、read_last_session_id は agent.resume_id、
+    read_last_result_subtype は agent.result_subtype、read_max_total_cost_usd は agent.spent_usd に読み替える
+    (どれも今回の run の出力の行 read_agent_log_lines(paths.agent_log_file, offset) を渡す)。
+    記録の reply の claude は agent.name になる。
 
     時計は 2 つ受け取る。deadline_clock は期限・残り時間・経過時間 (elapsed_s) を計る時計で、
     clock は記録の時刻 (CommandEvent.time) に使う時計。本番はどちらも壁時計 (time.time) で、第3章の試行
@@ -785,7 +890,7 @@ def run_agent_until(
     """
     log_path = paths.agent_log_file
     offset = agent_log_size(log_path)
-    env = build_claude_env(base_env, paths.root)
+    env = agent.build_env(base_env, paths.root)
     deadline = deadline_clock() + minutes * 60.0
     launches = 0
     resumes = 0
@@ -796,13 +901,8 @@ def run_agent_until(
     def launch(
         launch_options: LaunchOptions, prompt: str, session_id: str | None
     ) -> AgentProcess:
-        args = build_claude_args(
-            prompt,
-            agent_commands,
-            paths.instructions_file,
-            launch_options,
-            session_id,
-            writable_files=writable_files,
+        args = agent.build_args(
+            prompt, agent_commands, paths, launch_options, session_id, writable_files
         )
         return start_process(args, paths.root, env, log_path, paths.agent_stderr_file)
 
@@ -839,7 +939,7 @@ def run_agent_until(
         with defer():
             process = launch(options, first_prompt(game), None)
         launches = 1
-        record(_run_event(clock(), ("start",), "launched claude launch=1"))
+        record(_run_event(clock(), ("start",), f"launched {agent.name} launch=1"))
         while True:
             now = deadline_clock()
             if process.poll() is None:
@@ -848,16 +948,17 @@ def run_agent_until(
                     break
                 sleep(POLL_INTERVAL_S)
                 continue
+            lines = read_agent_log_lines(log_path, offset)
             remaining_budget: float | None = None
             if options.max_budget_usd is not None:
-                spent = read_max_total_cost_usd(log_path, offset)
+                spent = agent.spent_usd(lines)
                 remaining_budget = options.max_budget_usd - (
                     spent if spent is not None else 0.0
                 )
-            session_id = read_last_session_id(log_path, offset)
+            session_id = agent.resume_id(lines)
             reason = stop_reason_after_exit(
                 remaining_s=deadline - now,
-                last_subtype=read_last_result_subtype(log_path, offset),
+                last_subtype=agent.result_subtype(lines),
                 remaining_budget_usd=remaining_budget,
                 resumes=resumes,
                 session_id=session_id,
@@ -878,7 +979,7 @@ def run_agent_until(
                 _run_event(
                     clock(),
                     ("resume", session_id),
-                    f"launched claude launch={launches} resume={session_id}",
+                    f"launched {agent.name} launch={launches} resume={session_id}",
                 )
             )
     finally:

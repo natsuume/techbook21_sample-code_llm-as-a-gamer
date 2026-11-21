@@ -16,6 +16,11 @@ look の画像は引数の関数 (load_frame) で、agent.jsonl は行の列で�
 
 期限で止めた (SIGINT・SIGTERM などで止めた) claude -p は、進行中のターンの result メッセージを書かない。
 そのため起動の数は events.jsonl から数え、費用・ターン・時間は result メッセージを書いた起動の分だけを集計する。
+
+Codex (codex exec --json) の作業ディレクトリーでは、agent.jsonl を codex_log で読み、CodexAgentSummary にする
+(summarize_codex_agent)。Codex は費用・ターン数・時間を出さないため、それらの項目は None (表示は「なし」) にし、
+代わりに turn.completed の usage のトークン数を集計する。result メッセージの代わりは turn.completed で、
+期限で止めた起動は turn.completed を出さないことがある。
 """
 
 import json
@@ -25,6 +30,15 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
+from switch2_harness.agent_kind import CODEX_AGENT, DEFAULT_AGENT, AgentKind
+from switch2_harness.codex_log import (
+    count_responses as count_codex_responses,
+)
+from switch2_harness.codex_log import (
+    count_turns_completed,
+    has_codex_output,
+    max_usage_by_thread,
+)
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.screen_change import change_ratio, is_static
 
@@ -73,6 +87,34 @@ class AgentSummary:
 
 
 @dataclass(frozen=True)
+class CodexAgentSummary:
+    """codex exec の起動と出力の集計。キーの前半は AgentSummary と同じで、Codex が出さない項目は None。
+
+    launches: 起動の数 (AgentSummary と同じく events.jsonl から数える)
+    results: turn.completed の数 (Claude Code の result メッセージの代わり)
+    total_cost_usd: None (codex exec は費用を出さない)
+    num_turns: None (codex exec はモデルを呼んだ回数を出さない)
+    duration_ms: None (codex exec はターンの時間を出さない)
+    responses: 応答の数 (codex_log.count_responses。item.completed のうち推論の要約と Codex の警告を除いたもの)
+    input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens:
+        スレッドごとに turn.completed の usage の最大の値を取り、合計したもの (usage はスレッドの累計で、resume で
+        続けた起動の usage は前の起動の分を含むため)。turn.completed を書いた起動の分だけで、期限で止めた起動の分は
+        含まない (後で同じスレッドを resume した起動が turn.completed を書けば、その累計に入る)
+    """
+
+    launches: int
+    results: int
+    total_cost_usd: None
+    num_turns: None
+    duration_ms: None
+    responses: int
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+
+
+@dataclass(frozen=True)
 class SessionSummary:
     """1 つの作業ディレクトリーの実験の集計。
 
@@ -85,7 +127,8 @@ class SessionSummary:
     longest_static_s: 変化なしの組が連続した区間の最長の時間 (区間の最初の look から最後の look までの秒数)。無ければ 0.0
     unchanged_after_press: 間に成功した press が 1 つ以上ある look の組のうち、変化なしの組の数
     pressed_pairs: 間に成功した press が 1 つ以上ある look の組の数
-    agent: claude -p の集計 (summarize_agent)。run のイベントも、agent.jsonl の assistant と result の行も無ければ None
+    agent: エージェントの集計。Claude Code は summarize_agent、Codex は summarize_codex_agent の結果。
+        run のイベントも、エージェントの出力の行も無ければ None
     """
 
     duration_s: float
@@ -97,7 +140,7 @@ class SessionSummary:
     longest_static_s: float
     unchanged_after_press: int
     pressed_pairs: int
-    agent: AgentSummary | None
+    agent: AgentSummary | CodexAgentSummary | None
 
 
 def agent_messages_from_lines(lines: Iterable[str]) -> list[dict[str, object]]:
@@ -195,6 +238,32 @@ def summarize_agent(
     )
 
 
+def summarize_codex_agent(
+    events: Sequence[CommandEvent], agent_lines: Sequence[str]
+) -> CodexAgentSummary | None:
+    """イベントの列と agent.jsonl (codex exec --json) の行の列から CodexAgentSummary を作る。
+
+    command が "run" のイベントが 1 つも無く、codex_log.has_codex_output(agent_lines) も False なら None。
+    トークン数は codex_log.max_usage_by_thread の値をスレッドについて合計する。
+    """
+    has_run_event = any(event.command == "run" for event in events)
+    if not has_run_event and not has_codex_output(agent_lines):
+        return None
+    usages = list(max_usage_by_thread(agent_lines).values())
+    return CodexAgentSummary(
+        launches=count_launches(events),
+        results=count_turns_completed(agent_lines),
+        total_cost_usd=None,
+        num_turns=None,
+        duration_ms=None,
+        responses=count_codex_responses(agent_lines),
+        input_tokens=sum(usage.input_tokens for usage in usages),
+        cached_input_tokens=sum(usage.cached_input_tokens for usage in usages),
+        output_tokens=sum(usage.output_tokens for usage in usages),
+        reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in usages),
+    )
+
+
 @dataclass(frozen=True)
 class _LookPair:
     """隣り合う 2 つの成功した look と、その組の判定。"""
@@ -249,6 +318,7 @@ def summarize_session(
     events: Sequence[CommandEvent],
     load_frame: LoadFrame,
     agent_lines: Sequence[str],
+    agent: AgentKind = DEFAULT_AGENT,
 ) -> SessionSummary:
     """イベントの列と agent.jsonl の行の列 (全行) から SessionSummary を作る。
 
@@ -257,7 +327,8 @@ def summarize_session(
     screen_change.is_static で変化なしかを決める。
     「間に成功した press がある」は、並べ替えた列で組の 2 つの look の間に成功した press があること。
     look の間隔の中央値は statistics.median、平均は statistics.fmean で求める。
-    agent は summarize_agent(events, agent_lines) の結果。
+    agent (エージェントの種類) が codex なら、SessionSummary.agent は summarize_codex_agent(events, agent_lines)、
+    そうでなければ summarize_agent(events, agent_lines) の結果。
     """
     ordered = sorted(events, key=lambda event: event.time)
     duration_s = ordered[-1].time - ordered[0].time if len(ordered) >= 2 else 0.0
@@ -286,7 +357,11 @@ def summarize_session(
         longest_static_s=_longest_static_s(pairs),
         unchanged_after_press=sum(1 for pair in pressed if pair.static),
         pressed_pairs=len(pressed),
-        agent=summarize_agent(events, agent_lines),
+        agent=(
+            summarize_codex_agent(events, agent_lines)
+            if agent == CODEX_AGENT
+            else summarize_agent(events, agent_lines)
+        ),
     )
 
 
@@ -310,6 +385,10 @@ def format_summary(summary: SessionSummary) -> str:
         result を出した起動の分: 費用 <total_cost_usd> USD / ターン <num_turns> / 時間 <duration_ms を秒にしたもの> 秒
     look_interval が None なら 4 行目は `look の間隔: なし (成功した look が 2 回未満)`。
     agent が None なら 8 行目と 9 行目の代わりに `エージェント: 記録なし` の 1 行にする (全体で 8 行)。
+    agent が CodexAgentSummary なら、8 行目と 9 行目は次の形にする (format_codex_agent_lines):
+        エージェント: 起動 <launches> 回 / 応答 <responses> 回 / turn.completed <results> 回
+        turn.completed を出した起動の分: 費用 なし / ターン なし / 時間 なし / 入力 <input_tokens> トークン
+            (キャッシュ <cached_input_tokens>) / 出力 <output_tokens> トークン (推論 <reasoning_output_tokens>)
     例: `コマンドの回数: look=6 press=3`、`result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 秒`。
     """
     counts = " ".join(
@@ -336,6 +415,8 @@ def format_summary(summary: SessionSummary) -> str:
     agent = summary.agent
     if agent is None:
         lines.append("エージェント: 記録なし")
+    elif isinstance(agent, CodexAgentSummary):
+        lines.extend(format_codex_agent_lines(agent))
     else:
         lines.append(
             f"エージェント: 起動 {agent.launches} 回 / 応答 {agent.responses} 回 / "
@@ -346,3 +427,17 @@ def format_summary(summary: SessionSummary) -> str:
             f"ターン {agent.num_turns} / 時間 {agent.duration_ms / 1000:.1f} 秒"
         )
     return "\n".join(lines)
+
+
+def format_codex_agent_lines(agent: CodexAgentSummary) -> tuple[str, str]:
+    """CodexAgentSummary の、format_summary の 8 行目と 9 行目を返す (format_summary の説明を参照)。"""
+    launches_line = (
+        f"エージェント: 起動 {agent.launches} 回 / 応答 {agent.responses} 回 / "
+        f"turn.completed {agent.results} 回"
+    )
+    usage_line = (
+        "turn.completed を出した起動の分: 費用 なし / ターン なし / 時間 なし / "
+        f"入力 {agent.input_tokens} トークン (キャッシュ {agent.cached_input_tokens}) / "
+        f"出力 {agent.output_tokens} トークン (推論 {agent.reasoning_output_tokens})"
+    )
+    return launches_line, usage_line

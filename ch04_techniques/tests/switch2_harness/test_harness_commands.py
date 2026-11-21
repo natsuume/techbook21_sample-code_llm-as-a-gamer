@@ -15,11 +15,15 @@ from harness_fakes import (
     FAKE_REFLECTION,
     FAKE_STAGNATION_ALERT,
     FakeClock,
+    FakeCodexPrepare,
     FakeDaemon,
     FakeProcessStarter,
     FakeSleep,
     ImageWritingDaemon,
     ProcessPlan,
+    codex_message_line,
+    codex_thread_line,
+    codex_turn_completed_line,
     make_paths,
     read_fake_template,
     shot_color,
@@ -30,7 +34,12 @@ from switch2_harness.agent_launcher import (
     build_claude_args,
     first_prompt,
 )
+from switch2_harness.codex_command import build_codex_env, build_codex_exec_args
+from switch2_harness.codex_critic import CodexCritic
+from switch2_harness.codex_home import CodexSetupError
+from switch2_harness.codex_instructions import codex_read_template
 from switch2_harness.commands import (
+    CODEX_BUDGET_MESSAGE,
     RUN_INTERRUPTED_MESSAGE,
     CommandResult,
     handle_finish,
@@ -51,6 +60,8 @@ from switch2_harness.features import (
     Feature,
 )
 from switch2_harness.harness_config import HarnessConfig
+from switch2_harness.instructions import read_package_template, render_instructions
+from switch2_harness.reflection_critic import CLAUDE_CRITIC
 from switch2_harness.signal_guard import RunTerminated
 from switch2_harness.workspace import WorkspacePaths
 
@@ -1802,3 +1813,294 @@ def test_run_with_stagnation_alert_and_reflection_enters_both(paths, clock):
     assert reflecting.recording_order_at_exit == ["enter"]
     assert reflecting.launches_at_enter == 0
     assert reflecting.sent_at_exit == [["up", "ALL"]]
+
+
+# --- Codex (init --agent codex と、codex の作業ディレクトリーの run・report) ---
+
+CODEX_HOME = Path("/home/player/.cache/switch2-harness/codex-home/play-abc")
+HARNESS_EXECUTABLE = Path("/repo/ch04_techniques/.venv/bin/switch2-harness")
+AGENTS_MD = f"# Codex への指示\n\n{HARNESS_EXECUTABLE} look\n"
+
+
+def write_codex_workspace(paths: WorkspacePaths, features: list[str]) -> None:
+    """agent が codex の harness.json と AGENTS.md を書く。"""
+    paths.harness_file.write_text(
+        json.dumps(
+            {
+                "game": "ゲーム A",
+                "goal": "ボスを倒す",
+                "features": features,
+                "created_at": "2026-11-16T21:00:05+09:00",
+                "agent": "codex",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (paths.root / "AGENTS.md").write_text(AGENTS_MD, encoding="utf-8")
+
+
+def run_codex_with_fakes(
+    paths: WorkspacePaths,
+    clock: FakeClock,
+    prepare: FakeCodexPrepare,
+    options: LaunchOptions,
+    available: tuple[Feature, ...] = FAKE_FEATURES,
+    reflecting: FakeReflecting | None = None,
+):
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    result = handle_run(
+        paths,
+        1.0,
+        options,
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
+        available=available,
+        reflecting=reflecting,
+        prepare_codex=prepare,
+        harness_executable=HARNESS_EXECUTABLE,
+    )
+    return result, starter, daemon
+
+
+def test_init_with_codex_writes_agents_md_and_the_agent(tmp_path):
+    directory = tmp_path / "plays" / "codex"
+    result = handle_init(
+        directory,
+        "ゲーム A",
+        "ボスを倒す",
+        ["notes", REFLECTION_FEATURE],
+        now=fixed_now,
+        read_template=read_package_template,
+        agent="codex",
+        harness_executable=HARNESS_EXECUTABLE,
+    )
+    assert result == CommandResult(
+        exit_code=0,
+        stdout_lines=(f"ok {directory} features=notes,reflection agent=codex",),
+    )
+    assert json.loads((directory / "harness.json").read_text(encoding="utf-8")) == {
+        "game": "ゲーム A",
+        "goal": "ボスを倒す",
+        "features": ["notes", "reflection"],
+        "created_at": "2026-11-16T21:00:05+09:00",
+        "agent": "codex",
+    }
+    assert not (directory / "CLAUDE.md").exists()
+    config = HarnessConfig(
+        "ゲーム A", "ボスを倒す", ("notes", "reflection"), "2026-11-16T21:00:05+09:00"
+    )
+    agents_md = (directory / "AGENTS.md").read_text(encoding="utf-8")
+    assert agents_md == render_instructions(
+        config, codex_read_template(read_package_template, HARNESS_EXECUTABLE)
+    )
+    # サブコマンドは、ハーネスの実行ファイルの絶対パスで書く (rules がサンドボックスの外で動かすのはその形だけ)
+    assert f"{HARNESS_EXECUTABLE} look " in agents_md
+    assert "uv run" not in agents_md
+    # notes.md の最初の内容は、Claude Code の作業ディレクトリーと同じ
+    claude_directory = tmp_path / "plays" / "claude"
+    handle_init(
+        claude_directory,
+        "ゲーム A",
+        "ボスを倒す",
+        ["notes", REFLECTION_FEATURE],
+        now=fixed_now,
+        read_template=read_package_template,
+    )
+    assert (directory / "notes.md").read_text(encoding="utf-8") == (
+        claude_directory / "notes.md"
+    ).read_text(encoding="utf-8")
+    assert "view_image" not in (claude_directory / "CLAUDE.md").read_text("utf-8")
+
+
+def test_run_with_codex_prepares_the_codex_home_and_launches_codex(paths, clock):
+    write_codex_workspace(paths, ["memo-files"])
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, starter, daemon = run_codex_with_fakes(
+        paths, clock, prepare, LaunchOptions(model=None, effort="low")
+    )
+    assert result.exit_code == 0
+    [call] = prepare.calls
+    assert call.paths == paths
+    assert call.agent_commands == ("look", "press", "status", "finish", "note", "notes")
+    assert call.writable_files == ("memo.md",)
+    assert call.environ == {"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"}
+    assert call.executable == HARNESS_EXECUTABLE
+    [launch] = starter.launches
+    # --model を省くと codex の既定のモデル。指示は作業ディレクトリーの AGENTS.md
+    assert launch.args == build_codex_exec_args(
+        first_prompt("ゲーム A"), "gpt-6.2-sol", "low", AGENTS_MD
+    )
+    assert launch.env == build_codex_env(
+        {"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"}, CODEX_HOME, paths.root
+    )
+    assert daemon.sent == [["up", "ALL"]]
+    assert read_events(paths.events_file)[0].reply == "launched codex launch=1"
+
+
+def test_run_with_codex_rejects_max_budget_usd(paths, clock):
+    write_codex_workspace(paths, [])
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, starter, daemon = run_codex_with_fakes(
+        paths, clock, prepare, LaunchOptions(max_budget_usd=1.0)
+    )
+    assert result == CommandResult(
+        exit_code=1, stderr_lines=(f"error {CODEX_BUDGET_MESSAGE}",)
+    )
+    assert CODEX_BUDGET_MESSAGE == (
+        "--max-budget-usd cannot be used with agent codex "
+        "(codex exec does not report the cost)"
+    )
+    assert prepare.calls == []
+    assert starter.launches == []
+    assert daemon.sent == []
+
+
+def test_run_with_codex_stops_when_the_codex_home_cannot_be_prepared(paths, clock):
+    write_codex_workspace(paths, [])
+    prepare = FakeCodexPrepare(
+        CODEX_HOME, error=CodexSetupError("codex login not found")
+    )
+    result, starter, daemon = run_codex_with_fakes(
+        paths, clock, prepare, LaunchOptions()
+    )
+    assert result == CommandResult(
+        exit_code=1, stderr_lines=("error codex login not found",)
+    )
+    assert starter.launches == []
+    assert daemon.sent == []
+
+
+def test_run_with_codex_stops_when_agents_md_uses_another_executable(paths, clock):
+    write_codex_workspace(paths, [])
+    (paths.root / "AGENTS.md").write_text(
+        "uv run switch2-harness look\n", encoding="utf-8"
+    )
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, starter, _ = run_codex_with_fakes(paths, clock, prepare, LaunchOptions())
+    message = (
+        f"error {paths.root / 'AGENTS.md'} does not use {HARNESS_EXECUTABLE}; "
+        "create the workspace again with init"
+    )
+    assert result == CommandResult(exit_code=1, stderr_lines=(message,))
+    assert prepare.calls == []
+    assert starter.launches == []
+
+
+def test_run_with_codex_stops_without_agents_md(paths, clock):
+    write_codex_workspace(paths, [])
+    (paths.root / "AGENTS.md").unlink()
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, starter, _ = run_codex_with_fakes(paths, clock, prepare, LaunchOptions())
+    assert result.exit_code == 1
+    assert result.stderr_lines[0].startswith("error ")
+    assert "AGENTS.md" in result.stderr_lines[0]
+    assert prepare.calls == []
+    assert starter.launches == []
+
+
+def test_run_with_claude_uses_the_claude_default_model_without_a_model(paths, clock):
+    write_harness_json(paths, [])
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    handle_run(
+        paths,
+        1.0,
+        LaunchOptions(model=None),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FAKE_FEATURES,
+    )
+    args = starter.launches[0].args
+    assert args[args.index("--model") + 1] == "claude-opus-5-5"
+
+
+def test_run_with_codex_reflects_with_the_codex_critic(paths, clock, monkeypatch):
+    write_codex_workspace(paths, ["memo-files", REFLECTION_FEATURE])
+    received: list[dict[str, object]] = []
+
+    @contextmanager
+    def fake_reflecting_with_critic(paths, config, **kwargs) -> Iterator[None]:
+        received.append(kwargs)
+        yield
+
+    monkeypatch.setattr(
+        "switch2_harness.commands.reflecting_with_critic", fake_reflecting_with_critic
+    )
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, _, _ = run_codex_with_fakes(
+        paths, clock, prepare, LaunchOptions(), available=FEATURES_WITH_REFLECTION
+    )
+    assert result.exit_code == 0
+    [kwargs] = received
+    assert kwargs["critic"] == CodexCritic(CODEX_HOME)
+
+
+def test_run_with_claude_reflects_with_the_claude_critic(paths, clock, monkeypatch):
+    write_harness_json(paths, ["memo-files", REFLECTION_FEATURE])
+    received: list[dict[str, object]] = []
+
+    @contextmanager
+    def fake_reflecting_with_critic(paths, config, **kwargs) -> Iterator[None]:
+        received.append(kwargs)
+        yield
+
+    monkeypatch.setattr(
+        "switch2_harness.commands.reflecting_with_critic", fake_reflecting_with_critic
+    )
+    starter, daemon, sleep = make_run_parts(clock, [ProcessPlan(runs_for_s=None)])
+    handle_run(
+        paths,
+        1.0,
+        LaunchOptions(),
+        start_process=starter,
+        clock=clock,
+        deadline_clock=clock,
+        sleep=sleep,
+        send=daemon,
+        base_env={},
+        available=FEATURES_WITH_REFLECTION,
+    )
+    [kwargs] = received
+    assert kwargs["critic"] is CLAUDE_CRITIC
+
+
+def test_report_with_codex_reads_the_codex_log(paths):
+    append_event(
+        paths.events_file,
+        CommandEvent(1.0, "run", ("start",), "launched codex launch=1", True, 0.0),
+    )
+    paths.agent_log_file.write_text(
+        "\n".join(
+            [
+                codex_thread_line("t1"),
+                codex_message_line("進みます"),
+                codex_turn_completed_line(100, 40, 7, 3),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = handle_report(paths, as_json=True, agent="codex")
+    agent = json.loads(result.stdout_lines[0])["agent"]
+    assert agent == {
+        "launches": 1,
+        "results": 1,
+        "total_cost_usd": None,
+        "num_turns": None,
+        "duration_ms": None,
+        "responses": 1,
+        "input_tokens": 100,
+        "cached_input_tokens": 40,
+        "output_tokens": 7,
+        "reasoning_output_tokens": 3,
+    }
+    text = handle_report(paths, as_json=False, agent="codex").stdout_lines
+    assert text[-1].startswith("turn.completed を出した起動の分: 費用 なし")

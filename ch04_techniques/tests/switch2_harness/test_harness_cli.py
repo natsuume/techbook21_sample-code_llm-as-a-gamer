@@ -21,12 +21,15 @@ from harness_fakes import (
     FAKE_REFLECTION,
     FAKE_STAGNATION_ALERT,
     FakeClock,
+    FakeCodexPrepare,
     FakeCriticStarter,
     FakeDaemon,
     FakeProcessStarter,
     FakeSleep,
     ImageWritingDaemon,
     ProcessPlan,
+    codex_thread_line,
+    codex_turn_completed_line,
     make_paths,
     read_fake_template,
 )
@@ -40,6 +43,7 @@ from switch2_harness.cli import (
     production_dependencies,
     run_cli,
 )
+from switch2_harness.codex_home import DEFAULT_HARNESS_EXECUTABLE, prepare_codex_home
 from switch2_harness.daemon_client import send_command
 from switch2_harness.event_log import CommandEvent, append_event
 from switch2_harness.features import (
@@ -744,3 +748,146 @@ def test_run_interrupted_by_ctrl_c_exits_with_1(workspace, harness, capsys):
     assert captured.out == ""
     assert captured.err == "error run interrupted\n"
     assert harness.daemon.sent == [["up", "ALL"]]
+
+
+# --- Codex ---
+
+CODEX_HOME = Path("/home/player/.cache/switch2-harness/codex-home/play-abc")
+HARNESS_EXECUTABLE = Path("/repo/ch04_techniques/.venv/bin/switch2-harness")
+
+
+def make_codex_workspace(root: Path, features: Sequence[str] = ()) -> Path:
+    """init を使わずに、agent が codex の作業ディレクトリー (harness.json・AGENTS.md・records/・frames/) を作る。"""
+    make_workspace(root, features)
+    harness_file = root / "harness.json"
+    data = json.loads(harness_file.read_text(encoding="utf-8"))
+    harness_file.write_text(
+        json.dumps({**data, "agent": "codex"}, ensure_ascii=False), encoding="utf-8"
+    )
+    (root / "AGENTS.md").write_text(f"# 指示\n\n{HARNESS_EXECUTABLE} look\n", "utf-8")
+    return root
+
+
+def test_parser_init_agent_defaults_to_claude():
+    args = build_parser().parse_args(["init", "plays/x", "--game", "G"])
+    assert args.agent == "claude"
+    args = build_parser().parse_args(
+        ["init", "plays/x", "--game", "G", "--agent", "codex"]
+    )
+    assert args.agent == "codex"
+
+
+def test_parser_run_model_defaults_to_none():
+    # 既定のモデルは、harness.json のエージェントの種類で決まる (commands.handle_run)
+    assert build_parser().parse_args(["run", "--minutes", "1"]).model is None
+
+
+def test_init_with_unknown_agent_exits_with_2(tmp_path, harness):
+    with pytest.raises(SystemExit) as error:
+        harness.run("init", str(tmp_path / "play"), "--game", "G", "--agent", "gemini")
+    assert error.value.code == 2
+    assert not (tmp_path / "play").exists()
+
+
+def test_init_with_codex(tmp_path, harness, capsys):
+    harness.deps = replace(
+        harness.deps,
+        read_template=read_package_template,
+        available=FEATURES,
+        harness_executable=HARNESS_EXECUTABLE,
+    )
+    directory = tmp_path / "play"
+    argv = [
+        "init",
+        str(directory),
+        "--game",
+        "G",
+        "--agent",
+        "codex",
+        "--enable",
+        "notes",
+    ]
+    assert harness.run(*argv) == 0
+    assert capsys.readouterr().out == f"ok {directory} features=notes agent=codex\n"
+    assert (
+        json.loads((directory / "harness.json").read_text("utf-8"))["agent"] == "codex"
+    )
+    agents_md = (directory / "AGENTS.md").read_text(encoding="utf-8")
+    assert "view_image" in agents_md
+    assert f"{HARNESS_EXECUTABLE} status " in agents_md
+    assert not (directory / "CLAUDE.md").exists()
+
+
+def test_run_dispatch_with_codex(tmp_path, harness, capsys):
+    workspace = make_codex_workspace(tmp_path / "play")
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    harness.deps = replace(
+        harness.deps, prepare_codex=prepare, harness_executable=HARNESS_EXECUTABLE
+    )
+    argv = ["run", "--minutes", "1", "--effort", "low", "--workspace", str(workspace)]
+    assert harness.run(*argv) == 0
+    [launch] = harness.starter.launches
+    assert launch.args[:2] == ["codex", "exec"]
+    assert launch.args[launch.args.index("-m") + 1] == "gpt-6.2-sol"
+    assert 'model_reasoning_effort="low"' in launch.args
+    assert launch.env["CODEX_HOME"] == str(CODEX_HOME)
+    [call] = prepare.calls
+    assert call.paths.root == workspace
+    assert call.executable == HARNESS_EXECUTABLE
+
+
+def test_run_with_codex_and_max_budget_usd_fails(tmp_path, harness, capsys):
+    workspace = make_codex_workspace(tmp_path / "play")
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    harness.deps = replace(
+        harness.deps, prepare_codex=prepare, harness_executable=HARNESS_EXECUTABLE
+    )
+    argv = [
+        "run",
+        "--minutes",
+        "1",
+        "--max-budget-usd",
+        "1",
+        "--workspace",
+        str(workspace),
+    ]
+    assert harness.run(*argv) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "error --max-budget-usd cannot be used with agent codex "
+        "(codex exec does not report the cost)\n"
+    )
+    assert prepare.calls == []
+    assert harness.starter.launches == []
+    assert harness.daemon.sent == []
+
+
+def test_report_with_codex(tmp_path, harness, capsys):
+    workspace = make_codex_workspace(tmp_path / "play")
+    (workspace / "records" / "agent.jsonl").write_text(
+        codex_thread_line("t1") + "\n" + codex_turn_completed_line(10, 0, 2) + "\n",
+        encoding="utf-8",
+    )
+    assert harness.run("report", "--json", "--workspace", str(workspace)) == 0
+    agent = json.loads(capsys.readouterr().out)["agent"]
+    assert agent["total_cost_usd"] is None
+    assert agent["input_tokens"] == 10
+    assert agent["results"] == 1
+
+
+def test_report_with_an_unknown_agent_fails(tmp_path, harness, capsys):
+    workspace = make_workspace(tmp_path / "play")
+    harness_file = workspace / "harness.json"
+    data = json.loads(harness_file.read_text(encoding="utf-8"))
+    harness_file.write_text(json.dumps({**data, "agent": "x"}), encoding="utf-8")
+    assert harness.run("report", "--workspace", str(workspace)) == 1
+    assert capsys.readouterr().err == (
+        "error harness.json: unknown agent: x (available: claude, codex)\n"
+    )
+
+
+def test_production_dependencies_prepare_the_real_codex_home():
+    deps = production_dependencies()
+    assert deps.prepare_codex is prepare_codex_home
+    assert deps.harness_executable == DEFAULT_HARNESS_EXECUTABLE

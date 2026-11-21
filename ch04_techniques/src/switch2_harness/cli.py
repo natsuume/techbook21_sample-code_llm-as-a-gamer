@@ -1,7 +1,7 @@
 """switch2-harness コマンドの入口。argparse でサブコマンドを解釈し、commands の各処理へ振り分ける。
 
 使い方:
-    uv run switch2-harness init plays/sample --game "ゲーム名" [--goal "目標"] [--enable NAME ...]
+    uv run switch2-harness init plays/sample --game "ゲーム名" [--goal "目標"] [--enable NAME ...] [--agent claude|codex]
     uv run switch2-harness look [--workspace DIR]
     uv run switch2-harness press tap B+RIGHT [--workspace DIR]
     uv run switch2-harness status [--workspace DIR]
@@ -23,13 +23,19 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 
 from switch2_harness.action_history import FramesChanged, frames_changed_on_disk
+from switch2_harness.agent_kind import AGENT_KINDS, DEFAULT_AGENT, DEFAULT_MODELS
 from switch2_harness.agent_launcher import (
-    DEFAULT_MODEL,
     LaunchOptions,
     StartProcess,
     start_claude_process,
+)
+from switch2_harness.codex_home import (
+    DEFAULT_HARNESS_EXECUTABLE,
+    PrepareCodex,
+    prepare_codex_home,
 )
 from switch2_harness.commands import (
     CommandResult,
@@ -51,7 +57,7 @@ from switch2_harness.features import (
     STAGNATION_ALERT_FEATURE,
     Feature,
 )
-from switch2_harness.harness_config import DEFAULT_GOAL, read_config
+from switch2_harness.harness_config import DEFAULT_GOAL, read_agent, read_config
 from switch2_harness.instructions import ReadTemplate, read_package_template
 from switch2_harness.reflection_critic import StartCritic, start_critic_process
 from switch2_harness.screen_recorder import read_latest_last_new_screen_time
@@ -74,12 +80,15 @@ class CliDependencies:
     deadline_clock: run の期限と経過時間を計る時計 (本番は time.time。WSL2 では time.monotonic が実時間より遅く進むため使わない)
     now: init の created_at に使うタイムゾーン付きの現在時刻 (本番は datetime.now().astimezone())
     sleep: 待機 (本番は time.sleep)
-    start_process: claude の起動 (本番は agent_launcher.start_claude_process)
-    start_critic: 振り返りの要素の批評役 (claude -p) の起動 (本番は reflection_critic.start_critic_process)
-    environ: claude に渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
-    read_template: CLAUDE.md と、要素が置くファイルの最初の内容と、批評役への指示のテンプレートの読み込み
-        (本番は instructions.read_package_template)
+    start_process: エージェント (claude か codex) の起動 (本番は agent_launcher.start_claude_process)
+    start_critic: 振り返りの要素の批評役の起動 (本番は reflection_critic.start_critic_process)
+    environ: エージェントに渡す環境変数の元。エージェント用のサブコマンドを固定する環境変数もここから読む (本番は os.environ)
+    read_template: 指示ファイル (CLAUDE.md・AGENTS.md) と、要素が置くファイルの最初の内容と、批評役への指示の
+        テンプレートの読み込み (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
+    prepare_codex: codex の作業ディレクトリーの run で、専用の CODEX_HOME を用意する (本番は codex_home.prepare_codex_home)
+    harness_executable: codex の指示ファイルと rules に書く、ハーネスの実行ファイルの絶対パス
+        (本番は codex_home.DEFAULT_HARNESS_EXECUTABLE。この Python の仮想環境の bin/switch2-harness)
     """
 
     send: SendCommand
@@ -92,6 +101,8 @@ class CliDependencies:
     environ: Mapping[str, str]
     read_template: ReadTemplate
     available: tuple[Feature, ...]
+    prepare_codex: PrepareCodex = prepare_codex_home
+    harness_executable: Path = DEFAULT_HARNESS_EXECUTABLE
 
 
 def _local_now() -> datetime:
@@ -112,6 +123,8 @@ def production_dependencies() -> CliDependencies:
         environ=os.environ,
         read_template=read_package_template,
         available=FEATURES,
+        prepare_codex=prepare_codex_home,
+        harness_executable=DEFAULT_HARNESS_EXECUTABLE,
     )
 
 
@@ -128,19 +141,20 @@ def build_parser() -> argparse.ArgumentParser:
     """サブコマンドの parser を返す (prog は PROG)。サブコマンドの指定は必須。
 
     init: DIR (位置引数)、--game NAME (必須)、--goal TEXT (既定 harness_config.DEFAULT_GOAL)、
-        --enable NAME ... (action="extend"、nargs="+"、既定は空のリスト。--enable a b と --enable a --enable b のどちらも書ける)
+        --enable NAME ... (action="extend"、nargs="+"、既定は空のリスト。--enable a b と --enable a --enable b のどちらも書ける)、
+        --agent NAME (agent_kind.AGENT_KINDS のどれか。既定 agent_kind.DEFAULT_AGENT)
     look / status / finish: --workspace DIR
     press: ACTION (位置引数)、ARGS (位置引数、1 つ以上)、--workspace DIR。
         ACTION の値は argparse では制限せず、commands.handle_press で検証する
     report: --json (指定すると集計を JSON で出す)、--workspace DIR
-    run: --minutes N (必須、float)、--model MODEL (既定 agent_launcher.DEFAULT_MODEL)、--effort LEVEL (既定 None)、
-        --max-budget-usd X (float、既定 None)、--workspace DIR。
+    run: --minutes N (必須、float)、--model MODEL (既定 None。commands.handle_run が harness.json のエージェントの
+        既定のモデルにする)、--effort LEVEL (既定 None)、--max-budget-usd X (float、既定 None)、--workspace DIR。
         --minutes と --max-budget-usd の値の範囲は commands.handle_run で検証する
     --workspace は、省いたかどうかを見分けるため既定を None にする (どの作業ディレクトリーにするかは run_cli が決める)。
     """
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="Claude Code が Nintendo Switch 2 をプレイするための補助コマンド",
+        description="Claude Code か Codex が Nintendo Switch 2 をプレイするための補助コマンド",
     )
     subcommands = parser.add_subparsers(
         dest="command", required=True, metavar="COMMAND"
@@ -162,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME",
         help="有効にする要素の名前",
+    )
+    init.add_argument(
+        "--agent",
+        choices=AGENT_KINDS,
+        default=DEFAULT_AGENT,
+        help=f"プレイするエージェント (既定: {DEFAULT_AGENT})",
     )
 
     look = subcommands.add_parser("look", help="画面を撮影して frames/ に保存する")
@@ -187,24 +207,29 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workspace_option(report)
 
     run = subcommands.add_parser(
-        "run", help="claude -p を起動し、決めた時間がたったら止める"
+        "run", help="エージェントを起動し、決めた時間がたったら止める"
     )
     run.add_argument(
         "--minutes", type=float, required=True, metavar="N", help="動かす時間 (分)"
     )
+    default_models = "、".join(
+        f"{kind} は {model}" for kind, model in DEFAULT_MODELS.items()
+    )
     run.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
+        default=None,
         metavar="MODEL",
-        help=f"claude のモデル (既定: {DEFAULT_MODEL})",
+        help=f"エージェントのモデル (既定: {default_models})",
     )
-    run.add_argument("--effort", default=None, metavar="LEVEL", help="claude の effort")
+    run.add_argument(
+        "--effort", default=None, metavar="LEVEL", help="エージェントの effort"
+    )
     run.add_argument(
         "--max-budget-usd",
         type=float,
         default=None,
         metavar="X",
-        help="run 全体の費用の上限 (USD)",
+        help="run 全体の費用の上限 (USD。claude だけで使える)",
     )
     _add_workspace_option(run)
     return parser
@@ -286,7 +311,11 @@ def _dispatch(
     if command == "finish":
         return handle_finish(paths, send=deps.send, clock=deps.clock)
     if command == "report":
-        return handle_report(paths, args.as_json)
+        try:
+            agent = read_agent(paths.harness_file)
+        except (OSError, ValueError) as e:
+            return CommandResult(exit_code=1, stderr_lines=(f"error {e}",))
+        return handle_report(paths, args.as_json, agent)
     if command == "run":
         options = LaunchOptions(
             model=args.model, effort=args.effort, max_budget_usd=args.max_budget_usd
@@ -304,6 +333,8 @@ def _dispatch(
             available=deps.available,
             start_critic=deps.start_critic,
             read_template=deps.read_template,
+            prepare_codex=deps.prepare_codex,
+            harness_executable=deps.harness_executable,
         )
     raise ValueError(f"unknown command: {command}")
 
@@ -343,6 +374,8 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
             now=deps.now,
             read_template=deps.read_template,
             available=deps.available,
+            agent=args.agent,
+            harness_executable=deps.harness_executable,
         )
     else:
         requested: str | None = args.workspace
