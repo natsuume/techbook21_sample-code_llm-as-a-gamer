@@ -89,9 +89,11 @@ CRITIC_DISABLED_FEATURES: tuple[str, ...] = ("shell_tool", "unified_exec", "view
 HARNESS_EXECUTABLE_NAME = "switch2-harness"
 
 # 子プロセスに渡さない環境変数。名前がこの接尾辞で終わるもの (OPENAI_API_KEY・CODEX_API_KEY・ANTHROPIC_API_KEY など。
-# Codex はユーザーのログインで動かす) と、この接頭辞で始まるもの (run を起動した Claude Code のセッションの変数)
+# Codex はユーザーのログインで動かす) と、これらの接頭辞で始まるもの。CLAUDE は run を起動した Claude Code の
+# セッションの変数。PYTHON は PYTHONPATH などで、渡すと、サンドボックスの外で動くハーネスの実行ファイルが
+# 作業ディレクトリーに置かれたファイルを読むようになりうるため
 HIDDEN_ENV_SUFFIX = "_API_KEY"
-HIDDEN_ENV_PREFIX = "CLAUDE"
+HIDDEN_ENV_PREFIXES: tuple[str, ...] = ("CLAUDE", "PYTHON")
 
 
 def toml_basic_string(value: str) -> str:
@@ -178,9 +180,12 @@ def codex_auth_source(environ: Mapping[str, str]) -> Path:
 def is_kept_codex_env_name(name: str) -> bool:
     """環境変数の名前 name を codex に渡すなら True を返す。
 
-    HIDDEN_ENV_SUFFIX ("_API_KEY") で終わる名前と、HIDDEN_ENV_PREFIX ("CLAUDE") で始まる名前は渡さない。
+    HIDDEN_ENV_SUFFIX ("_API_KEY") で終わる名前と、HIDDEN_ENV_PREFIXES ("CLAUDE"・"PYTHON") のどれかで始まる名前は
+    渡さない。
     """
-    return not (name.endswith(HIDDEN_ENV_SUFFIX) or name.startswith(HIDDEN_ENV_PREFIX))
+    return not (
+        name.endswith(HIDDEN_ENV_SUFFIX) or name.startswith(HIDDEN_ENV_PREFIXES)
+    )
 
 
 def build_codex_env(

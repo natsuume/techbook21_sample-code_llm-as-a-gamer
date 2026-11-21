@@ -132,6 +132,9 @@ def test_codex_auth_source():
         ("ANTHROPIC_API_KEY", False),
         ("CLAUDECODE", False),
         ("CLAUDE_CODE_SESSION_ID", False),
+        ("PYTHONPATH", False),
+        ("PYTHONHOME", False),
+        ("PYTHONSAFEPATH", False),
     ],
 )
 def test_is_kept_codex_env_name(name, kept):
