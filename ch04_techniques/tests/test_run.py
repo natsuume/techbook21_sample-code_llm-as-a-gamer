@@ -272,9 +272,31 @@ def test_main_passes_given_device_fps_to_capture(recorder):
 
 def test_main_builds_supervisor_with_bridge_and_radio_reset(recorder):
     run.main(REQUIRED)
-    assert recorder.supervisor.start_bridge is run.Bridge
     assert recorder.supervisor.reset_radio is reset_bluetooth_radio
     assert recorder.output.sender is recorder.supervisor
+
+
+@pytest.mark.parametrize(
+    "extra, port_name",
+    [([], "COM3"), (["--com-port", "COM4"], "COM4"), (["--com-port", "com4"], "COM4")],
+)
+def test_main_starts_every_bridge_with_the_com_port(
+    recorder, monkeypatch, extra, port_name
+):
+    # 最初の起動にも、復旧での起動し直しにも、同じ COM ポートで Bridge を作る
+    bridge_kwargs: list[dict] = []
+
+    class RecordingBridge:
+        def __init__(self, **kwargs):
+            bridge_kwargs.append(kwargs)
+
+    monkeypatch.setattr(run, "Bridge", RecordingBridge)
+    run.main([*REQUIRED, *extra])
+    first = recorder.supervisor.start_bridge()
+    restarted = recorder.supervisor.start_bridge()
+    assert isinstance(first, RecordingBridge)
+    assert restarted is not first
+    assert bridge_kwargs == [{"port_name": port_name}, {"port_name": port_name}]
 
 
 def test_main_creates_game_notes_and_run_log(recorder):
@@ -863,6 +885,7 @@ def test_parse_args_uses_defaults():
         "device_fps": 60,
         "ffmpeg_fps": 30,
         "process_fps": 10,
+        "com_port": "COM3",
         "history_seconds": 5.0,
         "image_width": 1280,
         "jpeg_quality": 85,
@@ -1093,6 +1116,10 @@ def test_parse_args_requires_game_and_model(argv, capsys):
         (["--device-fps", "30", "--ffmpeg-fps", "30"], "ffmpeg_fps", 30),
         (["--ffmpeg-fps", "1", "--process-fps", "1"], "process_fps", 1),
         (["--ffmpeg-fps", "60", "--process-fps", "60"], "ffmpeg_fps", 60),
+        (["--com-port", "COM3"], "com_port", "COM3"),
+        (["--com-port", "COM4"], "com_port", "COM4"),
+        (["--com-port", "com4"], "com_port", "COM4"),
+        (["--com-port", "COM10"], "com_port", "COM10"),
         (["--history-seconds", "0.1"], "history_seconds", 0.1),
         (["--image-width", "498"], "image_width", 498),
         (["--image-width", "1280"], "image_width", 1280),
@@ -1166,6 +1193,28 @@ def test_parse_args_has_no_button_or_stick_thresholds(option, capsys):
         run.parse_args([*REQUIRED, option, "0.5"])
     assert excinfo.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--com-port", "COM0"],
+        ["--com-port", "COM04"],
+        ["--com-port", "4"],
+        ["--com-port", "COM4;"],
+        ["--com-port", "COM 4"],
+        ["--com-port", ""],
+        # - で始まる値も、= でつなげば --com-port の値として渡る
+        ["--com-port=-PortName"],
+    ],
+)
+def test_parse_args_rejects_invalid_com_port(extra, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        run.parse_args([*REQUIRED, *extra])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "--com-port" in err
+    assert "invalid COM port" in err
 
 
 def test_parse_args_rejects_ffmpeg_fps_above_device_fps_with_message(capsys):

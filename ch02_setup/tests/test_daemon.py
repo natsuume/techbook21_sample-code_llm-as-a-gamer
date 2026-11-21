@@ -20,17 +20,20 @@ def recorder(monkeypatch):
 
     偽の BridgeSupervisor は、受け取った start_bridge を本物と同じくコンストラクターで 1 回呼ぶ。
     偽の Bridge と Capture は本物と同じ引数だけを受け取り、ほかの引数を渡すと TypeError になる。
+    偽の Bridge の port_name は、渡されなければ None のまま残す (daemon.main が明示的に渡したかを確かめるため。
+    本物の既定値は DEFAULT_COM_PORT)。
     rec.bridge_error を設定すると、偽の Bridge はその例外を送出する (起動の失敗)。
     """
     rec = Recorder()
     rec.bridge_error = None
 
     class FakeBridge:
-        def __init__(self):
+        def __init__(self, port_name=None):
             if rec.bridge_error is not None:
                 raise rec.bridge_error
             rec.events.append("bridge created")
             rec.bridge = self
+            self.port_name = port_name
 
     class FakeSupervisor:
         def __init__(self, start_bridge, reset_radio):
@@ -117,13 +120,19 @@ def test_main_builds_supervisor_with_bridge_and_radio_reset(recorder):
     assert supervisor.reset_radio is reset_bluetooth_radio
 
 
-def test_main_starts_every_bridge_without_arguments(recorder):
-    daemon.main([])
+@pytest.mark.parametrize(
+    "argv, port_name",
+    [([], "COM3"), (["--com-port", "COM4"], "COM4"), (["--com-port", "com4"], "COM4")],
+)
+def test_main_starts_every_bridge_with_the_com_port(recorder, argv, port_name):
+    daemon.main(argv)
     first = recorder.bridge
-    # 復旧で起動し直すブリッジも、最初のブリッジと同じく引数なしの Bridge() で起動する
+    assert first.port_name == port_name
+    # 復旧で起動し直すブリッジも、最初のブリッジと同じ COM ポートで起動する
     restarted = recorder.supervisor.start_bridge()
     assert restarted is recorder.bridge
     assert restarted is not first
+    assert restarted.port_name == port_name
 
 
 def test_main_resets_controller_state_on_recovery(recorder):
@@ -206,12 +215,49 @@ def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
 
 
 def test_parse_args_uses_defaults():
-    # 起動引数は device_fps と ffmpeg_fps と process_fps の 3 つだけ
+    # 起動引数は device_fps と ffmpeg_fps と process_fps と com_port の 4 つだけ
     assert vars(daemon.parse_args([])) == {
         "device_fps": 60,
         "ffmpeg_fps": 30,
         "process_fps": 10,
+        "com_port": "COM3",
     }
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--com-port", "COM3"], "COM3"),
+        (["--com-port", "COM4"], "COM4"),
+        (["--com-port", "com4"], "COM4"),
+        (["--com-port", "COM10"], "COM10"),
+    ],
+)
+def test_parse_args_accepts_com_port_in_upper_case(argv, expected):
+    assert daemon.parse_args(argv).com_port == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--com-port", "COM0"],
+        ["--com-port", "COM04"],
+        ["--com-port", "4"],
+        ["--com-port", "COM4;"],
+        ["--com-port", "COM 4"],
+        ["--com-port", ""],
+        # - で始まる値も、= でつなげば --com-port の値として渡る
+        ["--com-port=-PortName"],
+    ],
+)
+def test_parse_args_rejects_invalid_com_port(argv, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(argv)
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "--com-port" in err
+    assert "invalid COM port" in err
 
 
 @pytest.mark.parametrize(

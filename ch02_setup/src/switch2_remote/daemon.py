@@ -28,16 +28,20 @@ status の bridge_state が ok に戻り、bridge_restarts が 1 増える。復
                         PC との USB の接続で 60fps を受け取れないときは 30 にする
     --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)。起動後は変えられない
     --process-fps N     間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
+    --com-port PORT     ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。COM1、COM2 のような COM と 1 以上の
+                        整数で、大文字小文字を区別しない。既定 COM3)。最初の起動にも復旧での起動し直しにも使う
     範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
-    組み合わせは起動時にエラーにする
+    組み合わせと、--com-port の形の誤りは起動時にエラーにする
 
 使い方:
     uv run switch2-remote-daemon
     uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
     uv run switch2-remote-daemon --device-fps 30
+    uv run switch2-remote-daemon --com-port COM4
 """
 
 import argparse
+import functools
 import os
 import socket
 import struct
@@ -49,7 +53,12 @@ from switch2_remote.bridge_supervisor import BridgeSupervisor
 from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES, Capture
 from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
-from switch2_remote.controller_bridge import Bridge, BridgeStartError
+from switch2_remote.controller_bridge import (
+    DEFAULT_COM_PORT,
+    Bridge,
+    BridgeStartError,
+    parse_com_port,
+)
 from switch2_remote.error_message import describe_error
 
 SOCKET_ADDRESS = (
@@ -101,11 +110,13 @@ def serve_connection(
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """起動引数を解釈し、device_fps・ffmpeg_fps・process_fps を持つ Namespace を返す。
+    """起動引数を解釈し、device_fps・ffmpeg_fps・process_fps・com_port を持つ Namespace を返す。
 
     argv が None なら sys.argv[1:] を使う。範囲外の値と、ffmpeg_fps が device_fps より大きい組み合わせと、
     process_fps が ffmpeg_fps より大きい組み合わせは、parser.error で使い方とともに表示して終了する (SystemExit)。
     device_fps は DEVICE_FPS_CHOICES のどれかだけを受け付ける (argparse の choices)。
+    com_port は controller_bridge.parse_com_port で確かめて大文字にする (既定 DEFAULT_COM_PORT)。形の誤りは
+    argparse が使い方とともに表示して終了する (SystemExit)。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-remote-daemon",
@@ -132,6 +143,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_PROCESS_FPS,
         help=f"間引いて残すフレームレート ({PROCESS_FPS_MIN}〜ffmpeg_fps、既定 {DEFAULT_PROCESS_FPS})",
+    )
+    parser.add_argument(
+        "--com-port",
+        type=parse_com_port,
+        default=DEFAULT_COM_PORT,
+        metavar="PORT",
+        help=(
+            "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
+        ),
     )
     args = parser.parse_args(argv)
     if args.ffmpeg_fps < FFMPEG_FPS_MIN:
@@ -162,14 +183,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None):
     """起動引数を解釈してから、ブリッジ・Controller・キャプチャ・ソケットを用意してコマンドを受け付ける。
 
-    ブリッジは BridgeSupervisor で包み、最初の起動も起動し直しも Bridge() で行う。
+    ブリッジは BridgeSupervisor で包み、最初の起動も起動し直しも Bridge(port_name=args.com_port) で行う
+    (functools.partial で COM ポートを固定した start_bridge を渡す)。
     最初のブリッジの起動に失敗したら (BridgeStartError)、そのメッセージで終了する (SystemExit)。
     復旧に成功したら Controller の押下状態を空にする (on_recovered = controller.reset_state)。
     """
     args = parse_args(argv)
     try:
         supervisor = BridgeSupervisor(
-            start_bridge=Bridge,
+            start_bridge=functools.partial(Bridge, port_name=args.com_port),
             reset_radio=reset_bluetooth_radio,
         )
     except BridgeStartError as e:

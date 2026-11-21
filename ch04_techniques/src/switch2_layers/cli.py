@@ -1,7 +1,7 @@
 """コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once を持つ。
 
     switch2-layers run [--mode advisor] --software NAME --user NAME [--runs-dir DIR] [--device-fps 30|60]
-                       [--interval-fps N] [--interval-width N]
+                       [--com-port PORT] [--interval-fps N] [--interval-width N]
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--middle-effort none|low] [--surface fake|jev] [--threshold-advisor P]
@@ -21,7 +21,7 @@
                        [--agent claude|codex] [--codex-model NAME]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--monitor-threshold P] [--max-monitor-errors N]
-                       [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
+                       [--runs-dir DIR] [--device-fps 30|60] [--com-port PORT] [--interval-fps N] [--interval-width N]
                        [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
         実機で Orchestrator 型を動かす。主ループ (orchestrator.main_loop) と、操作の実行と監視
@@ -35,7 +35,7 @@
                        [--agent claude|codex] [--codex-model NAME]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--delegate-image-width N] [--max-delegate-errors N]
-                       [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
+                       [--runs-dir DIR] [--device-fps 30|60] [--com-port PORT] [--interval-fps N] [--interval-width N]
                        [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
         実機で委任型を動かす。主ループ (--agent で選ぶ。orchestrator.main_loop) と、操作の実行と委任のループ
@@ -73,6 +73,7 @@ SystemExit (終了コード 2) にする。値の範囲の誤りと人の初期�
 """
 
 import argparse
+import functools
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -81,7 +82,12 @@ from pathlib import Path
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.bridge_supervisor import BridgeSupervisor
 from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES, Capture
-from switch2_remote.controller_bridge import Bridge, BridgeStartError
+from switch2_remote.controller_bridge import (
+    DEFAULT_COM_PORT,
+    Bridge,
+    BridgeStartError,
+    parse_com_port,
+)
 
 from switch2_layers.app import (
     REASON_INTERRUPTED,
@@ -345,6 +351,16 @@ def add_run_parser(
         help=(
             "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする "
             f"(既定 {DEFAULT_DEVICE_FPS})"
+        ),
+    )
+    parser.add_argument(
+        "--com-port",
+        type=parse_com_port,
+        default=DEFAULT_COM_PORT,
+        metavar="PORT",
+        help=(
+            "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
         ),
     )
     parser.add_argument(
@@ -835,6 +851,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         user_name=args.user if args.user is not None else "",
         runs_dir=args.runs_dir,
         device_fps=args.device_fps,
+        com_port=args.com_port,
         interval_fps=args.interval_fps,
         interval_width=args.interval_width,
         max_surface_errors=args.max_surface_errors,
@@ -936,13 +953,15 @@ def create_system_screen_middle(
     return LunaSystemScreenMiddle(api_key=api_key, screen_names=SYSTEM_SCREEN_NAMES)
 
 
-def start_isolated_bridge() -> Bridge:
-    """ブリッジを新しいセッションで起動して返す (controller_bridge.Bridge(new_session=True))。
+def start_isolated_bridge(port_name: str) -> Bridge:
+    """COM ポート port_name を開くブリッジを新しいセッションで起動して返す
+    (controller_bridge.Bridge(new_session=True, port_name=port_name))。
 
-    run の BridgeSupervisor の start_bridge に渡し、最初の起動にも起動し直しにも使う。最初の Ctrl+C の SIGINT が
-    ブリッジに届かないので、片付けの操作を送れる。
+    run は functools.partial(start_isolated_bridge, settings.com_port) を BridgeSupervisor の start_bridge に渡し、
+    最初の起動にも起動し直しにも同じ COM ポートを使う。最初の Ctrl+C の SIGINT がブリッジに届かないので、
+    片付けの操作を送れる。
     """
-    return Bridge(new_session=True)
+    return Bridge(new_session=True, port_name=port_name)
 
 
 def create_monitor_client(environ: Mapping[str, str]) -> JevClient:
@@ -980,7 +999,8 @@ def run_command(args: argparse.Namespace) -> int:
        settings.middle_effort を渡さない)
     5. surface.surface_assembly.build_surface_assembly(settings, surface の API キー) で surface の部品を作り、
        safety.safety_assembly.build_safety_assembly(settings.safety, 安全の監視の API キー) で安全の監視の部品を作る
-    6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=start_isolated_bridge,
+    6. switch2_remote.bridge_supervisor.BridgeSupervisor(
+       start_bridge=functools.partial(start_isolated_bridge, settings.com_port),
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
     7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True,
@@ -1178,8 +1198,9 @@ def _run_with_hardware(
 ) -> int:
     """ブリッジとキャプチャーを作って LayersApp を動かし、閉じる (advisor と Orchestrator 型で共有)。終了コードを返す。
 
-    1. BridgeSupervisor(start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio) を作る。最初のブリッジの
-       起動に失敗したら (BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
+    1. BridgeSupervisor(start_bridge=functools.partial(start_isolated_bridge, settings.com_port),
+       reset_radio=reset_bluetooth_radio) を作る (最初の起動にも起動し直しにも --com-port の COM ポートを使う)。
+       最初のブリッジの起動に失敗したら (BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
     2. Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True, device_fps=settings.device_fps) を作る
     3. LayersApp(settings, build_parts(SwitchCaptureReader(capture), supervisor)).run() で動かし、止まるまで待つ
     4. 止まったら (途中の例外でも)、作れた capture と supervisor を閉じる
@@ -1188,7 +1209,8 @@ def _run_with_hardware(
     """
     try:
         supervisor = BridgeSupervisor(
-            start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio
+            start_bridge=functools.partial(start_isolated_bridge, settings.com_port),
+            reset_radio=reset_bluetooth_radio,
         )
     except BridgeStartError as error:
         print(str(error), file=sys.stderr)

@@ -1,8 +1,9 @@
 """Windows 側の controller_bridge.ps1 を常駐させ、Pico 2 W 経由で Switch 2 にゲームパッドのレポートを送る。
 
 controller_bridge.ps1 はこのパッケージに同梱しており、このファイルと同じディレクトリから探す。
+ブリッジには開く COM ポートを -PortName で渡す (既定 DEFAULT_COM_PORT)。起動引数 --com-port の値は parse_com_port で確かめる。
 ブリッジとは標準入出力の 1 行ずつでやり取りする:
-    起動時         ブリッジが COM ポートを開き、中立を 200ms 送ってから `ready <PORT> <epoch_ms>` を出力する
+    起動時         ブリッジが -PortName の COM ポートを開き、中立を 200ms 送ってから `ready <PORT> <epoch_ms>` を出力する
     set <HEX>      HEX (8 バイトのレポートを表す 16 桁の小文字 16 進) を現在のレポートにする。
                    ブリッジの送信スレッドが新しいレポートを 1 回書き込んだ後に `ack <HEX> <epoch_ms>` を出力する。
                    不正な行には `error <理由>` を出力する
@@ -12,8 +13,10 @@ controller_bridge.ps1 はこのパッケージに同梱しており、このフ�
 ブリッジの出力は BOM なし UTF-8 で、読み取りでは念のため行頭の BOM (U+FEFF) を除く。
 """
 
+import argparse
 import os
 import queue
+import re
 import subprocess
 import threading
 
@@ -29,6 +32,35 @@ BRIDGE_ACK_TIMEOUT = 2.0  # set を書き込んでから ack が返るまでの�
 # その後に中立を 200ms 送ることがあるため、それより長くとる
 BRIDGE_QUIT_TIMEOUT = 3.0
 REPORT_BYTES = 8
+# ブリッジが開く COM ポートの既定値 (controller_bridge.ps1 の -PortName の既定値と同じ)
+DEFAULT_COM_PORT = "COM3"
+# COM ポートの名前の形。re.fullmatch で値の全体と比べる ($ は末尾の改行の前にも一致するため使わない)。
+# re.ASCII で、大文字小文字を区別しない比較を ASCII の文字に限る
+COM_PORT_PATTERN = re.compile(r"COM[1-9][0-9]*", re.IGNORECASE | re.ASCII)
+
+
+def is_valid_com_port(value: str) -> bool:
+    """value が COM ポートの名前の形なら True を返す。
+
+    形は、COM に続けて先頭が 0 でない 10 進の整数 (正規表現 ^COM[1-9][0-9]*$ の全体一致。大文字小文字を区別しない)。
+    COM3・COM10・com4 は True、COM0・COM04・COM・4・-PortName・COM4;・空白や改行を含む値・空文字列は False。
+    """
+    return COM_PORT_PATTERN.fullmatch(value) is not None
+
+
+def parse_com_port(value: str) -> str:
+    """起動引数 --com-port の値を確かめ、大文字にした COM ポートの名前を返す (argparse の type に渡す)。
+
+    is_valid_com_port の形なら大文字にして返す (com4 → COM4)。そうでなければ
+    argparse.ArgumentTypeError(f"invalid COM port: {value!r} (expected COM1, COM2, ...)") を送出する。
+    値は PowerShell の -File の引数としてブリッジに渡るため、- で始まる値などがパラメーター名として
+    解釈されないよう、この形の値だけを受け付ける。
+    """
+    if not is_valid_com_port(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid COM port: {value!r} (expected COM1, COM2, ...)"
+        )
+    return value.upper()
 
 
 class UnconfirmedInputError(RuntimeError):
@@ -58,9 +90,11 @@ class Bridge:
     ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
     new_session が True なら、ブリッジを新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の SIGINT が
     ブリッジに届かなくなるため、呼び出し側は Ctrl+C の後もレポートを送れる。ブリッジは close で終わらせる。
+    port_name はブリッジが開く COM ポート (既定 DEFAULT_COM_PORT)。controller_bridge.ps1 に -PortName <port_name> で渡す。
+    形は確かめない (起動引数で受け取る呼び出し側が parse_com_port で確かめる)。
     """
 
-    def __init__(self, new_session: bool = False):
+    def __init__(self, new_session: bool = False, port_name: str = DEFAULT_COM_PORT):
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()
@@ -71,6 +105,8 @@ class Bridge:
             "Bypass",
             "-File",
             bridge_win_path,
+            "-PortName",
+            port_name,
         ]
         self.proc = subprocess.Popen(
             command,

@@ -132,6 +132,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60 fps を受け取れないときは 30 にします (第2章の README の既知の問題を参照) | 60 | 30 か 60 |
 | `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート | 30 | 1〜`--device-fps` の値の整数 |
 | `--process-fps N` | 間引いて残すフレームレート | 10 | 1〜`--ffmpeg-fps` の値の整数 |
+| `--com-port PORT` | ブリッジが開く COM ポート。Pico 2 W の Bluetooth の発信側の COM ポートを指定します (第2章の README の「2. Windows とのペアリング」を参照)。ブリッジを復旧で起動し直すときも同じ COM ポートを開きます | `COM3` | `COM1`、`COM2` のように `COM` と 1 以上の整数 (先頭に 0 を付けた `COM04` などは誤り。大文字と小文字は区別しません) |
 | `--history-seconds S` | フレームの履歴を持つ秒数。advisor に渡す画像のうち、意味のあるフレーム以外は、この秒数の範囲から等間隔に選びます | 5.0 | 0 より大きい有限の値 |
 | `--image-width N` | 要求と advisor に渡す画像の幅。縦横比を保って縮小します | 1280 | 498〜1280 の整数 |
 | `--jpeg-quality N` | 要求と advisor に渡す画像の JPEG の品質 | 85 | 1〜100 の整数 |
@@ -1146,7 +1147,7 @@ Codex の主ループのセッションは、次のように動きます。
 
 初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) と `--codex-model` の範囲は `--mode` と `--agent` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
 
-advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--device-fps`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds`・`--system-advice-seconds` は使いません。
+advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--device-fps`・`--com-port`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds`・`--system-advice-seconds` は使いません。
 
 #### Orchestrator 型の記録
 
@@ -1341,6 +1342,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 | `--user NAME` | ソフトを遊ぶユーザーの名前 (advisor 型では必須。Orchestrator 型では使いません)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
 | `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60 fps を受け取れないときは 30 にします (第2章の README の既知の問題を参照) | 60 | 30 か 60 |
+| `--com-port PORT` | ブリッジが開く COM ポート。Pico 2 W の Bluetooth の発信側の COM ポートを指定します (第2章の README の「2. Windows とのペアリング」を参照)。ブリッジを復旧で起動し直すときも同じ COM ポートを開きます | `COM3` | `COM1`、`COM2` のように `COM` と 1 以上の整数 (先頭に 0 を付けた `COM04` などは誤り。大文字と小文字は区別しません) |
 | `--interval-fps N` | 一定間隔のフレームを `frames/interval/` に保存するフレームレート | 5 | 0 より大きく 10 以下 |
 | `--interval-width N` | 一定間隔のフレームを縮小する幅 | 640 | 64〜1280 の整数 |
 | `--max-surface-errors N` | surface の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |

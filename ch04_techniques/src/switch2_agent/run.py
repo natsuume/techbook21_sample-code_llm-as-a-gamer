@@ -15,6 +15,8 @@ Ctrl+C で止まる。
                                  受け取れないときは 30 にする
     --ffmpeg-fps N               ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)
     --process-fps N              間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)
+    --com-port PORT              ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。COM1、COM2 のような COM と
+                                 1 以上の整数で、大文字小文字を区別しない。既定 COM3)
     --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
     --jpeg-quality N             要求に載せる画像の JPEG の品質 (整数 1〜100、既定 85)
@@ -40,13 +42,14 @@ Ctrl+C で止まる。
                                  (advisor-<役割>-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
                                  origin_mono) と、終了時の記録の件数 (record_end)
     範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
-    組み合わせは起動時にエラーにする
+    組み合わせと、--com-port の形の誤りは起動時にエラーにする
 
 使い方 (ch04_techniques ディレクトリーで実行する):
     uv run switch2-agent --game <名前> --model jev
 """
 
 import argparse
+import functools
 import math
 import os
 import threading
@@ -62,7 +65,12 @@ from switch2_remote.capture import (
     DEVICE_HEIGHT,
     DEVICE_WIDTH,
 )
-from switch2_remote.controller_bridge import Bridge, BridgeStartError
+from switch2_remote.controller_bridge import (
+    DEFAULT_COM_PORT,
+    Bridge,
+    BridgeStartError,
+    parse_com_port,
+)
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
 from switch2_agent.advisor_roles import ADVISOR_ROLES
@@ -236,6 +244,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
     game (str)、model ("jev" / "decisions")、device_fps (int、既定 60。DEVICE_FPS_CHOICES のどれか)、
     ffmpeg_fps (int、既定 30)、process_fps (int、既定 10)、
+    com_port (str、既定 DEFAULT_COM_PORT の COM3。controller_bridge.parse_com_port で確かめて大文字にする)、
     history_seconds (float、既定 5.0)、image_width (int、既定 1280)、jpeg_quality (int、既定 85)、
     threshold_advisor (float、既定 0.5)、
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
@@ -249,7 +258,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     argv が None なら sys.argv[1:] を使う。--game と --model は必須。範囲 (モジュールの docstring の起動引数) の外の値、
     数として読めない値、--ffmpeg-fps が --device-fps より大きい組み合わせ、--process-fps が --ffmpeg-fps より大きい
     組み合わせは、第2章の daemon.parse_args と同じく
-    parser.error で使い方とともに表示して終了する (SystemExit、終了コード 2)。
+    parser.error で使い方とともに表示して終了する (SystemExit、終了コード 2)。--com-port の形の誤りも、argparse が
+    使い方とともに表示して終了する (SystemExit、終了コード 2)。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-agent",
@@ -286,6 +296,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_PROCESS_FPS,
         help=f"間引いて残すフレームレート ({PROCESS_FPS_MIN}〜ffmpeg_fps)",
+    )
+    parser.add_argument(
+        "--com-port",
+        type=parse_com_port,
+        default=DEFAULT_COM_PORT,
+        metavar="PORT",
+        help=(
+            "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
+        ),
     )
     parser.add_argument(
         "--history-seconds",
@@ -533,8 +553,9 @@ def main(argv: list[str] | None = None) -> None:
 
     起動の順:
         1. ゲームの情報のファイルを用意する (game_notes.ensure_game_notes(cwd / NOTES_DIR_NAME, game))
-        2. BridgeSupervisor(start_bridge=Bridge, reset_radio=reset_bluetooth_radio)。最初のブリッジの起動に
-           失敗したら (BridgeStartError)、そのメッセージで終了する
+        2. BridgeSupervisor(start_bridge=functools.partial(Bridge, port_name=com_port),
+           reset_radio=reset_bluetooth_radio)。最初の起動にも復旧での起動し直しにも、--com-port の COM ポートを使う。
+           最初のブリッジの起動に失敗したら (BridgeStartError)、そのメッセージで終了する
         3. --record-dashboard が付いていれば、ダッシュボードの記録 recorder = DashboardRecorder(実行のディレクトリー,
            RunLog.write)。付いていなければ recorder は None
         4. PadOutput(supervisor)。recorder があれば PadOutput(supervisor, on_report=recorder.record_pad)
@@ -602,7 +623,8 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         supervisor = BridgeSupervisor(
-            start_bridge=Bridge, reset_radio=reset_bluetooth_radio
+            start_bridge=functools.partial(Bridge, port_name=args.com_port),
+            reset_radio=reset_bluetooth_radio,
         )
     except BridgeStartError as e:
         raise SystemExit(str(e)) from None

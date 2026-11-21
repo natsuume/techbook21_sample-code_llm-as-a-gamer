@@ -32,6 +32,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES
+from switch2_remote.controller_bridge import DEFAULT_COM_PORT, is_valid_com_port
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
@@ -215,6 +216,9 @@ class RunSettings:
     device_fps                  デバイスから受け取るフレームレート (--device-fps、既定 60。
                                 switch2_remote.capture.DEVICE_FPS_CHOICES の 30 か 60)。PC との USB の接続で 60fps を
                                 受け取れないときは 30 にする
+    com_port                    ブリッジが開く COM ポート (--com-port、既定 COM3。Pico 2 W の Bluetooth の発信側)。
+                                switch2_remote.controller_bridge.is_valid_com_port の形 (COM と 1 以上の整数。
+                                大文字小文字を区別しない)。最初の起動にも復旧での起動し直しにも使う
     interval_fps                一定間隔のフレームの保存のフレームレート (--interval-fps、既定 5。0 より大きく INTERVAL_FPS_MAX 以下)
     interval_width              一定間隔のフレームを縮小する幅 (--interval-width、既定 640。INTERVAL_WIDTH_MIN〜INTERVAL_WIDTH_MAX)
     max_surface_errors          surface の decide の失敗がこの回数続いたら全体を止める (--max-surface-errors、既定 5。1 以上)
@@ -294,6 +298,7 @@ class RunSettings:
     user_name: str = ""
     runs_dir: Path = DEFAULT_RUNS_DIR
     device_fps: int = DEFAULT_DEVICE_FPS
+    com_port: str = DEFAULT_COM_PORT
     interval_fps: float = DEFAULT_INTERVAL_FPS
     interval_width: int = DEFAULT_INTERVAL_WIDTH
     max_surface_errors: int = DEFAULT_MAX_SURFACE_ERRORS
@@ -370,7 +375,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
     メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--device-fps は DEVICE_FPS_CHOICES のどれか
-    (30 か 60)。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
+    (30 か 60)。--com-port は switch2_remote.controller_bridge.is_valid_com_port の形 (cli の parse_com_port と同じ判定)。
+    --threshold-advisor は 0 以上 1 以下 (nan は誤り)、
     --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
     middle_effort は値の型 (MiddleEffort) で決まるため確かめない。
     surface は値の型 (SurfaceKind) で、surface_map は値の型 (SurfaceMapMode) で決まるため確かめない。
@@ -395,6 +401,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
             "--device-fps must be one of "
             f"{', '.join(str(fps) for fps in DEVICE_FPS_CHOICES)}: {settings.device_fps}"
         )
+    if not is_valid_com_port(settings.com_port):
+        errors.append(f"--com-port must be COM1, COM2, ...: {settings.com_port!r}")
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
         errors.append(
             f"--interval-fps must be more than 0 and at most {INTERVAL_FPS_MAX:g}: "
