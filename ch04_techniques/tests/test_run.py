@@ -8,6 +8,7 @@ import pytest
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
 from switch2_remote.controller_state import PadState
+from switch2_remote.hardware_env import COM_PORT_ENV, DEVICE_FPS_ENV
 
 from switch2_agent import run
 from switch2_agent.action_decision import Thresholds
@@ -36,6 +37,13 @@ REQUIRED = ["--game", "zelda", "--model", "jev"]
 TEST_API_KEY = "test-key-not-a-secret"
 # 偽の Pipeline の started_at (経過秒の起点の time.monotonic の値)
 PIPELINE_STARTED_AT = 12.5
+
+
+@pytest.fixture(autouse=True)
+def without_hardware_env(monkeypatch):
+    """どのテストも、開発者の環境の SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS で既定値が変わらないよう、消してから動かす。"""
+    monkeypatch.delenv(COM_PORT_ENV, raising=False)
+    monkeypatch.delenv(DEVICE_FPS_ENV, raising=False)
 
 
 class Recorder:
@@ -1248,3 +1256,104 @@ def test_parse_args_rejects_process_fps_above_ffmpeg_fps(extra, capsys):
         run.parse_args([*REQUIRED, *extra])
     assert excinfo.value.code == 2
     assert "usage:" in capsys.readouterr().err
+
+
+# --- 環境変数による既定値 (SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS) ---
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {},
+        # .env.sample の空の行をそのまま写したときの値
+        {"SWITCH2_COM_PORT": "", "SWITCH2_DEVICE_FPS": ""},
+    ],
+)
+def test_parse_args_without_arguments_and_environ_uses_com3_and_60(environ):
+    args = run.parse_args(REQUIRED, environ=environ)
+    assert (args.com_port, args.device_fps) == ("COM3", 60)
+
+
+def test_parse_args_takes_defaults_from_environ():
+    environ = {"SWITCH2_COM_PORT": "com4", "SWITCH2_DEVICE_FPS": "30"}
+    args = run.parse_args(REQUIRED, environ=environ)
+    # --record-dashboard の run.jsonl の start の args (vars(起動引数)) にも、決まった後の値が入る
+    assert (vars(args)["com_port"], vars(args)["device_fps"]) == ("COM4", 30)
+    assert args.ffmpeg_fps == 30
+
+
+def test_parse_args_prefers_arguments_to_environ():
+    environ = {"SWITCH2_COM_PORT": "COM4", "SWITCH2_DEVICE_FPS": "30"}
+    args = run.parse_args(
+        [*REQUIRED, "--com-port", "COM5", "--device-fps", "60"], environ=environ
+    )
+    assert (args.com_port, args.device_fps) == ("COM5", 60)
+
+
+@pytest.mark.parametrize(
+    "extra, environ, expected",
+    [
+        (["--com-port", "COM4"], {"SWITCH2_COM_PORT": "COM0"}, ("COM4", 60)),
+        (["--device-fps", "30"], {"SWITCH2_DEVICE_FPS": "45"}, ("COM3", 30)),
+        (
+            ["--com-port", "COM4", "--device-fps", "30"],
+            {"SWITCH2_COM_PORT": "-PortName", "SWITCH2_DEVICE_FPS": "030"},
+            ("COM4", 30),
+        ),
+    ],
+)
+def test_parse_args_does_not_read_environ_of_given_arguments(extra, environ, expected):
+    # 起動引数を指定したときは環境変数を読まないため、環境変数の値が誤っていてもよい
+    args = run.parse_args([*REQUIRED, *extra], environ=environ)
+    assert (args.com_port, args.device_fps) == expected
+
+
+@pytest.mark.parametrize(
+    "environ, message",
+    [
+        (
+            {"SWITCH2_COM_PORT": "COM0"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: 'COM0'",
+        ),
+        (
+            {"SWITCH2_COM_PORT": "-PortName"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: '-PortName'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": "45"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: '45'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": " 30"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: ' 30'",
+        ),
+    ],
+)
+def test_parse_args_rejects_invalid_environ_without_arguments(environ, message, capsys):
+    # 環境変数の誤りは、起動引数の誤りと同じく使い方とともに表示して終了する
+    with pytest.raises(SystemExit) as excinfo:
+        run.parse_args(REQUIRED, environ=environ)
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert message in err
+
+
+def test_parse_args_checks_ffmpeg_fps_against_device_fps_from_environ(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        run.parse_args(
+            [*REQUIRED, "--ffmpeg-fps", "31"], environ={"SWITCH2_DEVICE_FPS": "30"}
+        )
+    assert excinfo.value.code == 2
+    assert "--ffmpeg-fps (31) must not exceed --device-fps (30)" in (
+        capsys.readouterr().err
+    )
+
+
+def test_parse_args_checks_ffmpeg_fps_against_device_fps_from_arguments():
+    # --device-fps を指定したときは、環境変数の値ではなく --device-fps の値で比べる
+    args = run.parse_args(
+        [*REQUIRED, "--device-fps", "60", "--ffmpeg-fps", "60"],
+        environ={"SWITCH2_DEVICE_FPS": "30"},
+    )
+    assert (args.device_fps, args.ffmpeg_fps) == (60, 60)
