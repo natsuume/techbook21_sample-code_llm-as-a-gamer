@@ -1640,7 +1640,7 @@ uv run switch2-harness init plays/dq3-codex --game "ドラゴンクエストⅢ 
 uv run switch2-harness run --workspace plays/dq3-codex --minutes 10 --effort medium
 ```
 
-先に Codex CLI (`codex`) を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かし、子のプロセスの環境変数からは `*_API_KEY` (`OPENAI_API_KEY`・`CODEX_API_KEY` など) と、`CLAUDE` で始まる変数と、`PYTHON` で始まる変数 (理由は「サブコマンドを絶対パスで書く理由」の項) を除きます。ログインの認証のファイル (`${CODEX_HOME:-~/.codex}/auth.json`) が無いときは、`run` は何も起動せずに `error codex login not found: ...` を表示して終了コード 1 で終わります。認証を OS のキーストアに保存する設定にしている場合も、このファイルができないため使えません。
+先に Codex CLI (`codex`) を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かし、子のプロセスの環境変数からは `*_API_KEY` (`OPENAI_API_KEY`・`CODEX_API_KEY` など) と、`CLAUDE` で始まる変数と、`PYTHON` で始まる変数 (理由は「サブコマンドを絶対パスで書く理由」の項) を除きます。ログインの認証のファイル (`${CODEX_HOME:-~/.codex}/auth.json`) が無いときは、`run` は何も起動せずに `error codex login not found: ...` を表示して終了コード 1 で終わります。認証を OS のキーストアに保存する設定にしていて、このファイルが無い場合も同じく止まります。
 
 - 指示ファイルは `AGENTS.md` です。`CLAUDE.md` と同じテンプレートから、Claude Code のツールの名前の箇所 (Read → view_image またはシェルのコマンド、Write・Edit → apply_patch) と、サブコマンドの書き方だけを置き換えて作ります ([`src/switch2_harness/codex_instructions.py`](./src/switch2_harness/codex_instructions.py))。サブコマンドは `uv run switch2-harness look` の代わりに、`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look` の形で書きます (理由は「サブコマンドを絶対パスで書く理由」の項)。`run` は `AGENTS.md` を読み、`-c developer_instructions=...` で渡します (起動し直すときも同じ値を渡します)。`AGENTS.md` に今の仮想環境の実行ファイルの絶対パスが書かれていないとき (仮想環境やリポジトリーを動かした後など) は、`run` は何も起動せずに止まります。`init` で作業ディレクトリーを作り直してください
 - 最初の起動は `codex exec --json --skip-git-repo-check -m <モデル> [-c model_reasoning_effort=<effort>] -c developer_instructions=<指示> <プロンプト>` です。期限より前に終わったら、出力の `thread.started` の `thread_id` で `codex exec resume ... <thread_id> <プロンプト>` を起動し、同じ会話を続けます。起動し直す条件と回数の上限は Claude Code と同じです (`no_session` は、起動し直すための thread_id が無かったことを表します)。標準入力は `/dev/null` にします
@@ -1675,7 +1675,7 @@ Claude Code のときとの違いは次のとおりです。
 
 サンドボックスの外で動くのは、規則に当たったコマンドだけです。規則を `uv run switch2-harness ...` にすると、エージェントがサンドボックスの外に出られます。`uv run` は、作業ディレクトリー (cwd) から上にたどって見つけた `pyproject.toml` をプロジェクトとして使い、実行の前にそのプロジェクトの環境を同期します。`notes` を有効にした作業ディレクトリーの直下は書けるため、エージェントがそこに `pyproject.toml` などを置けば、規則に当たった `uv run switch2-harness status` が、置かれたプロジェクトのコード (ビルドバックエンドや console script) をサンドボックスの外で実行します。2026-11-21 に、作業ディレクトリーに置いた `pyproject.toml` (作業ディレクトリーの中のビルドバックエンドを指すもの) で `uv run switch2-harness status` を実行すると、ビルドバックエンドのコードが作業ディレクトリーの外にファイルを書くことを、モデルを呼ばずに確かめました。
 
-そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、仮想環境の Python を絶対パスで起動します (uv は、仮想環境のパスが長いと、Python のパスを shebang に書かず、`/bin/sh` から `exec` する形で書きます)。`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。`PYTHONPATH` などの環境変数があると検索パスが変わるため、`run` は Codex に渡す環境変数から `PYTHON` で始まる変数を除きます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`)。このテストでは、比べる対象として、同じ作業ディレクトリーで `python -c "import json"` を動かすと置いた `json.py` が読まれることも確かめています。
+そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、仮想環境の Python を絶対パスで起動します (1 行目は、仮想環境の Python のパスの shebang のことも、`/bin/sh` から仮想環境の Python を `exec` する形のこともあります)。`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。`PYTHONPATH` などの環境変数があると検索パスが変わるため、`run` は Codex に渡す環境変数から `PYTHON` で始まる変数を除きます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`)。このテストでは、比べる対象として、同じ作業ディレクトリーで `python -c "import json"` を動かすと置いた `json.py` が読まれることも確かめています。
 
 人が `uv run` を実行するときも同じです。`notes` を有効にした Codex の作業ディレクトリーでは、作業ディレクトリーの中 (`cd plays/<名前>` の後) で `uv run switch2-harness ...` を実行しないでください。エージェントが置いた `pyproject.toml` などのコードが、人の権限で動きます。`report`・`look` などは、`ch04_techniques` ディレクトリーで `--workspace plays/<名前>` を付けて実行します。
 
@@ -1710,6 +1710,7 @@ Claude Code のときとの違いは次のとおりです。
 - code mode の JavaScript から、`require` と `fetch` のほかの方法で、ツールを通さずにファイルやネットワークに触れられないか
 - ユーザーと管理者のスキル (`~/.agents/skills`・`/etc/codex/skills`) を `skills.config` で止めること (このマシンには無いため)
 - ユーザーの `~/.codex/config.toml` の設定が混ざらないこと (専用の `config.toml` が読まれることは確かめましたが、ユーザーの設定に目印を置いて確かめてはいません)
+- `PYTHON` で始まる環境変数を除いた後に、Codex がコマンドを包むログインシェル (`bash -lc`) が `~/.profile` などを読み、そこで `PYTHONPATH` などを設定し直したときの扱い
 - サブコマンドをそのままの形で書かなかったときの扱い (`<絶対パス> status 2>&1`、パイプ、`cd x && <絶対パス> status` など)。codex-cli 0.171.0 のソース (`codex-rs/core/src/exec_policy.rs`) では、パイプや `&&` でつないだ単純なコマンドはつながったコマンドごとに規則と比べ、リダイレクト・置換・変数の代入を含んで分けられないコマンドは、シェルの呼び出し全体を 1 つとして規則と比べます。規則に当たらなければサンドボックスの中で動き、実行ファイルが見えないため失敗すると考えられます
 
 ### 要素
