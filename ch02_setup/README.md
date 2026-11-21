@@ -69,12 +69,7 @@ PC から Pico 2 W へ送信するときは、発信側の COM ポートを使�
 uv run switch2-remote-daemon --com-port COM4
 ```
 
-発信側の COM ポートは PC ごとに決まるため、環境変数 `SWITCH2_COM_PORT` に書いておくこともできます。`--com-port` を省いたときは、この環境変数の COM ポートを開きます。環境変数は、シェルで `export` するか、環境変数を書いたファイルを `uv run --env-file <ファイル> switch2-remote-daemon` で渡します (5. デーモンの起動の節を参照)。
-
-```bash
-export SWITCH2_COM_PORT=COM4
-uv run switch2-remote-daemon
-```
+発信側の COM ポートは PC ごとに決まるため、環境変数 `SWITCH2_COM_PORT` に書いておけば、`--com-port` を省略したときにその COM ポートを開きます (渡し方は 5. デーモンの起動の節を参照)。
 
 ## 3. ffmpeg の導入
 
@@ -120,7 +115,7 @@ uv run switch2-remote-daemon
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
-`--device-fps` と `--com-port` の正しい値は PC ごとに決まるため、既定値を環境変数で変えられます。起動引数を省いたときは、環境変数 `SWITCH2_DEVICE_FPS` と `SWITCH2_COM_PORT` の値を使います。環境変数が無いときと、値が空のときは、表の既定値 (60 と `COM3`) を使います。起動引数を指定したときは、環境変数を使いません。環境変数は、シェルで `export` するか、環境変数を書いたファイルを `uv run --env-file <ファイル> switch2-remote-daemon` で渡します。
+`--device-fps` と `--com-port` の正しい値は PC ごとに決まるため、既定値を環境変数で変えられます。起動引数を省略したときは、環境変数 `SWITCH2_DEVICE_FPS` と `SWITCH2_COM_PORT` の値を使います。環境変数が無いときと、値が空のときは、表の既定値 (60 と `COM3`) を使います。起動引数を指定したときは、環境変数を使いません。環境変数は、シェルで `export` するか、環境変数を書いたファイルを `uv run --env-file <ファイル> switch2-remote-daemon` で渡します。
 
 ```bash
 export SWITCH2_COM_PORT=COM4
@@ -135,7 +130,7 @@ SWITCH2_COM_PORT=COM4
 SWITCH2_DEVICE_FPS=30
 ```
 
-範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、表の範囲に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。起動引数を省いたときの環境変数 `SWITCH2_DEVICE_FPS`・`SWITCH2_COM_PORT` の値が表の範囲に合わない場合 (`45`、`030`、前後に空白がある値、`COM0` など) も、起動せずに、環境変数の名前を含むエラーを表示します。`--device-fps` を省略した場合は、環境変数で決めた値 (無ければ 60) と `--ffmpeg-fps` を比べます。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、表の範囲に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。起動引数を省略したときの環境変数 `SWITCH2_DEVICE_FPS`・`SWITCH2_COM_PORT` の値が表の範囲に合わない場合 (`45`、`030`、前後に空白がある値、`COM0` など) も、起動せずに、環境変数の名前を含むエラーを表示します。`--device-fps` を省略した場合は、環境変数で決めた値 (無ければ 60) と `--ffmpeg-fps` を比べます。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
 デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 
