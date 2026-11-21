@@ -37,6 +37,14 @@ from switch2_layers.orchestrator.main_loop import (
     main_loop_failure_reason,
     session_failure_reason,
 )
+from switch2_layers.orchestrator.main_loop_session import (
+    AssistantText,
+    AutoCompaction,
+    ContextUsage,
+    MainLoopSessionEvent,
+    SessionEnded,
+    TurnResult,
+)
 from switch2_layers.orchestrator.orchestrator_events import (
     CaseHit,
     MainActionsRun,
@@ -47,7 +55,8 @@ from switch2_layers.orchestrator.orchestrator_instructions import (
     orchestrator_instructions,
 )
 from switch2_layers.orchestrator.parent_skill_names import find_parent_skill_names
-from switch2_layers.orchestrator.turn_input import describe_previous_actions
+from switch2_layers.orchestrator.pending_send import PendingSend
+from switch2_layers.orchestrator.turn_input import TurnImage, describe_previous_actions
 from switch2_layers.progress.progress_state import ProgressState, write_progress_state
 from switch2_layers.progress.progress_text import NO_PROGRESS_TEXT
 from switch2_layers.records.run_log import RunLog
@@ -2329,3 +2338,445 @@ def test_delegate_discarded_actions_send_the_next_input_without_waiting(tmp_path
     second = text_of(inputs_of(fake, 0)[1])
     assert "## 前の操作の列" not in second
     assert wait_fields(turns_rows(harness.root)[1]) == (START_T, 0.0, START_T)
+
+
+# --- セッションを作るものの差し替え (session_factory。プロセスを使わない偽のセッション) ---
+
+
+@dataclass(frozen=True)
+class SentInput:
+    """偽のセッションに送られた入力 1 つ (send_turn_in_background の引数)。"""
+
+    text: str
+    images: tuple[TurnImage, ...]
+
+
+# 偽のセッションの、1 つの入力への応答 (read が返す出来事の並び)。空なら何も返さない (考えている途中)
+Script = list[MainLoopSessionEvent]
+
+
+def reply_events(text: str = VALID_TEXT, tokens: int = 1000) -> Script:
+    """文・使用量・ターンの結果の順の、誤りの無い応答。"""
+    return [
+        AssistantText(text=text),
+        ContextUsage(tokens=tokens),
+        TurnResult(is_error=False),
+    ]
+
+
+class FakeMainLoopSession:
+    """MainLoopSession の偽物 (プロセスを使わない)。
+
+    replies      入力ごとの応答。送られるたびに前から 1 つずつ取り、その出来事を read が返す列に足す。使い切ったら
+                 何も足さない
+    start_error  start で出す例外 (None なら起動する)
+    returncode   close が返す値
+    calls        呼ばれた操作 (操作の名前, セッションの番号) を足していくリスト (FakeSessionFactory と共有する)
+    sent         送られた入力 (送られた順)
+    """
+
+    def __init__(
+        self,
+        number: int,
+        replies: list[Script],
+        start_error: Exception | None,
+        returncode: int | None,
+        calls: list[tuple[str, int]],
+    ):
+        self.number = number
+        self.replies = [list(reply) for reply in replies]
+        self.start_error = start_error
+        self.returncode = returncode
+        self.calls = calls
+        self.sent: list[SentInput] = []
+        self.close_grace: list[float] = []
+        self._events: queue.Queue = queue.Queue()
+        self._ended = False
+
+    def start(self) -> None:
+        self.calls.append(("start", self.number))
+        if self.start_error is not None:
+            raise self.start_error
+
+    def send_turn_in_background(self, text: str, images) -> PendingSend:
+        self.calls.append(("send", self.number))
+        self.sent.append(SentInput(text=text, images=tuple(images)))
+        for event in self.replies.pop(0) if self.replies else []:
+            self._events.put(event)
+        pending = PendingSend()
+        pending.finish(True)
+        return pending
+
+    def read(self, timeout_s: float) -> MainLoopSessionEvent | None:
+        if self._ended:
+            return SessionEnded()
+        try:
+            event = self._events.get(timeout=max(timeout_s, 0.0))
+        except queue.Empty:
+            return None
+        if isinstance(event, SessionEnded):
+            self._ended = True
+        return event
+
+    def close(self, grace_s: float) -> int | None:
+        self.calls.append(("close", self.number))
+        self.close_grace.append(grace_s)
+        return self.returncode
+
+
+class FakeSessionFactory:
+    """MainLoopSessionFactory の偽物。create のたびに FakeMainLoopSession を作る。
+
+    scripts      セッションごとの応答の並び (足りなければ、どの入力にも応答しない)
+    start_error  どのセッションの start でも出す例外 (None なら起動する)
+    returncodes  セッションごとの close の戻り値 (足りなければ 0)
+    create_error create で出す例外 (None なら作る)
+    """
+
+    def __init__(
+        self,
+        scripts: list[list[Script]] = (),
+        start_error: Exception | None = None,
+        returncodes: list[int | None] = (),
+        create_error: Exception | None = None,
+    ):
+        self.scripts = [list(script) for script in scripts]
+        self.start_error = start_error
+        self.returncodes = list(returncodes)
+        self.create_error = create_error
+        self.calls: list[tuple[str, int]] = []
+        self.created: list[tuple[int, Path]] = []
+        self.sessions: list[FakeMainLoopSession] = []
+
+    def create(self, number: int, stream_path: Path) -> FakeMainLoopSession:
+        self.calls.append(("create", number))
+        self.created.append((number, stream_path))
+        if self.create_error is not None:
+            raise self.create_error
+        index = len(self.sessions)
+        session = FakeMainLoopSession(
+            number,
+            self.scripts[index] if index < len(self.scripts) else [],
+            self.start_error,
+            self.returncodes[index] if index < len(self.returncodes) else 0,
+            self.calls,
+        )
+        self.sessions.append(session)
+        return session
+
+    def sent(self, index: int) -> list[SentInput]:
+        """index 番目 (0 始まり) のセッションに送られた入力。まだ作っていなければ空。"""
+        return self.sessions[index].sent if len(self.sessions) > index else []
+
+
+def use_session_factory(harness: Harness, factory: FakeSessionFactory) -> None:
+    """harness の主ループを、session_factory だけを factory に変えて作り直す (start の前に呼ぶ)。"""
+    harness.loop = OrchestratorMainLoop(
+        dataclasses.replace(harness.loop.parts, session_factory=factory),
+        harness.loop.settings,
+    )
+
+
+def test_session_factory_creates_starts_and_sends_the_main_loop_input(tmp_path):
+    fake = FakeClaude()
+    factory = FakeSessionFactory([[reply_events(), []]])
+    harness = make_harness(
+        tmp_path, fake, initial_instruction="主人公の名前は自由に決めてよい"
+    )
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 2)
+    harness.finish()
+    # Claude の子プロセスは起動しない
+    assert fake.start_attempts == 0
+    stream_path = RunPaths(harness.root).orchestrator_session_stream(1)
+    assert factory.created == [(1, stream_path)]
+    assert stream_path.parent.is_dir()
+    assert factory.calls == [
+        ("create", 1),
+        ("start", 1),
+        ("send", 1),
+        ("send", 1),
+        ("close", 1),
+    ]
+    assert factory.sessions[0].close_grace == [0.01]
+    first, second = factory.sent(0)
+    turns = turns_rows(harness.root)
+    # 送ったテキストと画像は、主ループが作って turns.jsonl に書いた入力と同じ
+    assert first.text == turns[0]["input_text"]
+    assert "主人公の名前は自由に決めてよい" in first.text
+    assert "t=10.000" in first.text
+    assert first.images == tuple(
+        TurnImage(t=t, file=interval_record(t).file, jpeg=latest_bytes(t))
+        for t in (6.0, 7.0, 8.0, 9.0, 10.0)
+    )
+    assert [image.file for image in first.images] == turns[0]["images"]
+    assert second.text == turns[1]["input_text"]
+    assert "## 人の初期指示" not in second.text
+    assert "## 時刻" in second.text
+    assert second.images == first.images
+    assert sessions_rows(harness.root)[0] == {
+        "t": START_T,
+        "event": "start",
+        "session": 1,
+        "stream": "orchestrator/session-001/stream.jsonl",
+    }
+
+
+def test_session_factory_text_reaches_the_parser_and_usage_reaches_the_records(
+    tmp_path,
+):
+    factory = FakeSessionFactory(
+        [
+            [
+                [
+                    ContextUsage(tokens=1000),
+                    AssistantText(text="考えている途中の文"),
+                    AssistantText(text=VALID_TEXT),
+                    ContextUsage(tokens=2000),
+                    TurnResult(is_error=False),
+                ],
+                [],
+            ]
+        ]
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 2)
+    harness.finish()
+    # 最後の文だけを読む
+    assert harness.parser.calls == [VALID_TEXT]
+    assert harness.controller.applied == [DECISION]
+    first = turns_rows(harness.root)[0]
+    assert first["outcome"] == "applied"
+    assert first["response_json"] == VALID_JSON
+    # 使用量は最後の値 (足し合わせない)
+    assert first["usage_tokens"] == 2000
+    [end] = end_rows(harness.root)
+    assert end["usage_tokens"] == 2000
+    assert end["reason"] == "close"
+    assert end["returncode"] == 0
+    [run_end] = [
+        row
+        for row in read_jsonl(harness.root / "run.jsonl")
+        if row["event"] == "orchestrator_session_end"
+    ]
+    assert run_end["usage_tokens"] == 2000
+
+
+def test_session_factory_usage_over_the_threshold_sends_the_handoff_without_images(
+    tmp_path,
+):
+    factory = FakeSessionFactory(
+        [
+            [
+                reply_events(tokens=130_000),
+                [
+                    AssistantText(text=HANDOFF_REPLY_TEXT),
+                    ContextUsage(tokens=131_000),
+                    TurnResult(is_error=False),
+                ],
+            ],
+            [[]],
+        ]
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(1)) == 1)
+    harness.finish()
+    assert factory.sent(0)[1] == SentInput(text=handoff_request_text(), images=())
+    # 引き継ぎの依頼の応答は読まない
+    assert harness.parser.calls == [VALID_TEXT]
+    assert [number for number, _ in factory.created] == [1, 2]
+    assert len(factory.sent(1)[0].images) == 5
+    ends = end_rows(harness.root)
+    assert ends[0]["reason"] == "rotate"
+    assert ends[0]["usage_tokens"] == 131_000
+    assert ends[0]["completed_turns"] == 2
+    assert [
+        (row["session"], row["turn"], row["kind"], row["outcome"])
+        for row in turns_rows(harness.root)
+    ] == [
+        (1, 1, "turn", "applied"),
+        (1, 2, "handoff", "handoff"),
+        (2, 1, "turn", "stopped"),
+    ]
+
+
+@pytest.mark.parametrize("metadata", [{"trigger": "auto", "pre_tokens": 967_123}, None])
+def test_session_factory_auto_compaction_writes_the_compact_row(tmp_path, metadata):
+    factory = FakeSessionFactory(
+        [
+            [
+                [
+                    AssistantText(text=VALID_TEXT),
+                    AutoCompaction(metadata=metadata),
+                    ContextUsage(tokens=1000),
+                    TurnResult(is_error=False),
+                ],
+                [],
+            ]
+        ]
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 2)
+    harness.finish()
+    # 要約の後もセッションは続く
+    assert len(factory.sessions) == 1
+    compacts = [row for row in sessions_rows(harness.root) if row["event"] == "compact"]
+    assert compacts == [
+        {"t": START_T, "event": "compact", "session": 1, "metadata": metadata}
+    ]
+
+
+def test_session_factory_error_result_ends_the_session_as_exit(tmp_path):
+    factory = FakeSessionFactory(
+        [
+            [
+                reply_events(),
+                [AssistantText(text=VALID_TEXT), TurnResult(is_error=True)],
+            ],
+            [[]],
+        ],
+        returncodes=[1],
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(1)) == 1)
+    harness.finish()
+    # is_error が true の結果の文の JSON は読まない
+    assert harness.parser.calls == [VALID_TEXT]
+    assert harness.controller.applied == [DECISION]
+    # 前のセッションを終えてから、次のセッションを作る
+    assert factory.calls.index(("close", 1)) < factory.calls.index(("create", 2))
+    first_end = end_rows(harness.root)[0]
+    assert first_end["reason"] == "exit"
+    assert first_end["returncode"] == 1
+    assert first_end["completed_turns"] == 1
+    error_turn = turns_rows(harness.root)[1]
+    assert (error_turn["session"], error_turn["turn"]) == (1, 2)
+    assert error_turn["outcome"] == "error_result"
+    assert error_turn["t_result"] == START_T
+    assert error_turn["errors"] is None
+    assert harness.reasons == []
+
+
+def test_session_factory_error_results_on_the_first_turn_stop_the_run(tmp_path):
+    factory = FakeSessionFactory([[[TurnResult(is_error=True)]]] * 3 + [[[]]])
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    harness.join()
+    assert harness.reasons == [session_failure_reason(MAX_SESSION_FAILURES)]
+    assert len(factory.sessions) == 3
+    ends = end_rows(harness.root)
+    assert [row["reason"] for row in ends] == ["exit", "exit", "exit"]
+    assert [row["completed_turns"] for row in ends] == [0, 0, 0]
+    assert [row["outcome"] for row in turns_rows(harness.root)] == [
+        "error_result",
+        "error_result",
+        "error_result",
+    ]
+    assert harness.controller.applied == []
+
+
+def test_session_factory_session_end_in_the_middle_of_a_turn_ends_as_exit(tmp_path):
+    factory = FakeSessionFactory(
+        [
+            [reply_events(), [AssistantText(text="途中の文"), SessionEnded()]],
+            [[]],
+        ],
+        returncodes=[1],
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(1)) == 1)
+    harness.finish()
+    assert harness.parser.calls == [VALID_TEXT]
+    first_end = end_rows(harness.root)[0]
+    assert first_end["reason"] == "exit"
+    assert first_end["returncode"] == 1
+    assert first_end["completed_turns"] == 1
+    exited = turns_rows(harness.root)[1]
+    assert exited["outcome"] == "exited"
+    assert exited["t_result"] is None
+    assert harness.reasons == []
+
+
+def test_session_factory_session_end_of_the_handoff_request_still_rotates(tmp_path):
+    factory = FakeSessionFactory(
+        [[reply_events(tokens=130_000), [SessionEnded()]], [[]]]
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(1)) == 1)
+    harness.finish()
+    assert end_rows(harness.root)[0]["reason"] == "rotate"
+    handoff = turns_rows(harness.root)[1]
+    assert handoff["kind"] == "handoff"
+    assert handoff["outcome"] == "exited"
+
+
+def test_session_factory_session_ends_before_the_first_turn_stop_the_run(tmp_path):
+    factory = FakeSessionFactory([[[SessionEnded()]]] * 3 + [[[]]])
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    harness.join()
+    assert harness.reasons == [session_failure_reason(MAX_SESSION_FAILURES)]
+    assert len(factory.sessions) == 3
+    assert [row["reason"] for row in end_rows(harness.root)] == ["exit", "exit", "exit"]
+    assert [row["outcome"] for row in turns_rows(harness.root)] == [
+        "exited",
+        "exited",
+        "exited",
+    ]
+
+
+def test_session_factory_start_failure_counts_as_a_failed_session(tmp_path):
+    factory = FakeSessionFactory(
+        start_error=FileNotFoundError(2, "No such file", "agent")
+    )
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    harness.join()
+    assert harness.reasons == [session_failure_reason(MAX_SESSION_FAILURES)]
+    # 起動できなかったセッションには、入力を送らず、close も呼ばない
+    assert factory.calls == [
+        ("create", 1),
+        ("start", 1),
+        ("create", 2),
+        ("start", 2),
+        ("create", 3),
+        ("start", 3),
+    ]
+    sessions = sessions_rows(harness.root)
+    assert [row["event"] for row in sessions] == ["end", "end", "end"]
+    assert all(row["reason"] == "exit" for row in sessions)
+    assert all(row["returncode"] is None for row in sessions)
+    assert all("FileNotFoundError" in row["error"] for row in sessions)
+    run_events = [row["event"] for row in read_jsonl(harness.root / "run.jsonl")]
+    assert "orchestrator_session_start" not in run_events
+    assert run_events.count("orchestrator_session_end") == 3
+
+
+def test_session_factory_create_error_is_not_a_start_failure(tmp_path):
+    # create の例外は (OSError も) 起動の失敗に数えず、主ループの想定外の例外として止まる
+    factory = FakeSessionFactory(create_error=OSError("cannot build the command"))
+    harness = make_harness(tmp_path, FakeClaude())
+    use_session_factory(harness, factory)
+    harness.start()
+    harness.join()
+    assert harness.reasons == [
+        main_loop_failure_reason("OSError: cannot build the command")
+    ]
+    assert factory.calls == [("create", 1)]
+    assert sessions_rows(harness.root) == []

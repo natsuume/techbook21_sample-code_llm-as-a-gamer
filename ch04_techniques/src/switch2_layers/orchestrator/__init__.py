@@ -5,6 +5,10 @@
 
 主ループ (Claude Code を stream-json の入出力で開いたままにし、使用量がしきい値を超えたらセッションを入れ替える):
     main_loop                   主ループ (OrchestratorMainLoop)。セッションの開始・ターンの送受信・入れ替え・停止
+    main_loop_session           主ループとセッションの境界の型 (セッション・セッションを作るもの・read が返す出来事)。
+                                主ループは、エージェントの入出力の形を知らずに、この型だけを通してセッションを使う
+    claude_main_loop_session    その境界の Claude Code の実装 (起動の引数・環境変数の組み立てと、stream-json の行から
+                                出来事への直し方)
 run --mode orchestrator と run --mode delegate の組み立て (app と cli が使う):
     orchestrator_assembly       主ループと OrchestratorController を作ってつなぎ、監視のループと委任のループのスレッドの
                                 本体を持つ (app.LayersApp が Orchestrator 型と委任型の start で使う)
@@ -22,6 +26,7 @@ I/O を持たない部品:
     orchestrator_instructions   変わらない指示 (--append-system-prompt。監視型と委任型の版) と、引き継ぎの依頼の文
     turn_input                  1 ターンの入力のテキストと画像の選び方 (画像と notes/ の一覧を読む関数も置く)
     stream_messages             stream-json の行の読み方 (使用量・自動の要約の印) と、標準入力に送る行の形
+    pending_send                書き込み用のスレッドで始めた、セッションへの入力の書き込み 1 つ (書き終わったかを待つ)
 操作の送信・Jev の呼び出し・ファイルとプロセスを扱う部品:
     action_executor             procedure と macro を展開した操作の列を、1 つずつ PadOutput に送る
     monitor_loop                監視の Jev への要求 1 回と、今の監視の状態 (失敗が続いた回数、once・every の扱い)

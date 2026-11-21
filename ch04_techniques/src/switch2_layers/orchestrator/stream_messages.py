@@ -4,7 +4,8 @@
     {"type": "user", "message": {"role": "user", "content": [テキストと画像のブロック]}, "parent_tool_use_id": null}
     画像のブロックは {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": <base64>}}。
     この形で、テキストと base64 の JPEG を送れることを確かめた (2026-11-16、Claude Code 2.1.325)
-標準出力の行のうち、主ループが使うもの:
+標準出力の行のうち、主ループの出来事にするもの (orchestrator.claude_main_loop_session.stream_line_events が、
+orchestrator.main_loop_session の出来事に直す):
     system/init        各ユーザーのターンの最初に出る (1 つのセッションに何度も出る)
     assistant          モデルの応答。1 つの API の呼び出しの応答が、内容のブロックごとの複数の行に分かれて届き、
                        それらの行の message.usage は同じ値になる。文の取り出しは deep.claude_stream_log.assistant_text
