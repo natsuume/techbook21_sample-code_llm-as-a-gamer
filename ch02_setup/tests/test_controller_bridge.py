@@ -1,3 +1,4 @@
+import argparse
 import queue
 import subprocess
 import threading
@@ -6,9 +7,12 @@ import pytest
 
 from switch2_remote import controller_bridge
 from switch2_remote.controller_bridge import (
+    DEFAULT_COM_PORT,
     Bridge,
     BridgeStartError,
     UnconfirmedInputError,
+    is_valid_com_port,
+    parse_com_port,
 )
 from switch2_remote.ffmpeg_locator import POWERSHELL
 
@@ -196,9 +200,15 @@ BRIDGE_COMMAND = [
 ]
 
 
-def test_bridge_starts_powershell_with_bridge_script_only(popen_calls):
+def test_bridge_starts_powershell_with_bridge_script_and_default_port(popen_calls):
     Bridge()
-    assert popen_calls.args == [BRIDGE_COMMAND]
+    assert popen_calls.args == [[*BRIDGE_COMMAND, "-PortName", "COM3"]]
+
+
+def test_bridge_passes_given_port_name_to_bridge_script(popen_calls):
+    # 発信側の COM ポートが COM3 以外の PC では、スクリプトを書き換えずに -PortName で渡す
+    Bridge(port_name="COM4")
+    assert popen_calls.args == [[*BRIDGE_COMMAND, "-PortName", "COM4"]]
 
 
 def test_bridge_stays_in_the_same_session_by_default(popen_calls):
@@ -348,3 +358,57 @@ def test_set_report_on_unusable_bridge_does_not_ask_to_restart_daemon():
     with pytest.raises(RuntimeError) as excinfo:
         bridge.set_report(REPORT_A)
     assert str(excinfo.value) == "controller bridge is not usable"
+
+
+# --- COM ポートの名前 (--com-port) ---
+
+VALID_COM_PORTS = [
+    ("COM3", "COM3"),
+    ("COM4", "COM4"),
+    ("com4", "COM4"),
+    ("Com4", "COM4"),
+    ("COM10", "COM10"),
+]
+
+# - で始まる値はブリッジの起動で PowerShell のパラメーター名として解釈されうるため、COM<番号> の形だけを受け付ける
+INVALID_COM_PORTS = [
+    "COM0",
+    "COM04",
+    "COM",
+    "4",
+    "-PortName",
+    "COM4;",
+    "COM 4",
+    " COM4",
+    "COM4\n",
+    "",
+]
+
+
+def test_default_com_port_is_com3():
+    # controller_bridge.ps1 の -PortName の既定値と同じ
+    assert DEFAULT_COM_PORT == "COM3"
+
+
+@pytest.mark.parametrize("value, expected", VALID_COM_PORTS)
+def test_parse_com_port_accepts_com_and_number_in_upper_case(value, expected):
+    assert parse_com_port(value) == expected
+
+
+@pytest.mark.parametrize("value", INVALID_COM_PORTS)
+def test_parse_com_port_rejects_other_values_with_the_value(value):
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        parse_com_port(value)
+    assert (
+        str(excinfo.value) == f"invalid COM port: {value!r} (expected COM1, COM2, ...)"
+    )
+
+
+@pytest.mark.parametrize("value", [value for value, _ in VALID_COM_PORTS])
+def test_is_valid_com_port_accepts_com_and_number(value):
+    assert is_valid_com_port(value)
+
+
+@pytest.mark.parametrize("value", INVALID_COM_PORTS)
+def test_is_valid_com_port_rejects_other_values(value):
+    assert not is_valid_com_port(value)

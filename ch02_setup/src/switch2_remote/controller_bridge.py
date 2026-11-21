@@ -29,6 +29,28 @@ BRIDGE_ACK_TIMEOUT = 2.0  # set を書き込んでから ack が返るまでの�
 # その後に中立を 200ms 送ることがあるため、それより長くとる
 BRIDGE_QUIT_TIMEOUT = 3.0
 REPORT_BYTES = 8
+# ブリッジが開く COM ポートの既定値 (controller_bridge.ps1 の -PortName の既定値と同じ)
+DEFAULT_COM_PORT = "COM3"
+
+
+def is_valid_com_port(value: str) -> bool:
+    """value が COM ポートの名前の形なら True を返す。
+
+    形は、COM に続けて先頭が 0 でない 10 進の整数 (正規表現 ^COM[1-9][0-9]*$ の全体一致。大文字小文字を区別しない)。
+    COM3・COM10・com4 は True、COM0・COM04・COM・4・-PortName・COM4;・空白や改行を含む値・空文字列は False。
+    """
+    raise NotImplementedError
+
+
+def parse_com_port(value: str) -> str:
+    """起動引数 --com-port の値を確かめ、大文字にした COM ポートの名前を返す (argparse の type に渡す)。
+
+    is_valid_com_port の形なら大文字にして返す (com4 → COM4)。そうでなければ
+    argparse.ArgumentTypeError(f"invalid COM port: {value!r} (expected COM1, COM2, ...)") を送出する。
+    値は PowerShell の -File の引数としてブリッジに渡るため、- で始まる値などがパラメーター名として
+    解釈されないよう、この形の値だけを受け付ける。
+    """
+    raise NotImplementedError
 
 
 class UnconfirmedInputError(RuntimeError):
@@ -58,9 +80,11 @@ class Bridge:
     ブリッジの quit の処理が中立を 200ms 送るため、終了できれば押されたままの入力は離れる。
     new_session が True なら、ブリッジを新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の SIGINT が
     ブリッジに届かなくなるため、呼び出し側は Ctrl+C の後もレポートを送れる。ブリッジは close で終わらせる。
+    port_name はブリッジが開く COM ポート (既定 DEFAULT_COM_PORT)。controller_bridge.ps1 に -PortName <port_name> で渡す。
+    形は確かめない (起動引数で受け取る呼び出し側が parse_com_port で確かめる)。
     """
 
-    def __init__(self, new_session: bool = False):
+    def __init__(self, new_session: bool = False, port_name: str = DEFAULT_COM_PORT):
         bridge_win_path = subprocess.run(
             ["wslpath", "-w", BRIDGE_SCRIPT], capture_output=True, text=True, check=True
         ).stdout.strip()

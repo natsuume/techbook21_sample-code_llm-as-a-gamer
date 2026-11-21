@@ -1226,10 +1226,18 @@ def test_run_uses_the_selected_runner(monkeypatch, capsys, extra, runner_type):
     assert isinstance(parts_seen[0].deep, runner_type)
 
 
+class RecordingBridge:
+    """controller_bridge.Bridge の偽物。受け取った引数を bridge_kwargs に記録する (実機に触れない)。"""
+
+    def __init__(self, bridge_kwargs: list[dict], **kwargs):
+        bridge_kwargs.append(kwargs)
+
+
 def test_run_starts_the_bridge_and_capture_in_new_sessions(monkeypatch):
     # 最初の Ctrl+C の SIGINT がブリッジと ffmpeg に届かないよう、どちらも新しいセッションで起動する
     supervisor_kwargs: list[dict] = []
     capture_kwargs: list[dict] = []
+    bridge_kwargs: list[dict] = []
 
     class RecordingSupervisor(FakeBridgeSupervisor):
         def __init__(self, **kwargs):
@@ -1250,12 +1258,15 @@ def test_run_starts_the_bridge_and_capture_in_new_sessions(monkeypatch):
     monkeypatch.setattr(cli, "BridgeSupervisor", RecordingSupervisor)
     monkeypatch.setattr(cli, "Capture", RecordingCapture)
     monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
+    monkeypatch.setattr(
+        cli, "Bridge", lambda **kwargs: RecordingBridge(bridge_kwargs, **kwargs)
+    )
     assert (
         main([*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake"]) == 0
     )
-    assert [kwargs["start_bridge"] for kwargs in supervisor_kwargs] == [
-        cli.start_isolated_bridge
-    ]
+    assert len(supervisor_kwargs) == 1
+    supervisor_kwargs[0]["start_bridge"]()
+    assert bridge_kwargs == [{"new_session": True, "port_name": "COM3"}]
     assert capture_kwargs == [{"new_session": True, "device_fps": 60}]
 
 
@@ -1307,16 +1318,82 @@ def test_run_rejects_device_fps_outside_the_choices(value, capsys):
     assert "invalid" in err
 
 
-def test_start_isolated_bridge_starts_the_bridge_in_a_new_session(monkeypatch):
+@pytest.mark.parametrize(
+    "extra, port_name",
+    [([], "COM3"), (["--com-port", "COM4"], "COM4"), (["--com-port", "com4"], "COM4")],
+)
+def test_run_starts_every_bridge_with_the_com_port(extra, port_name, monkeypatch):
+    # 最初の起動にも、復旧での起動し直しにも、同じ COM ポートでブリッジを起動する
+    supervisor_kwargs: list[dict] = []
     bridge_kwargs: list[dict] = []
 
-    class RecordingBridge:
+    class RecordingSupervisor(FakeBridgeSupervisor):
         def __init__(self, **kwargs):
-            bridge_kwargs.append(kwargs)
+            supervisor_kwargs.append(kwargs)
 
-    monkeypatch.setattr(cli, "Bridge", RecordingBridge)
-    assert isinstance(cli.start_isolated_bridge(), RecordingBridge)
-    assert bridge_kwargs == [{"new_session": True}]
+    class FakeLayersApp:
+        def __init__(self, settings, parts):
+            pass
+
+        def run(self) -> str:
+            return REASON_INTERRUPTED
+
+    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+    monkeypatch.setattr(cli, "BridgeSupervisor", RecordingSupervisor)
+    monkeypatch.setattr(cli, "Capture", FakeCapture)
+    monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
+    monkeypatch.setattr(
+        cli, "Bridge", lambda **kwargs: RecordingBridge(bridge_kwargs, **kwargs)
+    )
+    assert (
+        main(
+            [*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+        )
+        == 0
+    )
+    [kwargs] = supervisor_kwargs
+    kwargs["start_bridge"]()
+    kwargs["start_bridge"]()
+    assert bridge_kwargs == [{"new_session": True, "port_name": port_name}] * 2
+
+
+def test_run_settings_from_args_copy_the_com_port():
+    assert run_settings_from_args(build_parser().parse_args(RUN)).com_port == "COM3"
+    args = build_parser().parse_args([*ORCHESTRATOR, "--com-port", "com4"])
+    assert run_settings_from_args(args).com_port == "COM4"
+    args = build_parser().parse_args([*DELEGATE, "--com-port", "COM10"])
+    assert run_settings_from_args(args).com_port == "COM10"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--com-port", "COM0"],
+        ["--com-port", "COM04"],
+        ["--com-port", "4"],
+        ["--com-port", "COM4;"],
+        ["--com-port", "COM 4"],
+        ["--com-port", ""],
+        # - で始まる値も、= でつなげば --com-port の値として渡る
+        ["--com-port=-PortName"],
+    ],
+)
+def test_run_rejects_invalid_com_port(extra, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, *extra])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--com-port" in err
+    assert "invalid COM port" in err
+
+
+def test_start_isolated_bridge_starts_the_bridge_in_a_new_session(monkeypatch):
+    bridge_kwargs: list[dict] = []
+    monkeypatch.setattr(
+        cli, "Bridge", lambda **kwargs: RecordingBridge(bridge_kwargs, **kwargs)
+    )
+    assert isinstance(cli.start_isolated_bridge("COM4"), RecordingBridge)
+    assert bridge_kwargs == [{"new_session": True, "port_name": "COM4"}]
 
 
 # --- --safety (安全の監視) ---

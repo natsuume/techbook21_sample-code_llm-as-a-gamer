@@ -757,6 +757,41 @@ def test_run_settings_to_json_writes_device_fps_as_integer():
     assert type(value["device_fps"]) is int
 
 
+def test_com_port_defaults_to_com3():
+    assert RunSettings().com_port == "COM3"
+
+
+@pytest.mark.parametrize("com_port", ["COM3", "COM4", "COM10", "com4"])
+def test_com_ports_of_com_and_number_are_valid(com_port):
+    assert run_settings_errors(RunSettings(com_port=com_port)) == []
+
+
+@pytest.mark.parametrize(
+    "com_port",
+    ["COM0", "COM04", "COM", "4", "-PortName", "COM4;", "COM 4", "COM4\n", ""],
+)
+def test_invalid_com_port_is_reported_with_option_name(com_port):
+    errors = run_settings_errors(RunSettings(com_port=com_port))
+    assert errors == [f"--com-port must be COM1, COM2, ...: {com_port!r}"]
+
+
+def test_com_port_error_comes_between_device_fps_and_interval_fps_errors():
+    # メッセージは引数の定義の順 (RunSettings の属性の順) に並べる
+    errors = run_settings_errors(
+        RunSettings(device_fps=45, com_port="COM0", interval_fps=0.0)
+    )
+    assert len(errors) == 3
+    assert "--device-fps" in errors[0]
+    assert "--com-port" in errors[1]
+    assert "--interval-fps" in errors[2]
+
+
+def test_run_settings_to_json_writes_com_port_as_string():
+    value = run_settings_to_json(RunSettings(com_port="COM4"))
+    assert value["com_port"] == "COM4"
+    assert type(value["com_port"]) is str
+
+
 def test_orchestrator_settings_defaults_follow_the_issue():
     settings = RunSettings()
     assert settings.mode is RunMode.ADVISOR
