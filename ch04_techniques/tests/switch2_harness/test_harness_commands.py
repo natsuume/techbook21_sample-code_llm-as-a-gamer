@@ -1818,7 +1818,8 @@ def test_run_with_stagnation_alert_and_reflection_enters_both(paths, clock):
 # --- Codex (init --agent codex と、codex の作業ディレクトリーの run・report) ---
 
 CODEX_HOME = Path("/home/player/.cache/switch2-harness/codex-home/play-abc")
-AGENTS_MD = "# Codex への指示\n"
+HARNESS_EXECUTABLE = Path("/repo/ch04_techniques/.venv/bin/switch2-harness")
+AGENTS_MD = f"# Codex への指示\n\n{HARNESS_EXECUTABLE} look\n"
 
 
 def write_codex_workspace(paths: WorkspacePaths, features: list[str]) -> None:
@@ -1861,6 +1862,7 @@ def run_codex_with_fakes(
         available=available,
         reflecting=reflecting,
         prepare_codex=prepare,
+        harness_executable=HARNESS_EXECUTABLE,
     )
     return result, starter, daemon
 
@@ -1875,6 +1877,7 @@ def test_init_with_codex_writes_agents_md_and_the_agent(tmp_path):
         now=fixed_now,
         read_template=read_package_template,
         agent="codex",
+        harness_executable=HARNESS_EXECUTABLE,
     )
     assert result == CommandResult(
         exit_code=0,
@@ -1891,9 +1894,13 @@ def test_init_with_codex_writes_agents_md_and_the_agent(tmp_path):
     config = HarnessConfig(
         "ゲーム A", "ボスを倒す", ("notes", "reflection"), "2026-11-16T21:00:05+09:00"
     )
-    assert (directory / "AGENTS.md").read_text(encoding="utf-8") == render_instructions(
-        config, codex_read_template(read_package_template)
+    agents_md = (directory / "AGENTS.md").read_text(encoding="utf-8")
+    assert agents_md == render_instructions(
+        config, codex_read_template(read_package_template, HARNESS_EXECUTABLE)
     )
+    # サブコマンドは、ハーネスの実行ファイルの絶対パスで書く (rules がサンドボックスの外で動かすのはその形だけ)
+    assert f"{HARNESS_EXECUTABLE} look " in agents_md
+    assert "uv run" not in agents_md
     # notes.md の最初の内容は、Claude Code の作業ディレクトリーと同じ
     claude_directory = tmp_path / "plays" / "claude"
     handle_init(
@@ -1922,6 +1929,7 @@ def test_run_with_codex_prepares_the_codex_home_and_launches_codex(paths, clock)
     assert call.agent_commands == ("look", "press", "status", "finish", "note", "notes")
     assert call.writable_files == ("memo.md",)
     assert call.environ == {"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"}
+    assert call.executable == HARNESS_EXECUTABLE
     [launch] = starter.launches
     # --model を省くと codex の既定のモデル。指示は作業ディレクトリーの AGENTS.md
     assert launch.args == build_codex_exec_args(
@@ -1965,6 +1973,22 @@ def test_run_with_codex_stops_when_the_codex_home_cannot_be_prepared(paths, cloc
     )
     assert starter.launches == []
     assert daemon.sent == []
+
+
+def test_run_with_codex_stops_when_agents_md_uses_another_executable(paths, clock):
+    write_codex_workspace(paths, [])
+    (paths.root / "AGENTS.md").write_text(
+        "uv run switch2-harness look\n", encoding="utf-8"
+    )
+    prepare = FakeCodexPrepare(CODEX_HOME)
+    result, starter, _ = run_codex_with_fakes(paths, clock, prepare, LaunchOptions())
+    message = (
+        f"error {paths.root / 'AGENTS.md'} does not use {HARNESS_EXECUTABLE}; "
+        "create the workspace again with init"
+    )
+    assert result == CommandResult(exit_code=1, stderr_lines=(message,))
+    assert prepare.calls == []
+    assert starter.launches == []
 
 
 def test_run_with_codex_stops_without_agents_md(paths, clock):

@@ -18,6 +18,7 @@ from switch2_harness.codex_command import (
     codex_home_dir,
     codex_rules_text,
     critic_permission_profile,
+    harness_executable,
     is_kept_codex_env_name,
     player_permission_profile,
     toml_basic_string,
@@ -236,14 +237,25 @@ def test_codex_config_toml_disables_the_given_skills():
     }
 
 
-def test_codex_rules_text_allows_only_the_agent_commands():
-    assert codex_rules_text(("look", "press", "status", "finish")) == (
+def test_harness_executable_is_the_console_script_of_the_virtual_environment():
+    assert harness_executable(Path("/repo/ch04_techniques/.venv")) == Path(
+        "/repo/ch04_techniques/.venv/bin/switch2-harness"
+    )
+
+
+def test_codex_rules_text_allows_only_the_absolute_harness_executable():
+    executable = Path("/repo/ch04_techniques/.venv/bin/switch2-harness")
+    text = codex_rules_text(executable, ("look", "press", "status", "finish"))
+    assert text == (
         "# switch2-harness が run の始めに書き直す規則。エージェント用のサブコマンドだけを、サンドボックスの外で動かす\n"
         "prefix_rule(\n"
-        '    pattern = ["uv", "run", "switch2-harness", ["look", "press", "status", "finish"]],\n'
+        '    pattern = ["/repo/ch04_techniques/.venv/bin/switch2-harness", '
+        '["look", "press", "status", "finish"]],\n'
         '    decision = "allow",\n'
         ")\n"
     )
+    # uv run は、作業ディレクトリーに置かれた pyproject.toml などを使うため許さない
+    assert "uv" not in text
 
 
 # --- 起動引数 ---

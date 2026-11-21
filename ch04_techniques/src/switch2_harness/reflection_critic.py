@@ -36,7 +36,9 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -336,12 +338,26 @@ def critic_output_file_name(index: int) -> str:
 def write_notes(path: Path, text: str) -> None:
     """notes.md を text に書き換える。
 
-    path に ".tmp" を足したファイルに UTF-8 で書いてから、os.replace で path に置き換える
-    (プレイ中のエージェントに、書きかけの notes.md を読ませない)。
+    path と同じディレクトリーに、名前が `<path の名前>.<ランダムな文字列>.tmp` の一時ファイルを tempfile.mkstemp で
+    新しく作り (既にあるファイルやシンボリックリンクを開かない)、UTF-8 で書いてから、os.replace で path に置き換える
+    (プレイ中のエージェントに、書きかけの notes.md を読ませない)。書けなければ一時ファイルを消して、例外をそのまま出す。
+    Codex のエージェントは作業ディレクトリーの直下を書けるため、決まった名前の一時ファイルを使うと、エージェントが
+    その名前で作業ディレクトリーの外を指すシンボリックリンクを置き、サンドボックスの外で動くハーネスにリンク先を
+    書かせられる。それを防ぐため、名前を決めずに新しく作る。
     """
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        # mkstemp は 0600 で作るため、置き換える前の notes.md と同じ権限にする (無いか普通のファイルでなければ 0644)
+        os.fchmod(fd, _notes_mode(path))
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _signal_group_if_present(process: AgentProcess, sig: int) -> None:
@@ -369,12 +385,39 @@ def stop_critic(process: AgentProcess, wait: Callable[[float], bool]) -> None:
         process.wait()
 
 
-def _read_notes(path: Path) -> str:
-    """notes.md を UTF-8 で読んで返す。無ければ空の文字列。"""
+def _notes_mode(path: Path) -> int:
+    """path (notes.md) が普通のファイルならその権限のビットを、無いか普通のファイルでなければ 0o644 を返す。
+
+    シンボリックリンクはたどらない (os.lstat)。
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return 0o644
+    if stat.S_ISREG(status.st_mode):
+        return stat.S_IMODE(status.st_mode)
+    return 0o644
+
+
+def _read_notes(path: Path) -> str:
+    """notes.md を UTF-8 で読んで返す。無ければ空の文字列。
+
+    シンボリックリンク (O_NOFOLLOW で開けない) と、普通のファイルでないもの (FIFO など。O_NONBLOCK で開いて
+    待たずに確かめる) は読まず、空の文字列を返す。Codex のエージェントは作業ディレクトリーの直下を書けるため、
+    notes.md を作業ディレクトリーの外を指すリンクに置き換えて、サンドボックスの外で動くハーネスにリンク先を
+    読ませる (批評役に渡させ、notes.md に書き戻させる) ことができてしまうため。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return ""
+    except OSError:
+        # シンボリックリンクなど (ELOOP)。リンク先は読まない
+        return ""
+    with os.fdopen(fd, "rb") as notes_file:
+        if not stat.S_ISREG(os.fstat(notes_file.fileno()).st_mode):
+            return ""
+        return notes_file.read().decode("utf-8")
 
 
 def _read_log_lines(path: Path, start: int, end: int | None = None) -> list[str]:

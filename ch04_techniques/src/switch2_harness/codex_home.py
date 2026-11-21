@@ -7,8 +7,10 @@ ${XDG_CACHE_HOME:-~/.cache}/switch2-harness/codex-home/<名前>) に、次のも
                 置き換えた可能性があり、上書きするとその内容を失うため)
     config.toml codex_command.codex_config_toml の本文 (run のたびに書き直す)。書き換えられるファイルがあるときは、
                 ハーネスが run の間に書くディレクトリー (HARNESS_DIRS) を、無ければ先に作業ディレクトリーに作り、
-                直下にあるものを読み取り専用にする (無いパスを権限プロファイルに書かないため。codex_command の説明を参照)
-    rules/switch2-harness.rules  codex_command.codex_rules_text の本文 (run のたびに書き直す)
+                直下にあるハーネスが置くもの (PROTECTED_ROOT_NAMES) を読み取り専用にする (無いパスを権限プロファイルに
+                書かないため。codex_command の説明を参照)。エージェントが作ったものは読み取り専用にしない
+    rules/switch2-harness.rules  codex_command.codex_rules_text の本文 (run のたびに書き直す)。サンドボックスの外で
+                動かすのは、この Python の仮想環境のハーネスの実行ファイル (DEFAULT_HARNESS_EXECUTABLE) の絶対パスの形だけ
 config.toml の権限プロファイルには Codex 本体のディレクトリーが要る。`codex` のコマンドは Node の包みで、その子孫に
 本体 (実行ファイルの名前が codex) がいる。codex exec は短命なので、`codex app-server` を短く起動して子孫を /proc で探し
 (probe_native_codex_dir)、見つけたら標準入力を閉じて終わらせる (2026-11-21、codex-cli 0.171.0 で、起動から約 0.05 秒で
@@ -18,11 +20,13 @@ config.toml の権限プロファイルには Codex 本体のディレクトリ�
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from switch2_harness.agent_kind import CODEX_AGENT, instructions_file_name
 from switch2_harness.codex_command import (
     CODEX_AUTH_FILE_NAME,
     CODEX_COMMAND,
@@ -35,10 +39,16 @@ from switch2_harness.codex_command import (
     codex_config_toml,
     codex_home_dir,
     codex_rules_text,
+    harness_executable,
 )
 from switch2_harness.multi_frame import MULTI_FRAMES_DIR_NAME
 from switch2_harness.process_tree import PROC_DIR, read_descendants
-from switch2_harness.workspace import FRAMES_DIR_NAME, RECORDS_DIR_NAME, WorkspacePaths
+from switch2_harness.workspace import (
+    FRAMES_DIR_NAME,
+    HARNESS_FILE_NAME,
+    RECORDS_DIR_NAME,
+    WorkspacePaths,
+)
 
 # Codex 本体の実行ファイルの名前
 NATIVE_CODEX_NAME = "codex"
@@ -55,6 +65,17 @@ HARNESS_DIRS: tuple[str, ...] = (
     MULTI_FRAMES_DIR_NAME,
     RECORDS_DIR_NAME,
 )
+
+# 書き換えられるファイルがあるとき (作業ディレクトリーの直下を write にするとき)、読み取り専用にするもの
+PROTECTED_ROOT_NAMES: tuple[str, ...] = (
+    instructions_file_name(CODEX_AGENT),
+    HARNESS_FILE_NAME,
+    *HARNESS_DIRS,
+)
+
+# この Python の仮想環境のハーネスの実行ファイル (run と init が使う。uv run で起動したときは
+# <ch04_techniques>/.venv/bin/switch2-harness)
+DEFAULT_HARNESS_EXECUTABLE = harness_executable(Path(sys.prefix))
 
 # スキルのディレクトリーの、各階層からの相対パスと、スキルの本文のファイル
 AGENTS_SKILLS_RELATIVE_DIR = Path(".agents") / "skills"
@@ -264,10 +285,27 @@ def _write_text_atomically(path: Path, text: str) -> None:
 ProbeNativeCodexDir = Callable[[dict[str, str], Path], Path | None]
 
 # prepare_codex_home と同じ形の関数 (作業ディレクトリー, エージェント用のサブコマンド, 書き換えられるファイル,
-# 起動した人の環境変数) → CODEX_HOME。commands.handle_run が受け取り、テストでは偽物を渡す
+# 起動した人の環境変数, ハーネスの実行ファイル) → CODEX_HOME。commands.handle_run が受け取り、テストでは偽物を渡す
 PrepareCodex = Callable[
-    [WorkspacePaths, Sequence[str], Sequence[str], Mapping[str, str]], Path
+    [WorkspacePaths, Sequence[str], Sequence[str], Mapping[str, str], Path], Path
 ]
+
+
+def protected_root_entries(root: Path) -> list[str]:
+    """作業ディレクトリー root の直下にある、ハーネスが置くもの (PROTECTED_ROOT_NAMES) の名前を返す (その順)。
+
+    無いものは含めない。どれかがシンボリックリンクなら CodexSetupError にする (リンク先を読み取り専用にして
+    サンドボックスから読めるようにしたり、ハーネスがリンク先に書いたりしないため)。
+    エージェントが作ったものは含めない (読み取り専用にせず、作業ディレクトリーの外を指すリンクも権限プロファイルに書かない)。
+    """
+    names: list[str] = []
+    for name in PROTECTED_ROOT_NAMES:
+        path = root / name
+        if path.is_symlink():
+            raise CodexSetupError(f"{path} is a symbolic link; remove it and run again")
+        if path.exists():
+            names.append(name)
+    return names
 
 
 def prepare_codex_home(
@@ -275,22 +313,27 @@ def prepare_codex_home(
     agent_commands: Sequence[str],
     writable_files: Sequence[str],
     environ: Mapping[str, str],
+    executable: Path,
     *,
     probe: ProbeNativeCodexDir = probe_native_codex_dir,
 ) -> Path:
     """paths の作業ディレクトリーの専用の CODEX_HOME を用意し、そのパスを返す (モジュールの説明を参照)。
 
-    1. home = codex_command.codex_home_dir(paths.root, environ) を親も含めて作る
-    2. ensure_auth_link(home / "auth.json", codex_command.codex_auth_source(environ))
-    3. env = codex_command.build_codex_env(environ, home, paths.root) で、probe(env, paths.root) により本体の
+    executable はハーネスの実行ファイルの絶対パス (codex_command.harness_executable。rules に書く)。
+    1. executable がファイルでなければ CodexSetupError
+    2. home = codex_command.codex_home_dir(paths.root, environ) を親も含めて作る
+    3. ensure_auth_link(home / "auth.json", codex_command.codex_auth_source(environ))
+    4. env = codex_command.build_codex_env(environ, home, paths.root) で、probe(env, paths.root) により本体の
        ディレクトリーを探す
-    4. writable_files が空でなければ、paths.root の下の HARNESS_DIRS のうち無いものを作る
-    5. home / "config.toml" に codex_config_toml(<本体>, <paths.root の直下の名前>, writable_files,
+    5. writable_files が空でなければ、paths.root の下の HARNESS_DIRS のうち無いものを作る
+    6. home / "config.toml" に codex_config_toml(<本体>, protected_root_entries(paths.root), writable_files,
        find_codex_skill_files_to_disable(paths.root, env)) を、home / "rules" / "switch2-harness.rules" に
-       codex_rules_text(agent_commands) を書く (どちらも一時ファイルに書いてから置き換える)
-    HOME が無い・ログインしていない・auth.json がリンクでない・codex を起動できない (OSError)・本体が見つからないときは
-    CodexSetupError にする。
+       codex_rules_text(executable, agent_commands) を書く (どちらも一時ファイルに書いてから置き換える)
+    HOME が無い・ログインしていない・auth.json がリンクでない・codex を起動できない (OSError)・本体が見つからない・
+    ハーネスが置くものがシンボリックリンクのときは CodexSetupError にする。
     """
+    if not executable.is_file():
+        raise CodexSetupError(f"switch2-harness executable not found: {executable}")
     try:
         home = codex_home_dir(paths.root, environ)
         source = codex_auth_source(environ)
@@ -306,12 +349,12 @@ def prepare_codex_home(
     if native_dir is None:
         raise CodexSetupError("could not find the codex executable under `codex`")
     if writable_files:
+        protected_root_entries(paths.root)
         for name in HARNESS_DIRS:
             (paths.root / name).mkdir(exist_ok=True)
-    root_entries = sorted(entry.name for entry in paths.root.iterdir())
     config_text = codex_config_toml(
         native_dir,
-        root_entries,
+        protected_root_entries(paths.root),
         writable_files,
         find_codex_skill_files_to_disable(paths.root, env),
     )
@@ -319,6 +362,6 @@ def prepare_codex_home(
     rules_dir = home / CODEX_RULES_DIR_NAME
     rules_dir.mkdir(exist_ok=True)
     _write_text_atomically(
-        rules_dir / CODEX_RULES_FILE_NAME, codex_rules_text(agent_commands)
+        rules_dir / CODEX_RULES_FILE_NAME, codex_rules_text(executable, agent_commands)
     )
     return home

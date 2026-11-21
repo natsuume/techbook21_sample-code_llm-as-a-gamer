@@ -11,17 +11,24 @@ Codex は、作業ディレクトリーごとの専用の CODEX_HOME (codex_home
         - 作業ディレクトリーの親の階層とユーザーのスキルは、skills.config で 1 つずつ止める
         - 権限プロファイル (player_permission_profile・critic_permission_profile) を定義し、プレイヤーの
           プロファイルを既定 (default_permissions) にする
-    rules/switch2-harness.rules (codex_rules_text): `uv run switch2-harness <エージェント用のサブコマンド> ...` だけを
-        サンドボックスの外で動かす規則。デーモンのソケット (抽象名前空間の Unix ソケット) に届くのは、この規則に
-        当たったコマンドだけ。ほかのコマンドは Codex のサンドボックスの中で動く
+    rules/switch2-harness.rules (codex_rules_text): `<ハーネスの実行ファイルの絶対パス> <エージェント用のサブコマンド> ...`
+        だけをサンドボックスの外で動かす規則。デーモンのソケット (抽象名前空間の Unix ソケット) に届くのは、この規則に
+        当たったコマンドだけ。ほかのコマンドは Codex のサンドボックスの中で動く。
+        ハーネスの実行ファイルは、ch04_techniques の仮想環境の console script (harness_executable。作業ディレクトリーの外)。
+        `uv run switch2-harness ...` は許さない。uv は cwd (作業ディレクトリー) から上にたどって見つけた pyproject.toml・
+        uv.toml・.python-version・.venv を使うため、エージェントが作業ディレクトリーにそれらを置くと、サンドボックスの外で
+        任意のコードを動かせる (2026-11-21 に、作業ディレクトリーに置いた pyproject.toml のビルドバックエンドが、
+        `uv run switch2-harness status` で作業ディレクトリーの外にファイルを書くことを確かめた)
     auth.json: ユーザーの ${CODEX_HOME:-~/.codex}/auth.json へのシンボリックリンク (codex_auth_source)
 
 権限プロファイルの値の優先は deny > write > read で、作業ディレクトリーの下では、細かいパスに書いた read が、
 親に書いた write より優先される (2026-11-21、codex-cli 0.171.0 で `codex sandbox` で確かめた)。ファイル 1 つだけを
 write にすること (例 "notes.md" = "write") は、サンドボックスの起動 (bwrap) が失敗するためできない。そこで、書き換えられる
-ファイルがあるときは作業ディレクトリーの直下を write にし、直下にある、書き換えられるファイル以外のもの (harness.json・
-指示ファイル・frames/・multi-frames/・records/ など) を read にする。直下に新しいファイルを作ることは防げない。
+ファイルがあるときは作業ディレクトリーの直下を write にし、ハーネスが置くもの (harness.json・指示ファイル・frames/・
+multi-frames/・records/。codex_home.prepare_codex_home が選ぶ) を read にする。直下に新しいファイルを作ることは防げない。
 書き換えられるファイルが無いときは、直下も read にする (書ける場所を作らない)。
+エージェントが作ったもの (シンボリックリンクを含む) は read にしない。作業ディレクトリーの外を指すリンクを read に書くと、
+リンク先がサンドボックスから読めるようになるおそれがあるため。
 read にするのは、サンドボックスの起動の時点で直下にあるものだけにする。無いパスを read にすると、サンドボックスが
 その場所にマウントの的として空のファイルを作り、codex を SIGINT で止めるとそれが作業ディレクトリーに残る
 (2026-11-21 に multi-frames で確かめた。後で look が multi-frames/ を作れなくなる)。直下を write にしたときは、
@@ -78,8 +85,8 @@ DISABLED_FEATURES: tuple[str, ...] = (
 # 批評役で、さらに --disable で止める機能 (シェルのコマンドと画像を開くツール)
 CRITIC_DISABLED_FEATURES: tuple[str, ...] = ("shell_tool", "unified_exec", "view_image")
 
-# プレイヤーのシェルのコマンドを、サンドボックスの外で動かすコマンドの書き出し (rules の pattern の先頭)
-HARNESS_COMMAND_WORDS: tuple[str, ...] = ("uv", "run", "switch2-harness")
+# ハーネスの console script の名前 (仮想環境の bin/ の下)
+HARNESS_EXECUTABLE_NAME = "switch2-harness"
 
 # 子プロセスに渡さない環境変数。名前がこの接尾辞で終わるもの (OPENAI_API_KEY・CODEX_API_KEY・ANTHROPIC_API_KEY など。
 # Codex はユーザーのログインで動かす) と、この接頭辞で始まるもの (run を起動した Claude Code のセッションの変数)
@@ -290,23 +297,30 @@ def codex_config_toml(
     return "\n".join(lines) + "\n"
 
 
-def codex_rules_text(agent_commands: Sequence[str]) -> str:
+def harness_executable(venv_prefix: Path) -> Path:
+    """仮想環境 venv_prefix (例: <ch04_techniques>/.venv) のハーネスの console script のパス
+    venv_prefix / "bin" / HARNESS_EXECUTABLE_NAME を返す。"""
+    return venv_prefix / "bin" / HARNESS_EXECUTABLE_NAME
+
+
+def codex_rules_text(executable: Path, agent_commands: Sequence[str]) -> str:
     """専用の CODEX_HOME の rules/switch2-harness.rules の本文を返す (末尾は改行 1 つ)。
 
-    `uv run switch2-harness <agent_commands のどれか> ...` をサンドボックスの外で動かす prefix_rule を 1 つ書く:
+    `<executable> <agent_commands のどれか> ...` をサンドボックスの外で動かす prefix_rule を 1 つ書く:
         prefix_rule(
-            pattern = ["uv", "run", "switch2-harness", ["look", "press", "status", "finish"]],
+            pattern = ["<executable の絶対パス>", ["look", "press", "status", "finish"]],
             decision = "allow",
         )
-    文字列は json.dumps で書く。前に環境変数を付けた形 (`X=1 uv run ...`) と、ほかのサブコマンド (init など) は当たらない
+    文字列は json.dumps で書く。executable はハーネスの実行ファイルの絶対パス (harness_executable)。
+    前に環境変数を付けた形 (`X=1 <executable> ...`・`env X=1 <executable> ...`)、相対パスやほかの場所の
+    switch2-harness、`uv run switch2-harness ...`、ほかのサブコマンド (init など) は当たらない
     (2026-11-21 に `codex execpolicy check` で確かめた)。
     """
-    words = ", ".join(json.dumps(word) for word in HARNESS_COMMAND_WORDS)
     commands = ", ".join(json.dumps(command) for command in agent_commands)
     return (
         "# switch2-harness が run の始めに書き直す規則。エージェント用のサブコマンドだけを、サンドボックスの外で動かす\n"
         "prefix_rule(\n"
-        f"    pattern = [{words}, [{commands}]],\n"
+        f"    pattern = [{json.dumps(str(executable))}, [{commands}]],\n"
         '    decision = "allow",\n'
         ")\n"
     )

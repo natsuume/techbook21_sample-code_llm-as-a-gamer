@@ -1642,7 +1642,7 @@ uv run switch2-harness run --workspace plays/dq3-codex --minutes 10 --effort med
 
 前提として、codex CLI を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かし、子のプロセスの環境変数からは `*_API_KEY` (`OPENAI_API_KEY`・`CODEX_API_KEY` など) と、`CLAUDE` で始まる変数を除きます。ログインの認証のファイル (`${CODEX_HOME:-~/.codex}/auth.json`) が無いときは、`run` は何も起動せずに `error codex login not found: ...` を表示して終了コード 1 で終わります。
 
-- 指示ファイルは `AGENTS.md` です。`CLAUDE.md` と同じテンプレートから、Claude Code のツールの名前の箇所だけを置き換えて作ります (Read → view_image またはシェルのコマンド、Write・Edit → apply_patch。[`src/switch2_harness/codex_instructions.py`](./src/switch2_harness/codex_instructions.py))。`run` は `AGENTS.md` を読み、`-c developer_instructions=...` で渡します (起動し直すときも同じ値を渡します)
+- 指示ファイルは `AGENTS.md` です。`CLAUDE.md` と同じテンプレートから、Claude Code のツールの名前の箇所 (Read → view_image またはシェルのコマンド、Write・Edit → apply_patch) と、サブコマンドの書き方だけを置き換えて作ります ([`src/switch2_harness/codex_instructions.py`](./src/switch2_harness/codex_instructions.py))。サブコマンドは `uv run switch2-harness look` の代わりに、`ch04_techniques/.venv/bin/switch2-harness look` の絶対パスで書きます (理由は「サブコマンドを絶対パスで書く理由」の項)。`run` は `AGENTS.md` を読み、`-c developer_instructions=...` で渡します (起動し直すときも同じ値を渡します)。`AGENTS.md` に今の仮想環境の実行ファイルの絶対パスが書かれていないとき (仮想環境やリポジトリーを動かした後など) は、`run` は何も起動せずに止まります。`init` で作業ディレクトリーを作り直してください
 - 最初の起動は `codex exec --json --skip-git-repo-check -m <モデル> [-c model_reasoning_effort=<effort>] -c developer_instructions=<指示> <プロンプト>` です。期限より前に終わったら、出力の `thread.started` の `thread_id` で `codex exec resume ... <thread_id> <プロンプト>` を起動し、同じ会話を続けます。起動し直す条件と回数の上限は Claude Code と同じです (`no_session` は、起動し直すための thread_id が無かったことを表します)。標準入力は `/dev/null` にします
 - `--max-budget-usd` は使えません。`codex exec` は費用を出さないため、指定すると何も起動せずに `error --max-budget-usd cannot be used with agent codex (codex exec does not report the cost)` を表示して、終了コード 1 で終わります (`--max-budget-usd` の値の誤りと同じ終了コード)。`budget_exhausted` で止まることはありません
 - 振り返り (`reflection`) の批評役も Codex にします (「振り返り」の節)
@@ -1655,21 +1655,32 @@ Codex は、作業ディレクトリーごとの専用の CODEX_HOME で動か�
 |---|---|
 | `auth.json` | ユーザーの `${CODEX_HOME:-~/.codex}/auth.json` へのシンボリックリンク。写しは作りません。リンクでないファイルになっていたら、`run` は何も起動せずに止まります (Codex がトークンの更新で置き換えた可能性があり、上書きするとその内容を失うため。中身を確かめてから消してください) |
 | `config.toml` | 承認を求めない (`approval_policy = "never"`)、Web 検索・MCP サーバー・plugin・apps・画像の生成・目標・コンピューターとブラウザーの操作・記憶・サブエージェント (`agents.enabled = false`)・同梱のスキルを止める、リポジトリーの `AGENTS.md` を読ませない (`project_doc_max_bytes = 0`)、作業ディレクトリーの親の階層とユーザーの `.agents/skills/` のスキルを `skills.config` で止める、権限プロファイル (下の表) |
-| `rules/switch2-harness.rules` | `uv run switch2-harness look\|press\|status\|finish ...` だけをサンドボックスの外で動かす規則 (`prefix_rule`) |
+| `rules/switch2-harness.rules` | `<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look\|press\|status\|finish ...` だけをサンドボックスの外で動かす規則 (`prefix_rule`) |
 | `sessions/` など | Codex が書く会話の記録など。`codex exec resume` はここから会話を読みます |
 
-CODEX_HOME を変えると、ユーザーの `~/.codex/config.toml` と `~/.codex/AGENTS.md` は読まれません。権限プロファイルには Codex 本体のディレクトリーを書く必要があるため (読めないと、サンドボックスの補助が起動できず、シェルのコマンドがすべて失敗します)、`run` は始めに `codex app-server` を短く起動して、その子孫から本体 (実行ファイルの名前が `codex`) を探し、見つけたら終わらせます。
+Codex は CODEX_HOME の `config.toml` と `AGENTS.md` を読むため、ユーザーの `~/.codex/config.toml` と `~/.codex/AGENTS.md` の代わりに、専用の CODEX_HOME のものが使われます (専用の CODEX_HOME には `AGENTS.md` を置きません)。権限プロファイルには Codex 本体のディレクトリーを書く必要があるため (読めないと、サンドボックスの補助が起動できず、シェルのコマンドがすべて失敗します)、`run` は始めに `codex app-server` を短く起動して、その子孫から本体 (実行ファイルの名前が `codex`) を探し、見つけたら終わらせます。
 
 Claude Code のときとの違いは次のとおりです。
 
 | | Claude Code | Codex |
 |---|---|---|
 | 使えるツール | Bash・Read (`notes` を有効にすると Write・Edit も) | Codex に組み込まれたシェル・apply_patch・view_image など |
-| サブコマンド | `uv run switch2-harness <サブコマンド>` だけを許可し、ほかの Bash は拒否します | `uv run switch2-harness look\|press\|status\|finish ...` だけがサンドボックスの外で動き、デーモンに届きます。ほかのコマンドも拒否はされず、Codex のサンドボックスの中で動きます (作業ディレクトリーの外は見えず、ネットワークにつながらず、デーモンにも届きません) |
-| 書ける範囲 | `notes.md` だけ | `notes` が無効なら、どこにも書けません。`notes` を有効にすると、作業ディレクトリーの直下を書けるようにし、直下にある `notes.md` 以外のもの (`harness.json`・`AGENTS.md`・`frames/`・`multi-frames/`・`records/` など) を読み取り専用にします。そのため、**直下に新しいファイルを作ることはできます**。ファイル 1 つだけを書けるようにする設定 (`"notes.md" = "write"`) は、サンドボックスの起動 (bwrap) が失敗するため使えません |
+| サブコマンド | `uv run switch2-harness <サブコマンド>` だけを許可し、ほかの Bash は拒否します | `<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look\|press\|status\|finish ...` だけがサンドボックスの外で動き、デーモンに届きます。ほかのコマンドも拒否はされず、Codex のサンドボックスの中で動きます (作業ディレクトリーの外は見えず、ネットワークにつながらず、デーモンにも届きません。`uv` も見えません) |
+| 書ける範囲 | `notes.md` だけ | `notes` が無効なら、どこにも書けません。`notes` を有効にすると、作業ディレクトリーの直下を書けるようにし、ハーネスが置くもの (`harness.json`・`AGENTS.md`・`frames/`・`multi-frames/`・`records/`) を読み取り専用にします。そのため、**直下に新しいファイルを作ることはできます**。ファイル 1 つだけを書けるようにする設定 (`"notes.md" = "write"`) は、サンドボックスの起動 (bwrap) が失敗するため使えません |
 | 読める範囲 | 作業ディレクトリーの中 | 作業ディレクトリーの中と、シェルが動くのに要るシステムのファイル (`:minimal`)、Codex 本体のディレクトリー |
 | 設定 | `--restricted` で、ユーザーの設定を読みません | 専用の CODEX_HOME の `config.toml` だけを読みます |
 | 費用の上限 | `--max-budget-usd` | 使えません |
+
+#### サブコマンドを絶対パスで書く理由
+
+サンドボックスの外で動くのは、規則に当たったコマンドだけです。規則を `uv run switch2-harness ...` にすると、エージェントがサンドボックスの外に出られます。`uv run` は、作業ディレクトリー (cwd) から上にたどって最初に見つけた `pyproject.toml` のプロジェクトと、`uv.toml`・`.python-version`・`.venv` を使います。`notes` を有効にした作業ディレクトリーの直下は書けるため、エージェントがそこに `pyproject.toml` などを置けば、規則に当たった `uv run switch2-harness status` が、置かれたプロジェクトのコード (ビルドバックエンドや console script) をサンドボックスの外で実行します。2026-11-21 に、作業ディレクトリーに置いた `pyproject.toml` (作業ディレクトリーの中のビルドバックエンドを指すもの) で `uv run switch2-harness status` を実行すると、ビルドバックエンドのコードが作業ディレクトリーの外にファイルを書くことを、モデルを呼ばずに確かめました。
+
+そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、shebang に書かれた仮想環境の Python で動き、`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`)。
+
+同じ理由で、サンドボックスの外で動くハーネスが作業ディレクトリーの直下のものを読み書きするときは、エージェントが置いたシンボリックリンクをたどりません。
+
+- 振り返りが `notes.md` を読むときは、シンボリックリンクと普通のファイルでないもの (FIFO など) を読まず、空として扱います。書くときは、名前を決めずに新しく作った一時ファイル (`notes.md.<ランダムな文字列>.tmp`) に書いてから置き換えます。決まった名前の一時ファイルを使うと、エージェントがその名前で外を指すリンクを置き、ハーネスにリンク先を書かせられるためです。`notes.md` の権限は、置き換える前と同じにします
+- 権限プロファイルで読み取り専用にするのは、ハーネスが置くものだけです。エージェントが作ったものは書きません (外を指すリンクを読み取り専用に書くと、リンク先がサンドボックスから読めるようになるおそれがあるため)。ハーネスが置くもののどれかがシンボリックリンクになっていたら、`run` は何も起動せずに止まります
 
 `notes` を有効にした作業ディレクトリーでは、`run` は始めに `frames/`・`multi-frames/`・`records/` が無ければ作ります (複数フレームを有効にしていなくても、空の `multi-frames/` ができます)。サンドボックスの起動の時点で無いパスを読み取り専用にすると、サンドボックスがその場所にマウントの的として空のファイルを作り、Codex を SIGINT で止めるとそれが残るためです。同じ理由で、作業ディレクトリーの直下には、空の `.agents`・`.aws`・`.codex`・`.git` のディレクトリーが残ることがあります。ハーネスはこれらを使いません。
 
@@ -1677,11 +1688,16 @@ Claude Code のときとの違いは次のとおりです。
 
 - `codex exec --json` の出力は 1 行 1 つの JSON で、`thread.started` (起動し直しても同じ `thread_id`)、`turn.started`、`item.completed` (`agent_message`・`command_execution`・`file_change`。Codex の警告は `type` が `error` の item)、`turn.completed` (usage) の形です。失敗のときは `{"type": "error", ...}` と `{"type": "turn.failed", ...}` が出て、終了コードは 1 でした (存在しないモデルを指定して確かめました)。`codex exec resume` の起動の `turn.completed` の usage は、前の起動の分を含む累計でした
 - 専用の CODEX_HOME の `config.toml` が読まれ、`developer_instructions` が開発者のメッセージに入ることを、`codex debug prompt-input` (モデルを呼ばない) で確かめました。`features.multi_agent` を止めると非推奨の警告が出るため、`agents.enabled = false` で止めています
-- 最初の起動と起動し直しの両方で、`uv run switch2-harness status` はサンドボックスの外で動き、デーモンが動いていないための `error cannot connect to daemon: [Errno 111] Connection refused` になりました (サンドボックスの中なら接続は EPERM になります)。Codex はコマンドを `/bin/bash -lc '...'` で包んで実行しますが、規則に当たりました。`SWITCH2_HARNESS_WORKSPACE` は、シェルのコマンドに引き継がれました
+- 規則の判定を、`codex execpolicy check` (モデルを呼ばない) で確かめました。`<絶対パス> look`・`press tap A`・`status`・`finish` は許可され、`<絶対パス> init`・`run`・`report`、`uv run switch2-harness status`、前に環境変数を付けた形 (`env X=1 <絶対パス> status`・`X=1 <絶対パス> status`)、相対パス (`.venv/bin/switch2-harness`・`./switch2-harness`・`switch2-harness`) とほかの場所の `switch2-harness` は当たりませんでした
+- 規則を `uv run switch2-harness ...` にしていたときに、最初の起動と起動し直しの両方で、`uv run switch2-harness status` はサンドボックスの外で動き、デーモンが動いていないための `error cannot connect to daemon: [Errno 111] Connection refused` になりました。Codex はコマンドを `/bin/bash -lc '...'` で包んで実行しますが、規則に当たりました。`SWITCH2_HARNESS_WORKSPACE` は、シェルのコマンドに引き継がれました
+- 規則を絶対パスにした後、`AGENTS.md` の指示のとおりに Codex が実行した `<絶対パス> status` はサンドボックスの外で動き (同じ `Connection refused` で、ハーネスが `records/events.jsonl` に記録しました)、`uv run switch2-harness status` はサンドボックスの中で動いて `uv: command not found` になりました。プレイヤーの Codex は、`frames/` の画像を view_image で開き、画像の文字を読み取りました
+- 置かれた `pyproject.toml`・`sitecustomize.py`・`.venv/` がある作業ディレクトリーで、`<絶対パス> status` を実行しても、それらのコードは動きませんでした
 - サンドボックスの中のコマンドでは、`notes.md` への追記 (シェル) と apply_patch での書き込みは通り、`harness.json`・`AGENTS.md`・`frames/` と `records/` の中への書き込みは拒まれ、直下の新しいファイル (`newfile.txt`) は作れました。`ls ..` には作業ディレクトリーしか見えず、`../../README.md`・`~/.codex` は見えず、`curl` はホストの名前を引けずに失敗しました。モデルがシェルを JavaScript のツール (code mode) から呼んだときも同じでした。その JavaScript では `require` と `fetch` は定義されていませんでした
 - 期限などで `run` が Codex のプロセスグループに SIGINT を送ると、Codex は 1 秒未満で終わり、実行中のシェルのコマンド (サンドボックスの中の `sleep`、一時的に規則で許してサンドボックスの外で動かした `sleep`) も残りませんでした。どちらのコマンドも Codex の子孫で、別のセッションにいました。同じ CODEX_HOME を環境変数に持つプロセスも残りませんでした (共有のデーモンの側ではコマンドは動いていませんでした)
 - 批評役は、`-i` で添付した 3 枚の画像の文字と色を、添付の順に読み取りました。シェルのコマンドは使えませんでした。`reflect_once` が批評を `notes.md` の「振り返り」の節に書きました (約 7 秒)
-- 指示を「`status` を実行して `notes.md` に 1 行足して終える」に差し替えた作業ディレクトリーで `run --minutes 1.5` を動かすと、同じ thread_id で 5 回起動し直し (合わせて 6 回起動)、`report` に turn.completed とトークン数が出ました
+- 指示を「`status` を実行して `notes.md` に 1 行足して終える」に差し替えた作業ディレクトリーで `run --minutes 1.5` を動かすと、同じ thread_id で 5 回起動し直し (合わせて 6 回起動)、`report` に turn.completed とトークン数が出ました (規則を絶対パスにする前に確かめました)
+- 前の run の残り (空の `.agents`・`.aws`・`.codex`・`.git`) がある作業ディレクトリーで CODEX_HOME を用意し直しても、サンドボックスは起動し、`notes.md` に書けて、`harness.json`・`.agents/skills/`・`.git/config` には書けませんでした (`codex sandbox` で確かめました)
+- 約 20 回の codex の起動の後も、どの専用の CODEX_HOME の `auth.json` もシンボリックリンクのままで、ユーザーの `~/.codex/auth.json` は更新されていませんでした (この間にトークンの更新は起きていません)
 
 確認していないことは次のとおりです。
 
@@ -1691,6 +1707,8 @@ Claude Code のときとの違いは次のとおりです。
 - Codex を SIGKILL で強制終了するまで進んだときに、シェルのコマンドが残らないか (Claude Code と同じく、強制終了の前に控えた子孫のセッションを止めます)
 - code mode の JavaScript から、`require` と `fetch` のほかの方法で、ツールを通さずにファイルやネットワークに触れられないか
 - ユーザーと管理者のスキル (`~/.agents/skills`・`/etc/codex/skills`) を `skills.config` で止めること (このマシンには無いため)
+- ユーザーの `~/.codex/config.toml` の設定が混ざらないこと (専用の `config.toml` が読まれることは確かめましたが、ユーザーの設定に目印を置いて確かめてはいません)
+- サブコマンドをそのままの形で書かなかったときの扱い (`<絶対パス> status 2>&1`、パイプ、`cd x && <絶対パス> status` など)。Codex がモデルに渡す権限の説明には、リダイレクト・置換・環境変数の付いたコマンドは規則で判定せず、パイプや `&&` はつながったコマンドごとに判定するとあります。規則に当たらなければサンドボックスの中で動き、実行ファイルが見えないため失敗すると考えられます
 
 ### 要素
 

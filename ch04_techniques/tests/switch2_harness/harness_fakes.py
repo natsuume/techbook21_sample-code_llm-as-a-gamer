@@ -418,6 +418,7 @@ class CodexPrepareCall:
     agent_commands: tuple[str, ...]
     writable_files: tuple[str, ...]
     environ: dict[str, str]
+    executable: Path
 
 
 @dataclass
@@ -437,10 +438,15 @@ class FakeCodexPrepare:
         agent_commands: Sequence[str],
         writable_files: Sequence[str],
         environ: Mapping[str, str],
+        executable: Path,
     ) -> Path:
         self.calls.append(
             CodexPrepareCall(
-                paths, tuple(agent_commands), tuple(writable_files), dict(environ)
+                paths,
+                tuple(agent_commands),
+                tuple(writable_files),
+                dict(environ),
+                executable,
             )
         )
         if self.error is not None:

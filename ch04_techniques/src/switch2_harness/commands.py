@@ -49,7 +49,12 @@ from switch2_harness.agent_launcher import (
     validate_minutes,
 )
 from switch2_harness.codex_critic import CodexCritic
-from switch2_harness.codex_home import CodexSetupError, PrepareCodex, prepare_codex_home
+from switch2_harness.codex_home import (
+    DEFAULT_HARNESS_EXECUTABLE,
+    CodexSetupError,
+    PrepareCodex,
+    prepare_codex_home,
+)
 from switch2_harness.codex_instructions import codex_read_template
 from switch2_harness.codex_player import CodexPlayer
 from switch2_harness.daemon_client import SendCommand
@@ -290,16 +295,20 @@ def handle_init(
     read_template: ReadTemplate,
     available: tuple[Feature, ...] = FEATURES,
     agent: AgentKind = DEFAULT_AGENT,
+    harness_executable: Path = DEFAULT_HARNESS_EXECUTABLE,
 ) -> CommandResult:
     """init: 作業ディレクトリーを作る。agent はプレイするエージェントの種類 (既定は claude)。
+
+    harness_executable は、codex の指示ファイルに書く、ハーネスの実行ファイルの絶対パス (claude では使わない)。
 
     1. enable を features.validate_feature_names(enable, available) で検証する。
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1 (ファイルシステムには触れない)
     2. HarnessConfig(game, goal, 検証した名前, format_created_at(now()), agent) を作る
     3. instructions.render_instructions(config, read_template, available) で指示ファイルの本文を作る。
        指示ファイルは作業ディレクトリーの直下の agent_kind.instructions_file_name(agent) (claude は CLAUDE.md)。
-       agent が codex なら、read_template の代わりに codex_instructions.codex_read_template(read_template) を渡し、
-       Claude Code のツールの名前の箇所だけを Codex のものに置き換えた本文 (AGENTS.md) にする
+       agent が codex なら、read_template の代わりに codex_instructions.codex_read_template(read_template,
+       harness_executable) を渡し、Claude Code のツールの名前の箇所とサブコマンドの書き方 (`uv run switch2-harness` を
+       harness_executable に) だけを置き換えた本文 (AGENTS.md) にする
     4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
        (置換はしない)、{<name>: <本文>} を作る。続けて、features.agent_file_appends(検証した名前, available) の順に、
        各 FileAppend について read_template(<template_file>) を読み (置換はしない)、辞書の <name> の本文を
@@ -327,7 +336,9 @@ def handle_init(
         instructions_file=root_paths.root / instructions_file_name(agent),
     )
     instructions_reader = (
-        codex_read_template(read_template) if agent == CODEX_AGENT else read_template
+        codex_read_template(read_template, harness_executable)
+        if agent == CODEX_AGENT
+        else read_template
     )
     instructions_text = render_instructions(config, instructions_reader, available)
     # 要素のファイルの最初の内容と、その末尾に足す内容は、テンプレートを置換せずにそのまま書く
@@ -579,15 +590,24 @@ def _codex_agents(
     writable_files: Sequence[str],
     base_env: Mapping[str, str],
     prepare_codex: PrepareCodex,
+    harness_executable: Path,
 ) -> tuple[CodexPlayer, CodexCritic]:
     """Codex のプレイヤーと批評役を作る (handle_run の 2a.)。
 
-    作業ディレクトリーの AGENTS.md を読み (読めなければ OSError)、prepare_codex で専用の CODEX_HOME を用意する
-    (用意できなければ codex_home.CodexSetupError)。
+    作業ディレクトリーの AGENTS.md を読み (読めなければ OSError)、harness_executable の絶対パスが書かれていなければ
+    codex_home.CodexSetupError にする (rules がサンドボックスの外で動かすのはその形だけのため。仮想環境を動かした後など)。
+    prepare_codex で専用の CODEX_HOME を用意する (用意できなければ codex_home.CodexSetupError)。
     """
     instructions_path = paths.root / instructions_file_name(CODEX_AGENT)
     instructions = instructions_path.read_text(encoding="utf-8")
-    codex_home = prepare_codex(paths, commands, writable_files, base_env)
+    if str(harness_executable) not in instructions:
+        raise CodexSetupError(
+            f"{instructions_path} does not use {harness_executable}; "
+            "create the workspace again with init"
+        )
+    codex_home = prepare_codex(
+        paths, commands, writable_files, base_env, harness_executable
+    )
     return CodexPlayer(codex_home, instructions), CodexCritic(codex_home)
 
 
@@ -608,6 +628,7 @@ def handle_run(
     start_critic: StartCritic = start_critic_process,
     read_template: ReadTemplate = read_package_template,
     prepare_codex: PrepareCodex = prepare_codex_home,
+    harness_executable: Path = DEFAULT_HARNESS_EXECUTABLE,
 ) -> CommandResult:
     """run: 作業ディレクトリーでエージェント (claude -p か codex exec) を起動し、minutes 分たったら止める。
 
@@ -625,8 +646,9 @@ def handle_run(
        config.agent が codex で options.max_budget_usd が None でなければ、`error <CODEX_BUDGET_MESSAGE>` を stderr に出し、
        終了コード 1 (codex exec は費用を出さないため。何も起動しない)。
        options.model が None なら、config.agent の既定のモデル (agent_kind.default_model) にする
-    2a. config.agent が codex なら、作業ディレクトリーの AGENTS.md を読み、prepare_codex(paths,
-       <エージェント用のサブコマンド>, <書き換えられるファイルの名前>, base_env) で専用の CODEX_HOME を用意する
+    2a. config.agent が codex なら、作業ディレクトリーの AGENTS.md を読み、harness_executable (ハーネスの実行ファイルの
+       絶対パス) が書かれていることを確かめて、prepare_codex(paths, <エージェント用のサブコマンド>,
+       <書き換えられるファイルの名前>, base_env, harness_executable) で専用の CODEX_HOME を用意する
        (本番は codex_home.prepare_codex_home)。AGENTS.md を読めない (OSError) か codex_home.CodexSetupError なら、
        `error <メッセージ>` を stderr に出し、終了コード 1。プレイヤーは codex_player.CodexPlayer(<CODEX_HOME>,
        <AGENTS.md の本文>)、批評役は codex_critic.CodexCritic(<CODEX_HOME>) にする。
@@ -682,7 +704,12 @@ def handle_run(
     if config.agent == CODEX_AGENT:
         try:
             player, critic = _codex_agents(
-                paths, commands, writable_files, base_env, prepare_codex
+                paths,
+                commands,
+                writable_files,
+                base_env,
+                prepare_codex,
+                harness_executable,
             )
         except (OSError, CodexSetupError) as e:
             return _error_result(e)

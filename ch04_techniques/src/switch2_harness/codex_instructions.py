@@ -1,17 +1,24 @@
 """Codex のプレイヤーへの指示ファイル (AGENTS.md) の文を、Claude Code 版のテンプレートから作る。
 
 テンプレート (instructions/*.md) は Claude Code 版の 1 つだけを持ち、Codex 版は読んだテンプレートの
-Claude Code のツールの名前の箇所だけを置き換えて作る (CODEX_REPLACEMENTS)。ほかの文は Claude Code 版と同じ。
+Claude Code のツールの名前の箇所 (CODEX_REPLACEMENTS) と、サブコマンドの書き方 (CLAUDE_HARNESS_COMMAND) だけを
+置き換えて作る。ほかの文は Claude Code 版と同じ。
     - 画像を開く: Read ツール → view_image ツール
     - notes.md を読む: Read ツール・Read → シェルのコマンド (cat など)
     - notes.md に書く: Write か Edit ツール・Edit → apply_patch ツール・apply_patch
-置き換える元の文は、そのテンプレートにちょうど 1 回現れなければならない。0 回か 2 回以上なら ValueError にする
-(Claude Code 版のテンプレートが変わったときに、置き換えの漏れに気づくため)。
+    - サブコマンド: `uv run switch2-harness` → ハーネスの実行ファイルの絶対パス (codex_command.harness_executable)。
+      Codex の rules がサンドボックスの外で動かすのは、その絶対パスの形だけのため
+ツールの名前の元の文は、そのテンプレートにちょうど 1 回現れなければならない。0 回か 2 回以上なら ValueError にする
+(Claude Code 版のテンプレートが変わったときに、置き換えの漏れに気づくため)。サブコマンドの書き方は、現れるものをすべて置き換える。
 """
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from switch2_harness.instructions import ReadTemplate
+
+# Claude Code 版のテンプレートの、サブコマンドの書き出し
+CLAUDE_HARNESS_COMMAND = "uv run switch2-harness"
 
 # テンプレートのファイル名 → (Claude Code 版の文, Codex 版の文) の組。この順に置き換える
 CODEX_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -63,21 +70,23 @@ def replace_exactly_once(text: str, replacements: Sequence[tuple[str, str]]) -> 
     return text
 
 
-def codex_template(file_name: str, text: str) -> str:
+def codex_template(file_name: str, text: str, executable: Path) -> str:
     """テンプレート file_name の本文 text を Codex 版にして返す。
 
-    CODEX_REPLACEMENTS に file_name があれば replace_exactly_once で置き換え、無ければ text をそのまま返す。
+    CODEX_REPLACEMENTS に file_name があれば replace_exactly_once で置き換え、続けて CLAUDE_HARNESS_COMMAND を
+    すべて str(executable) (ハーネスの実行ファイルの絶対パス) に置き換える。
     """
-    return replace_exactly_once(text, CODEX_REPLACEMENTS.get(file_name, ()))
+    replaced = replace_exactly_once(text, CODEX_REPLACEMENTS.get(file_name, ()))
+    return replaced.replace(CLAUDE_HARNESS_COMMAND, str(executable))
 
 
-def codex_read_template(read_template: ReadTemplate) -> ReadTemplate:
+def codex_read_template(read_template: ReadTemplate, executable: Path) -> ReadTemplate:
     """read_template で読んだテンプレートを codex_template で Codex 版にして返す、テンプレートの読み込みの関数を返す。
 
-    instructions.render_instructions に渡して、AGENTS.md の本文を作る。
+    instructions.render_instructions に渡して、AGENTS.md の本文を作る。executable はハーネスの実行ファイルの絶対パス。
     """
 
     def read_codex_template(file_name: str) -> str:
-        return codex_template(file_name, read_template(file_name))
+        return codex_template(file_name, read_template(file_name), executable)
 
     return read_codex_template

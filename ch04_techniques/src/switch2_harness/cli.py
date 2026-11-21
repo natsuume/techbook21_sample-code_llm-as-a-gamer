@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 
 from switch2_harness.action_history import FramesChanged, frames_changed_on_disk
 from switch2_harness.agent_kind import AGENT_KINDS, DEFAULT_AGENT, DEFAULT_MODELS
@@ -31,7 +32,11 @@ from switch2_harness.agent_launcher import (
     StartProcess,
     start_claude_process,
 )
-from switch2_harness.codex_home import PrepareCodex, prepare_codex_home
+from switch2_harness.codex_home import (
+    DEFAULT_HARNESS_EXECUTABLE,
+    PrepareCodex,
+    prepare_codex_home,
+)
 from switch2_harness.commands import (
     CommandResult,
     handle_finish,
@@ -82,6 +87,8 @@ class CliDependencies:
         テンプレートの読み込み (本番は instructions.read_package_template)
     available: 利用できる要素 (本番は features.FEATURES)
     prepare_codex: codex の作業ディレクトリーの run で、専用の CODEX_HOME を用意する (本番は codex_home.prepare_codex_home)
+    harness_executable: codex の指示ファイルと rules に書く、ハーネスの実行ファイルの絶対パス
+        (本番は codex_home.DEFAULT_HARNESS_EXECUTABLE。この Python の仮想環境の bin/switch2-harness)
     """
 
     send: SendCommand
@@ -95,6 +102,7 @@ class CliDependencies:
     read_template: ReadTemplate
     available: tuple[Feature, ...]
     prepare_codex: PrepareCodex = prepare_codex_home
+    harness_executable: Path = DEFAULT_HARNESS_EXECUTABLE
 
 
 def _local_now() -> datetime:
@@ -116,6 +124,7 @@ def production_dependencies() -> CliDependencies:
         read_template=read_package_template,
         available=FEATURES,
         prepare_codex=prepare_codex_home,
+        harness_executable=DEFAULT_HARNESS_EXECUTABLE,
     )
 
 
@@ -325,6 +334,7 @@ def _dispatch(
             start_critic=deps.start_critic,
             read_template=deps.read_template,
             prepare_codex=deps.prepare_codex,
+            harness_executable=deps.harness_executable,
         )
     raise ValueError(f"unknown command: {command}")
 
@@ -365,6 +375,7 @@ def run_cli(argv: list[str] | None, deps: CliDependencies) -> int:
             read_template=deps.read_template,
             available=deps.available,
             agent=args.agent,
+            harness_executable=deps.harness_executable,
         )
     else:
         requested: str | None = args.workspace

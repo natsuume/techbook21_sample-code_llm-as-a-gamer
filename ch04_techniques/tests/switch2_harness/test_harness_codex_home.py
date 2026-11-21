@@ -1,6 +1,8 @@
 """codex_home のテスト。本物の codex・~/.codex・~/.cache には触れない (HOME を tmp_path の下にする)。"""
 
 import os
+import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,9 +16,11 @@ from switch2_harness.codex_command import (
     codex_rules_text,
 )
 from switch2_harness.codex_home import (
+    DEFAULT_HARNESS_EXECUTABLE,
     HARNESS_DIRS,
     NATIVE_PROBE_POLL_S,
     NATIVE_PROBE_TIMEOUT_S,
+    PROTECTED_ROOT_NAMES,
     CodexSetupError,
     ensure_auth_link,
     find_codex_skill_files_to_disable,
@@ -273,6 +277,14 @@ def make_environ(tmp_path: Path) -> dict[str, str]:
     return {"HOME": str(home), "PATH": "/usr/bin", "OPENAI_API_KEY": "secret"}
 
 
+def make_executable(tmp_path: Path) -> Path:
+    """ハーネスの実行ファイルの代わり (中身は使わない)。"""
+    executable = tmp_path / "venv" / "bin" / "switch2-harness"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    return executable
+
+
 def make_workspace(tmp_path: Path):
     paths = make_paths(tmp_path / "play")
     paths.harness_file.write_text("{}", encoding="utf-8")
@@ -281,12 +293,34 @@ def make_workspace(tmp_path: Path):
     return paths
 
 
+def read_workspace_profile(home: Path) -> dict[str, str]:
+    config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    return config["permissions"][PLAYER_PERMISSION_PROFILE]["filesystem"][
+        ":workspace_roots"
+    ]
+
+
+def test_protected_root_names():
+    assert PROTECTED_ROOT_NAMES == (
+        "AGENTS.md",
+        "harness.json",
+        "frames",
+        "multi-frames",
+        "records",
+    )
+
+
+def test_default_harness_executable_is_in_this_virtual_environment():
+    assert DEFAULT_HARNESS_EXECUTABLE == Path(sys.prefix) / "bin" / "switch2-harness"
+
+
 def test_prepare_codex_home_writes_the_config_rules_and_auth_link(tmp_path):
     environ = make_environ(tmp_path)
     paths = make_workspace(tmp_path)
+    executable = make_executable(tmp_path)
     probe = ProbeRecorder()
     home = prepare_codex_home(
-        paths, ("look", "press"), ("notes.md",), environ, probe=probe
+        paths, ("look", "press"), ("notes.md",), environ, executable, probe=probe
     )
     assert home == codex_home_dir(paths.root, environ)
     assert home.is_relative_to(tmp_path / "home" / ".cache")
@@ -301,7 +335,7 @@ def test_prepare_codex_home_writes_the_config_rules_and_auth_link(tmp_path):
     config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
     profile = config["permissions"][PLAYER_PERMISSION_PROFILE]["filesystem"]
     assert profile[str(NATIVE)] == "read"
-    # 書き換えられるファイルがあるので、ハーネスのディレクトリーを先に作り、直下のものを読み取り専用にする
+    # 書き換えられるファイルがあるので、ハーネスのディレクトリーを先に作り、ハーネスが置くものを読み取り専用にする
     assert profile[":workspace_roots"] == {
         ".": "write",
         "AGENTS.md": "read",
@@ -311,30 +345,95 @@ def test_prepare_codex_home_writes_the_config_rules_and_auth_link(tmp_path):
         "records": "read",
     }
     assert (paths.root / "multi-frames").is_dir()
+    # rules に書くのは、ハーネスの実行ファイルの絶対パスの形だけ
     assert (home / "rules" / "switch2-harness.rules").read_text(
         encoding="utf-8"
-    ) == codex_rules_text(("look", "press"))
+    ) == codex_rules_text(executable, ("look", "press"))
     assert not list(home.glob("*.tmp"))
+
+
+def test_prepare_codex_home_does_not_protect_what_the_agent_made(tmp_path):
+    # エージェントが作ったファイルと、作業ディレクトリーの外を指すリンクは、権限プロファイルに書かない
+    environ = make_environ(tmp_path)
+    paths = make_workspace(tmp_path)
+    (paths.root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    (paths.root / "leak").symlink_to(tmp_path / "home")
+    home = prepare_codex_home(
+        paths,
+        ("look",),
+        ("notes.md",),
+        environ,
+        make_executable(tmp_path),
+        probe=ProbeRecorder(),
+    )
+    profile = read_workspace_profile(home)
+    assert "pyproject.toml" not in profile
+    assert "leak" not in profile
+    assert str(tmp_path / "home") not in (home / "config.toml").read_text("utf-8")
+
+
+@pytest.mark.parametrize("name", ["records", "multi-frames", "harness.json"])
+def test_prepare_codex_home_refuses_a_symbolic_link_in_place_of_a_harness_entry(
+    tmp_path, name
+):
+    environ = make_environ(tmp_path)
+    paths = make_workspace(tmp_path)
+    target = tmp_path / "outside"
+    target.mkdir()
+    entry = paths.root / name
+    if entry.is_dir():
+        entry.rmdir()
+    else:
+        entry.unlink(missing_ok=True)
+    entry.symlink_to(target)
+    with pytest.raises(CodexSetupError) as error:
+        prepare_codex_home(
+            paths,
+            ("look",),
+            ("notes.md",),
+            environ,
+            make_executable(tmp_path),
+            probe=ProbeRecorder(),
+        )
+    assert "is a symbolic link" in str(error.value)
+    assert list(target.iterdir()) == []
 
 
 def test_prepare_codex_home_without_writable_files_makes_nothing_writable(tmp_path):
     environ = make_environ(tmp_path)
     paths = make_workspace(tmp_path)
-    home = prepare_codex_home(paths, ("look",), (), environ, probe=ProbeRecorder())
-    config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
-    profile = config["permissions"][PLAYER_PERMISSION_PROFILE]["filesystem"]
-    assert profile[":workspace_roots"] == {".": "read"}
+    home = prepare_codex_home(
+        paths, ("look",), (), environ, make_executable(tmp_path), probe=ProbeRecorder()
+    )
+    assert read_workspace_profile(home) == {".": "read"}
     assert not (paths.root / "multi-frames").exists()
 
 
 def test_prepare_codex_home_rewrites_on_the_next_run(tmp_path):
     environ = make_environ(tmp_path)
     paths = make_workspace(tmp_path)
-    home = prepare_codex_home(paths, ("look",), (), environ, probe=ProbeRecorder())
-    prepare_codex_home(paths, ("look", "status"), (), environ, probe=ProbeRecorder())
+    executable = make_executable(tmp_path)
+    home = prepare_codex_home(
+        paths, ("look",), (), environ, executable, probe=ProbeRecorder()
+    )
+    prepare_codex_home(
+        paths, ("look", "status"), (), environ, executable, probe=ProbeRecorder()
+    )
     assert (home / "rules" / "switch2-harness.rules").read_text(
         encoding="utf-8"
-    ) == codex_rules_text(("look", "status"))
+    ) == codex_rules_text(executable, ("look", "status"))
+
+
+def test_prepare_codex_home_fails_without_the_harness_executable(tmp_path):
+    environ = make_environ(tmp_path)
+    paths = make_workspace(tmp_path)
+    probe = ProbeRecorder()
+    with pytest.raises(CodexSetupError) as error:
+        prepare_codex_home(
+            paths, ("look",), (), environ, tmp_path / "missing", probe=probe
+        )
+    assert "switch2-harness executable not found" in str(error.value)
+    assert probe.calls == []
 
 
 @pytest.mark.parametrize(
@@ -348,20 +447,87 @@ def test_prepare_codex_home_fails_without_codex(tmp_path, probe, message):
     environ = make_environ(tmp_path)
     paths = make_workspace(tmp_path)
     with pytest.raises(CodexSetupError) as error:
-        prepare_codex_home(paths, ("look",), (), environ, probe=probe)
+        prepare_codex_home(
+            paths, ("look",), (), environ, make_executable(tmp_path), probe=probe
+        )
     assert message in str(error.value)
 
 
 def test_prepare_codex_home_fails_without_home_or_login(tmp_path):
     paths = make_workspace(tmp_path)
+    executable = make_executable(tmp_path)
     with pytest.raises(CodexSetupError):
-        prepare_codex_home(paths, ("look",), (), {}, probe=ProbeRecorder())
+        prepare_codex_home(paths, ("look",), (), {}, executable, probe=ProbeRecorder())
     with pytest.raises(CodexSetupError) as error:
         prepare_codex_home(
             paths,
             ("look",),
             (),
             {"HOME": str(tmp_path / "nobody")},
+            executable,
             probe=ProbeRecorder(),
         )
     assert "codex login" in str(error.value)
+
+
+# --- ハーネスの実行ファイルが、作業ディレクトリーに置かれたものを読まないこと ---
+
+PLANTED_PYTHON = """from pathlib import Path
+Path({marker!r}).write_text("planted code ran", encoding="utf-8")
+"""
+
+
+@pytest.mark.skipif(
+    not DEFAULT_HARNESS_EXECUTABLE.is_file(),
+    reason="the switch2-harness console script is not installed",
+)
+def test_harness_executable_ignores_files_planted_in_the_workspace(tmp_path):
+    """rules がサンドボックスの外で動かす実行ファイルが、cwd (作業ディレクトリー) のファイルでコードを動かさないこと。
+
+    エージェントが作業ディレクトリーに置きうる、Python と uv が読むファイルを置いて、本物の console script を
+    cwd を作業ディレクトリーにして動かし、目印のファイルが作られないことを確かめる。デーモンに触れない report を使う。
+    """
+    paths = make_workspace(tmp_path)
+    marker = tmp_path / "marker"
+    code = PLANTED_PYTHON.format(marker=str(marker))
+    for name in (
+        "sitecustomize.py",
+        "usercustomize.py",
+        "json.py",
+        "planted_backend.py",
+    ):
+        (paths.root / name).write_text(code, encoding="utf-8")
+    package = paths.root / "switch2_harness"
+    package.mkdir()
+    (package / "__init__.py").write_text(code, encoding="utf-8")
+    (package / "cli.py").write_text(
+        code + "def main():\n    return 0\n", encoding="utf-8"
+    )
+    (paths.root / "planted.pth").write_text(f"import json; {code.splitlines()[1]}\n")
+    (paths.root / "pyvenv.cfg").write_text("home = /nonexistent\n", encoding="utf-8")
+    (paths.root / "pyproject.toml").write_text(
+        '[project]\nname = "planted"\nversion = "0"\n'
+        '[project.scripts]\nswitch2-harness = "planted_backend:main"\n'
+        '[build-system]\nrequires = []\nbuild-backend = "planted_backend"\n'
+        'backend-path = ["."]\n',
+        encoding="utf-8",
+    )
+    (paths.root / "uv.toml").write_text('python-preference = "system"\n')
+    (paths.root / ".python-version").write_text("3.0\n", encoding="utf-8")
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("PYTHON", "VIRTUAL_ENV", "UV_"))
+    }
+    result = subprocess.run(
+        [str(DEFAULT_HARNESS_EXECUTABLE), "report", "--workspace", str(paths.root)],
+        cwd=paths.root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("記録の時間:")
+    assert not marker.exists()

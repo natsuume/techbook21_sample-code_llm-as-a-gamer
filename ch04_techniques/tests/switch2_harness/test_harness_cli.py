@@ -43,7 +43,7 @@ from switch2_harness.cli import (
     production_dependencies,
     run_cli,
 )
-from switch2_harness.codex_home import prepare_codex_home
+from switch2_harness.codex_home import DEFAULT_HARNESS_EXECUTABLE, prepare_codex_home
 from switch2_harness.daemon_client import send_command
 from switch2_harness.event_log import CommandEvent, append_event
 from switch2_harness.features import (
@@ -753,6 +753,7 @@ def test_run_interrupted_by_ctrl_c_exits_with_1(workspace, harness, capsys):
 # --- Codex ---
 
 CODEX_HOME = Path("/home/player/.cache/switch2-harness/codex-home/play-abc")
+HARNESS_EXECUTABLE = Path("/repo/ch04_techniques/.venv/bin/switch2-harness")
 
 
 def make_codex_workspace(root: Path, features: Sequence[str] = ()) -> Path:
@@ -763,7 +764,7 @@ def make_codex_workspace(root: Path, features: Sequence[str] = ()) -> Path:
     harness_file.write_text(
         json.dumps({**data, "agent": "codex"}, ensure_ascii=False), encoding="utf-8"
     )
-    (root / "AGENTS.md").write_text("# 指示\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text(f"# 指示\n\n{HARNESS_EXECUTABLE} look\n", "utf-8")
     return root
 
 
@@ -790,7 +791,10 @@ def test_init_with_unknown_agent_exits_with_2(tmp_path, harness):
 
 def test_init_with_codex(tmp_path, harness, capsys):
     harness.deps = replace(
-        harness.deps, read_template=read_package_template, available=FEATURES
+        harness.deps,
+        read_template=read_package_template,
+        available=FEATURES,
+        harness_executable=HARNESS_EXECUTABLE,
     )
     directory = tmp_path / "play"
     argv = [
@@ -808,14 +812,18 @@ def test_init_with_codex(tmp_path, harness, capsys):
     assert (
         json.loads((directory / "harness.json").read_text("utf-8"))["agent"] == "codex"
     )
-    assert "view_image" in (directory / "AGENTS.md").read_text(encoding="utf-8")
+    agents_md = (directory / "AGENTS.md").read_text(encoding="utf-8")
+    assert "view_image" in agents_md
+    assert f"{HARNESS_EXECUTABLE} status " in agents_md
     assert not (directory / "CLAUDE.md").exists()
 
 
 def test_run_dispatch_with_codex(tmp_path, harness, capsys):
     workspace = make_codex_workspace(tmp_path / "play")
     prepare = FakeCodexPrepare(CODEX_HOME)
-    harness.deps = replace(harness.deps, prepare_codex=prepare)
+    harness.deps = replace(
+        harness.deps, prepare_codex=prepare, harness_executable=HARNESS_EXECUTABLE
+    )
     argv = ["run", "--minutes", "1", "--effort", "low", "--workspace", str(workspace)]
     assert harness.run(*argv) == 0
     [launch] = harness.starter.launches
@@ -825,12 +833,15 @@ def test_run_dispatch_with_codex(tmp_path, harness, capsys):
     assert launch.env["CODEX_HOME"] == str(CODEX_HOME)
     [call] = prepare.calls
     assert call.paths.root == workspace
+    assert call.executable == HARNESS_EXECUTABLE
 
 
 def test_run_with_codex_and_max_budget_usd_fails(tmp_path, harness, capsys):
     workspace = make_codex_workspace(tmp_path / "play")
     prepare = FakeCodexPrepare(CODEX_HOME)
-    harness.deps = replace(harness.deps, prepare_codex=prepare)
+    harness.deps = replace(
+        harness.deps, prepare_codex=prepare, harness_executable=HARNESS_EXECUTABLE
+    )
     argv = [
         "run",
         "--minutes",
@@ -877,4 +888,6 @@ def test_report_with_an_unknown_agent_fails(tmp_path, harness, capsys):
 
 
 def test_production_dependencies_prepare_the_real_codex_home():
-    assert production_dependencies().prepare_codex is prepare_codex_home
+    deps = production_dependencies()
+    assert deps.prepare_codex is prepare_codex_home
+    assert deps.harness_executable == DEFAULT_HARNESS_EXECUTABLE
