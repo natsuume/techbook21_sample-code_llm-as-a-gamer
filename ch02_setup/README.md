@@ -69,6 +69,13 @@ PC から Pico 2 W へ送信するときは、発信側の COM ポートを使�
 uv run switch2-remote-daemon --com-port COM4
 ```
 
+発信側の COM ポートは PC ごとに決まるため、環境変数 `SWITCH2_COM_PORT` に書いておくこともできます。`--com-port` を省いたときは、この環境変数の COM ポートを開きます。環境変数は、シェルで `export` するか、環境変数を書いたファイルを `uv run --env-file <ファイル> switch2-remote-daemon` で渡します (5. デーモンの起動の節を参照)。
+
+```bash
+export SWITCH2_COM_PORT=COM4
+uv run switch2-remote-daemon
+```
+
 ## 3. ffmpeg の導入
 
 Windows 側の PowerShell で ffmpeg を導入します。`--scope user` を付けると管理者権限なしで導入できます。
@@ -104,16 +111,31 @@ uv run switch2-remote-daemon
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にします (既知の問題を参照) | 60 | 30 か 60 |
+| `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にします (既知の問題を参照) | 60 (環境変数 `SWITCH2_DEVICE_FPS` があればその値) | 30 か 60 |
 | `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 1280x720・`--device-fps` のフレームレートで受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜`--device-fps` の値 |
 | `--process-fps N` | デーモンが残すフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
-| `--com-port PORT` | ブリッジが開く COM ポート。Pico 2 W とのペアリングで作られた発信側の COM ポートを指定します (2. Windows とのペアリングの節を参照)。ブリッジを復旧で起動し直すときも同じ COM ポートを開きます | `COM3` | `COM1`、`COM2` のように `COM` と 1 以上の整数 (先頭に 0 を付けた `COM04` などは誤り。大文字と小文字は区別しません) |
+| `--com-port PORT` | ブリッジが開く COM ポート。Pico 2 W とのペアリングで作られた発信側の COM ポートを指定します (2. Windows とのペアリングの節を参照)。ブリッジを復旧で起動し直すときも同じ COM ポートを開きます | `COM3` (環境変数 `SWITCH2_COM_PORT` があればその値) | `COM1`、`COM2` のように `COM` と 1 以上の整数 (先頭に 0 を付けた `COM04` などは誤り。大文字と小文字は区別しません) |
 
 ```bash
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
-範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、表の範囲に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+`--device-fps` と `--com-port` の正しい値は PC ごとに決まるため、既定値を環境変数で変えられます。起動引数を省いたときは、環境変数 `SWITCH2_DEVICE_FPS` と `SWITCH2_COM_PORT` の値を使います。環境変数が無いときと、値が空のときは、表の既定値 (60 と `COM3`) を使います。起動引数を指定したときは、環境変数を使いません。環境変数は、シェルで `export` するか、環境変数を書いたファイルを `uv run --env-file <ファイル> switch2-remote-daemon` で渡します。
+
+```bash
+export SWITCH2_COM_PORT=COM4
+export SWITCH2_DEVICE_FPS=30
+uv run switch2-remote-daemon
+```
+
+`--env-file` で渡すファイルには、1 行に 1 つずつ `名前=値` の形で書きます。
+
+```text
+SWITCH2_COM_PORT=COM4
+SWITCH2_DEVICE_FPS=30
+```
+
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、表の範囲に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。起動引数を省いたときの環境変数 `SWITCH2_DEVICE_FPS`・`SWITCH2_COM_PORT` の値が表の範囲に合わない場合 (`45`、`030`、前後に空白がある値、`COM0` など) も、起動せずに、環境変数の名前を含むエラーを表示します。`--device-fps` を省略した場合は、環境変数で決めた値 (無ければ 60) と `--ffmpeg-fps` を比べます。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
 デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 

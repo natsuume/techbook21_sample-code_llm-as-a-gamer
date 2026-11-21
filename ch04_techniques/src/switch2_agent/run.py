@@ -11,12 +11,13 @@ Ctrl+C で止まる。
 起動引数:
     --game NAME                  ゲーム名 (必須)。ゲームの情報は game_notes/<NAME>/ に置く
     --model {jev,decisions}      Decision Model (必須)。jev は TypeSafe Jev、decisions は OpenAI Decisions API
-    --device-fps N               デバイスから受け取るフレームレート (30 か 60、既定 60)。PC との USB の接続で 60fps を
-                                 受け取れないときは 30 にする
+    --device-fps N               デバイスから受け取るフレームレート (30 か 60、既定 60。環境変数 SWITCH2_DEVICE_FPS が
+                                 あればその値)。PC との USB の接続で 60fps を受け取れないときは 30 にする
     --ffmpeg-fps N               ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)
     --process-fps N              間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)
     --com-port PORT              ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。COM1、COM2 のような COM と
-                                 1 以上の整数で、大文字小文字を区別しない。既定 COM3)
+                                 1 以上の整数で、大文字小文字を区別しない。既定 COM3。環境変数 SWITCH2_COM_PORT が
+                                 あればその値)
     --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
     --jpeg-quality N             要求に載せる画像の JPEG の品質 (整数 1〜100、既定 85)
@@ -42,7 +43,8 @@ Ctrl+C で止まる。
                                  (advisor-<役割>-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
                                  origin_mono) と、終了時の記録の件数 (record_end)
     範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
-    組み合わせと、--com-port の形の誤りは起動時にエラーにする
+    組み合わせと、--com-port の形の誤りと、環境変数 SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS の値の誤りは
+    起動時にエラーにする (環境変数は第2章の switch2_remote.hardware_env で読む。空の値は無いのと同じに扱う)
 
 使い方 (ch04_techniques ディレクトリーで実行する):
     uv run switch2-agent --game <名前> --model jev
@@ -54,7 +56,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
@@ -70,6 +72,12 @@ from switch2_remote.controller_bridge import (
     Bridge,
     BridgeStartError,
     parse_com_port,
+)
+from switch2_remote.hardware_env import (
+    COM_PORT_ENV,
+    DEVICE_FPS_ENV,
+    com_port_from_env,
+    device_fps_from_env,
 )
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
@@ -239,7 +247,9 @@ def build_timeline(
     return TimelineBuilder(settings, operation_log, screen)
 
 
-def parse_args(argv: list[str] | None) -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None, environ: Mapping[str, str] | None = None
+) -> argparse.Namespace:
     """起動引数を解釈し、次の属性を持つ Namespace を返す。
 
     game (str)、model ("jev" / "decisions")、device_fps (int、既定 60。DEVICE_FPS_CHOICES のどれか)、
@@ -260,6 +270,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     組み合わせは、第2章の daemon.parse_args と同じく
     parser.error で使い方とともに表示して終了する (SystemExit、終了コード 2)。--com-port の形の誤りも、argparse が
     使い方とともに表示して終了する (SystemExit、終了コード 2)。
+    --com-port と --device-fps を省いたときは、環境変数の辞書 environ (None なら os.environ) から
+    switch2_remote.hardware_env の com_port_from_env と device_fps_from_env で決める (変数が無いか空なら既定値)。
+    指定したときは環境変数を読まない。環境変数の値の誤りも parser.error で使い方とともに表示して終了する
+    (SystemExit、終了コード 2)。範囲の確かめ (range_errors) は、決めた後の device_fps で行う。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-agent",
@@ -280,9 +294,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--device-fps",
         type=int,
         choices=DEVICE_FPS_CHOICES,
-        default=DEFAULT_DEVICE_FPS,
+        default=None,
         help=(
-            "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする"
+            "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする "
+            f"(既定 {DEFAULT_DEVICE_FPS}。環境変数 {DEVICE_FPS_ENV} があればその値)"
         ),
     )
     parser.add_argument(
@@ -300,11 +315,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--com-port",
         type=parse_com_port,
-        default=DEFAULT_COM_PORT,
+        default=None,
         metavar="PORT",
         help=(
             "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
-            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT}。"
+            f"環境変数 {COM_PORT_ENV} があればその値)"
         ),
     )
     parser.add_argument(
@@ -432,6 +448,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
+    if environ is None:
+        environ = os.environ
+    try:
+        if args.com_port is None:
+            args.com_port = com_port_from_env(environ)
+        if args.device_fps is None:
+            args.device_fps = device_fps_from_env(environ)
+    except ValueError as e:
+        parser.error(str(e))
     for message in range_errors(args):
         parser.error(message)
     return args
@@ -587,7 +612,8 @@ def main(argv: list[str] | None = None) -> None:
         11. request_log があれば、Pipeline を作った後に request_log.write_header(args.model, build_instructions(),
            Pipeline に渡した問いの一覧) で requests.jsonl の header の行を書く
         12. run.jsonl に start の行 {"event": "start", "game", "model", "run_dir"} を書く。--record-dashboard が
-           付いていれば、"args": vars(起動引数) (argparse の属性名をキーにした起動引数のすべて) と
+           付いていれば、"args": vars(起動引数) (argparse の属性名をキーにした起動引数のすべて。com_port と
+           device_fps は、環境変数から決めた場合も含めて決めた後の値) と
            "origin_mono": pipeline.started_at (経過秒の起点の time.monotonic の値) も足す
     ログは cwd / RUNS_DIR_NAME / <YYYYmmdd-HHMMSS> / RUN_LOG_FILE_NAME に RunLog で書く (advisor の入出力も同じ実行のディレクトリーに置く)。
     --save-requests が付いていれば、要求ごとの入出力も同じ実行のディレクトリーの requests.jsonl と frames/ に書く。

@@ -65,9 +65,13 @@ run --mode orchestrator は、API キーとして環境変数 TYPESAFE_API_KEY �
 run --mode delegate も同じく、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (委任は常に Jev を使うため)。
 --agent codex は、codex CLI のユーザーのログイン (codex login) で動くため、API キーを確かめない。codex CLI が無いときや
 ログインしていないときは、主ループのセッションが最初のターンを終えられず、続けて 3 回そうなると実行全体が止まる。
+run の --com-port と --device-fps を省いたときは、環境変数 SWITCH2_COM_PORT と SWITCH2_DEVICE_FPS から決める
+(第2章の switch2_remote.hardware_env。変数が無いか空なら COM3 と 60)。起動引数を指定したときは環境変数を読まない。
+middle-once と deep-once は実機を開かないため、この環境変数を読まない。
 
 引数の形の誤り (知らない引数、数として読めない値、--doc・--middle・--middle-effort の知らない値、run --mode advisor の
---software・--user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
+--software・--user が無い・空か空白だけ、--instruction と --instruction-file の両方、run の --com-port・--device-fps を
+省いたときの環境変数 SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS の値の誤り、など) は argparse が使い方とともに表示し、
 SystemExit (終了コード 2) にする。値の範囲の誤りと人の初期指示の誤り (空か空白だけ、ファイルが読めない) は、
 各サブコマンドの処理が標準エラー出力に書いて終了コード 2 を返す。
 """
@@ -87,6 +91,12 @@ from switch2_remote.controller_bridge import (
     Bridge,
     BridgeStartError,
     parse_com_port,
+)
+from switch2_remote.hardware_env import (
+    COM_PORT_ENV,
+    DEVICE_FPS_ENV,
+    com_port_from_env,
+    device_fps_from_env,
 )
 
 from switch2_layers.app import (
@@ -214,23 +224,31 @@ ADVISOR_REQUIRED_OPTIONS: tuple[tuple[str, str], ...] = (
 
 
 class LayersArgumentParser(argparse.ArgumentParser):
-    """switch2-layers の最上位の ArgumentParser。run の --software と --user を、--mode advisor のときだけ必須にする。
+    """switch2-layers の最上位の ArgumentParser。run の --software と --user を、--mode advisor のときだけ必須にし、
+    run の --com-port と --device-fps を省いたときの値を環境変数から決める。
 
     argparse の required は、ほかの引数 (--mode) の値を見て決められない。そのため、引数を解釈し終えた後
     (parse_known_args。parse_args もこれを通る) に確かめ、--mode advisor で無い引数があれば、run の parser の誤り
     (`the following arguments are required: --software, --user` の形。使い方を表示して SystemExit 2) にする。
+    続けて、run (どの --mode でも) の com_port と device_fps が None (起動引数を省いた) なら、environ から
+    switch2_remote.hardware_env の com_port_from_env と device_fps_from_env で決める。環境変数の値の誤り
+    (ValueError) も run の parser の誤り (使い方を表示して SystemExit 2) にする。起動引数を指定したときと、
+    run 以外のサブコマンドでは環境変数を読まない。
 
     run_parser   サブコマンド run の ArgumentParser (build_parser が入れる)。None なら確かめない
+    environ      環境変数の辞書 (build_parser が入れる)。None なら os.environ を読む
     """
 
     run_parser: argparse.ArgumentParser | None = None
+    environ: Mapping[str, str] | None = None
 
     def parse_known_args(
         self,
         args: list[str] | None = None,
         namespace: argparse.Namespace | None = None,
     ) -> tuple[argparse.Namespace, list[str]]:
-        """引数を解釈し (argparse.ArgumentParser.parse_known_args)、run --mode advisor の必須の引数を確かめる。"""
+        """引数を解釈し (argparse.ArgumentParser.parse_known_args)、run --mode advisor の必須の引数を確かめ、
+        run の --com-port と --device-fps を省いていれば環境変数から決める。"""
         parsed, extras = super().parse_known_args(args, namespace)
         run_parser = self.run_parser
         if (
@@ -247,16 +265,26 @@ class LayersArgumentParser(argparse.ArgumentParser):
                 run_parser.error(
                     f"the following arguments are required: {', '.join(missing)}"
                 )
+        if run_parser is not None and parsed.command == "run":
+            environ = os.environ if self.environ is None else self.environ
+            try:
+                if parsed.com_port is None:
+                    parsed.com_port = com_port_from_env(environ)
+                if parsed.device_fps is None:
+                    parsed.device_fps = device_fps_from_env(environ)
+            except ValueError as error:
+                run_parser.error(str(error))
         return parsed, extras
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(environ: Mapping[str, str] | None = None) -> argparse.ArgumentParser:
     """3 つのサブコマンド (run・middle-once・deep-once) の引数を定義した ArgumentParser を返す。
 
     各サブコマンドの Namespace には、処理の関数 (handler: Namespace → 終了コード) を持たせる。
     サブコマンドは必須 (無ければ argparse が SystemExit 2 にする)。知らないサブコマンドは argparse が SystemExit 2 にする。
-    最上位は LayersArgumentParser (run --mode advisor の --software と --user を必須にする)、サブコマンドの parser は
-    argparse.ArgumentParser にする。
+    最上位は LayersArgumentParser (run --mode advisor の --software と --user を必須にし、run の --com-port と
+    --device-fps を省いたときの値を環境変数から決める)、サブコマンドの parser は argparse.ArgumentParser にする。
+    environ は、その環境変数を読む辞書 (None なら解釈するときに os.environ を読む)。
     """
     parser = LayersArgumentParser(
         prog=PROG,
@@ -272,6 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser_class=argparse.ArgumentParser,
     )
     parser.run_parser = add_run_parser(commands)
+    parser.environ = environ
     add_middle_once_parser(commands)
     add_deep_once_parser(commands)
     return parser
@@ -347,20 +376,21 @@ def add_run_parser(
         "--device-fps",
         type=int,
         choices=DEVICE_FPS_CHOICES,
-        default=DEFAULT_DEVICE_FPS,
+        default=None,
         help=(
             "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする "
-            f"(既定 {DEFAULT_DEVICE_FPS})"
+            f"(既定 {DEFAULT_DEVICE_FPS}。環境変数 {DEVICE_FPS_ENV} があればその値)"
         ),
     )
     parser.add_argument(
         "--com-port",
         type=parse_com_port,
-        default=DEFAULT_COM_PORT,
+        default=None,
         metavar="PORT",
         help=(
             "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
-            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT}。"
+            f"環境変数 {COM_PORT_ENV} があればその値)"
         ),
     )
     parser.add_argument(
@@ -845,6 +875,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     Orchestrator 型の 6 つの値と委任型の 2 つの値 (--delegate-image-width・--max-delegate-errors) と、主ループの
     エージェントの 2 つの値 (--agent・--codex-model) は、--mode に依らず写す。
     --instruction と --instruction-file は写さない (run_command が orchestrator と delegate のときだけ読む)。
+    --com-port と --device-fps は、build_parser の parser が決めた後の値 (省いたときは環境変数から決めた値) を写す。
     """
     return RunSettings(
         software_name=args.software if args.software is not None else "",
@@ -1314,6 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
     """起動引数 argv (None なら sys.argv[1:]) を解釈し、サブコマンドの処理を呼んで終了コードを返す。
 
     --help は使い方を表示して SystemExit(0)、引数の形の誤りは SystemExit(2) にする (argparse)。
+    run の --com-port と --device-fps を省いたときの値は、os.environ の環境変数から決める (build_parser)。
     """
     args = build_parser().parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.handler

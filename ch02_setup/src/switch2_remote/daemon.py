@@ -24,14 +24,16 @@ status の bridge_state が ok に戻り、bridge_restarts が 1 増える。復
     quit                  コントローラー、ブリッジ、キャプチャを止めて終了する
 
 起動引数:
-    --device-fps N      デバイスから受け取るフレームレート (30 か 60、既定 60)。起動後は変えられない。
-                        PC との USB の接続で 60fps を受け取れないときは 30 にする
+    --device-fps N      デバイスから受け取るフレームレート (30 か 60、既定 60。環境変数 SWITCH2_DEVICE_FPS があれば
+                        その値)。起動後は変えられない。PC との USB の接続で 60fps を受け取れないときは 30 にする
     --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)。起動後は変えられない
     --process-fps N     間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
     --com-port PORT     ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。COM1、COM2 のような COM と 1 以上の
-                        整数で、大文字小文字を区別しない。既定 COM3)。最初の起動にも復旧での起動し直しにも使う
+                        整数で、大文字小文字を区別しない。既定 COM3。環境変数 SWITCH2_COM_PORT があればその値)。
+                        最初の起動にも復旧での起動し直しにも使う
     範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
-    組み合わせと、--com-port の形の誤りは起動時にエラーにする
+    組み合わせと、--com-port の形の誤りと、環境変数 SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS の値の誤りは
+    起動時にエラーにする (環境変数は hardware_env で読む。空の値は無いのと同じに扱う)
 
 使い方:
     uv run switch2-remote-daemon
@@ -45,6 +47,7 @@ import functools
 import os
 import socket
 import struct
+from collections.abc import Mapping
 
 import cv2
 
@@ -60,6 +63,12 @@ from switch2_remote.controller_bridge import (
     parse_com_port,
 )
 from switch2_remote.error_message import describe_error
+from switch2_remote.hardware_env import (
+    COM_PORT_ENV,
+    DEVICE_FPS_ENV,
+    com_port_from_env,
+    device_fps_from_env,
+)
 
 SOCKET_ADDRESS = (
     "\0switch2-remote"  # 抽象名前空間。ファイルパスの長さ制限と後片付けが不要
@@ -109,14 +118,20 @@ def serve_connection(
     return False
 
 
-def parse_args(argv: list[str] | None) -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None, environ: Mapping[str, str] | None = None
+) -> argparse.Namespace:
     """起動引数を解釈し、device_fps・ffmpeg_fps・process_fps・com_port を持つ Namespace を返す。
 
     argv が None なら sys.argv[1:] を使う。範囲外の値と、ffmpeg_fps が device_fps より大きい組み合わせと、
     process_fps が ffmpeg_fps より大きい組み合わせは、parser.error で使い方とともに表示して終了する (SystemExit)。
     device_fps は DEVICE_FPS_CHOICES のどれかだけを受け付ける (argparse の choices)。
-    com_port は controller_bridge.parse_com_port で確かめて大文字にする (既定 DEFAULT_COM_PORT)。形の誤りは
+    com_port は controller_bridge.parse_com_port で確かめて大文字にする。形の誤りは
     argparse が使い方とともに表示して終了する (SystemExit)。
+    --com-port と --device-fps を省いたときは、環境変数の辞書 environ (None なら os.environ) から
+    hardware_env.com_port_from_env と hardware_env.device_fps_from_env で決める (変数が無いか空なら
+    DEFAULT_COM_PORT と DEFAULT_DEVICE_FPS)。指定したときは環境変数を読まない。環境変数の値の誤りも
+    parser.error で使い方とともに表示して終了する (SystemExit)。ffmpeg_fps は、決めた後の device_fps と比べる。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-remote-daemon",
@@ -126,10 +141,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--device-fps",
         type=int,
         choices=DEVICE_FPS_CHOICES,
-        default=DEFAULT_DEVICE_FPS,
+        default=None,
         help=(
-            "デバイスから受け取るフレームレート (既定 "
-            f"{DEFAULT_DEVICE_FPS})。PC との USB の接続で 60fps を受け取れないときは 30 にする"
+            f"デバイスから受け取るフレームレート (既定 {DEFAULT_DEVICE_FPS}。"
+            f"環境変数 {DEVICE_FPS_ENV} があればその値)。"
+            "PC との USB の接続で 60fps を受け取れないときは 30 にする"
         ),
     )
     parser.add_argument(
@@ -147,14 +163,24 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--com-port",
         type=parse_com_port,
-        default=DEFAULT_COM_PORT,
+        default=None,
         metavar="PORT",
         help=(
             "ブリッジが開く COM ポート (Pico 2 W の Bluetooth の発信側。"
-            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT})"
+            f"COM1、COM2 のように指定する。既定 {DEFAULT_COM_PORT}。"
+            f"環境変数 {COM_PORT_ENV} があればその値)"
         ),
     )
     args = parser.parse_args(argv)
+    if environ is None:
+        environ = os.environ
+    try:
+        if args.com_port is None:
+            args.com_port = com_port_from_env(environ)
+        if args.device_fps is None:
+            args.device_fps = device_fps_from_env(environ)
+    except ValueError as e:
+        parser.error(str(e))
     if args.ffmpeg_fps < FFMPEG_FPS_MIN:
         parser.error(
             f"--ffmpeg-fps must be {FFMPEG_FPS_MIN} or more: {args.ffmpeg_fps}"

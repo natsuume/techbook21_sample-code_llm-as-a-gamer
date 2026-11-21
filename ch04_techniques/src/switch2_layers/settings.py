@@ -215,10 +215,12 @@ class RunSettings:
     runs_dir                    実行ディレクトリーを作る親 (--runs-dir、既定 runs)
     device_fps                  デバイスから受け取るフレームレート (--device-fps、既定 60。
                                 switch2_remote.capture.DEVICE_FPS_CHOICES の 30 か 60)。PC との USB の接続で 60fps を
-                                受け取れないときは 30 にする
+                                受け取れないときは 30 にする。--device-fps を省いたとき、cli は環境変数
+                                SWITCH2_DEVICE_FPS があればその値を入れる
     com_port                    ブリッジが開く COM ポート (--com-port、既定 COM3。Pico 2 W の Bluetooth の発信側)。
                                 switch2_remote.controller_bridge.is_valid_com_port の形 (COM と 1 以上の整数。
-                                大文字小文字を区別しない)。最初の起動にも復旧での起動し直しにも使う
+                                大文字小文字を区別しない)。最初の起動にも復旧での起動し直しにも使う。--com-port を
+                                省いたとき、cli は環境変数 SWITCH2_COM_PORT があればその値を入れる
     interval_fps                一定間隔のフレームの保存のフレームレート (--interval-fps、既定 5。0 より大きく INTERVAL_FPS_MAX 以下)
     interval_width              一定間隔のフレームを縮小する幅 (--interval-width、既定 640。INTERVAL_WIDTH_MIN〜INTERVAL_WIDTH_MAX)
     max_surface_errors          surface の decide の失敗がこの回数続いたら全体を止める (--max-surface-errors、既定 5。1 以上)
