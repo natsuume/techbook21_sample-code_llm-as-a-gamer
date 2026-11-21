@@ -3,12 +3,15 @@
 委任型 (--mode delegate) は、監視の代わりに委任を書く。主ループはリアルタイムの場面の操作を、意味のある行動 (マクロ) の
 選択肢とタスク・注意事項とともに Jev に委任し、Jev が返すか主ループが止めたら操作権が主ループに戻る。
 
-主ループ (Claude Code を stream-json の入出力で開いたままにし、使用量がしきい値を超えたらセッションを入れ替える):
+主ループ (エージェント (--agent。Claude Code か Codex) を開いたままにし、使用量がしきい値を超えたらセッションを
+入れ替える):
     main_loop                   主ループ (OrchestratorMainLoop)。セッションの開始・ターンの送受信・入れ替え・停止
     main_loop_session           主ループとセッションの境界の型 (セッション・セッションを作るもの・read が返す出来事)。
                                 主ループは、エージェントの入出力の形を知らずに、この型だけを通してセッションを使う
     claude_main_loop_session    その境界の Claude Code の実装 (起動の引数・環境変数の組み立てと、stream-json の行から
                                 出来事への直し方)
+    codex_main_loop_session     その境界の Codex の実装 (codex app-server の起動・初期化・スレッドの開始・ターンの
+                                送受信。JSON-RPC の行から出来事への直し方は codex_messages)
 run --mode orchestrator と run --mode delegate の組み立て (app と cli が使う):
     orchestrator_assembly       主ループと OrchestratorController を作ってつなぎ、監視のループと委任のループのスレッドの
                                 本体を持つ (app.LayersApp が Orchestrator 型と委任型の start で使う)
@@ -27,6 +30,9 @@ I/O を持たない部品:
     turn_input                  1 ターンの入力のテキストと画像の選び方 (画像と notes/ の一覧を読む関数も置く)
     stream_messages             stream-json の行の読み方 (使用量・自動の要約の印) と、標準入力に送る行の形
     pending_send                書き込み用のスレッドで始めた、セッションへの入力の書き込み 1 つ (書き終わったかを待つ)
+    codex_session_command       codex app-server の起動の引数・環境変数・権限プロファイル・初期化とスレッドの開始の引数
+    codex_messages              codex app-server と話す JSON-RPC の行の形と読み方 (通知から出来事へ、要求への応答)
+    codex_instructions          Codex 版の変わらない指示と、入力の「古いフレーム」の節の文 (Claude 版の文から作る)
 操作の送信・Jev の呼び出し・ファイルとプロセスを扱う部品:
     action_executor             procedure と macro を展開した操作の列を、1 つずつ PadOutput に送る
     monitor_loop                監視の Jev への要求 1 回と、今の監視の状態 (失敗が続いた回数、once・every の扱い)
@@ -36,7 +42,10 @@ I/O を持たない部品:
     orchestrator_controller     Decision を当て、操作の実行と監視 (委任型では委任) を 1 つのループで動かす
                                 (OrchestratorController)
     parent_skill_names          実行ディレクトリーの親のディレクトリーのスキルの名前を集める (skillOverrides で off にする)
-    skill_copy                  本体の操作のスキルと、notes/skills/ のゲームの内容のスキルを .claude/skills/ に写す
+    codex_skill_paths           Codex に読ませないスキル (親の階層・ユーザー・管理者) の SKILL.md のパスを集める
+    skill_copy                  本体の操作のスキルと、notes/skills/ のゲームの内容のスキルを .claude/skills/ (Codex では
+                                .agents/skills/) に写す
     claude_stream_session       claude の子プロセス 1 つの起動・標準入力への書き込み・標準出力の読み取り・終了
+    codex_app_server_process    codex app-server の子プロセス 1 つの起動・標準入力への書き込み・標準出力の読み取り・終了
     session_record              orchestrator/sessions.jsonl と orchestrator/turns.jsonl の行の形と書き込み
 """

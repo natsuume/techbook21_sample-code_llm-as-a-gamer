@@ -18,23 +18,27 @@
         真で返し続けるフェイク)。deep は --deep で選ぶ (既定 claude = Claude Code、fake = deep.fake_deep)。
         安全の監視は --safety で選ぶ (既定 jev は TypeSafe Jev、fake は safety.fake_safety)
     switch2-layers run --mode orchestrator [--instruction TEXT | --instruction-file PATH]
+                       [--agent claude|codex] [--codex-model NAME]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--monitor-threshold P] [--max-monitor-errors N]
                        [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
                        [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
-        実機で Orchestrator 型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と監視
+        実機で Orchestrator 型を動かす。主ループ (orchestrator.main_loop) と、操作の実行と監視
         (orchestrator.orchestrator_controller) を、キャプチャー・安全の監視・停滞の計測と組み立てる (app)。
+        主ループのエージェントは --agent で選ぶ (既定 claude は Claude Code、codex は OpenAI Codex の codex app-server。
+        Codex のモデルは --codex-model で選ぶ)。
         準備と片付けの段階は使わない (ソフトの起動とユーザー選択は、主ループが本体の操作のスキルで行う)。
         起動するソフトと遊ぶユーザーは、人の初期指示 (--instruction か --instruction-file) に書く。--software と
         --user は使わない (指定しても動きは変わらない)。surface・middle・deep の引数も使わない
     switch2-layers run --mode delegate [--instruction TEXT | --instruction-file PATH]
+                       [--agent claude|codex] [--codex-model NAME]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--delegate-image-width N] [--max-delegate-errors N]
                        [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
                        [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
-        実機で委任型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と委任のループ
+        実機で委任型を動かす。主ループ (--agent で選ぶ。orchestrator.main_loop) と、操作の実行と委任のループ
         (orchestrator.orchestrator_controller の委任型と orchestrator.delegate_loop) を、キャプチャー・安全の監視・
         停滞の計測と組み立てる (app)。主ループはリアルタイムの場面の操作を Jev に委任する。監視は使わない
         (--monitor-threshold と --max-monitor-errors は使わない)。そのほかは --mode orchestrator と同じ
@@ -59,6 +63,8 @@ middle-once は既定の none で呼ぶ。
 run --mode orchestrator は、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (監視は常に Jev を使うため、
 --safety fake でも要る)。OPENAI_API_KEY は確かめない。無ければ、実機と実行ディレクトリーに触れる前に終了コード 2 を返す。
 run --mode delegate も同じく、API キーとして環境変数 TYPESAFE_API_KEY だけを確かめる (委任は常に Jev を使うため)。
+--agent codex は、codex CLI のユーザーのログイン (codex login) で動くため、API キーを確かめない。codex CLI が無いときや
+ログインしていないときは、主ループのセッションが最初のターンを終えられず、続けて 3 回そうなると実行全体が止まる。
 
 引数の形の誤り (知らない引数、数として読めない値、--doc・--middle・--middle-effort の知らない値、run --mode advisor の
 --software・--user が無い・空か空白だけ、--instruction と --instruction-file の両方、など) は argparse が使い方とともに表示し、
@@ -116,7 +122,9 @@ from switch2_layers.settings import (
     AUTOCOMPACT_MAX_TOKENS,
     CAPTURE_FFMPEG_FPS,
     CAPTURE_PROCESS_FPS,
+    DEFAULT_AGENT,
     DEFAULT_BOX_REQUERY_EVERY,
+    DEFAULT_CODEX_MODEL,
     DEFAULT_DEEP_AUTO_SECONDS,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
@@ -162,6 +170,7 @@ from switch2_layers.settings import (
     SAFETY_INTERVAL_MAX_S,
     SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
+    AgentKind,
     DeepOnceSettings,
     DeepRunnerChoice,
     MiddleEffort,
@@ -288,8 +297,8 @@ def add_run_parser(
         help="実機で 3 層 (advisor 型)・Orchestrator 型・委任型のどれかを動かす",
         description=(
             "実機で動かす。--mode advisor (既定) は 3 層 (surface は --surface、middle は --middle、deep は --deep で"
-            "選ぶ)、--mode orchestrator は Claude Code の主ループと、操作の実行と監視を動かす。--mode delegate は "
-            "Claude Code の主ループと、操作の実行と委任のループを動かす。Ctrl+C で止まる"
+            "選ぶ)、--mode orchestrator は主ループ (--agent で Claude Code か Codex を選ぶ) と、操作の実行と監視を"
+            "動かす。--mode delegate は主ループと、操作の実行と委任のループを動かす。Ctrl+C で止まる"
         ),
     )
     parser.add_argument(
@@ -297,8 +306,8 @@ def add_run_parser(
         choices=[mode.value for mode in RunMode],
         default=DEFAULT_RUN_MODE.value,
         help=(
-            "run の型。advisor は surface・middle・deep の 3 層、orchestrator は Claude Code の主ループと、"
-            "操作の実行と監視、delegate は Claude Code の主ループと、操作の実行と委任のループを動かす "
+            "run の型。advisor は surface・middle・deep の 3 層、orchestrator は主ループ (--agent) と、"
+            "操作の実行と監視、delegate は主ループ (--agent) と、操作の実行と委任のループを動かす "
             f"(既定 {DEFAULT_RUN_MODE.value})"
         ),
     )
@@ -566,7 +575,9 @@ def add_orchestrator_arguments(parser: argparse.ArgumentParser) -> None:
     --instruction TEXT と --instruction-file PATH は相互排他 (両方なら argparse の誤り)。Namespace の instruction
     (str か None) と instruction_file (Path か None) に入る。中身の確かめ (空か空白だけ・読めないファイル) は
     run_command が行う。
-    --orchestrator-effort は settings.ORCHESTRATOR_EFFORTS から選び (既定 medium)、--rotate-tokens は int
+    --agent は settings.AgentKind の値 (claude / codex) から選び (既定 claude)、--codex-model は文字列 (既定
+    settings.DEFAULT_CODEX_MODEL の gpt-6.2-sol。空か空白だけかは run_command が settings.run_settings_errors で
+    確かめる)。--orchestrator-effort は settings.ORCHESTRATOR_EFFORTS から選び (既定 medium)、--rotate-tokens は int
     (既定 120000)、--turn-timeout は float (既定 120)、--max-decision-errors は int (既定 3)、--monitor-threshold は
     float (既定 0.5)、--max-monitor-errors は int (既定 5)。--monitor-threshold と --max-monitor-errors は
     --mode delegate では使わない。
@@ -594,10 +605,28 @@ def add_orchestrator_arguments(parser: argparse.ArgumentParser) -> None:
         help="人の初期指示を書いた UTF-8 のファイル。--instruction と一緒には使えない",
     )
     group.add_argument(
+        "--agent",
+        choices=[agent.value for agent in AgentKind],
+        default=DEFAULT_AGENT.value,
+        help=(
+            "主ループのエージェント。claude は Claude Code、codex は OpenAI Codex (codex app-server。codex CLI を"
+            f"導入してログインしておく) (既定 {DEFAULT_AGENT.value})"
+        ),
+    )
+    group.add_argument(
+        "--codex-model",
+        metavar="NAME",
+        default=DEFAULT_CODEX_MODEL,
+        help=f"--agent codex の主ループのモデル (既定 {DEFAULT_CODEX_MODEL})",
+    )
+    group.add_argument(
         "--orchestrator-effort",
         choices=ORCHESTRATOR_EFFORTS,
         default=ORCHESTRATOR_EFFORT,
-        help=f"主ループの Claude Code の --effort (既定 {ORCHESTRATOR_EFFORT})",
+        help=(
+            "主ループの effort (Claude Code の --effort、Codex のターンの effort) "
+            f"(既定 {ORCHESTRATOR_EFFORT})"
+        ),
     )
     group.add_argument(
         "--rotate-tokens",
@@ -796,8 +825,9 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
     --software と --user は software_name と user_name にする (無い (None) ときは空文字列。--mode orchestrator と
     --mode delegate では使わないため無くてよい)。--middle は MiddleKind に、--middle-effort は MiddleEffort
     (middle_effort) に、--surface は SurfaceKind に、--surface-map は SurfaceMapMode に、
-    --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode にする。Orchestrator 型の 6 つの値と
-    委任型の 2 つの値 (--delegate-image-width・--max-delegate-errors) は、--mode に依らず写す。
+    --deep は DeepRunnerChoice に、--safety は SafetyKind に、--mode は RunMode に、--agent は AgentKind にする。
+    Orchestrator 型の 6 つの値と委任型の 2 つの値 (--delegate-image-width・--max-delegate-errors) と、主ループの
+    エージェントの 2 つの値 (--agent・--codex-model) は、--mode に依らず写す。
     --instruction と --instruction-file は写さない (run_command が orchestrator と delegate のときだけ読む)。
     """
     return RunSettings(
@@ -840,6 +870,8 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         max_monitor_errors=args.max_monitor_errors,
         delegate_image_width=args.delegate_image_width,
         max_delegate_errors=args.max_delegate_errors,
+        agent=AgentKind(args.agent),
+        codex_model=args.codex_model,
     )
 
 

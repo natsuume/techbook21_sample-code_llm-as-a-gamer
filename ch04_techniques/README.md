@@ -262,8 +262,8 @@ advisor 型の run は、準備 (`prepare`)・プレイ (`play`)・復帰 (`reco
 | コマンド | 内容 |
 |---|---|
 | `switch2-layers run [--mode advisor] --software NAME --user NAME [起動引数]` | 実機 (キャプチャーとコントローラーのブリッジ) につないで、指定のソフトを指定のユーザーで起動する準備から始め、3 層を動かします (advisor 型。`--mode` の既定)。Ctrl+C で止めると、HOME メニューに戻って指定のソフトを終了する片付けをしてから止まります |
-| `switch2-layers run --mode orchestrator [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、Claude Code の主ループと、操作の実行と監視を動かします (「Orchestrator 型」の節)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
-| `switch2-layers run --mode delegate [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、Claude Code の主ループと、操作の実行と委任のループを動かします (「Orchestrator 型」の節の「委任型」の項)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
+| `switch2-layers run --mode orchestrator [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、主ループ (Claude Code か Codex。`--agent`) と、操作の実行と監視を動かします (「Orchestrator 型」の節)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
+| `switch2-layers run --mode delegate [--instruction TEXT \| --instruction-file PATH] [起動引数]` | 実機につないで、主ループ (Claude Code か Codex。`--agent`) と、操作の実行と委任のループを動かします (「Orchestrator 型」の節の「委任型」の項)。準備と片付けの段階は使わず、Ctrl+C で止めるとすぐに止まります |
 | `switch2-layers middle-once --run-dir DIR [--middle-window S] [--middle fake\|luna]` | 保存済みの実行ディレクトリーに対して middle を 1 回動かし、`middle/state.json` などの出力を書きます。タスクのキューは保存済みの `notes/scenes/<場面ID>/tasks.json` から作り直し、run と同じ規則で取り消しと追加を行って、`tasks.json`・`tasks.md`・`tasks.jsonl` に書き戻します。呼ばれた理由は `interval` です。初めての場面でも deep は起動せず、求める文書の種類を `middle/calls.jsonl` に書くだけです。`--middle` は run と同じです |
 | `switch2-layers deep-once --run-dir DIR --doc KIND [--scene SCENE_ID] [--deep claude\|fake]` | 保存済みの実行ディレクトリーに対して deep のジョブを 1 回、終わるまで動かします。`KIND` は `controls`・`tips`・`strategy`・`advice`・`map`・`game` のどれかです。`--scene` は `controls` と `tips` にだけ付けられます。付けなければ、`middle/state.json` の現在の場面 (無ければ共通の文書) を対象にします。`--deep` は run と同じです |
 
@@ -999,11 +999,11 @@ uv run --env-file .env switch2-layers run --mode orchestrator --instruction-file
 
 | 部品 | 受け持ち |
 |---|---|
-| 主ループ (`orchestrator/main_loop.py`) | Claude Code (`claude -p`) を stream-json の入出力で開いたままにし、前のターンの操作の列が終わり、離した後の画面のフレームが撮れたら (`actions` が空なら、すぐ)、次の画面と出来事を渡します。各ターンの最後の JSON を読み、操作の実行と監視の部品に渡します |
+| 主ループ (`orchestrator/main_loop.py`) | Claude Code (`claude -p`) を stream-json の入出力で開いたままにし (`--agent codex` では `codex app-server`。「主ループのエージェント」の項)、前のターンの操作の列が終わり、離した後の画面のフレームが撮れたら (`actions` が空なら、すぐ)、次の画面と出来事を渡します。各ターンの最後の JSON を読み、操作の実行と監視の部品に渡します |
 | 操作の実行と監視 (`orchestrator/orchestrator_controller.py`) | JSON の操作の列を 1 つずつコントローラーに送り、マクロと監視を持ちます。監視があれば、主ループの操作が無い間に最新のフレームを Jev に問い、当たった条件の操作を送ります |
 | 共有の部品 | キャプチャー、フレームの保存、キャプチャーの見張り、コントローラーへの送信、安全の監視、画面の停滞の計測、記録です。advisor 型と同じものを使います |
 
-surface・middle・deep (deep のスケジューラーを含む) と、本体の画面のループは起動しません。`notes/` は空のディレクトリーで始め、advisor 型の初期の文書は作りません。主ループの Claude Code が使えるツールは Read・Glob・Grep・Write・Edit・Skill だけで、書き込めるのは `notes/` の下だけです。ゲームの内容の手順は、`notes/skills/game-<名前>/SKILL.md` にスキルとして書かせ、コードが中身を確かめてから `.claude/skills/` に写します。
+surface・middle・deep (deep のスケジューラーを含む) と、本体の画面のループは起動しません。`notes/` は空のディレクトリーで始め、advisor 型の初期の文書は作りません。主ループの Claude Code が使えるツールは Read・Glob・Grep・Write・Edit・Skill だけで、書き込めるのは `notes/` の下だけです。ゲームの内容の手順は、`notes/skills/game-<名前>/SKILL.md` にスキルとして書かせ、コードが中身を確かめてから `.claude/skills/` に写します。`--agent codex` のツールと制限は、「主ループのエージェント」の項にあります。
 
 #### Claude Code が受け取るものと書く JSON
 
@@ -1016,7 +1016,7 @@ surface・middle・deep (deep のスケジューラーを含む) と、本体の
 | 前の操作の列 | 前のターンの操作の列を始めた時刻と、終えた時刻 (最後にボタンとスティックを離した時刻。押す操作の無い列なら、列が終わった時刻) です。前のターンに操作が無かったとき (`actions` が空、JSON の誤り、セッションの最初の入力) は書きません |
 | 画面の停滞 | `progress/state.json` の値 (「画面の停滞の計測」の節) |
 | 前の JSON の誤り | 前のターンの JSON の誤りの説明 |
-| フレームの読み方 | `frames/latest/1.jpg`〜`5.jpg` は最新の 5 枚で、`1.jpg` が最新です。いつ Read しても、その時点の最新の画面が読めます。それより古いフレームは `frames/interval/` にあり、ファイル名は時刻のミリ秒 (9 桁) です。変わらない指示にも同じことを書いています |
+| フレームの読み方 | `frames/latest/1.jpg`〜`5.jpg` は最新の 5 枚で、`1.jpg` が最新です。いつ Read しても (`--agent codex` では、いつ view_image で開いても)、その時点の最新の画面が読めます。それより古いフレームは `frames/interval/` にあり、ファイル名は時刻のミリ秒 (9 桁) です。変わらない指示にも同じことを書いています |
 | 人の初期指示 | セッションの最初の入力だけに入れます。初期指示を渡さなかったときは「無し」と書きます |
 | `notes/` の一覧と引き継ぎ | セッションの最初の入力だけに入れます。`notes/` のファイルの一覧と、`notes/handoff.md` の中身です |
 
@@ -1056,7 +1056,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 #### セッションの入れ替え
 
-主ループのセッション (1 つの claude の子プロセス) の使用量が `--rotate-tokens` (既定 120,000) を超えたら、引き継ぎを `notes/handoff.md` に書くよう依頼します。その応答を受け取ったらセッションを終え、新しいセッションを始めます。使用量は、最後の assistant の行の入力のトークン (キャッシュの読み書きを含む) の和です。新しいセッションの最初の入力には、人の初期指示、`notes/` の一覧、`notes/handoff.md` の中身を入れます。入れ替えの間も、操作の実行と監視は動き続けます。
+主ループのセッション (1 つの claude の子プロセス) の使用量が `--rotate-tokens` (既定 120,000) を超えたら、引き継ぎを `notes/handoff.md` に書くよう依頼します。その応答を受け取ったらセッションを終え、新しいセッションを始めます。使用量は、最後の assistant の行の入力のトークン (キャッシュの読み書きを含む) の和です (`--agent codex` では、最後の使用量の通知の `last.inputTokens` です)。新しいセッションの最初の入力には、人の初期指示、`notes/` の一覧、`notes/handoff.md` の中身を入れます。入れ替えの間も、操作の実行と監視は動き続けます。
 
 1 ターンが `--turn-timeout` 秒 (既定 120) を超えたとき、子プロセスが終わったときも、そのセッションを終えて新しいセッションを始めます。新しいセッションが最初のターンを終えずに終わることが 3 回続くと、実行全体を止めます。
 
@@ -1066,6 +1066,60 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 本書では、どの層にもゲームの名前を渡さない条件で試します (「ソフトの名前とユーザーの名前」の項)。Orchestrator 型では、人の初期指示に限って、起動するソフトの名前 (ゲームの名前) を書いてよいことにしています。変わらない指示と引き継ぎの依頼の文には、ゲームの名前を書いていません。初期指示は、主ループの各セッションの最初の入力に入れ、`orchestrator/instruction.md` にも写して残します。
 
+#### 主ループのエージェント (`--agent`)
+
+主ループは、Claude Code (既定。`--agent claude`) のほかに、OpenAI Codex (`--agent codex`) でも動かせます。監視型と委任型のどちらでも使えます。受け取る入力、書く JSON、操作の実行と監視 (委任型では委任)、記録の形はどちらも同じで、変わるのは主ループのセッションの中身だけです。主ループは [`orchestrator/main_loop_session.py`](./src/switch2_layers/orchestrator/main_loop_session.py) の境界の型だけを通してセッションを使い、Claude Code の実装は `claude_main_loop_session.py`、Codex の実装は `codex_main_loop_session.py` にあります。
+
+```bash
+uv run --env-file .env switch2-layers run --mode orchestrator --agent codex --instruction '<ソフトの名前> を <ユーザーの名前> で起動して、冒険を始めてください'
+uv run --env-file .env switch2-layers run --mode delegate --agent codex --codex-model gpt-6.2-sol --orchestrator-effort high --instruction-file instruction.md
+```
+
+`--agent codex` の前提として、codex CLI を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かします (子プロセスの環境変数から `OPENAI_API_KEY`・`TYPESAFE_API_KEY`・`CODEX_API_KEY` を除きます)。そのため、Codex の API キーは確かめません。ログインしているかは起動の前に確かめません。codex CLI が無いときやログインしていないときは、主ループのセッションが最初のターンを終えられないため、3 回続くと `orchestrator session failed 3 times in a row` で止まると考えられます (確認していません)。モデルは `--codex-model` (既定 `gpt-6.2-sol`) で、effort は Claude Code と同じ `--orchestrator-effort` で選びます。gpt-6.2-sol は `low`・`medium`・`high`・`xhigh`・`max` のどれにも対応しています。
+
+Codex の主ループのセッションは、次のように動きます。
+
+- 1 つのセッションは、`codex app-server` の子プロセス 1 つと、その中の ephemeral なスレッド 1 つです (スレッドは `~/.codex` に残りません)。標準入出力で、1 行に 1 つの JSON の JSON-RPC を話します。起動のときに `initialize` と `thread/start` を送り、ターンごとに `turn/start` を送ります。子プロセスを起動した後、`initialize` の応答、Codex 本体の場所の特定、`thread/start` の応答を、合わせて最大 30 秒待ちます
+- 変わらない指示は、`thread/start` の `developerInstructions` で渡します。Claude 版の文から、ツールに関わる箇所 (ツールの名前、読み書きできる範囲、スキルの使い方、フレームの開き方) だけを置き換えた文です ([`orchestrator/codex_instructions.py`](./src/switch2_layers/orchestrator/codex_instructions.py))。毎ターンの入力の「古いフレーム」の節も、Read の代わりに view_image と書きます
+- 画像は、JPEG を `orchestrator/session-<NNN>/images/turn-<NNNN>-<順番>.jpg` に書いて、ファイルのパスで渡します。画像の前の時刻のラベルは Claude 版と同じです。`orchestrator/` はモデルからは読めませんが、画像は app-server のプロセスがサンドボックスの外で読みます
+- 答えの文は、`item/completed` の `agentMessage` の文です。1 ターンに途中の文と最後の文が届くことがあり、最後に届いた文の JSON を読みます。`turn/completed` の状態が `completed` でないとき (`failed`・`interrupted`) と、`turn/start` が誤りを返したときは、Claude 版の `is_error` が true の result と同じく扱います
+- 使用量は、`thread/tokenUsage/updated` の `last.inputTokens` (キャッシュを含む、その要求の入力の大きさ) です。サブエージェントのスレッドの通知は読みません。サーバーからの承認の要求は断り、ほかの要求には誤りを返します
+
+制限の作り方は、Claude 版と次のように違います ([`orchestrator/codex_session_command.py`](./src/switch2_layers/orchestrator/codex_session_command.py))。
+
+| | Claude Code (`--agent claude`) | Codex (`--agent codex`) |
+|---|---|---|
+| 使えるツール | Read・Glob・Grep・Write・Edit・Skill | Codex に組み込まれたシェル・apply_patch・view_image。plugin・apps・複数のエージェント・画像の生成などの機能は `--disable` で止め、web_search も止めます。それでもサブエージェントのツール (collaboration の `spawn_agent` など) は残ります。サブエージェントのスレッドの出力は、主ループでは読みません |
+| 通信 | 通信できるツールがありません | シェルのコマンドから外のホストの名前を引けず、通信できませんでした (権限プロファイルにはファイルの範囲だけを書いています) |
+| 読める範囲 | `frames/`・`notes/`・`.claude/skills/`。直下の記録は拒むルールで読めなくします | 実行ディレクトリーの全体から、直下の記録 (Claude 版で読ませない項目と同じもの) を権限プロファイルの deny で除きます |
+| 書ける範囲 | `notes/` の下 (許すルール) | `notes/` の下 (権限プロファイルの write)。シェルのコマンドも apply_patch も、Codex のサンドボックスの中で動きます |
+| スキル | `.claude/skills/` に写し、Skill のツールで使います | `.agents/skills/` に写します。スキルの一覧に名前・説明・パスが載り、モデルが SKILL.md をシェルで読みます (Skill のツールと、本文のシェルの実行はありません)。写す規則は Claude 版と同じです |
+| 親の階層・ユーザー・同梱のスキル | skillOverrides で off にします | 実行ディレクトリーの親の階層の `.agents/skills/` とユーザーのスキルは `skills.config` で 1 つずつ止め、同梱のスキル (imagegen など) は `skills.bundled.enabled=false` で止めます |
+| AGENTS.md・CLAUDE.md | 読ませません | リポジトリーの AGENTS.md は `project_doc_max_bytes=0` で読ませません。`~/.codex/AGENTS.md` (CODEX_HOME の AGENTS.md) は、止める設定が見つからず、読まれます |
+| ユーザーの設定 | `--setting-sources project` で、ユーザーの設定を読みません | `~/.codex/config.toml` の設定 (`service_tier` など) は反映されます。MCP サーバーの設定は `-c mcp_servers={}` で空にします (ユーザーの設定に登録したサーバーが消えるかは、登録の無いこの環境では確認していません) |
+| 承認 | 確認の要る操作をすべて拒むモード (`dontAsk`) | 承認を求めないモード (`approvalPolicy` never)。承認の要求が来たら断ります |
+
+シェルは使えますが、サンドボックスの中で動き、書けるのは `notes/` の下だけです。サンドボックスの中からは、Windows の exe を起動できません (WSL の相互運用のソケットを作れないため)。
+
+2026-11-21 に codex-cli 0.171.0 と gpt-6.2-sol (effort low) で、次のことを確かめました。
+
+- 実装したセッションを一時の実行ディレクトリーで起動し、画像を添えて 3 ターン送ると、どのターンでも文・使用量・ターンの終わり (`completed`) が届きました。添えた画像の色を正しく答えました。起動からスレッドの開始までは 4〜5 秒でした
+- apply_patch で `notes/check.md` を作れました。シェルの `cat run.jsonl` は `Permission denied` で、`echo x > root.txt` (実行ディレクトリーの直下への書き込み) は `Read-only file system` で拒まれました。`orchestrator/` の中のファイルの読み取りも拒まれました。実行ディレクトリーにまだ無い項目を deny にしても、シェルは動きました
+- view_image で `frames/latest/1.jpg` を開き、その画像の色を正しく答えました
+- シェルの `curl -sS -m 5 https://example.com` は `Could not resolve host` で失敗しました
+- `.agents/skills/` に写した本体の操作のスキルだけが一覧に載り、同梱のスキルは載りませんでした。実行ディレクトリーの親の階層の `.agents/skills/` のスキルは、`skills.config` で止まりました (`skills/list` の `enabled` が false。セッションを作るものが組み立てたコマンドの設定を `codex debug prompt-input` に渡したときも、一覧に載ったのは実行ディレクトリーのスキルだけでした)
+- 1 ターンの中で、使用量の通知はモデルへの要求ごとに届き、`last.inputTokens` はその要求の値でした (`total` は積み上げた値)。使用量の通知は `turn/completed` より前に届きました
+- `codex debug prompt-input` (モデルを呼ばずに、モデルに渡す入力を表示する) で、`project_doc_max_bytes=0` のときにリポジトリーの AGENTS.md が読まれず、CODEX_HOME の AGENTS.md は読まれることを確かめました
+
+次のことは確認していません。
+
+- 実機 (Switch 2) につないだ通しの実行
+- 自動の要約の通知 (`thread/compacted` と、`contextCompaction` の item) が届く場面。両方が同じターンで届いたときは、1 つの要約として `sessions.jsonl` に書きます。使用量の通知の `modelContextWindow` は 475,000 だったので、`--rotate-tokens` をこれに近い値にすると、入れ替えより先に Codex の自動の要約が起きることがあります
+- 写したゲームの内容のスキルが、同じセッションの一覧にいつ載るか。変わらない指示には、一覧に無くても `.agents/skills/game-<名前>/SKILL.md` をシェルで読めば使えると書いています
+- ユーザーと管理者のスキル (`~/.agents/skills`・`~/.codex/skills`・`/etc/codex/skills`) を `skills.config` で止めること (このマシンには無いため)
+- サブエージェントのスレッドが、主ループのスレッドと同じ権限プロファイルで動くこと
+- codex CLI が無いときやログインしていないときの、止まるまでの流れ (どちらでも最初のターンを終えられないため、3 回続くと止まるはずです)
+
 #### Orchestrator 型の起動引数
 
 次の引数は Orchestrator 型だけで使います。advisor 型では使わず、指定しても動きは変わりません (advisor 型では `--instruction-file` のファイルも読みません)。ただし、値の範囲は advisor 型でも確かめます (下の段落)。`--monitor-threshold` と `--max-monitor-errors` は監視型だけで使い、委任型では使いません。委任型だけで使う引数は、「委任型の起動引数」の項にあります。
@@ -1074,14 +1128,16 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 |---|---|---|---|
 | `--instruction TEXT` | 人の初期指示。起動するソフトと遊ぶユーザーなどを書きます。`--instruction-file` と一緒には使えません | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--instruction-file PATH` | 人の初期指示を書いた UTF-8 のファイル。`--instruction` と一緒には使えません | なし | 読めるファイルで、中身が空か空白だけでないもの |
-| `--orchestrator-effort {low,medium,high,xhigh,max}` | 主ループの Claude Code の `--effort` | `medium` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `--agent {claude,codex}` | 主ループのエージェント。`claude` は Claude Code、`codex` は OpenAI Codex の `codex app-server` です (「主ループのエージェント」の項) | `claude` | `claude`、`codex` |
+| `--codex-model NAME` | `--agent codex` の主ループのモデル。`--agent claude` では使いません | `gpt-6.2-sol` | 空でない文字列 (空か空白だけは誤り) |
+| `--orchestrator-effort {low,medium,high,xhigh,max}` | 主ループの effort (Claude Code の `--effort`、Codex のターンの effort) | `medium` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `--rotate-tokens N` | 主ループのセッションの使用量がこれを超えたら、引き継ぎを書かせてセッションを入れ替えます | 120000 | 1 以上 1000000 未満の整数 |
 | `--turn-timeout S` | 主ループの 1 ターン (入力を作ってから result を受け取るまで) の上限の秒数 | 120 | 0 より大きい有限の値 |
 | `--max-decision-errors N` | 主ループの JSON の誤りが続けてこの回数になったら止まります | 3 | 1 以上の整数 |
 | `--monitor-threshold P` | 監視の当たりのしきい値 | 0.5 | 0 より大きく 1 より小さい値 |
 | `--max-monitor-errors N` | 監視の Jev の失敗がこの回数続いたら、監視を止めます | 5 | 1 以上の整数 |
 
-初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
+初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) と `--codex-model` の範囲は `--mode` と `--agent` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
 
 advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--device-fps`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds`・`--system-advice-seconds` は使いません。
 
@@ -1094,13 +1150,15 @@ advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs
 | `orchestrator/instruction.md` | 渡した人の初期指示の写し。初期指示を渡さなければ作りません |
 | `orchestrator/sessions.jsonl` | セッションの開始 (`start`)、終了 (`end`。理由 `rotate`・`timeout`・`exit`・`close`、使用量、終了コード、result を受け取ったターンの数)、自動の要約 (`compact`) を 1 行ずつ書きます |
 | `orchestrator/turns.jsonl` | ターンごとに 1 行。送ったテキスト、添えた画像の元の `frames/interval/` のファイル名 (`images`。`frames/latest/` のパスではありません)、前のターンの操作の列が終わるのを待ち始めた時刻 (`t_wait_start`) と待った秒数 (`wait_s`。待たなかったターンは 0)、入力を作った時刻 (`t_sent`)、最後の JSON、誤りの説明、終わり方 (`applied`・`invalid`・`handoff`・`error_result`・`timeout`・`exited`・`stopped`)、使用量を書きます |
-| `orchestrator/session-<NNN>/stream.jsonl` | セッションごとの Claude Code の stream-json の出力。deep の `stream.jsonl` と同じ形です |
+| `orchestrator/session-<NNN>/stream.jsonl` | セッションごとの Claude Code の stream-json の出力。deep の `stream.jsonl` と同じ形です。`--agent codex` では、app-server から届いた JSON-RPC の行を同じ形 (`{"elapsed_s", "data"}`) で書き、送った行を `{"elapsed_s", "sent"}` の形で書きます |
+| `orchestrator/session-<NNN>/images/` | `--agent codex` だけ。ターンごとに添えた画像の JPEG (`turn-<NNNN>-<順番>.jpg`) です |
 | `orchestrator/monitor.jsonl` | 監視が Jev に送った要求ごとに 1 行。監視の名前、フレームの時刻、選択肢ごとの確率、当たって操作を始めた条件 (`hit`)、Jev の応答の `usage`、失敗の説明を書きます |
 | `frames/latest/1.jpg`〜`5.jpg` | 一定間隔のフレームの最新の 5 枚。`frames/interval/` に保存するたびに置き換え、`1.jpg` が最新です。左上に時刻を書き込み、幅は `frames/interval/` と同じ (`--interval-width`) です。一時ファイルに書いてから名前を変えて置き換えます。5 枚たまるまでは、ある分だけを置きます |
 | `operations.jsonl` | advisor 型と同じファイルです。主ループの操作は `source` が `orchestrator`、監視の操作は `monitor` の行になります |
 | `.claude/skills/` | 主ループの Claude Code に読ませるスキル。本体の操作のスキルと、確かめて写したゲームの内容のスキルです |
+| `.agents/skills/` | `--agent codex` だけ。主ループの Codex に読ませるスキルで、中身は `.claude/skills/` と同じ規則で写します (`--agent codex` では `.claude/skills/` は作りません) |
 
-`run.jsonl` の `start` の行の `args` には、`mode` と 6 つの値を書きます (委任型の 2 つの値も、`--mode` に依らず書きます)。主ループのセッションの開始と終了 (`orchestrator_session_start`・`orchestrator_session_end`) と、JSON の誤り (`orchestrator_decision_error`) も `run.jsonl` に書きます。段階の行 (`phase`・`clean_up_end`) は書きません。
+`run.jsonl` の `start` の行の `args` には、`mode` と 6 つの値を書きます (委任型の 2 つの値と、主ループのエージェントの 2 つの値 (`agent`・`codex_model`) も、`--mode` に依らず書きます)。主ループのセッションの開始と終了 (`orchestrator_session_start`・`orchestrator_session_end`) と、JSON の誤り (`orchestrator_decision_error`) も `run.jsonl` に書きます。段階の行 (`phase`・`clean_up_end`) は書きません。
 
 #### Orchestrator 型の止まる理由
 
@@ -1109,7 +1167,7 @@ advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs
 | 条件 | `stop` の理由 |
 |---|---|
 | 主ループの JSON の誤りが `--max-decision-errors` 回続いた | `orchestrator decision invalid <回数> times in a row` |
-| 新しいセッションが最初のターンを終えずに終わることが 3 回続いた (claude を起動できない、最初のターンが `--turn-timeout` を超えた、子プロセスが終わったなど) | `orchestrator session failed <回数> times in a row` |
+| 新しいセッションが最初のターンを終えずに終わることが 3 回続いた (claude か codex app-server を起動できない、Codex の初期化かスレッドの開始に失敗した、最初のターンが `--turn-timeout` を超えた、子プロセスが終わったなど) | `orchestrator session failed <回数> times in a row` |
 | 主ループのスレッドが想定外の例外で終わった | `orchestrator main loop failed: <例外の説明>` |
 | 操作の実行と監視のループのスレッドが想定外の例外で終わった (`orchestrator/monitor.jsonl` に書けないときなど) | `monitor loop failed: <例外の説明>` |
 
@@ -1234,7 +1292,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 | `--delegate-image-width N` | 委任のループが Jev に送る画像の幅。下限は、Jev が受け付ける画像の各辺の下限 280 ピクセルを、16:9 の高さで満たす幅です | 1280 | 498〜1280 の整数 |
 | `--max-delegate-errors N` | 委任のループの Jev の失敗がこの回数続いたら、操作権を主ループに返します | 5 | 1 以上の整数 |
 
-`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors` と、advisor 型と共通の引数の使い方は、監視型と同じです (「Orchestrator 型の起動引数」の項)。監視型だけで使う `--monitor-threshold`・`--max-monitor-errors` は使いません。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめます。委任に Jev を使うため、`--safety fake` でも要ります。
+`--instruction`・`--instruction-file`・`--agent`・`--codex-model`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors` と、advisor 型と共通の引数の使い方は、監視型と同じです (「Orchestrator 型の起動引数」の項)。監視型だけで使う `--monitor-threshold`・`--max-monitor-errors` は使いません。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめます。委任に Jev を使うため、`--safety fake` でも要ります。
 
 #### 委任型の記録
 
@@ -1271,7 +1329,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--mode {advisor,orchestrator,delegate}` | run の型。`advisor` は surface・middle・deep の 3 層、`orchestrator` は Claude Code の主ループと、操作の実行と監視、`delegate` は Claude Code の主ループと、操作の実行と委任のループを動かします (「Orchestrator 型」の節) | `advisor` | `advisor`、`orchestrator`、`delegate` |
+| `--mode {advisor,orchestrator,delegate}` | run の型。`advisor` は surface・middle・deep の 3 層、`orchestrator` は主ループ (`--agent` で Claude Code か Codex を選ぶ) と、操作の実行と監視、`delegate` は主ループと、操作の実行と委任のループを動かします (「Orchestrator 型」の節) | `advisor` | `advisor`、`orchestrator`、`delegate` |
 | `--software NAME` | 起動するソフトの名前 (advisor 型では必須。Orchestrator 型では使いません)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--user NAME` | ソフトを遊ぶユーザーの名前 (advisor 型では必須。Orchestrator 型では使いません)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
@@ -1303,7 +1361,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 | `--task-stuck-seconds S` | 現在の場面の最も古いタスクの続いた秒数がこれを超えたら、間隔を待たずに middle を呼びます (きっかけ `stuck`)。超えたまま続く間は、この秒数ごとに呼びます | 30 | 0 より大きい有限の値 |
 | `--system-advice-seconds S` | 準備・復帰の段階がこの秒数を超えて続いたら、助言の deep をきっかけ `system` で求めます。超えたまま続く間は、この秒数ごとに求めます (「本体の画面の扱い」の節の「本体の画面の助言」の項) | 90 | 0 より大きい有限の値 |
 
-Orchestrator 型だけで使う引数 (`--instruction`・`--instruction-file`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors`・`--monitor-threshold`・`--max-monitor-errors`) は、「Orchestrator 型」の節の「Orchestrator 型の起動引数」の項にあります。委任型だけで使う引数 (`--delegate-image-width`・`--max-delegate-errors`) は、同じ節の「委任型の起動引数」の項にあります。
+Orchestrator 型だけで使う引数 (`--instruction`・`--instruction-file`・`--agent`・`--codex-model`・`--orchestrator-effort`・`--rotate-tokens`・`--turn-timeout`・`--max-decision-errors`・`--monitor-threshold`・`--max-monitor-errors`) は、「Orchestrator 型」の節の「Orchestrator 型の起動引数」の項にあります。委任型だけで使う引数 (`--delegate-image-width`・`--max-delegate-errors`) は、同じ節の「委任型の起動引数」の項にあります。
 
 範囲外の値では、実機に触れずにエラーを表示して終了します (終了コード 2)。advisor 型で `--software` か `--user` が無いときと、値が空か空白だけのときも、引数の誤りとして使い方を表示し、実機に触れずに終了します (終了コード 2)。2 つの名前は、書かれたまま本体の画面の middle の入力に入れ、`run.jsonl` の `start` の行の `args` (`software_name`・`user_name`) にも書きます。Orchestrator 型で 2 つの名前を渡さなかったときは、`args` に空文字列を書きます。advisor 型で、`--middle luna` で環境変数 `OPENAI_API_KEY` が無いとき、`--surface jev` か `--safety jev` で環境変数 `TYPESAFE_API_KEY` が無いときも、範囲の確かめの後に、実機に触れず、実行ディレクトリーも作らずに終了します (終了コード 2)。`--surface jev` と `--safety jev` の両方でキーが無いときは、両方のメッセージを表示します。`--deep-auto-seconds` が `--deep-min-start-interval` より短いと、自動の呼び出しが最小の間隔で捨てられ続けるため、エラーにしています。
 
@@ -1335,7 +1393,7 @@ run は、実行ごとに `runs/<YYYYmmdd-HHMMSS>/` を作ります (同じ名�
 
 | ファイル | 内容 |
 |---|---|
-| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです。`args` の `mode` は run の型 (`advisor`・`orchestrator`・`delegate` のどれか) で、Orchestrator 型の 6 つの値と委任型の 2 つの値も `--mode` に依らず入ります)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節。advisor 型だけ)、Orchestrator 型の主ループのセッションの開始・終了と JSON の誤り (「Orchestrator 型」の節)、委任型の委任の始まりと終わり (`delegate_start`・`delegate_end`。「Orchestrator 型」の節の「委任型の記録」の項)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
+| `run.jsonl` | 起動 (`start`。起動引数を `args` に含みます。`args` には `--software` と `--user` の名前 (`software_name`・`user_name`) も入ります。`args` の `deep` は、deep を Claude Code (`claude`) とフェイク (`fake`) のどちらで動かしたかです。`args` の `mode` は run の型 (`advisor`・`orchestrator`・`delegate` のどれか) で、Orchestrator 型の 6 つの値と委任型の 2 つの値と主ループのエージェントの 2 つの値 (`agent` は `claude` か `codex`、`codex_model` はそのモデル) も `--mode` に依らず入ります)、段階の変化 (`phase`) と片付けの終わり (`clean_up_end`。「本体の画面の扱い」の節。advisor 型だけ)、Orchestrator 型の主ループのセッションの開始・終了と JSON の誤り (「Orchestrator 型」の節)、委任型の委任の始まりと終わり (`delegate_start`・`delegate_end`。「Orchestrator 型」の節の「委任型の記録」の項)、surface と middle の失敗、deep のジョブの開始・停止の要求・終了・保留した要求・捨てた要求と deep を求めたときの失敗 (「run の起動引数」の節の表)、保存を捨てた画像の件数 (`frames_dropped`)、停止 (`stop`。止まった理由を含む) を、1 行 1 件の JSON で書きます。`stop` の行の後には何も書きません |
 | `surface.jsonl` | surface の要求ごとの記録。送った画像の時刻とファイル名、読んだ文書の場面、その要求の先頭のタスクの ID (`task_id`。先頭のタスクが無ければ null。失敗の行にも書きます)、state の `map` に入れたマップの場所の `name` (`map_place`。マップを渡さなかった行、`--surface fake` の行、失敗の行では null)、送った操作、ボタンの制限で外したボタン (`blocked_buttons`)、deep を求めた文書の種類、情報ラベル (`info_labels`)、最新のフレームの box (`boxes`。対象の名前・座標・確信度・出どころ `jev` か `tracker`)、場面転換、待ち時間、失敗の説明を書きます。さらに、要求の番号 (`request`。1 から数え、`surface_requests.jsonl` の `request` と同じ値)、要求したすべての Choice と Noul の問いの確率 (`answers`。`choices` に問いごとの選択肢の確率を、`nouls` に問いごとの確率を入れます。Box の問いの答えは `boxes` に書きます)、Jev の応答の `usage` (受け取った形のまま) を書きます。`request` は、Jev を呼ばない `--surface fake` の行と、要求を送る前に失敗した行では null です。`answers` と `usage` は、`--surface fake` の行と、応答を読めなかった行 (失敗の行) では null です。`usage` は、応答に無いときも null です |
 | `surface_requests.jsonl` | surface が Jev に送った要求の記録。Jev に送る直前に 1 行ずつ足します。要求の番号 (`request`)、送った時刻 (`t_sent`)、モデル名 (`model`)、送った state (`state`。画像は、その画像を保存した `frames/surface/` のファイル名 (`surface.jsonl` の `frames` の `file` と同じ値) に置き換え、保存できなかった画像は null にします)、送った問いの一覧 (`questions`。問いごとに ID・型・問いの文と、Choice の問いでは選択肢の名前と説明 (`criteria`)) を書きます。送った後に失敗した要求 (HTTP のエラー、応答を読めない、答えが足りない) の行も残ります。API キーと HTTP のヘッダーは書きません。`--surface fake` では何も書きません。1 時間に約 3,000 要求を送ると数十 MB になる見込みですが、切り詰めや間引きはしません |
 | `safety.jsonl` | 安全の監視の確かめごとの記録 (「安全のための規則と安全の監視」の節)。送った時刻と受け取った時刻 (`t_sent`・`t_received`)、確かめたフレームの時刻 (`frame_t`)、確かめの種類 (`phase`。`start` か `monitor`)、3 つの問いの名前ごとの確率 (`probabilities`)、照合の選択肢ごとの確率 (`system_screen`)、照合の結果の見本の名前 (`system_screen_result`。照合の結果なしなら null)、Jev の応答の `usage`、失敗の説明 (`error`) を、1 行 1 回の JSON で書きます。失敗した行では `probabilities`・`system_screen`・`system_screen_result`・`usage` を null にします |
@@ -1405,7 +1463,7 @@ Orchestrator 型では段階に入らないため、どの理由でも片付け�
 
 ブリッジの復旧中 (第2章の `recovering`) は止まりません。surface は操作を中立に戻し、復旧が終わるまで要求を送りません。安全の監視は、復旧中も続けます。surface は失敗するたびに操作を中立に戻して 1 秒待ちます。middle が失敗した回は、前回の出力を残します。
 
-止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視 (委任型では委任) のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、claude のセッションを閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
+止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視 (委任型では委任) のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、主ループのセッション (claude か codex app-server) を閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。`--agent codex` のセッションの起動 (最大 30 秒待ちます) の途中に止めたときは、この 15 秒を超えることがあります。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
 
 ## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
 

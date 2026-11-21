@@ -2295,3 +2295,75 @@ def test_run_delegate_passes_the_instruction_and_the_jev_client_to_app(monkeypat
     assert parts.monitor is client
     assert recorded.open_while_run == [True]
     assert client.closed
+
+
+# --- 主ループのエージェント (--agent と --codex-model) ---
+
+
+def test_run_agent_defaults_to_claude_and_the_codex_model_to_gpt_6_2_sol():
+    args = build_parser().parse_args(ORCHESTRATOR)
+    assert args.agent == "claude"
+    assert args.codex_model == "gpt-6.2-sol"
+    settings = run_settings_from_args(args)
+    assert settings.agent.value == "claude"
+    assert settings.codex_model == "gpt-6.2-sol"
+
+
+@pytest.mark.parametrize("base", [ORCHESTRATOR, DELEGATE])
+def test_run_settings_from_args_copy_the_agent_and_the_codex_model(base):
+    args = build_parser().parse_args(
+        [*base, "--agent", "codex", "--codex-model", "gpt-6.1-sol"]
+    )
+    settings = run_settings_from_args(args)
+    assert settings.agent.value == "codex"
+    assert settings.codex_model == "gpt-6.1-sol"
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    value = run_settings_to_json(settings)
+    assert value["agent"] == "codex"
+    assert type(value["agent"]) is str
+    assert value["codex_model"] == "gpt-6.1-sol"
+
+
+def test_run_rejects_an_unknown_agent(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*ORCHESTRATOR, "--agent", "gemini"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--agent" in err
+    assert "invalid choice" in err
+
+
+def test_run_with_a_blank_codex_model_ends_with_the_option_name(tmp_path, capsys):
+    runs_dir = tmp_path / "runs"
+    code = main(
+        [
+            *ORCHESTRATOR,
+            "--agent",
+            "codex",
+            "--codex-model",
+            " ",
+            "--runs-dir",
+            str(runs_dir),
+        ]
+    )
+    assert code == 2
+    assert "--codex-model" in capsys.readouterr().err
+    assert not runs_dir.exists()
+
+
+def test_run_help_shows_the_agent_arguments(capsys):
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    help_text = capsys.readouterr().out
+    assert "--agent" in help_text
+    assert "--codex-model" in help_text
+
+
+def test_run_orchestrator_with_codex_passes_the_agent_to_app(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    code = main([*ORCHESTRATOR, "--safety", "fake", "--agent", "codex"])
+    assert code == 0
+    [(settings, _)] = recorded.created
+    assert settings.agent.value == "codex"
+    assert settings.codex_model == "gpt-6.2-sol"

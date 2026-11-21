@@ -13,6 +13,7 @@ from switch2_layers.progress.stuck_advice_trigger import (
     DEFAULT_SYSTEM_ADVICE_SECONDS,
 )
 from switch2_layers.settings import (
+    DEFAULT_AGENT,
     DEFAULT_BOX_REQUERY_EVERY,
     DEFAULT_DEEP_MIN_START_INTERVAL_S,
     DEFAULT_DEEP_RUNNER,
@@ -34,6 +35,7 @@ from switch2_layers.settings import (
     SAFETY_INTERVAL_MAX_S,
     SAFETY_INTERVAL_MIN_S,
     TYPESAFE_API_KEY_ENV,
+    AgentKind,
     DeepOnceSettings,
     DeepRunnerChoice,
     MiddleEffort,
@@ -954,3 +956,53 @@ def test_delegate_without_typesafe_api_key_is_an_error(environ):
 def test_delegate_with_typesafe_api_key_has_no_error():
     # OPENAI_API_KEY は確かめない
     assert delegate_api_key_errors({"TYPESAFE_API_KEY": "ts-x"}) == []
+
+
+# --- 主ループのエージェント (--agent と --codex-model) ---
+
+
+def test_agent_kinds_and_defaults():
+    assert [agent.value for agent in AgentKind] == ["claude", "codex"]
+    assert DEFAULT_AGENT is AgentKind.CLAUDE
+    assert RunSettings().agent is AgentKind.CLAUDE
+    assert RunSettings().codex_model == "gpt-6.2-sol"
+
+
+@pytest.mark.parametrize("mode", list(RunMode))
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+@pytest.mark.parametrize("codex_model", ["", " ", "\t\n"])
+def test_blank_codex_model_is_reported_with_option_name(mode, agent, codex_model):
+    # 範囲は mode と agent に依らず確かめる
+    errors = run_settings_errors(
+        RunSettings(mode=mode, agent=AgentKind(agent), codex_model=codex_model)
+    )
+    assert len(errors) == 1
+    assert "--codex-model" in errors[0]
+
+
+def test_codex_settings_are_valid():
+    for mode in RunMode:
+        settings = RunSettings(
+            mode=mode, agent=AgentKind.CODEX, codex_model="gpt-6.1-sol"
+        )
+        assert run_settings_errors(settings) == []
+
+
+def test_codex_model_error_follows_the_delegate_errors():
+    errors = run_settings_errors(RunSettings(codex_model="", max_delegate_errors=0))
+    assert len(errors) == 2
+    assert "--max-delegate-errors" in errors[0]
+    assert "--codex-model" in errors[1]
+
+
+def test_run_settings_to_json_writes_the_agent_as_string_and_the_codex_model():
+    value = run_settings_to_json(
+        RunSettings(mode=RunMode.DELEGATE, agent=AgentKind.CODEX, codex_model="m")
+    )
+    assert value["agent"] == "codex"
+    assert type(value["agent"]) is str
+    assert value["codex_model"] == "m"
+    assert json.loads(json.dumps(value)) == value
+    # --agent claude でも codex_model を入れる
+    assert run_settings_to_json(RunSettings())["codex_model"] == "gpt-6.2-sol"
+    assert run_settings_to_json(RunSettings())["agent"] == "claude"

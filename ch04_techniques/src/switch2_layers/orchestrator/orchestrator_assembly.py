@@ -20,6 +20,15 @@ from switch2_layers.frames.latest_frames import LatestFrame
 from switch2_layers.hardware.pad_output import PadOutput
 from switch2_layers.orchestrator.claude_session_command import ClaudeSessionOptions
 from switch2_layers.orchestrator.claude_stream_session import StreamProcessStarter
+from switch2_layers.orchestrator.codex_instructions import (
+    CODEX_FRAMES_GUIDE_TEXT,
+    codex_delegate_instructions,
+    codex_orchestrator_instructions,
+)
+from switch2_layers.orchestrator.codex_main_loop_session import (
+    CodexMainLoopSessionFactory,
+)
+from switch2_layers.orchestrator.codex_session_command import codex_skills_dir
 from switch2_layers.orchestrator.decision_parser import parse_decision
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
 from switch2_layers.orchestrator.delegate_loop import DelegateSettings
@@ -29,6 +38,7 @@ from switch2_layers.orchestrator.main_loop import (
     OrchestratorMainLoopParts,
     OrchestratorMainLoopSettings,
 )
+from switch2_layers.orchestrator.main_loop_session import MainLoopSessionFactory
 from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_controller import (
     OrchestratorController,
@@ -39,10 +49,11 @@ from switch2_layers.orchestrator.orchestrator_instructions import (
     delegate_instructions,
     orchestrator_instructions,
 )
+from switch2_layers.orchestrator.turn_input import FRAMES_GUIDE_TEXT
 from switch2_layers.records.run_log import RunLog
 from switch2_layers.run_clock import RunClock
 from switch2_layers.run_directory import RunPaths
-from switch2_layers.settings import RunMode, RunSettings
+from switch2_layers.settings import AgentKind, RunMode, RunSettings
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
 logger = logging.getLogger(__name__)
@@ -62,9 +73,9 @@ class OrchestratorLoopParts:
     monitor                監視 (委任型では委任) の要求の送り先 (run では surface.jev_client.JevClient)
     initial_instruction    人の初期指示。無ければ None
     on_stop                実行全体を止める関数 (止まる理由の文字列を受け取る。app.LayersApp.request_stop)
-    start_process          claude の子プロセスを起動する関数 (None なら subprocess.Popen)
-    signal_process_group   claude のプロセスグループにシグナルを送る関数 (None なら os.killpg)
-    environ                claude の環境変数の元 (None ならセッションを始めるときの os.environ)
+    start_process          主ループの子プロセス (claude か codex app-server) を起動する関数 (None なら subprocess.Popen)
+    signal_process_group   主ループの子プロセスのプロセスグループにシグナルを送る関数 (None なら os.killpg)
+    environ                主ループの子プロセスの環境変数の元 (None ならセッションを始めるときの os.environ)
     switch_skills_dir      本体の操作のスキルを写す元
     buffered_frames        キャプチャーの元のフレームを古い順に返す関数 (FrameBuffer.frames。委任の要求の画像に使う)。
                            委任型だけで使い、委任型では要る (None なら build_orchestrator_loops が ValueError)
@@ -132,6 +143,56 @@ def delegate_decision_parser(controller: OrchestratorController) -> DecisionPars
     return parse
 
 
+@dataclass(frozen=True)
+class MainLoopAgentParts:
+    """主ループの部品のうち、エージェント (--agent) で変わるもの (OrchestratorMainLoopParts の同じ名前の項目に渡す)。
+
+    instructions        変わらない指示の文
+    session_factory     セッションを作るもの (None なら、主ループが Claude Code のものを作る)
+    skills_dir          スキルの写し先 (None なら .claude/skills/)
+    frames_guide_text   入力の「## 古いフレーム」の節の本文
+    Claude Code では、instructions のほかは既定値 (主ループの Claude Code の動きを変えない)。
+    """
+
+    instructions: str
+    session_factory: MainLoopSessionFactory | None = None
+    skills_dir: Path | None = None
+    frames_guide_text: str = FRAMES_GUIDE_TEXT
+
+
+def codex_agent_parts(
+    parts: OrchestratorLoopParts, settings: RunSettings, delegate: bool
+) -> MainLoopAgentParts:
+    """--agent codex の主ループの部品を返す。
+
+    instructions        delegate なら codex_instructions.codex_delegate_instructions()、そうでなければ
+                        codex_orchestrator_instructions()
+    session_factory     codex_main_loop_session.CodexMainLoopSessionFactory(paths, instructions,
+                        model = settings.codex_model, effort = settings.orchestrator_effort, clock = clock.now,
+                        environ, start_process, signal_process_group)
+    skills_dir          codex_session_command.codex_skills_dir(paths) (.agents/skills/)
+    frames_guide_text   codex_instructions.CODEX_FRAMES_GUIDE_TEXT
+    """
+    instructions = (
+        codex_delegate_instructions() if delegate else codex_orchestrator_instructions()
+    )
+    return MainLoopAgentParts(
+        instructions=instructions,
+        session_factory=CodexMainLoopSessionFactory(
+            paths=parts.paths,
+            instructions=instructions,
+            model=settings.codex_model,
+            effort=settings.orchestrator_effort,
+            clock=parts.clock.now,
+            environ=parts.environ,
+            start_process=parts.start_process,
+            signal_process_group=parts.signal_process_group,
+        ),
+        skills_dir=codex_skills_dir(parts.paths),
+        frames_guide_text=CODEX_FRAMES_GUIDE_TEXT,
+    )
+
+
 def build_orchestrator_loops(
     parts: OrchestratorLoopParts, settings: RunSettings
 ) -> OrchestratorLoops:
@@ -156,8 +217,11 @@ def build_orchestrator_loops(
         main_loop    parse_decision = delegate_decision_parser(controller)、
                      instructions = orchestrator_instructions.delegate_instructions()
     委任型で parts.buffered_frames が None なら ValueError。
+    settings.agent が codex なら、どちらの型でも、主ループの instructions・session_factory・skills_dir・
+    frames_guide_text を codex_agent_parts の値にする (claude なら instructions のほかは渡さない)。
     """
-    if settings.mode is RunMode.DELEGATE:
+    delegate = settings.mode is RunMode.DELEGATE
+    if delegate:
         if parts.buffered_frames is None:
             raise ValueError("the delegate mode needs buffered_frames")
         controller = OrchestratorController(
@@ -198,6 +262,11 @@ def build_orchestrator_loops(
         )
         parse = registered_macro_parser(controller)
         instructions = orchestrator_instructions()
+    agent_parts = (
+        codex_agent_parts(parts, settings, delegate)
+        if settings.agent is AgentKind.CODEX
+        else MainLoopAgentParts(instructions=instructions)
+    )
     main_loop = OrchestratorMainLoop(
         OrchestratorMainLoopParts(
             paths=parts.paths,
@@ -213,7 +282,10 @@ def build_orchestrator_loops(
             signal_process_group=parts.signal_process_group,
             environ=parts.environ,
             switch_skills_dir=parts.switch_skills_dir,
-            instructions=instructions,
+            instructions=agent_parts.instructions,
+            session_factory=agent_parts.session_factory,
+            skills_dir=agent_parts.skills_dir,
+            frames_guide_text=agent_parts.frames_guide_text,
         ),
         OrchestratorMainLoopSettings(
             rotate_tokens=settings.rotate_tokens,

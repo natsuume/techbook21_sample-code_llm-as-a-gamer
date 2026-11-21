@@ -17,7 +17,7 @@ turn_input が委任の節を置く)。委任中に主ループの actions を�
                              使う)。起動の引数・環境変数の組み立てと、stream-json の行から出来事への直し方を持つ
     claude_session_command   Claude Code の起動の設定の型 (ClaudeSessionOptions) と、--rotate-tokens の値の確かめ
                              (autocompact_arguments)
-    skill_copy               本体の操作のスキルとゲームの内容のスキルを .claude/skills/ に写す
+    skill_copy               本体の操作のスキルとゲームの内容のスキルを、スキルの写し先 (既定 .claude/skills/) に写す
     orchestrator_instructions  変わらない指示 (--append-system-prompt) と引き継ぎの依頼の文
     action_settle            前のターンの操作の列が終わり、操作の後に撮ったフレームが届くのを待つ
     turn_input               入力のテキストと画像
@@ -85,9 +85,10 @@ from switch2_layers.orchestrator.skill_copy import (
     SkippedGameSkill,
     copy_game_skills,
     copy_switch_skills,
-    prepare_claude_skills_dir,
+    prepare_skills_dir,
 )
 from switch2_layers.orchestrator.turn_input import (
+    FRAMES_GUIDE_TEXT,
     SessionOpening,
     TurnContext,
     TurnImage,
@@ -222,6 +223,10 @@ class OrchestratorMainLoopParts:
     session_factory        セッションを作るもの (main_loop_session.MainLoopSessionFactory)。None なら、セッションを
                            始めるたびに、claude・instructions・environ・start_process・signal_process_group と
                            settings.rotate_tokens から claude_main_loop_session.ClaudeMainLoopSessionFactory を作って使う
+    skills_dir             本体の操作のスキルとゲームの内容のスキルの写し先。None なら paths.claude_skills_dir
+                           (.claude/skills/)。主ループの Codex では実行ディレクトリーの .agents/skills/ を渡す
+    frames_guide_text      入力の「## 古いフレーム」の節の本文 (既定 turn_input.FRAMES_GUIDE_TEXT。主ループの Codex では
+                           codex_instructions.CODEX_FRAMES_GUIDE_TEXT を渡す)
     claude・start_process・signal_process_group・environ・instructions は、session_factory が None のときに、Claude Code の
     セッションを作るのに使う。
     """
@@ -241,6 +246,8 @@ class OrchestratorMainLoopParts:
     switch_skills_dir: Path = field(default=DEFAULT_SWITCH_SKILLS_DIR)
     instructions: str = field(default_factory=orchestrator_instructions)
     session_factory: MainLoopSessionFactory | None = None
+    skills_dir: Path | None = None
+    frames_guide_text: str = FRAMES_GUIDE_TEXT
 
 
 class _TurnEnd(Enum):
@@ -323,8 +330,9 @@ class OrchestratorMainLoop:
 
     セッション (主ループのエージェントの子プロセス 1 つ。main_loop_session.MainLoopSession) の流れ:
         1. 始める: 番号 (1 始まり) を 1 増やし、paths.orchestrator_session_dir(番号) を (親を含めて) 作る。
-           skill_copy.prepare_claude_skills_dir で .claude/skills/ を作り、copy_switch_skills(switch_skills_dir) と
-           copy_game_skills で写す (セッションを起動する前に行う。写すスキルが無くても .claude/skills/ は作る)。
+           skill_copy.prepare_skills_dir でスキルの写し先 (parts.skills_dir。None なら .claude/skills/) を作り、
+           copy_switch_skills(switch_skills_dir) と copy_game_skills でそこに写す (セッションを起動する前に行う。
+           写すスキルが無くても写し先は作る)。
            copy_game_skills の結果の skipped を、写さなかったスキルとして覚える (copy_game_skills を呼ぶたびに
            置き換え、次の入力の TurnContext.skipped_skills に渡す)。
            セッションを作るもの (parts.session_factory。None なら、claude_main_loop_session.ClaudeMainLoopSessionFactory
@@ -517,7 +525,9 @@ class OrchestratorMainLoop:
                 return False
             if end is not _TurnEnd.RESULT:
                 return self._finish_cut_turn(session, turn, end)
-            self._skipped_skills = copy_game_skills(self.parts.paths).skipped
+            self._skipped_skills = copy_game_skills(
+                self.parts.paths, target_dir=self._skills_dir()
+            ).skipped
             if turn.result_is_error:
                 return self._finish_error_result(session, turn)
             session.completed_turns += 1
@@ -563,9 +573,9 @@ class OrchestratorMainLoop:
         self._session_number += 1
         number = self._session_number
         paths.orchestrator_session_dir(number).mkdir(parents=True, exist_ok=True)
-        prepare_claude_skills_dir(paths)
-        copy_switch_skills(parts.switch_skills_dir, paths)
-        self._skipped_skills = copy_game_skills(paths).skipped
+        skills_dir = prepare_skills_dir(self._skills_dir())
+        copy_switch_skills(parts.switch_skills_dir, paths, target_dir=skills_dir)
+        self._skipped_skills = copy_game_skills(paths, target_dir=skills_dir).skipped
         stream_path = paths.orchestrator_session_stream(number)
         stream = self._session_factory().create(number, stream_path)
         try:
@@ -588,6 +598,13 @@ class OrchestratorMainLoop:
         )
         parts.run_log.write(EVENT_ORCHESTRATOR_SESSION_START, session=number)
         return session
+
+    def _skills_dir(self) -> Path:
+        """スキルの写し先 (parts.skills_dir。None なら paths.claude_skills_dir)。"""
+        parts = self.parts
+        if parts.skills_dir is not None:
+            return parts.skills_dir
+        return parts.paths.claude_skills_dir
 
     def _session_factory(self) -> MainLoopSessionFactory:
         """セッションを作るものを返す (セッションの流れの 1)。
@@ -654,6 +671,7 @@ class OrchestratorMainLoop:
                 previous_error=self._previous_error,
                 skipped_skills=self._skipped_skills,
                 previous_actions=previous_actions,
+                frames_guide=parts.frames_guide_text,
             )
         )
         if first:
