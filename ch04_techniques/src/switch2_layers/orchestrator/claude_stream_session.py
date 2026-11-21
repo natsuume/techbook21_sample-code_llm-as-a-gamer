@@ -1,15 +1,17 @@
 """主ループの claude -p (stream-json の入出力) の子プロセス 1 つ (ClaudeStreamSession)。
 
 起動・標準入力への書き込み・標準出力の読み取り・終了を扱う。行の中身の読み方は orchestrator.stream_messages と
-deep.claude_stream_log の関数で行い、このモジュールはプロセスと行の受け渡しだけを扱う。
+deep.claude_stream_log の関数で行い、このモジュールはプロセスと行の受け渡しだけを扱う。主ループはこのクラスを直接は
+使わず、orchestrator.claude_main_loop_session.ClaudeMainLoopSession が包んで、行を主ループの出来事に直す。
     - 起動 (start): 子プロセスを新しいセッション (プロセスグループ) の先頭として起動する (start_new_session=True。
       プロセスグループの ID は子プロセスの pid と同じ)。作業ディレクトリーは実行ディレクトリー
     - 標準出力: 別のスレッド (daemon) が 1 行ずつ読み、届くたびに stream.jsonl に書き (deep.claude_stream_log の
-      ClaudeStreamLog。deep の stream.jsonl と同じ形)、読んだ行をキューに入れる。主ループは read で 1 つずつ受け取る
+      ClaudeStreamLog。deep の stream.jsonl と同じ形)、読んだ行をキューに入れる。read で 1 つずつ受け取る
     - 標準エラー出力: 別のスレッド (daemon) が最後まで読む
-    - 標準入力: send は呼んだスレッドで書く。send_in_background は書き込み用のスレッド (daemon) で書き、すぐ戻る。
-      子プロセスが標準入力を読まなくなると、パイプのバッファーを超える行 (画像を含む入力など) の書き込みは戻らない。
-      主ループは send_in_background を使い、書き終わるのを、停止の合図と --turn-timeout を確かめながら待つ
+    - 標準入力: send は呼んだスレッドで書く。send_in_background は書き込み用のスレッド (daemon) で書き、すぐ戻る
+      (戻り値は orchestrator.pending_send.PendingSend)。子プロセスが標準入力を読まなくなると、パイプのバッファーを
+      超える行 (画像を含む入力など) の書き込みは戻らない。主ループは (ClaudeMainLoopSession を通して)
+      send_in_background を使い、書き終わるのを、停止の合図と --turn-timeout を確かめながら待つ
     - 終了 (close): 標準入力を閉じ、grace_s 秒 (既定 5 秒) たっても終わらなければプロセスグループに SIGTERM を送り、
       さらに grace_s 秒たっても終わらなければ SIGKILL を送る。send_in_background の書き込みが終わっていなければ、
       標準入力を閉じると書き込みの終わりを待ってしまうため、閉じずに (最初の grace_s 秒も待たずに) すぐ SIGTERM を
@@ -31,6 +33,7 @@ from pathlib import Path
 from typing import IO, Protocol
 
 from switch2_layers.deep.claude_stream_log import ClaudeStreamLog
+from switch2_layers.orchestrator.pending_send import PendingSend
 from switch2_layers.orchestrator.stream_messages import user_message_line
 
 # logging を設定しなければ、WARNING 以上は標準エラー出力に書かれる
@@ -40,31 +43,6 @@ logger = logging.getLogger(__name__)
 SESSION_CLOSE_GRACE_S = 5.0
 # close で、標準出力を読むスレッドの終わりを待つ上限 (秒)
 READER_JOIN_TIMEOUT_S = 5.0
-
-
-class PendingSend:
-    """send_in_background で書き始めた 1 行の書き込み。"""
-
-    def __init__(self) -> None:
-        """書き終えていない状態で作る。"""
-        self._finished = threading.Event()
-        self._written = False
-
-    def finish(self, written: bool) -> None:
-        """書き込みが終わったことを記録する (written は書けたら True)。書き込み用のスレッドが呼ぶ。"""
-        self._written = written
-        self._finished.set()
-
-    def wait(self, timeout_s: float) -> bool | None:
-        """書き込みの終わりを最大 timeout_s 秒待つ。書けたら True、書けなかったら False、まだ終わっていなければ None。"""
-        if not self._finished.wait(max(timeout_s, 0.0)):
-            return None
-        return self._written
-
-    @property
-    def finished(self) -> bool:
-        """書き込みが終わっていれば (書けたかに依らず) True。"""
-        return self._finished.is_set()
 
 
 class StreamProcess(Protocol):

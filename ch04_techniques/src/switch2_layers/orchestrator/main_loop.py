@@ -1,8 +1,9 @@
 """Orchestrator 型の主ループ (OrchestratorMainLoop)。--mode orchestrator (監視型) と --mode delegate (委任型) で使う。
 
-主ループの Claude Code (claude -p) を stream-json の入出力で開いたままにし、前の判断の操作の列が終わって画面が
-落ち着き、操作の後に撮ったフレームが届いたら (actions が空なら、すぐ) 次の画面と出来事を渡し、各ターンの最後の
-JSON を、操作の実行と監視 (委任型では委任) の部品 (OrchestratorController。parse_decision と apply) に渡す。
+主ループのエージェントのセッション (既定は Claude Code の claude -p を stream-json の入出力で開いたままにしたもの) を
+開いたままにし、前の判断の操作の列が終わって画面が落ち着き、操作の後に撮ったフレームが届いたら (actions が空なら、
+すぐ) 次の画面と出来事を渡し、各ターンの最後の JSON を、操作の実行と監視 (委任型では委任) の部品
+(OrchestratorController。parse_decision と apply) に渡す。
 セッションの使用量がしきい値を超えたら、引き継ぎを書かせてからセッションを入れ替える。
 2 つの型の違いは、組み立て (orchestrator_assembly) が渡す部品だけで決まる: 変わらない指示の文
 (OrchestratorMainLoopParts.instructions)、JSON の読み方 (parse_decision)、出来事 (委任型では委任の状況を含む。
@@ -10,22 +11,23 @@ turn_input が委任の節を置く)。委任中に主ループの actions を�
 なるため、待たずに次の入力を作る。
 
 使う部品:
-    claude_session_command   起動の引数・--settings・権限のルール・環境変数
-    parent_skill_names       親のディレクトリーのスキルの名前 (skillOverrides で off にする)
+    main_loop_session        セッションとの境界の型 (セッション・セッションを作るもの・read が返す出来事)。主ループは
+                             エージェントの入出力の形を知らず、この型だけを通してセッションを使う
+    claude_main_loop_session その境界の Claude Code の実装 (OrchestratorMainLoopParts.session_factory が None のときに
+                             使う)。起動の引数・環境変数の組み立てと、stream-json の行から出来事への直し方を持つ
+    claude_session_command   Claude Code の起動の設定の型 (ClaudeSessionOptions) と、--rotate-tokens の値の確かめ
+                             (autocompact_arguments)
     skill_copy               本体の操作のスキルとゲームの内容のスキルを .claude/skills/ に写す
     orchestrator_instructions  変わらない指示 (--append-system-prompt) と引き継ぎの依頼の文
     action_settle            前のターンの操作の列が終わり、操作の後に撮ったフレームが届くのを待つ
     turn_input               入力のテキストと画像
-    claude_stream_session    子プロセスの起動・標準入力・標準出力・終了
-    stream_messages          stream-json の行の読み方と、標準入力に送る行の形
     session_record           orchestrator/sessions.jsonl・turns.jsonl
 入れ替えの間も、操作の実行と監視の部品は動き続ける。
-時計 (RunClock)・最新のフレームの受け取り方・子プロセスの起動・シグナルの送り先・環境変数・本体の操作のスキルの写す元を
-差し替えられ、テストでは偽の stream-json を返すプロセスと、時間を進められる時計を使う。
+時計 (RunClock)・最新のフレームの受け取り方・セッションを作るもの・子プロセスの起動・シグナルの送り先・環境変数・
+本体の操作のスキルの写す元を差し替えられ、テストでは偽の stream-json を返すプロセスと、時間を進められる時計を使う。
 """
 
 import logging
-import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -33,25 +35,31 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from switch2_layers.deep.claude_stream_log import assistant_text, is_result_message
 from switch2_layers.error_text import describe_exception
 from switch2_layers.frames.latest_frames import LatestFrame, newest_frame_t
 from switch2_layers.notes.note_reader import read_note_text
 from switch2_layers.orchestrator.action_settle import wait_for_settled_actions
+from switch2_layers.orchestrator.claude_main_loop_session import (
+    ClaudeMainLoopSessionFactory,
+)
 from switch2_layers.orchestrator.claude_session_command import (
     ClaudeSessionOptions,
     autocompact_arguments,
-    build_session_command,
-    build_session_env,
 )
 from switch2_layers.orchestrator.claude_stream_session import (
     SESSION_CLOSE_GRACE_S,
-    ClaudeStreamSession,
-    SessionLaunch,
-    StreamEnd,
     StreamProcessStarter,
 )
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
+from switch2_layers.orchestrator.main_loop_session import (
+    AssistantText,
+    AutoCompaction,
+    ContextUsage,
+    MainLoopSession,
+    MainLoopSessionFactory,
+    SessionEnded,
+    TurnResult,
+)
 from switch2_layers.orchestrator.orchestrator_events import (
     MainActionsRun,
     OrchestratorEvents,
@@ -61,7 +69,6 @@ from switch2_layers.orchestrator.orchestrator_instructions import (
     handoff_request_text,
     orchestrator_instructions,
 )
-from switch2_layers.orchestrator.parent_skill_names import find_parent_skill_names
 from switch2_layers.orchestrator.session_record import (
     SessionEndReason,
     SessionRecordWriter,
@@ -80,16 +87,11 @@ from switch2_layers.orchestrator.skill_copy import (
     copy_switch_skills,
     prepare_claude_skills_dir,
 )
-from switch2_layers.orchestrator.stream_messages import (
-    assistant_usage_tokens,
-    compact_metadata,
-    is_compact_boundary,
-)
 from switch2_layers.orchestrator.turn_input import (
     SessionOpening,
     TurnContext,
+    TurnImage,
     build_session_opening_text,
-    build_turn_content,
     build_turn_text,
     carry_over_events,
     list_note_files,
@@ -113,7 +115,7 @@ DEFAULT_TURN_TIMEOUT_S = 120.0  # --turn-timeout の既定値 (秒)
 DEFAULT_MAX_DECISION_ERRORS = 3  # --max-decision-errors の既定値
 # 新しいセッションが最初のターンの result を受け取る前に終わることが、続けてこの回数になったら実行全体を止める
 MAX_SESSION_FAILURES = 3
-# 標準出力の行を待つ 1 回の上限と、標準入力への書き込みが終わるのを待つ 1 回の上限 (秒)。
+# セッションの出来事を待つ 1 回の上限と、入力を送り終わるのを待つ 1 回の上限 (秒)。
 # この間隔で、停止の合図と --turn-timeout を確かめる
 READ_POLL_S = 0.05
 # set_started を待つ間に、停止の合図を確かめる間隔 (秒)
@@ -180,11 +182,12 @@ class OrchestratorMainLoopSettings:
     """主ループのしきい値と上限。
 
     rotate_tokens         セッションの使用量がこれを超えたら、引き継ぎの依頼を送って入れ替える (--rotate-tokens)
-    turn_timeout_s        1 ターン (入力を作った時刻から result まで。標準入力への書き込みを待つ時間を含み、入力を作る
+    turn_timeout_s        1 ターン (入力を作った時刻から result まで。入力を送り終わるのを待つ時間を含み、入力を作る
                           前に前のターンの操作の列が終わるのを待つ時間は含まない) の上限の秒数 (--turn-timeout)
     max_decision_errors   JSON の誤りが続けてこの回数になったら、実行全体を止める (--max-decision-errors)
-    close_grace_s         セッションを終えるときに、標準入力を閉じてから SIGTERM まで・SIGTERM から SIGKILL までに
-                          待つ秒数 (既定 claude_stream_session.SESSION_CLOSE_GRACE_S)
+    close_grace_s         セッションを終えるときに、セッションの close に渡す秒数 (Claude Code の実装では、標準入力を
+                          閉じてから SIGTERM まで・SIGTERM から SIGKILL までに待つ秒数。
+                          既定 claude_stream_session.SESSION_CLOSE_GRACE_S)
     """
 
     rotate_tokens: int = DEFAULT_ROTATE_TOKENS
@@ -216,6 +219,11 @@ class OrchestratorMainLoopParts:
     instructions           --append-system-prompt で渡す変わらない指示の文 (既定は
                            orchestrator_instructions.orchestrator_instructions() の監視型の版。--mode delegate では
                            orchestrator_instructions.delegate_instructions() の委任型の版を渡す)
+    session_factory        セッションを作るもの (main_loop_session.MainLoopSessionFactory)。None なら、セッションを
+                           始めるたびに、claude・instructions・environ・start_process・signal_process_group と
+                           settings.rotate_tokens から claude_main_loop_session.ClaudeMainLoopSessionFactory を作って使う
+    claude・start_process・signal_process_group・environ・instructions は、session_factory が None のときに、Claude Code の
+    セッションを作るのに使う。
     """
 
     paths: RunPaths
@@ -232,15 +240,16 @@ class OrchestratorMainLoopParts:
     environ: Mapping[str, str] | None = None
     switch_skills_dir: Path = field(default=DEFAULT_SWITCH_SKILLS_DIR)
     instructions: str = field(default_factory=orchestrator_instructions)
+    session_factory: MainLoopSessionFactory | None = None
 
 
 class _TurnEnd(Enum):
     """1 ターンを待ち終えた理由 (_wait_for_result の結果)。"""
 
-    RESULT = "result"  # result の行が届いた
+    RESULT = "result"  # ターンの結果 (TurnResult) が届いた
     STOPPED = "stopped"  # 停止の合図が立った
     TIMEOUT = "timeout"  # 入力を送ってから turn_timeout_s 秒たった
-    ENDED = "ended"  # 標準出力が終わった (子プロセスが終わった)
+    ENDED = "ended"  # セッションの出力が終わった (SessionEnded。子プロセスが終わった)
 
 
 class _AppliedResult(Enum):
@@ -255,7 +264,7 @@ class _AppliedResult(Enum):
 
 
 class _SendFailure(Enum):
-    """入力を送れなかった理由 (_send_content の結果)。"""
+    """入力を送れなかった理由 (_send_input の結果)。"""
 
     # 書き込みに失敗したか、turn_timeout_s 秒のうちに書き終わらなかった
     NOT_SENT = "not_sent"
@@ -293,15 +302,15 @@ class _OpenSession:
     """開いているセッション 1 つ。
 
     number            セッションの番号 (1 始まり)
-    stream            claude の子プロセス
-    usage_tokens      最後に読んだ assistant の行の使用量
+    stream            セッション (main_loop_session.MainLoopSession。既定は claude の子プロセス 1 つ)
+    usage_tokens      最後に受け取った使用量 (ContextUsage の値)
     turn_count        送った入力の数 (次の入力の番号は turn_count + 1)
     completed_turns   result を受け取ったターンの数 (引き継ぎの依頼を含む。is_error が true の result は数えない)
     previous_sent_t   前の入力を送った時刻。まだ送っていなければ None
     """
 
     number: int
-    stream: ClaudeStreamSession
+    stream: MainLoopSession
     usage_tokens: int = 0
     turn_count: int = 0
     completed_turns: int = 0
@@ -312,19 +321,19 @@ class OrchestratorMainLoop:
     """Orchestrator 型の主ループ。run は 1 つのスレッド (主ループのスレッド) から 1 回だけ呼ぶ。set_started は
     ほかのスレッドから呼んでよい。
 
-    セッション (1 つの claude の子プロセス) の流れ:
+    セッション (主ループのエージェントの子プロセス 1 つ。main_loop_session.MainLoopSession) の流れ:
         1. 始める: 番号 (1 始まり) を 1 増やし、paths.orchestrator_session_dir(番号) を (親を含めて) 作る。
            skill_copy.prepare_claude_skills_dir で .claude/skills/ を作り、copy_switch_skills(switch_skills_dir) と
-           copy_game_skills で写す (claude を起動する前に行う。写すスキルが無くても .claude/skills/ は作る)。
+           copy_game_skills で写す (セッションを起動する前に行う。写すスキルが無くても .claude/skills/ は作る)。
            copy_game_skills の結果の skipped を、写さなかったスキルとして覚える (copy_game_skills を呼ぶたびに
            置き換え、次の入力の TurnContext.skipped_skills に渡す)。
-           run_dir = paths.root のシンボリックリンクを解決した絶対パスとして、
-           command = claude_session_command.build_session_command(RunPaths(run_dir), parts.instructions,
-           parent_skill_names.find_parent_skill_names(run_dir), claude, settings.rotate_tokens)、
-           env = build_session_env(environ, claude.hidden_env_names)、cwd = run_dir で、
-           claude_stream_session.ClaudeStreamSession(stream_path=paths.orchestrator_session_stream(番号)) を起動する。
+           セッションを作るもの (parts.session_factory。None なら、claude_main_loop_session.ClaudeMainLoopSessionFactory
+           を parts.paths・instructions・claude・settings.rotate_tokens・clock.now・environ・start_process・
+           signal_process_group で作る) の create(番号, stream_path = paths.orchestrator_session_stream(番号)) で
+           セッションを作り、start で起動する (Claude Code の起動の引数・作業ディレクトリー・環境変数は
+           claude_main_loop_session に書く)。create の例外は、起動の失敗として扱わない (run の想定外の例外になる)。
            sessions.jsonl に開始の行 (stream は paths.relative(stream_path))、run.jsonl に
-           orchestrator_session_start {"session"} を書く。起動できなければ (OSError)、開始の行は書かずに、終了の行
+           orchestrator_session_start {"session"} を書く。起動できなければ (start の OSError)、開始の行は書かずに、終了の行
            (理由 exit、returncode null、error に説明) と orchestrator_session_end を書き、最初のターンを終えずに終わった
            セッションとして数える
         2. 最初の入力 (待たずに作る): events = turn_input.carry_over_events(繰り越した出来事, controller.take_events()) とし、
@@ -332,27 +341,30 @@ class OrchestratorMainLoop:
            notes/handoff.md の中身 (notes.note_reader.read_note_text))) と build_turn_text(TurnContext(clock.now(),
            events, read_progress_state(paths.progress_state), 前の JSON の誤り, 写さなかったスキル,
            previous_actions=None)) を改行でつないだテキストと、select_turn_frames(latest_frames()) (入力を作るときに
-           latest_frames を 1 回呼んで受け取った、同じ時点の最新の 5 枚。古い順) の画像を、build_turn_content の内容に
-           して送る。turns.jsonl の t_wait_start は t_sent と同じ (待たない)。入力を作ったら、繰り越した出来事を None に戻す
-           入力の送り方: ClaudeStreamSession.send_in_background で書き込み用のスレッドに書かせ、書き終わるのを
-           READ_POLL_S 秒ごとに、停止の合図と turn_timeout_s を確かめながら待つ (子プロセスが標準入力を読まなくなっても、
-           主ループのスレッドを止めないため)。書き込みに失敗したとき、または入力を作った時刻から turn_timeout_s 秒の
-           うちに書き終わらなかったときは、送れなかったものとして扱う (5 の「入力を送れなかった」)。書き終わる前に
-           停止の合図が立ったら、書き込みを待たずにセッションを終えて (理由 close) 戻る (この入力の行は書かない)
+           latest_frames を 1 回呼んで受け取った、同じ時点の最新の 5 枚。古い順) の画像を送る。turns.jsonl の
+           t_wait_start は t_sent と同じ (待たない)。入力を作ったら、繰り越した出来事を None に戻す
+           入力の送り方: セッションの send_turn_in_background(テキスト, 画像) で送り始め (Claude Code の実装では、
+           書き込み用のスレッドが標準入力に書く)、送り終わるのを READ_POLL_S 秒ごとに、停止の合図と turn_timeout_s を
+           確かめながら待つ (子プロセスが入力を受け取らなくなっても、主ループのスレッドを止めないため)。送れなかったとき、
+           または入力を作った時刻から turn_timeout_s 秒のうちに送り終わらなかったときは、送れなかったものとして扱う
+           (5 の「入力を送れなかった」)。送り終わる前に停止の合図が立ったら、送り終わるのを待たずにセッションを終えて
+           (理由 close) 戻る (この入力の行は書かない)
            出来事の繰り越し: ふつうのターンの入力が result を受け取れなかったとき (送れなかった・ターンの途中で
            子プロセスが終わった・turn_timeout_s で打ち切った・is_error が true の result が届いた)、その入力に載せた
            events (繰り越した分を含む) を繰り越した出来事として覚え、次の入力 (次のセッションの最初の入力を含む) で
            carry_over_events に渡す (一度だけの出来事を失わないため)。停止の合図で打ち切ったときは、主ループが戻るため
            繰り越さない
-        3. ターンを待つ: READ_POLL_S 秒ごとに ClaudeStreamSession.read で行を受け取る。ターンの最後の文と使用量は、
-           次のように読む (stream_messages):
-             - assistant の行: deep.claude_stream_log.assistant_text が None でなければ、そのターンの最後の文にする
-               (入力を送るたびに None に戻す。文の無いターンの文は None)。assistant_usage_tokens が None でなければ、
-               セッションの使用量にする (足し合わせない。セッションを始めるたびに 0 に戻す)
-             - compact_boundary の行: sessions.jsonl に要約の行を書く。セッションは続ける
-             - result の行: そのターンを終える (4)
-             - ほかの行 (system/init・thinking_tokens・rate_limit_event など): 何もしない (stream.jsonl には書かれる)
-        4. result を受け取ったら、copy_game_skills で写し (写さなかったスキルを覚え直す) てから:
+        3. ターンを待つ: 停止の合図と turn_timeout_s を確かめてから、セッションの read(READ_POLL_S) で出来事
+           (main_loop_session) を 1 つ受け取ることを繰り返す。出来事ごとに次のようにする (Claude Code の stream-json の
+           行から出来事への直し方は claude_main_loop_session に書く):
+             - AssistantText: その文を、そのターンの最後の文にする (入力を送るたびに None に戻す。文の無いターンの文は
+               None)
+             - ContextUsage: その値を、セッションの使用量にする (足し合わせない。セッションを始めるたびに 0 に戻す)
+             - AutoCompaction: sessions.jsonl に要約の行 (metadata は出来事の metadata) を書く。セッションは続ける
+             - TurnResult: そのターンを終える (4)
+             - SessionEnded: 5 の「セッションの出力の終わり」
+             - None (出来事が無かった): 何もしない
+        4. result (TurnResult) を受け取ったら、copy_game_skills で写し (写さなかったスキルを覚え直す) てから:
              is_error が true の result (API の誤りなど): JSON は読まず (parse_decision も apply も
                呼ばず、JSON の誤りの回数も変えない)、そのターンを終えたものとも数えない。turns.jsonl に行
                (outcome ERROR_RESULT、t_result は受け取った時刻) を書き、ふつうのターンなら出来事を繰り越して、
@@ -392,12 +404,13 @@ class OrchestratorMainLoop:
              - 停止の合図: そのターンの result を待たずに終える (理由 close。outcome STOPPED)。apply は呼ばない
              - 入力を送ってから turn_timeout_s 秒 (clock の差。ちょうどその秒数で超えたとする): 引き継ぎの依頼を送らずに
                終える (理由 timeout。引き継ぎの依頼のターンなら理由 rotate。outcome TIMEOUT)
-             - 標準出力の終わり (StreamEnd): 理由 exit (引き継ぎの依頼のターンなら rotate)。outcome EXITED
-             - 入力を送れなかった (書き込みの失敗か、turn_timeout_s 秒のうちに書き終わらなかった): 子プロセスが
+             - セッションの出力の終わり (SessionEnded): 理由 exit (引き継ぎの依頼のターンなら rotate)。outcome EXITED
+             - 入力を送れなかった (送る失敗か、turn_timeout_s 秒のうちに送り終わらなかった): 子プロセスが
                終わったものとして、理由 exit で終える (この入力の行は書かない)
-        セッションを終える手順は、ClaudeStreamSession.close(settings.close_grace_s) (標準入力を閉じ、close_grace_s 秒で
-        終わらなければ SIGTERM、さらに close_grace_s 秒で SIGKILL。書き込みが戻っていなければ、標準入力を閉じずに、
-        待たずに SIGTERM を送る)。終えたら、sessions.jsonl に終了の行、run.jsonl に
+        セッションを終える手順は、セッションの close(settings.close_grace_s) (Claude Code の実装では
+        claude_stream_session.ClaudeStreamSession.close: 標準入力を閉じ、close_grace_s 秒で終わらなければ SIGTERM、
+        さらに close_grace_s 秒で SIGKILL。書き込みが戻っていなければ、標準入力を閉じずに、待たずに SIGTERM を送る)。
+        終えたら、sessions.jsonl に終了の行 (returncode は close の戻り値)、run.jsonl に
         orchestrator_session_end {"session", "reason", "returncode", "usage_tokens"} を書く。
     セッションの続け方:
         - 理由 rotate・timeout・exit で終えたら、すぐ次のセッションを始める (引き継ぎは notes/ にあるものだけ)。
@@ -553,24 +566,8 @@ class OrchestratorMainLoop:
         prepare_claude_skills_dir(paths)
         copy_switch_skills(parts.switch_skills_dir, paths)
         self._skipped_skills = copy_game_skills(paths).skipped
-        run_dir = paths.root.resolve()
-        command = build_session_command(
-            RunPaths(run_dir),
-            parts.instructions,
-            find_parent_skill_names(run_dir),
-            parts.claude,
-            self.settings.rotate_tokens,
-        )
-        environ = parts.environ if parts.environ is not None else os.environ
-        env = build_session_env(environ, parts.claude.hidden_env_names)
         stream_path = paths.orchestrator_session_stream(number)
-        stream = ClaudeStreamSession(
-            SessionLaunch(command=command, cwd=run_dir, env=env),
-            stream_path,
-            parts.clock.now,
-            start_process=parts.start_process,
-            signal_process_group=parts.signal_process_group,
-        )
+        stream = self._session_factory().create(number, stream_path)
         try:
             stream.start()
         except OSError as error:
@@ -591,6 +588,26 @@ class OrchestratorMainLoop:
         )
         parts.run_log.write(EVENT_ORCHESTRATOR_SESSION_START, session=number)
         return session
+
+    def _session_factory(self) -> MainLoopSessionFactory:
+        """セッションを作るものを返す (セッションの流れの 1)。
+
+        parts.session_factory が None でなければそれを返す。None なら、今の parts と settings の値から
+        claude_main_loop_session.ClaudeMainLoopSessionFactory を作って返す。
+        """
+        parts = self.parts
+        if parts.session_factory is not None:
+            return parts.session_factory
+        return ClaudeMainLoopSessionFactory(
+            paths=parts.paths,
+            instructions=parts.instructions,
+            claude=parts.claude,
+            rotate_tokens=self.settings.rotate_tokens,
+            clock=parts.clock.now,
+            environ=parts.environ,
+            start_process=parts.start_process,
+            signal_process_group=parts.signal_process_group,
+        )
 
     def _wait_for_previous_actions(
         self, stop: threading.Event
@@ -656,9 +673,7 @@ class OrchestratorMainLoop:
             images=tuple(image.file for image in images),
             events=events,
         )
-        failure = self._send_content(
-            session, turn, build_turn_content(text, images), stop
-        )
+        failure = self._send_input(session, turn, text, images, stop)
         if failure is not None:
             self._carried_events = events
             return failure
@@ -685,23 +700,25 @@ class OrchestratorMainLoop:
             images=(),
             events=None,
         )
-        failure = self._send_content(session, turn, build_turn_content(text, []), stop)
+        failure = self._send_input(session, turn, text, (), stop)
         return turn if failure is None else failure
 
-    def _send_content(
+    def _send_input(
         self,
         session: _OpenSession,
         turn: _SentTurn,
-        content: list[dict[str, object]],
+        text: str,
+        images: Sequence[TurnImage],
         stop: threading.Event,
     ) -> _SendFailure | None:
-        """content を書き込み用のスレッドで送り、書き終わるのを停止の合図と turn_timeout_s を確かめながら待つ。
+        """入力 (text と images) をセッションの send_turn_in_background で送り始め、送り終わるのを停止の合図と
+        turn_timeout_s を確かめながら待つ。
 
-        書けたら、セッションの送った入力の数と前の入力を送った時刻を進めて None を返す。停止の合図が立ったら
-        _SendFailure.STOPPED、書き込みに失敗したか、turn.t_sent から turn_timeout_s 秒のうちに書き終わらなかったら
+        送れたら、セッションの送った入力の数と前の入力を送った時刻を進めて None を返す。停止の合図が立ったら
+        _SendFailure.STOPPED、送れなかったか、turn.t_sent から turn_timeout_s 秒のうちに送り終わらなかったら
         _SendFailure.NOT_SENT を返す (クラスの docstring の「入力の送り方」)。
         """
-        pending = session.stream.send_in_background(content)
+        pending = session.stream.send_turn_in_background(text, images)
         clock = self.parts.clock
         while True:
             written = pending.wait(READ_POLL_S)
@@ -723,33 +740,28 @@ class OrchestratorMainLoop:
     def _wait_for_result(
         self, session: _OpenSession, turn: _SentTurn, stop: threading.Event
     ) -> _TurnEnd:
-        """ターンの result を待つ (セッションの流れの 3)。届いた行から、最後の文・使用量・要約の印を読む。"""
+        """ターンの result を待つ (セッションの流れの 3)。届いた出来事から、最後の文・使用量・要約を読む。"""
         clock = self.parts.clock
         while True:
             if stop.is_set():
                 return _TurnEnd.STOPPED
             if clock.now() - turn.t_sent >= self.settings.turn_timeout_s:
                 return _TurnEnd.TIMEOUT
-            item = session.stream.read(READ_POLL_S)
-            if item is None:
+            event = session.stream.read(READ_POLL_S)
+            if event is None:
                 continue
-            if isinstance(item, StreamEnd):
+            if isinstance(event, SessionEnded):
                 return _TurnEnd.ENDED
-            data = item.data
-            text = assistant_text(data)
-            if text is not None:
-                turn.last_text = text
-            tokens = assistant_usage_tokens(data)
-            if tokens is not None:
-                session.usage_tokens = tokens
-            if is_compact_boundary(data):
+            if isinstance(event, AssistantText):
+                turn.last_text = event.text
+            elif isinstance(event, ContextUsage):
+                session.usage_tokens = event.tokens
+            elif isinstance(event, AutoCompaction):
                 self._records.write_session(
-                    compact_row(clock.now(), session.number, compact_metadata(data))
+                    compact_row(clock.now(), session.number, event.metadata)
                 )
-            if is_result_message(data):
-                turn.result_is_error = (
-                    isinstance(data, dict) and data.get("is_error") is True
-                )
+            elif isinstance(event, TurnResult):
+                turn.result_is_error = event.is_error
                 return _TurnEnd.RESULT
 
     def _apply_result(self, session: _OpenSession, turn: _SentTurn) -> _AppliedResult:
@@ -841,7 +853,7 @@ class OrchestratorMainLoop:
         return True
 
     def _end_session(self, session: _OpenSession, reason: SessionEndReason) -> None:
-        """子プロセスを終わらせ、sessions.jsonl と run.jsonl に終了を書く。"""
+        """セッションを close で終わらせ (子プロセスを終わらせ)、sessions.jsonl と run.jsonl に終了を書く。"""
         returncode = session.stream.close(self.settings.close_grace_s)
         self._open = None
         self._write_session_end(
