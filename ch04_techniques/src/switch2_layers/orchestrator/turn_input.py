@@ -14,7 +14,8 @@
     ## 今の監視                       describe_monitor (--mode orchestrator のとき)
     ## 委任                           describe_delegation (--mode delegate のとき。今の監視の節の代わりに置く)
     ## 今のマクロ                     describe_macros
-    ## 古いフレーム                   FRAMES_GUIDE_TEXT
+    ## 古いフレーム                   TurnContext.frames_guide (既定 FRAMES_GUIDE_TEXT。主ループの Codex では
+                                    orchestrator.codex_instructions.CODEX_FRAMES_GUIDE_TEXT)
 --mode delegate のときは、出来事の OrchestratorEvents.delegation が None でない (それで委任の節を置くかを決める)。
 セッションの最初の入力では、この前に build_session_opening_text の節を置く (人の初期指示・notes/ のファイルの一覧・
 notes/handoff.md の中身)。人の初期指示が無いときも節は省かず、本文を NONE_TEXT にして、初期指示が無いことを伝える。
@@ -103,6 +104,8 @@ class TurnContext:
                      写さなかったスキル
     previous_actions 前のターンの操作の列の時刻 (主ループが終わるのを待った列。終わった列だけを渡す)。前のターンの
                      actions が空だった・JSON の誤り・引き継ぎの依頼・セッションの最初のターンなら None
+    frames_guide     「## 古いフレーム」の節の本文 (既定 FRAMES_GUIDE_TEXT。フレームを開くツールの名前が
+                     エージェントで違うため、主ループの部品で変えられる)
     """
 
     now_t: float
@@ -111,6 +114,7 @@ class TurnContext:
     previous_error: DecisionError | None
     skipped_skills: tuple[SkippedGameSkill, ...] = ()
     previous_actions: MainActionsRun | None = None
+    frames_guide: str = FRAMES_GUIDE_TEXT
 
 
 @dataclass(frozen=True)
@@ -443,7 +447,7 @@ def build_turn_text(context: TurnContext) -> str:
             else ("## 委任", describe_delegation(delegation))
         ),
         ("## 今のマクロ", describe_macros(context.events.macros)),
-        ("## 古いフレーム", FRAMES_GUIDE_TEXT),
+        ("## 古いフレーム", context.frames_guide),
     ]
     return "\n".join(f"{heading}\n{body}" for heading, body in sections)
 

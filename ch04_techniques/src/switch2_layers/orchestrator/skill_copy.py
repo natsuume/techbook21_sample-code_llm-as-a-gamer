@@ -1,5 +1,10 @@
 """主ループの Claude Code に読ませるスキルを、実行ディレクトリーの .claude/skills/ に写す。
 
+写し先は引数で変えられる (target_dir。既定は .claude/skills/)。主ループの Codex (--agent codex) では、
+実行ディレクトリーの .agents/skills/ (orchestrator.codex_session_command.CODEX_SKILLS_RELATIVE_DIR) に写す。写す規則と
+写さなかった理由の文は、写し先に依らず同じ。以下の説明は Claude Code のもの (Codex のスキルの読み方は
+orchestrator.codex_session_command に書く)。
+
 写すものは 2 種類:
     本体の操作のスキル   パッケージの orchestrator/skills/switch-<名前>/ (DEFAULT_SWITCH_SKILLS_DIR)。セッションを
                         始めるときに写す (copy_switch_skills)
@@ -177,13 +182,21 @@ def game_skills_source_dir(paths: RunPaths) -> Path:
     return paths.notes_dir / GAME_SKILLS_NOTE_DIR
 
 
-def prepare_claude_skills_dir(paths: RunPaths) -> Path:
-    """paths.claude_skills_dir (.claude/skills/) を、親を含めて作り (既にあれば何もしない)、そのパスを返す。
+def prepare_skills_dir(target_dir: Path) -> Path:
+    """スキルの写し先 target_dir を、親を含めて作り (既にあれば何もしない)、そのパスを返す。
 
     作れなければ OSError をそのまま出す。
     """
-    paths.claude_skills_dir.mkdir(parents=True, exist_ok=True)
-    return paths.claude_skills_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def prepare_claude_skills_dir(paths: RunPaths) -> Path:
+    """paths.claude_skills_dir (.claude/skills/) を、親を含めて作り (既にあれば何もしない)、そのパスを返す。
+
+    prepare_skills_dir(paths.claude_skills_dir) と同じ。作れなければ OSError をそのまま出す。
+    """
+    return prepare_skills_dir(paths.claude_skills_dir)
 
 
 def copy_skill_directories(
@@ -210,14 +223,16 @@ def copy_skill_directories(
     return tuple(copied)
 
 
-def copy_switch_skills(source_dir: Path, paths: RunPaths) -> tuple[str, ...]:
-    """本体の操作のスキルを写す: copy_skill_directories(source_dir, paths.claude_skills_dir, SWITCH_SKILL_PREFIX)。
+def copy_switch_skills(
+    source_dir: Path, paths: RunPaths, target_dir: Path | None = None
+) -> tuple[str, ...]:
+    """本体の操作のスキルを写す: copy_skill_directories(source_dir, 写し先, SWITCH_SKILL_PREFIX)。
 
-    source_dir は DEFAULT_SWITCH_SKILLS_DIR (テストでは一時ディレクトリー)。
+    source_dir は DEFAULT_SWITCH_SKILLS_DIR (テストでは一時ディレクトリー)。写し先は target_dir (None なら
+    paths.claude_skills_dir)。
     """
-    return copy_skill_directories(
-        source_dir, paths.claude_skills_dir, SWITCH_SKILL_PREFIX
-    )
+    target = target_dir if target_dir is not None else paths.claude_skills_dir
+    return copy_skill_directories(source_dir, target, SWITCH_SKILL_PREFIX)
 
 
 def has_skill_shell_command(text: str) -> bool:
@@ -341,20 +356,23 @@ def read_skill_bytes(path: Path) -> bytes:
 
 
 def copy_game_skills(
-    paths: RunPaths, read_bytes: Callable[[Path], bytes] = read_skill_bytes
+    paths: RunPaths,
+    read_bytes: Callable[[Path], bytes] = read_skill_bytes,
+    target_dir: Path | None = None,
 ) -> GameSkillCopyResult:
     """ゲームの内容のスキルを、モジュールの docstring の「ゲームの内容のスキルを写す規則」で、
-    game_skills_source_dir(paths) から paths.claude_skills_dir に写す。
+    game_skills_source_dir(paths) から写し先 (target_dir。None なら paths.claude_skills_dir) に写す。
 
     read_bytes は SKILL_FILE を読む関数 (既定 read_skill_bytes)。写す候補の SKILL_FILE ごとに 1 回だけ呼び、返った
     バイト列を check_game_skill_bytes で確かめ、通ったらそのバイト列を写し先の SKILL_FILE に置き換えの書き込み
     (file_io.write_bytes_atomic) で書く (元のファイルを読み直さない)。テストでは、読んだ後に元のファイルを変える関数を
     渡す。
-    notes/skills/ が無ければ、何も写さずに GameSkillCopyResult((), ()) を返す。paths.claude_skills_dir は作ってある
-    ものとする。1 つのスキルを読むか写すのに失敗したら (read_bytes の OSError を含む)、logging で警告を書き、そのスキルを
+    notes/skills/ が無ければ、何も写さずに GameSkillCopyResult((), ()) を返す。写し先は作ってあるものとする。
+    1 つのスキルを読むか写すのに失敗したら (read_bytes の OSError を含む)、logging で警告を書き、そのスキルを
     飛ばして残りを写す (例外は出さず、skipped にも入れない。写しかけのファイルは残さない)。
     """
-    target_dir = paths.claude_skills_dir
+    if target_dir is None:
+        target_dir = paths.claude_skills_dir
     copied: list[str] = []
     skipped: list[SkippedGameSkill] = []
     for skill_dir in _skill_directories(

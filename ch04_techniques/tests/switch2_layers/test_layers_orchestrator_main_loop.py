@@ -2780,3 +2780,53 @@ def test_session_factory_create_error_is_not_a_start_failure(tmp_path):
     ]
     assert factory.calls == [("create", 1)]
     assert sessions_rows(harness.root) == []
+
+
+# --- スキルの写し先と、入力の「古いフレーム」の節 (エージェントで変わる部品) ---
+
+
+def use_agent_parts(harness: Harness, factory: FakeSessionFactory, **changes) -> None:
+    """harness の主ループを、session_factory と changes の項目だけを変えて作り直す (start の前に呼ぶ)。"""
+    harness.loop = OrchestratorMainLoop(
+        dataclasses.replace(harness.loop.parts, session_factory=factory, **changes),
+        harness.loop.settings,
+    )
+
+
+def test_skills_are_copied_to_the_given_skills_dir_instead_of_claude_skills(tmp_path):
+    switch_dir = tmp_path / "package-skills"
+    write_skill(switch_dir, "switch-select-user")
+    factory = FakeSessionFactory([[reply_events(), []]])
+    harness = make_harness(tmp_path, FakeClaude(), switch_skills_dir=switch_dir)
+    skills_dir = harness.root / ".agents" / "skills"
+    use_agent_parts(harness, factory, skills_dir=skills_dir)
+    write_skill(harness.root / "notes" / "skills", "game-dialog")
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 2)
+    harness.finish()
+    assert (skills_dir / "switch-select-user" / "SKILL.md").is_file()
+    assert (skills_dir / "game-dialog" / "SKILL.md").is_file()
+    assert not (harness.root / ".claude").exists()
+
+
+def test_skills_dir_is_made_even_without_any_skill(tmp_path):
+    factory = FakeSessionFactory([[[]]])
+    harness = make_harness(tmp_path, FakeClaude())
+    skills_dir = harness.root / ".agents" / "skills"
+    use_agent_parts(harness, factory, skills_dir=skills_dir)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 1)
+    harness.finish()
+    assert skills_dir.is_dir()
+
+
+def test_frames_guide_text_is_the_last_section_of_each_input(tmp_path):
+    guide = "古いフレームの案内 (テストの文)"
+    factory = FakeSessionFactory([[reply_events(), []]])
+    harness = make_harness(tmp_path, FakeClaude())
+    use_agent_parts(harness, factory, frames_guide_text=guide)
+    harness.start()
+    assert wait_until(lambda: len(factory.sent(0)) == 2)
+    harness.finish()
+    for sent in factory.sent(0):
+        assert sent.text.endswith(f"## 古いフレーム\n{guide}")
