@@ -32,6 +32,7 @@ Claude Code の批評役の起動 (build_critic_args):
 """
 
 import base64
+import errno
 import json
 import os
 import re
@@ -402,8 +403,8 @@ def _notes_mode(path: Path) -> int:
 def _read_notes(path: Path) -> str:
     """notes.md を UTF-8 で読んで返す。無ければ空の文字列。
 
-    シンボリックリンク (O_NOFOLLOW で開けない) と、普通のファイルでないもの (FIFO など。O_NONBLOCK で開いて
-    待たずに確かめる) は読まず、空の文字列を返す。Codex のエージェントは作業ディレクトリーの直下を書けるため、
+    シンボリックリンク (O_NOFOLLOW で開けず ELOOP になる) と、普通のファイルでないもの (FIFO など。O_NONBLOCK で
+    開いて待たずに確かめる) は読まず、空の文字列を返す。ほかの OSError (読む権限が無いなど) はそのまま送出する。Codex のエージェントは作業ディレクトリーの直下を書けるため、
     notes.md を作業ディレクトリーの外を指すリンクに置き換えて、サンドボックスの外で動くハーネスにリンク先を
     読ませる (批評役に渡させ、notes.md に書き戻させる) ことができてしまうため。
     """
@@ -411,9 +412,11 @@ def _read_notes(path: Path) -> str:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return ""
-    except OSError:
-        # シンボリックリンクなど (ELOOP)。リンク先は読まない
-        return ""
+    except OSError as e:
+        # シンボリックリンク (ELOOP) はリンク先を読まない。ほかの誤り (読む権限が無いなど) はそのまま出す
+        if e.errno == errno.ELOOP:
+            return ""
+        raise
     with os.fdopen(fd, "rb") as notes_file:
         if not stat.S_ISREG(os.fstat(notes_file.fileno()).st_mode):
             return ""

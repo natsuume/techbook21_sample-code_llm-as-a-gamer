@@ -944,3 +944,27 @@ def test_reflect_once_does_not_wait_on_a_fifo_notes(tmp_path):
     )
     [launch] = starter.launches
     assert "## notes.md\n\n(空)" in critic_content(launch.input_text)[-1]["text"]
+
+
+def test_reflect_once_raises_when_the_notes_cannot_be_read(tmp_path):
+    # 読む権限が無いなどの誤りは、空として扱わずにそのまま出す (notes.md を振り返りの節だけで上書きしないため)
+    paths = make_paths(tmp_path / "play")
+    offset = prepare_workspace(paths)
+    notes = paths.root / "notes.md"
+    notes.chmod(0o000)
+    clock = FakeClock(FIRST_TICK)
+    starter = FakeCriticStarter(clock, [critic_plan(success_lines("- 批評"))])
+    try:
+        if os.access(notes, os.R_OK):
+            pytest.skip("this user can read a file without the read permission")
+        with pytest.raises(PermissionError):
+            reflect_once(
+                make_setting(paths, starter, clock),
+                1,
+                RUN_START,
+                offset,
+                FakeStopWait(clock),
+            )
+    finally:
+        notes.chmod(0o644)
+    assert read_notes_file(paths) == NOTES

@@ -1675,11 +1675,13 @@ Claude Code のときとの違いは次のとおりです。
 
 サンドボックスの外で動くのは、規則に当たったコマンドだけです。規則を `uv run switch2-harness ...` にすると、エージェントがサンドボックスの外に出られます。`uv run` は、作業ディレクトリー (cwd) から上にたどって最初に見つけた `pyproject.toml` のプロジェクトと、`uv.toml`・`.python-version`・`.venv` を使います。`notes` を有効にした作業ディレクトリーの直下は書けるため、エージェントがそこに `pyproject.toml` などを置けば、規則に当たった `uv run switch2-harness status` が、置かれたプロジェクトのコード (ビルドバックエンドや console script) をサンドボックスの外で実行します。2026-11-21 に、作業ディレクトリーに置いた `pyproject.toml` (作業ディレクトリーの中のビルドバックエンドを指すもの) で `uv run switch2-harness status` を実行すると、ビルドバックエンドのコードが作業ディレクトリーの外にファイルを書くことを、モデルを呼ばずに確かめました。
 
-そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、shebang に書かれた仮想環境の Python で動き、`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`)。
+そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、shebang に書かれた仮想環境の Python で動き、`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`。同じ作業ディレクトリーで `python -c "import json"` を動かすと、置いた `json.py` が読まれることも確かめ、置いたファイルが効く形であることを確かめています)。
+
+人が `uv run` を実行するときも同じです。`notes` を有効にした Codex の作業ディレクトリーでは、作業ディレクトリーの中 (`cd plays/<名前>` の後) で `uv run switch2-harness ...` を実行しないでください。エージェントが置いた `pyproject.toml` などのコードが、人の権限で動きます。`report`・`look` などは、`ch04_techniques` ディレクトリーで `--workspace plays/<名前>` を付けて実行します。
 
 同じ理由で、サンドボックスの外で動くハーネスが作業ディレクトリーの直下のものを読み書きするときは、エージェントが置いたシンボリックリンクをたどりません。
 
-- 振り返りが `notes.md` を読むときは、シンボリックリンクと普通のファイルでないもの (FIFO など) を読まず、空として扱います。書くときは、名前を決めずに新しく作った一時ファイル (`notes.md.<ランダムな文字列>.tmp`) に書いてから置き換えます。決まった名前の一時ファイルを使うと、エージェントがその名前で外を指すリンクを置き、ハーネスにリンク先を書かせられるためです。`notes.md` の権限は、置き換える前と同じにします
+- 振り返りが `notes.md` を読むときは、シンボリックリンクと普通のファイルでないもの (FIFO など) を読まず、空として扱います (読む権限が無いなどのほかの誤りは、そのまま誤りにします)。書くときは、名前を決めずに新しく作った一時ファイル (`notes.md.<ランダムな文字列>.tmp`) に書いてから置き換えます。決まった名前の一時ファイルを使うと、エージェントがその名前で外を指すリンクを置き、ハーネスにリンク先を書かせられるためです。`notes.md` の権限は、置き換える前と同じにします
 - 権限プロファイルで読み取り専用にするのは、ハーネスが置くものだけです。エージェントが作ったものは書きません (外を指すリンクを読み取り専用に書くと、リンク先がサンドボックスから読めるようになるおそれがあるため)。ハーネスが置くもののどれかがシンボリックリンクになっていたら、`run` は何も起動せずに止まります
 
 `notes` を有効にした作業ディレクトリーでは、`run` は始めに `frames/`・`multi-frames/`・`records/` が無ければ作ります (複数フレームを有効にしていなくても、空の `multi-frames/` ができます)。サンドボックスの起動の時点で無いパスを読み取り専用にすると、サンドボックスがその場所にマウントの的として空のファイルを作り、Codex を SIGINT で止めるとそれが残るためです。同じ理由で、作業ディレクトリーの直下には、空の `.agents`・`.aws`・`.codex`・`.git` のディレクトリーが残ることがあります。ハーネスはこれらを使いません。
@@ -1695,7 +1697,7 @@ Claude Code のときとの違いは次のとおりです。
 - サンドボックスの中のコマンドでは、`notes.md` への追記 (シェル) と apply_patch での書き込みは通り、`harness.json`・`AGENTS.md`・`frames/` と `records/` の中への書き込みは拒まれ、直下の新しいファイル (`newfile.txt`) は作れました。`ls ..` には作業ディレクトリーしか見えず、`../../README.md`・`~/.codex` は見えず、`curl` はホストの名前を引けずに失敗しました。モデルがシェルを JavaScript のツール (code mode) から呼んだときも同じでした。その JavaScript では `require` と `fetch` は定義されていませんでした
 - 期限などで `run` が Codex のプロセスグループに SIGINT を送ると、Codex は 1 秒未満で終わり、実行中のシェルのコマンド (サンドボックスの中の `sleep`、一時的に規則で許してサンドボックスの外で動かした `sleep`) も残りませんでした。どちらのコマンドも Codex の子孫で、別のセッションにいました。同じ CODEX_HOME を環境変数に持つプロセスも残りませんでした (共有のデーモンの側ではコマンドは動いていませんでした)
 - 批評役は、`-i` で添付した 3 枚の画像の文字と色を、添付の順に読み取りました。シェルのコマンドは使えませんでした。`reflect_once` が批評を `notes.md` の「振り返り」の節に書きました (約 7 秒)
-- 指示を「`status` を実行して `notes.md` に 1 行足して終える」に差し替えた作業ディレクトリーで `run --minutes 1.5` を動かすと、同じ thread_id で 5 回起動し直し (合わせて 6 回起動)、`report` に turn.completed とトークン数が出ました (規則を絶対パスにする前に確かめました)
+- 指示を「`status` を実行して `notes.md` に 1 行足して終える」に差し替えた作業ディレクトリーで `run --minutes 1.5` を動かすと、同じ thread_id で 5 回起動し直し (合わせて 6 回起動)、`report` に turn.completed とトークン数が出ました。規則を絶対パスにした後も、同じ確かめ (指示の中のコマンドは絶対パス) で `run --minutes 1` を動かし、絶対パスの `status` がサンドボックスの外で動いて記録され、同じ thread_id で 4 回起動し直すことを確かめました
 - 前の run の残り (空の `.agents`・`.aws`・`.codex`・`.git`) がある作業ディレクトリーで CODEX_HOME を用意し直しても、サンドボックスは起動し、`notes.md` に書けて、`harness.json`・`.agents/skills/`・`.git/config` には書けませんでした (`codex sandbox` で確かめました)
 - 約 20 回の codex の起動の後も、どの専用の CODEX_HOME の `auth.json` もシンボリックリンクのままで、ユーザーの `~/.codex/auth.json` は更新されていませんでした (この間にトークンの更新は起きていません)
 

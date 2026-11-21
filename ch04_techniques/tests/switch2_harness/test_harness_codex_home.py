@@ -503,7 +503,10 @@ def test_harness_executable_ignores_files_planted_in_the_workspace(tmp_path):
     (package / "cli.py").write_text(
         code + "def main():\n    return 0\n", encoding="utf-8"
     )
-    (paths.root / "planted.pth").write_text(f"import json; {code.splitlines()[1]}\n")
+    (paths.root / "planted.pth").write_text(
+        f"import pathlib; pathlib.Path({str(marker)!r}).write_text('planted .pth ran')\n",
+        encoding="utf-8",
+    )
     (paths.root / "pyvenv.cfg").write_text("home = /nonexistent\n", encoding="utf-8")
     (paths.root / "pyproject.toml").write_text(
         '[project]\nname = "planted"\nversion = "0"\n'
@@ -519,6 +522,19 @@ def test_harness_executable_ignores_files_planted_in_the_workspace(tmp_path):
         for name, value in os.environ.items()
         if not name.startswith(("PYTHON", "VIRTUAL_ENV", "UV_"))
     }
+    # 比べる対象: cwd を sys.path に入れる起動 (python -c) なら、置いた json.py が読まれて目印ができる
+    control = subprocess.run(
+        [sys.executable, "-c", "import json"],
+        cwd=paths.root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert control.returncode == 0, control.stderr
+    assert marker.exists()
+    marker.unlink()
     result = subprocess.run(
         [str(DEFAULT_HARNESS_EXECUTABLE), "report", "--workspace", str(paths.root)],
         cwd=paths.root,
