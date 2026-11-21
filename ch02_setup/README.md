@@ -63,7 +63,7 @@ COM4  着信  PlayAbility Receiver ...
 
 PC から Pico 2 W へ送信するときは、発信側の COM ポートを使います。着信側は使いません。
 
-ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、デーモンを起動するときに起動引数 `--com-port` でその番号を指定してください (5. デーモンの起動の節を参照)。たとえば発信側が `COM4` なら、次のように起動します。
+ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、デーモンを起動するときに起動引数 `--com-port` でその COM ポートを指定してください (5. デーモンの起動の節を参照)。たとえば発信側が `COM4` なら、次のように起動します。
 
 ```bash
 uv run switch2-remote-daemon --com-port COM4
@@ -113,7 +113,7 @@ uv run switch2-remote-daemon
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
-範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、範囲の形に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、表の範囲に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
 デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 
