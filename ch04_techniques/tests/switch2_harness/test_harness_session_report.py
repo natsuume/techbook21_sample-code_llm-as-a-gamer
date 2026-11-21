@@ -2,10 +2,17 @@ import json
 
 import numpy as np
 import pytest
+from harness_fakes import (
+    codex_command_line,
+    codex_message_line,
+    codex_thread_line,
+    codex_turn_completed_line,
+)
 
 from switch2_harness.event_log import CommandEvent
 from switch2_harness.session_report import (
     AgentSummary,
+    CodexAgentSummary,
     IntervalStats,
     SessionSummary,
     agent_messages_from_lines,
@@ -13,6 +20,7 @@ from switch2_harness.session_report import (
     count_responses,
     format_summary,
     summarize_agent,
+    summarize_codex_agent,
     summarize_session,
     summary_to_dict,
 )
@@ -484,4 +492,143 @@ def test_format_summary_without_looks_and_agent():
         "変化なしが続いた最長の時間: 0.0 秒\n"
         "press の後も変化なしの組: 0 / 0\n"
         "エージェント: 記録なし"
+    )
+
+
+# --- Codex の作業ディレクトリーの集計 ---
+
+
+def codex_lines() -> list[str]:
+    """2 つのスレッドの、codex exec --json の出力の行 (t1 は resume で続けた 2 回の起動)。"""
+    return [
+        "WARNING: not json",
+        codex_thread_line("t1"),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "error", "message": "warn"}}
+        ),
+        codex_message_line("進みます"),
+        codex_command_line("uv run switch2-harness look"),
+        codex_turn_completed_line(30313, 19968, 145, 1),
+        codex_thread_line("t1"),
+        codex_message_line("続けます"),
+        codex_turn_completed_line(41218, 30080, 150, 2),
+        codex_thread_line("t2"),
+        codex_message_line("期限で止まる起動"),
+    ]
+
+
+def test_summarize_session_for_codex_reads_the_codex_log():
+    events = [run_event(1.0, "start"), run_event(10.0, "resume", "t1")]
+    summary = summarize_session(events, load_fake_frame, codex_lines(), agent="codex")
+    assert summary.agent == CodexAgentSummary(
+        launches=2,
+        results=2,
+        total_cost_usd=None,
+        num_turns=None,
+        duration_ms=None,
+        responses=4,
+        input_tokens=41218,
+        cached_input_tokens=30080,
+        output_tokens=150,
+        reasoning_output_tokens=2,
+    )
+
+
+def test_summarize_codex_agent_sums_the_threads():
+    lines = [
+        codex_thread_line("t1"),
+        codex_turn_completed_line(100, 10, 5, 1),
+        codex_thread_line("t2"),
+        codex_turn_completed_line(50, 0, 3, 0),
+    ]
+    agent = summarize_codex_agent([], lines)
+    assert agent is not None
+    assert (agent.input_tokens, agent.cached_input_tokens) == (150, 10)
+    assert (agent.output_tokens, agent.reasoning_output_tokens) == (8, 1)
+
+
+def test_summarize_codex_agent_is_none_without_runs_and_output():
+    assert summarize_codex_agent([], []) is None
+    assert (
+        summarize_codex_agent(
+            [look(1.0, "frames/000001.png")], [codex_thread_line("t")]
+        )
+        is None
+    )
+    assert summarize_codex_agent([run_event(1.0, "start")], []) == CodexAgentSummary(
+        launches=1,
+        results=0,
+        total_cost_usd=None,
+        num_turns=None,
+        duration_ms=None,
+        responses=0,
+        input_tokens=0,
+        cached_input_tokens=0,
+        output_tokens=0,
+        reasoning_output_tokens=0,
+    )
+
+
+def test_summary_to_dict_for_codex_has_the_claude_keys_and_tokens():
+    summary = summarize_session(
+        [run_event(1.0, "start")], load_fake_frame, codex_lines(), agent="codex"
+    )
+    agent = summary_to_dict(summary)["agent"]
+    assert agent == {
+        "launches": 1,
+        "results": 2,
+        "total_cost_usd": None,
+        "num_turns": None,
+        "duration_ms": None,
+        "responses": 4,
+        "input_tokens": 41218,
+        "cached_input_tokens": 30080,
+        "output_tokens": 150,
+        "reasoning_output_tokens": 2,
+    }
+    json.dumps(summary_to_dict(summary))
+
+
+def test_summarize_session_defaults_to_claude():
+    lines = [assistant_line("m1"), result_line(session_id="s1", total_cost_usd=0.5)]
+    events = [run_event(1.0, "start")]
+    assert summarize_session(events, load_fake_frame, lines) == summarize_session(
+        events, load_fake_frame, lines, agent="claude"
+    )
+    assert isinstance(
+        summarize_session(events, load_fake_frame, lines).agent, AgentSummary
+    )
+
+
+def test_format_summary_for_codex_writes_none_for_missing_items():
+    summary = SessionSummary(
+        duration_s=21.0,
+        command_counts={"run": 1},
+        error_count=0,
+        look_interval=None,
+        static_pairs=0,
+        look_pairs=0,
+        longest_static_s=0.0,
+        unchanged_after_press=0,
+        pressed_pairs=0,
+        agent=CodexAgentSummary(
+            launches=4,
+            results=3,
+            total_cost_usd=None,
+            num_turns=None,
+            duration_ms=None,
+            responses=12,
+            input_tokens=219297,
+            cached_input_tokens=188416,
+            output_tokens=889,
+            reasoning_output_tokens=0,
+        ),
+    )
+    lines = format_summary(summary).split("\n")
+    assert len(lines) == 9
+    assert lines[7] == "エージェント: 起動 4 回 / 応答 12 回 / turn.completed 3 回"
+    assert lines[8] == (
+        "turn.completed を出した起動の分: 費用 なし / ターン なし / 時間 なし / "
+        "入力 219297 トークン (キャッシュ 188416) / 出力 889 トークン (推論 0)"
     )

@@ -1474,9 +1474,11 @@ Orchestrator 型では段階に入らないため、どの理由でも片付け�
 
 止まるとき (片付けをしたときは、片付けを終えたとき) は、surface と middle のループ、本体の画面のループ、安全の監視と画面の停滞の計測のスレッドの終わりを最大 5 秒ずつ待ち、実行中の deep のジョブに停止を求めて、5 秒たっても終わらなければ強制終了します。Orchestrator 型では、操作の実行と監視 (委任型では委任) のループ、安全の監視、画面の停滞の計測のスレッドを最大 5 秒ずつ待ちます。主ループのスレッドは、主ループのセッション (claude か codex app-server) を閉じる時間 (標準入力を閉じてから SIGTERM まで、SIGTERM から SIGKILL までの各 5 秒) を足して、最大 15 秒待ちます。`--agent codex` のセッションの起動 (最大 30 秒待ちます) の途中に止めたときは、この 15 秒を超えることがあります。surface と middle と本体の画面の middle は、応答を受け取った時点で停止が決まっていれば、その応答を捨てます。操作を送らず、記録も書きません。`run` の終了コードは、止まった理由が `interrupted` (Ctrl+C) なら 0、ほかの理由では 1 です。片付けをしたときも、片付けを始めた理由で決まります。
 
-## Claude Code に補助コマンドを渡すハーネス (switch2-harness)
+## エージェントに補助コマンドを渡すハーネス (switch2-harness)
 
 `switch2-harness` は、第3章と同じく Claude Code に Switch 2 をプレイさせるための、補助コマンドと指示ファイル (`CLAUDE.md`) を用意するパッケージ ([`src/switch2_harness/`](./src/switch2_harness/)) です。第1章で取り上げた先行研究の手法を要素として足し、要素ごとに有効・無効を切り替えて効果を比べます。要素をすべて無効にすると、撮影とボタン入力のコマンドだけを使う、第3章に近い条件になります。第3章と違うのは、`press` で HOME を押せないこと (HOME 画面に戻るときは `finish` を使う)、人から指示されたとき以外はソフトを終了しないよう `CLAUDE.md` で指示すること、入力と撮影を記録すること、`run` で起動するときに起動した人の設定を混ぜないことです。
+
+プレイするエージェントは、Claude Code (既定) のほかに、OpenAI Codex CLI (`codex exec`) にもできます。`init --agent codex` で作った作業ディレクトリーでは、`run` が Codex を起動します (「Codex で動かす (`init --agent codex`)」の項)。
 
 映像と入力には第2章のデーモンを使います。デーモン (`switch2-remote-daemon`) は、`ch02_setup` ディレクトリーで先に起動しておいてください。Pico 2 W は、[第2章の README](../ch02_setup/README.md) の「7. Switch 2 で Pico 2 W を 1P に登録する」の手順で 1P にしておきます。2026-11-17 に『ポケットモンスター ファイアレッド』で試したところ、2P のままでも HOME メニューは操作でき、ソフトの起動まで進みましたが、ゲームは入力に応じませんでした。
 
@@ -1494,19 +1496,20 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 | `--game NAME` | ゲーム名。指示ファイルに書きます |
 | `--goal TEXT` | 目標。省略すると「できるだけ先へ進める」です |
 | `--enable NAME` | 有効にする要素の名前。繰り返して複数を指定できます |
+| `--agent NAME` | プレイするエージェント。`claude` (Claude Code。既定) か `codex` (OpenAI Codex CLI) です |
 
 作業ディレクトリーには次のものができます。
 
 | パス | 内容 |
 |---|---|
-| `harness.json` | ゲーム名・目標・有効な要素・作った日時 |
-| `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの |
-| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ。振り返り (`reflection`) も有効にすると、末尾の「振り返り」の節をハーネスが書き換える |
+| `harness.json` | ゲーム名・目標・有効な要素・作った日時。`--agent codex` のときだけ、`"agent": "codex"` も書く (無ければ `claude` として読む) |
+| `CLAUDE.md` | エージェントへの指示。基本のテンプレート (`src/switch2_harness/instructions/base.md`) に、有効な要素の節を足したもの。`--agent codex` では、代わりに `AGENTS.md` を置く |
+| `notes.md` | メモファイル (`notes`) を有効にしたときだけ置かれる。エージェントが Write・Edit ツールで書き込めるのは、このファイルだけ (`--agent codex` で書ける範囲は「Codex で動かす」の項)。振り返り (`reflection`) も有効にすると、末尾の「振り返り」の節をハーネスが書き換える |
 | `frames/` | `look` で撮影した画像 (`000001.png` からの連番) |
 | `multi-frames/` | 複数フレーム (`multi-frame`) を有効にしたときだけ作られる。`look` で続けて撮った 6 枚を縮小して並べた画像 (`frames/` の画像と同じ番号) |
 | `records/events.jsonl` | サブコマンドの記録 (1 行 1 件) |
-| `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json) |
-| `records/agent-stderr.log` | `run` で起動した Claude Code の標準エラー出力 |
+| `records/agent.jsonl` | `run` で起動した Claude Code の出力 (stream-json)。`--agent codex` では `codex exec --json` の出力 |
+| `records/agent-stderr.log` | `run` で起動した Claude Code (`--agent codex` では Codex) の標準エラー出力 |
 | `records/screen-samples/run-<NNN>/` | 停滞の知らせ (`stagnation-alert`) を有効にしたときだけ作られる。`run` の間に裏で撮った画面の記録と、最後の新しい画面の記録 (「停滞の知らせ」の節) |
 | `records/reflections/` | 振り返り (`reflection`) を有効にしたときだけ作られる。批評役の入力と出力の記録 (「振り返り」の節) |
 
@@ -1521,7 +1524,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 | `status` | エージェント | デーモンの動作状況を表示します |
 | `finish` | エージェント | 押したままの入力をすべて離してから HOME を押します |
 | `init DIR ...` | 人 | 作業ディレクトリーを作ります |
-| `run --minutes N` | 人 | 作業ディレクトリーで Claude Code を起動し、N 分たったら止めます |
+| `run --minutes N` | 人 | 作業ディレクトリーで Claude Code (`--agent codex` の作業ディレクトリーでは Codex) を起動し、N 分たったら止めます |
 | `report` | 人 | 記録から実験の集計を表示します。`--json` で JSON にします |
 
 `look`・`press`・`status`・`finish` は、成否によらず `records/events.jsonl` に記録します。記録は要素の有効・無効によらず取ります。
@@ -1530,7 +1533,7 @@ uv run switch2-harness init plays/dq3-baseline --game "ドラゴンクエスト�
 
 ### 実験の実行 (`run`)
 
-`run` は、作業ディレクトリーで Claude Code を headless (`claude -p`) で起動し、指定した分数がたったら止めます。
+`run` は、作業ディレクトリーで Claude Code を headless (`claude -p`) で起動し、指定した分数がたったら止めます。`--agent codex` の作業ディレクトリーでは、代わりに Codex を起動します。
 
 ```bash
 uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
@@ -1539,9 +1542,11 @@ uv run switch2-harness run --workspace plays/dq3-baseline --minutes 10
 | 引数 | 内容 | 既定値 |
 |---|---|---|
 | `--minutes N` | プレイする分数 (小数可) | なし (必須) |
-| `--model MODEL` | Claude Code に渡すモデル | `claude-opus-5-5` (第3章の試行と同じ) |
-| `--effort LEVEL` | Claude Code に渡す effort | 指定しない |
-| `--max-budget-usd X` | Claude Code に渡す費用の上限 | 指定しない |
+| `--model MODEL` | エージェントに渡すモデル | `claude-opus-5-5` (第3章の試行と同じ)。`--agent codex` の作業ディレクトリーでは `gpt-6.2-sol` |
+| `--effort LEVEL` | エージェントに渡す effort (Codex では `-c model_reasoning_effort`) | 指定しない |
+| `--max-budget-usd X` | Claude Code に渡す費用の上限。`--agent codex` の作業ディレクトリーでは使えません | 指定しない |
+
+この節の以下の説明は、Claude Code の場合です。Codex の起動と制限は「Codex で動かす (`init --agent codex`)」の項にあります。
 
 プレイ中のエージェントに、起動した人の環境の設定を混ぜないよう、次のように起動します。
 
@@ -1616,16 +1621,110 @@ result を出した起動の分: 費用 1.5000 USD / ターン 6 / 時間 3.0 �
 
 `--json` を付けると、同じ集計を JSON の 1 行で表示します。
 
+`--agent codex` の作業ディレクトリーでは、最後の 2 行が次の形になります。Codex は費用・ターン数・時間を出さないため「なし」 (JSON では `null`) にし、代わりに `turn.completed` に書かれたトークン数を出します。JSON のキーは、Claude Code の 6 つ (`launches`・`results`・`total_cost_usd`・`num_turns`・`duration_ms`・`responses`) に、`input_tokens`・`cached_input_tokens`・`output_tokens`・`reasoning_output_tokens` を足したものです。
+
+```text
+エージェント: 起動 6 回 / 応答 24 回 / turn.completed 6 回
+turn.completed を出した起動の分: 費用 なし / ターン なし / 時間 なし / 入力 219297 トークン (キャッシュ 188416) / 出力 889 トークン (推論 0)
+```
+
+| 行 | 内容 (`--agent codex`) |
+|---|---|
+| エージェント | `run` で起動した回数 / 応答の数 (`item.completed` のうち、推論の要約 (`reasoning`) と Codex 自身の警告 (`error`) を除いたもの。発言・コマンドの実行・ファイルの変更など) / ターンの終わりに出る `turn.completed` の数 |
+| turn.completed を出した起動の分 | `turn.completed` の `usage` のトークン数。`usage` はスレッドの累計 (起動し直した起動の `usage` は、前の起動の分を含む) なので、スレッドごとに最も大きい値を取って合計する。期限で止めた起動は `turn.completed` を出さないことがあり、その分は、同じスレッドを後で起動し直して `turn.completed` が出たときにだけ含まれる |
+
+### Codex で動かす (`init --agent codex`)
+
+`init --agent codex` で作った作業ディレクトリーでは、`run` が OpenAI Codex CLI を headless (`codex exec --json`) で起動します。サブコマンド・要素・記録・`run` の止め方 (期限・起動し直し・後片付けの `up ALL`) は Claude Code のときと同じです。
+
+```bash
+uv run switch2-harness init plays/dq3-codex --game "ドラゴンクエストⅢ そして伝説へ…" --agent codex --enable notes
+uv run switch2-harness run --workspace plays/dq3-codex --minutes 10 --effort medium
+```
+
+先に Codex CLI (`codex`) を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かし、子のプロセスの環境変数からは `*_API_KEY` (`OPENAI_API_KEY`・`CODEX_API_KEY` など) と、`CLAUDE` で始まる変数と、`PYTHON` で始まる変数 (理由は「サブコマンドを絶対パスで書く理由」の項) を除きます。ログインの認証のファイル (`${CODEX_HOME:-~/.codex}/auth.json`) が無いときは、`run` は何も起動せずに `error codex login not found: ...` を表示して終了コード 1 で終わります。認証を OS のキーストアに保存する設定にしていて、このファイルが無い場合も同じく止まります。
+
+- 指示ファイルは `AGENTS.md` です。`CLAUDE.md` と同じテンプレートから、Claude Code のツールの名前の箇所 (Read → view_image またはシェルのコマンド、Write・Edit → apply_patch) と、サブコマンドの書き方だけを置き換えて作ります ([`src/switch2_harness/codex_instructions.py`](./src/switch2_harness/codex_instructions.py))。サブコマンドは `uv run switch2-harness look` の代わりに、`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look` の形で書きます (理由は「サブコマンドを絶対パスで書く理由」の項)。`run` は `AGENTS.md` を読み、`-c developer_instructions=...` で渡します (起動し直すときも同じ値を渡します)。`AGENTS.md` に今の仮想環境の実行ファイルの絶対パスが書かれていないとき (仮想環境やリポジトリーを動かした後など) は、`run` は何も起動せずに止まります。`init` で作業ディレクトリーを作り直してください
+- 最初の起動は `codex exec --json --skip-git-repo-check -m <モデル> [-c model_reasoning_effort=<effort>] -c developer_instructions=<指示> <プロンプト>` です。期限より前に終わったら、出力の `thread.started` の `thread_id` で `codex exec resume ... <thread_id> <プロンプト>` を起動し、同じ会話を続けます。起動し直す条件と回数の上限は Claude Code と同じです (`no_session` は、起動し直すための thread_id が無かったことを表します)。標準入力は `/dev/null` にします
+- `--max-budget-usd` は使えません。`codex exec` は費用を出さないため、指定すると何も起動せずに `error --max-budget-usd cannot be used with agent codex (codex exec does not report the cost)` を表示して、終了コード 1 で終わります (`--max-budget-usd` の値の誤りと同じ終了コード)。`budget_exhausted` で止まることはありません
+- 振り返り (`reflection`) の批評役も Codex にします (「振り返り」の節)
+
+#### 専用の CODEX_HOME
+
+Codex は、作業ディレクトリーごとの専用の CODEX_HOME で動かします。場所は `${XDG_CACHE_HOME:-~/.cache}/switch2-harness/codex-home/<作業ディレクトリーの名前>-<作業ディレクトリーの絶対パスの SHA-256 の先頭 12 桁>` です。作業ディレクトリーの外 (エージェントから見えない場所) で、`/tmp` の外に置きます。CODEX_HOME を `/tmp` の下に置くと、Codex が `Refusing to create helper binaries under temporary dir "/tmp"` の警告を出すためです。`run` は、始めるたびに次のものを置き直します ([`src/switch2_harness/codex_home.py`](./src/switch2_harness/codex_home.py))。
+
+| パス (CODEX_HOME の中) | 内容 |
+|---|---|
+| `auth.json` | ユーザーの `${CODEX_HOME:-~/.codex}/auth.json` へのシンボリックリンク。写しは作りません。リンクでないファイルになっていたら、`run` は何も起動せずに止まります (Codex がトークンの更新で置き換えた可能性があり、上書きするとその内容を失うため。中身を確かめてから消してください) |
+| `config.toml` | 承認を求めない (`approval_policy = "never"`)、Web 検索・MCP サーバー・plugin・apps・画像の生成・目標・コンピューターとブラウザーの操作・記憶・サブエージェント (`agents.enabled = false`)・同梱のスキルを止める、リポジトリーの `AGENTS.md` を読ませない (`project_doc_max_bytes = 0`)、作業ディレクトリーの親の階層とユーザーの `.agents/skills/` のスキルを `skills.config` で止める、権限プロファイル (下の表) |
+| `rules/switch2-harness.rules` | `<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look\|press\|status\|finish ...` だけをサンドボックスの外で動かす規則 (`prefix_rule`) |
+| `sessions/` など | Codex が書く会話の記録など。`codex exec resume` はここから会話を読みます |
+
+Codex は CODEX_HOME の `config.toml` と `AGENTS.md` を読むため、ユーザーの `~/.codex/config.toml` と `~/.codex/AGENTS.md` の代わりに、専用の CODEX_HOME のものが使われます (専用の CODEX_HOME には `AGENTS.md` を置きません)。権限プロファイルには Codex 本体のディレクトリーを書く必要があるため (読めないと、サンドボックスの補助が起動できず、シェルのコマンドがすべて失敗します)、`run` は始めに `codex app-server` を短く起動して、その子孫から本体 (実行ファイルの名前が `codex`) を探し、見つけたら終わらせます。
+
+Claude Code のときとの違いは次のとおりです。
+
+| | Claude Code | Codex |
+|---|---|---|
+| 使えるツール | Bash・Read (`notes` を有効にすると Write・Edit も) | Codex に組み込まれたシェル・apply_patch・view_image など |
+| サブコマンド | `uv run switch2-harness <サブコマンド>` だけを許可し、ほかの Bash は拒否します | `<ch04_techniques の絶対パス>/.venv/bin/switch2-harness look\|press\|status\|finish ...` だけがサンドボックスの外で動き、デーモンに届きます。ほかのコマンドも拒否はされず、Codex のサンドボックスの中で動きます (作業ディレクトリーの外は見えず、ネットワークにつながらず、デーモンにも届きません。`uv` も見えません) |
+| 書ける範囲 | `notes.md` だけ | `notes` が無効なら、どこにも書けません。`notes` を有効にすると、作業ディレクトリーの直下を書けるようにし、ハーネスが置くもの (`harness.json`・`AGENTS.md`・`frames/`・`multi-frames/`・`records/`) を読み取り専用にします。そのため、**直下に新しいファイルを作ることはできます**。ファイル 1 つだけを書けるようにする設定 (`"notes.md" = "write"`) は、2026-11-21 に試したところサンドボックスの起動 (bwrap) が失敗したため、使っていません |
+| 読める範囲 | 作業ディレクトリーの中 | 作業ディレクトリーの中と、シェルが動くのに要るシステムのファイル (`:minimal`)、Codex 本体のディレクトリー |
+| 設定 | `--restricted` で、ユーザーの設定を読みません | ユーザーの `~/.codex/config.toml` の代わりに、専用の CODEX_HOME の `config.toml` を読みます (システムや管理者の設定は置き換えません) |
+| 費用の上限 | `--max-budget-usd` | 使えません |
+
+#### サブコマンドを絶対パスで書く理由
+
+サンドボックスの外で動くのは、規則に当たったコマンドだけです。規則を `uv run switch2-harness ...` にすると、エージェントがサンドボックスの外に出られます。`uv run` は、作業ディレクトリー (cwd) から上にたどって見つけた `pyproject.toml` をプロジェクトとして使い、実行の前にそのプロジェクトの環境を同期します。`notes` を有効にした作業ディレクトリーの直下は書けるため、エージェントがそこに `pyproject.toml` などを置けば、規則に当たった `uv run switch2-harness status` が、置かれたプロジェクトのコード (ビルドバックエンドや console script) をサンドボックスの外で実行します。2026-11-21 に、作業ディレクトリーに置いた `pyproject.toml` (作業ディレクトリーの中のビルドバックエンドを指すもの) で `uv run switch2-harness status` を実行すると、ビルドバックエンドのコードが作業ディレクトリーの外にファイルを書くことを、モデルを呼ばずに確かめました。
+
+そこで規則は、作業ディレクトリーの外にある `ch04_techniques` の仮想環境の console script (`<ch04_techniques の絶対パス>/.venv/bin/switch2-harness`) の絶対パスの形だけにし、`uv run` の形は許しません。この実行ファイルは、仮想環境の Python を絶対パスで起動します (1 行目は、仮想環境の Python のパスの shebang のことも、`/bin/sh` から仮想環境の Python を `exec` する形のこともあります)。`sys.path` の先頭は実行ファイルのディレクトリーです。cwd は `sys.path` に入らず、`.pth` は site-packages のものしか読まれず、`pyvenv.cfg` は仮想環境のものが読まれます。`PYTHONPATH` などの環境変数があると検索パスが変わるため、`run` は Codex に渡す環境変数から `PYTHON` で始まる変数を除きます。作業ディレクトリーに `sitecustomize.py`・`usercustomize.py`・`json.py`・`switch2_harness/`・`*.pth`・`pyvenv.cfg`・`pyproject.toml`・`uv.toml`・`.python-version`・`.venv/` を置いても、それらのコードが動かないことを確かめるテストがあります (`tests/switch2_harness/test_harness_codex_home.py`)。このテストでは、比べる対象として、同じ作業ディレクトリーで `python -c "import json"` を動かすと置いた `json.py` が読まれることも確かめています。
+
+人が `uv run` を実行するときも同じです。`notes` を有効にした Codex の作業ディレクトリーでは、作業ディレクトリーの中 (`cd plays/<名前>` の後) で `uv run switch2-harness ...` を実行しないでください。エージェントが置いた `pyproject.toml` などのコードが、人の権限で動きます。`report`・`look` などは、`ch04_techniques` ディレクトリーで `--workspace plays/<名前>` を付けて実行します。
+
+同じ理由で、サンドボックスの外で動くハーネスが作業ディレクトリーの直下のものを読み書きするときは、エージェントが置いたシンボリックリンクをたどりません。
+
+- 振り返りが `notes.md` を読むときは、シンボリックリンクと普通のファイルでないもの (FIFO など) を読まず、空として扱います (読む権限が無いなどのほかの誤りは、そのまま誤りにします)。書くときは、名前を決めずに新しく作った一時ファイル (`notes.md.<ランダムな文字列>.tmp`) に書いてから置き換えます。決まった名前の一時ファイルを使うと、エージェントがその名前で外を指すリンクを置き、ハーネスにリンク先を書かせられるためです。`notes.md` の権限は、置き換える前と同じにします
+- 権限プロファイルで読み取り専用にするのは、ハーネスが置くものだけです。エージェントが作ったものは権限プロファイルに書きません (外を指すリンクを読み取り専用に書くと、リンク先がサンドボックスから読めるようになるおそれがあるため)。ハーネスが置くもののどれかがシンボリックリンクになっていたら、`run` は何も起動せずに止まります
+
+`notes` を有効にした作業ディレクトリーでは、`run` は始めに `frames/`・`multi-frames/`・`records/` が無ければ作ります (複数フレームを有効にしていなくても、空の `multi-frames/` ができます)。書けるディレクトリーの中で、サンドボックスの起動の時点で無いパスを読み取り専用にすると、サンドボックスがその場所にマウント先として空のファイルを作り、2026-11-21 に試したところ、Codex を SIGINT で止めるとそれが残ったためです。同じ理由で、作業ディレクトリーの直下には、空の `.agents`・`.aws`・`.codex`・`.git` のディレクトリーが残ることがあります。ハーネスはこれらを使いません。
+
+2026-11-21 に codex-cli 0.171.0 と gpt-6.2-sol (effort low) で、次のことを確かめました。第2章のデーモンは起動せずに試しました。
+
+- `codex exec --json` の出力は 1 行 1 つの JSON で、`thread.started` (起動し直しても同じ `thread_id`)、`turn.started`、`item.completed` (`agent_message`・`command_execution`・`file_change`。Codex の警告は `type` が `error` の item)、`turn.completed` (usage) の形です。失敗のときは `{"type": "error", ...}` と `{"type": "turn.failed", ...}` が出て、終了コードは 1 でした (存在しないモデルを指定して確かめました)。`codex exec resume` の起動の `turn.completed` の usage は、前の起動の分を含む累計でした
+- 専用の CODEX_HOME の `config.toml` が読まれ、`developer_instructions` が開発者のメッセージに入ることを、`codex debug prompt-input` (モデルを呼ばない) で確かめました。`features.multi_agent` を止めると非推奨の警告が出るため、`agents.enabled = false` で止めています
+- 規則の判定を、`codex execpolicy check` (モデルを呼ばない) で確かめました。`<絶対パス> look`・`press tap A`・`status`・`finish` は許可され、`<絶対パス> init`・`run`・`report`、`uv run switch2-harness status`、前に環境変数を付けた形 (`env X=1 <絶対パス> status`・`X=1 <絶対パス> status`)、相対パス (`.venv/bin/switch2-harness`・`./switch2-harness`・`switch2-harness`) とほかの場所の `switch2-harness` は当たりませんでした
+- 規則を `uv run switch2-harness ...` にしていたときに、最初の起動と起動し直しの両方で、`uv run switch2-harness status` はサンドボックスの外で動き、デーモンが動いていないための `error cannot connect to daemon: [Errno 111] Connection refused` になりました。この環境では、Codex はコマンドを `/bin/bash -lc '...'` で包んで実行しましたが、規則に当たりました。`SWITCH2_HARNESS_WORKSPACE` は、シェルのコマンドに引き継がれました
+- 規則を絶対パスにした後、`AGENTS.md` の指示のとおりに Codex が実行した `<絶対パス> status` はサンドボックスの外で動き (同じ `Connection refused` で、ハーネスが `records/events.jsonl` に記録しました)、`uv run switch2-harness status` はサンドボックスの中で動いて `uv: command not found` になりました。プレイヤーの Codex は、`frames/` の画像を view_image で開き、画像の文字を読み取りました
+- 置かれた `pyproject.toml`・`sitecustomize.py`・`.venv/` がある作業ディレクトリーで、`<絶対パス> status` を実行しても、それらのコードは動きませんでした
+- サンドボックスの中のコマンドでは、`notes.md` への追記 (シェル) と apply_patch での書き込みは通り、`harness.json`・`AGENTS.md`・`frames/` と `records/` の中への書き込みは拒まれ、直下の新しいファイル (`newfile.txt`) は作れました。`ls ..` には作業ディレクトリーしか見えず、`../../README.md`・`~/.codex` は見えず、`curl` はホストの名前を引けずに失敗しました。モデルがシェルを JavaScript のツール (code mode) から呼んだときも同じでした。その JavaScript では `require` と `fetch` は定義されていませんでした
+- 期限などで `run` が Codex のプロセスグループに SIGINT を送ると、Codex は 1 秒未満で終わり、実行中のシェルのコマンド (サンドボックスの中の `sleep`、一時的に規則で許してサンドボックスの外で動かした `sleep`) も残りませんでした。どちらのコマンドも Codex の子孫で、別のセッションにいました。同じ CODEX_HOME を環境変数に持つプロセスも残りませんでした (共有のデーモンの側ではコマンドは動いていませんでした)
+- 批評役は、`-i` で添付した 3 枚の画像の文字と色を、添付の順に読み取りました。シェルのコマンドは使えませんでした。`reflect_once` が批評を `notes.md` の「振り返り」の節に書きました (約 7 秒)
+- 指示を「`status` を実行して `notes.md` に 1 行足して終える」に差し替えた作業ディレクトリーで `run --minutes 1.5` を動かすと、同じ thread_id で 5 回起動し直し (合わせて 6 回起動)、`report` に turn.completed とトークン数が出ました。規則を絶対パスにした後も、同じ確かめ (指示の中のコマンドは絶対パス) で `run --minutes 1` を動かし、絶対パスの `status` がサンドボックスの外で動いて記録され、同じ thread_id で 4 回起動し直すことを確かめました
+- 前の run の残り (空の `.agents`・`.aws`・`.codex`・`.git`) がある作業ディレクトリーで CODEX_HOME を用意し直しても、サンドボックスは起動し、`notes.md` に書けて、`harness.json`・`.agents/skills/`・`.git/config` には書けませんでした (`codex sandbox` で確かめました)
+- 約 20 回の codex の起動の後も、どの専用の CODEX_HOME の `auth.json` もシンボリックリンクのままで、ユーザーの `~/.codex/auth.json` は更新されていませんでした (この間にトークンの更新は起きていません)
+
+確認していないことは次のとおりです。
+
+- Codex がトークンの更新で `auth.json` を置き換えたときの扱い (シンボリックリンクを通して書くか、リンクを普通のファイルに置き換えるか)。置き換えた場合、次の `run` は止まります
+- 実機で、実際のゲームを長い時間プレイさせたときのふるまい
+- 利用枠の上限に達したときの出力 (そのときは起動し直しを繰り返し、20 回で `resumes_exhausted` で止まると考えられます)
+- Codex を SIGKILL で強制終了するまで進んだときに、シェルのコマンドが残らないか (Claude Code と同じく、強制終了の前に控えた子孫のセッションを止めます)
+- code mode の JavaScript から、`require` と `fetch` のほかの方法で、ツールを通さずにファイルやネットワークに触れられないか
+- ユーザーと管理者のスキル (`~/.agents/skills`・`/etc/codex/skills`) を `skills.config` で止めること (このマシンには無いため)
+- ユーザーの `~/.codex/config.toml` の設定が混ざらないこと (専用の `config.toml` が読まれることは確かめましたが、ユーザーの設定に目印を置いて確かめてはいません)
+- `PYTHON` で始まる環境変数を除いた後に、Codex がコマンドを包むログインシェル (`bash -lc`) が `~/.profile` などを読み、そこで `PYTHONPATH` などを設定し直したときの扱い
+- サブコマンドをそのままの形で書かなかったときの扱い (`<絶対パス> status 2>&1`、パイプ、`cd x && <絶対パス> status` など)。codex-cli 0.171.0 のソース (`codex-rs/core/src/exec_policy.rs`) では、パイプや `&&` でつないだ単純なコマンドはつながったコマンドごとに規則と比べ、リダイレクト・置換・変数の代入を含んで分けられないコマンドは、シェルの呼び出し全体を 1 つとして規則と比べます。規則に当たらなければサンドボックスの中で動き、実行ファイルが見えないため失敗すると考えられます
+
 ### 要素
 
-要素は `init --enable <名前>` で有効にします。有効にした要素は `harness.json` に記録され、`CLAUDE.md` にその要素の節が加わります。
+要素は `init --enable <名前>` で有効にします。有効にした要素は `harness.json` に記録され、`CLAUDE.md` (`--agent codex` では `AGENTS.md`) にその要素の節が加わります。
 
 | 名前 | 内容 |
 |---|---|
 | `action-history` | 行動履歴。`look` の出力に、直近の行動と、`press` の前後の画面の変化を付けます |
-| `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが Write・Edit ツールで書き込めるようにします |
+| `notes` | メモファイル。作業ディレクトリーの `notes.md` に、エージェントが書き込めるようにします (Claude Code は Write・Edit ツールで、Codex は apply_patch とシェルのコマンドで書きます) |
 | `stagnation-alert` | 停滞の知らせ。`run` の間に裏で画面を撮り、新しい画面が 120 秒出ていないと、`look` の出力に知らせの行を付けます |
-| `reflection` | 振り返り。`notes` と一緒に有効にします。`run` の間に 5 分ごとに別の Claude (批評役) に進め方を批評させ、`notes.md` の「振り返り」の節に書きます |
+| `reflection` | 振り返り。`notes` と一緒に有効にします。`run` の間に 5 分ごとに別の Claude (批評役。`--agent codex` では別の Codex) に進め方を批評させ、`notes.md` の「振り返り」の節に書きます |
 | `multi-frame` | 複数フレーム。`look` のときに 0.2 秒おきに 6 回撮り、6 枚を縮小して 1 枚に並べた画像のパスを、`look` の出力に付けます |
 
 #### 行動履歴 (`action-history`)
@@ -1722,6 +1821,10 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 - 指示は `src/switch2_harness/instructions/reflection-critic.md` です。先へ進んだか、まだ試していない方法、`notes.md` と画面の食い違いの 3 点を、400 字以内の箇条書きで書かせます
 - モデルは claude-opus-5-5、effort は medium です。ツールは渡さず (`--tools ""`)、プレイ中のエージェントと同じく、起動した人の設定・`CLAUDE.md`・MCP・Skill を読ませません。撮影は、標準入力の stream-json のメッセージに PNG のまま base64 で入れます。会話はディスクに残しません (`--no-session-persistence`)
 - 入力を渡し終えてから 240 秒たっても終わらない批評役は止めます。`run` が止まるときも、動いている批評役を止めます
+- `--agent codex` の作業ディレクトリーでは、批評役も Codex (`codex exec --json --ephemeral`) にします ([`src/switch2_harness/codex_critic.py`](./src/switch2_harness/codex_critic.py))。モデルは gpt-6.2-sol、effort は medium です
+  - 撮影は、画像のファイルを `-i` で添付します。プロンプトの文は標準入力で渡します。文は Claude Code の批評役と同じ指示・行動・発言・`notes.md` に、撮影の見出しの一覧と、画像をその順に添付したことを足したものです
+  - シェルのコマンドと画像を開くツールを止めます (`--disable shell_tool`・`unified_exec`・`view_image`)。プレイヤーの規則も読ませません (`--ignore-rules`)。読ませると、批評役がサブコマンドをサンドボックスの外で実行できるためです。権限プロファイルは、どこにも書けないものにします
+  - プレイヤーの発言は `agent.jsonl` の `agent_message` から読みます。批評は、最後のターンが `turn.completed` で終わったときの最後の `agent_message` です
 
 批評役が返した批評は、次の形で `notes.md` の「振り返り」の節に書きます。節が無ければ末尾に足します。ハーネスは別のファイルに書いてから置き換えるため、プレイ中のエージェントが書きかけの `notes.md` を読むことはありません。ただし、エージェントが読んだ後にハーネスが書き換えると、エージェントの Edit は失敗します。
 
@@ -1740,7 +1843,7 @@ uv run switch2-harness init plays/pokopia --game "ぽこ あ ポケモン" --ena
 振り返り: notes.md の「振り返り」の節を書き換えました
 ```
 
-`records/events.jsonl` には、批評を書くたびに `command` が `reflection` の行 (`args` は批評の通し番号) を、知らせを出した `look` の後に `command` が `reflection-notice` の行を足します。`report` のコマンドの回数には、それぞれの回数が出ます。批評役の費用は、`report` の集計にも、`run` の `--max-budget-usd` の予算にも入りません。費用は `records/reflections/critic-<NNN>.jsonl` の result の `total_cost_usd` にあります。
+`records/events.jsonl` には、批評を書くたびに `command` が `reflection` の行 (`args` は批評の通し番号) を、知らせを出した `look` の後に `command` が `reflection-notice` の行を足します。`report` のコマンドの回数には、それぞれの回数が出ます。批評役の費用は、`report` の集計にも、`run` の `--max-budget-usd` の予算にも入りません。費用は `records/reflections/critic-<NNN>.jsonl` の result の `total_cost_usd` にあります (`--agent codex` では費用は出ず、`turn.completed` の usage にトークン数があります)。
 
 | パス (`records/reflections/` の中) | 内容 |
 |---|---|
@@ -1776,3 +1879,4 @@ ok /home/user/ch04_techniques/plays/mahou-joshikousei/frames/000044.png
 - `run` を SIGKILL で止めると、後片付けは行われません。別のセッションで動く Claude Code は残るため、人が止めてから、`ch02_setup` ディレクトリーで `uv run switch2-remote up ALL` を送ってください
 - 振り返り (`reflection`) の批評役を動かす裏のスレッドで例外が起きると (`claude` が見つからない、など)、その `run` の残りの間は批評役を起動しません。`run` は止まらず、標準エラー出力に例外の内容が出るだけです。批評が書かれているかは、`records/reflections/reflections.jsonl` の `written` の行で確かめてください
 - 費用の集計と予算の残りは、Claude Code が result に書く `total_cost_usd` (Claude Code が計算した推定値) にもとづきます。Claude Code が result を書かずに異常終了してから起動し直した場合は、その起動の費用が次の起動に渡す残りの予算の計算に入らないため、`--max-budget-usd` をその分超えることがあります
+- `--agent codex` では、`notes` を有効にすると、エージェントが作業ディレクトリーの直下に新しいファイルを作れます (「Codex で動かす (`init --agent codex`)」の項)。サブコマンド以外のコマンドも、サンドボックスの中でなら動きます

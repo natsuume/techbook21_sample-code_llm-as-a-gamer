@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import signal
 import threading
 from collections.abc import Sequence
@@ -871,3 +872,99 @@ def test_reflecting_with_critic_stops_the_thread_when_an_exception_leaves(tmp_pa
         raise ErrorInRun
     assert new_threads(before) == set()
     assert starter.launches == []
+
+
+# --- notes.md の読み書きが、作業ディレクトリーに置かれたシンボリックリンクをたどらないこと ---
+# (Codex のエージェントは作業ディレクトリーの直下を書けるため、サンドボックスの外で動くハーネスに外のファイルを
+# 読み書きさせないことを確かめる)
+
+
+def test_write_notes_does_not_follow_a_planted_temporary_link(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("外のファイル\n", encoding="utf-8")
+    workspace = tmp_path / "play"
+    workspace.mkdir()
+    notes = workspace / "notes.md"
+    notes.write_text("# 古いメモ\n", encoding="utf-8")
+    (workspace / "notes.md.tmp").symlink_to(outside)
+    write_notes(notes, "# メモ\n")
+    assert outside.read_text(encoding="utf-8") == "外のファイル\n"
+    assert not notes.is_symlink()
+    assert notes.read_text(encoding="utf-8") == "# メモ\n"
+    assert sorted(path.name for path in workspace.iterdir()) == [
+        "notes.md",
+        "notes.md.tmp",
+    ]
+
+
+def test_write_notes_keeps_the_permissions_of_the_notes(tmp_path):
+    notes = tmp_path / "notes.md"
+    notes.write_text("# 古いメモ\n", encoding="utf-8")
+    notes.chmod(0o640)
+    write_notes(notes, "# メモ\n")
+    assert notes.stat().st_mode & 0o777 == 0o640
+
+
+def test_write_notes_creates_new_notes_readable_like_before(tmp_path):
+    notes = tmp_path / "notes.md"
+    write_notes(notes, "# メモ\n")
+    assert notes.stat().st_mode & 0o777 == 0o644
+
+
+def test_reflect_once_does_not_read_a_symlinked_notes(tmp_path):
+    paths = make_paths(tmp_path / "play")
+    offset = prepare_workspace(paths)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("外の秘密\n", encoding="utf-8")
+    (paths.root / "notes.md").unlink()
+    (paths.root / "notes.md").symlink_to(secret)
+    clock = FakeClock(FIRST_TICK)
+    starter = FakeCriticStarter(clock, [critic_plan(success_lines("- 批評"))])
+    reflect_once(
+        make_setting(paths, starter, clock), 1, RUN_START, offset, FakeStopWait(clock)
+    )
+    [launch] = starter.launches
+    assert "外の秘密" not in launch.input_text
+    assert "## notes.md\n\n(空)" in critic_content(launch.input_text)[-1]["text"]
+    # notes.md はリンクのまま書かず、普通のファイルに置き換わる。リンク先は変わらない
+    assert not (paths.root / "notes.md").is_symlink()
+    assert "外の秘密" not in read_notes_file(paths)
+    assert secret.read_text(encoding="utf-8") == "外の秘密\n"
+
+
+def test_reflect_once_does_not_wait_on_a_fifo_notes(tmp_path):
+    paths = make_paths(tmp_path / "play")
+    offset = prepare_workspace(paths)
+    (paths.root / "notes.md").unlink()
+    os.mkfifo(paths.root / "notes.md")
+    clock = FakeClock(FIRST_TICK)
+    starter = FakeCriticStarter(clock, [critic_plan(success_lines("- 批評"))])
+    reflect_once(
+        make_setting(paths, starter, clock), 1, RUN_START, offset, FakeStopWait(clock)
+    )
+    [launch] = starter.launches
+    assert "## notes.md\n\n(空)" in critic_content(launch.input_text)[-1]["text"]
+
+
+def test_reflect_once_raises_when_the_notes_cannot_be_read(tmp_path):
+    # 読む権限が無いなどの誤りは、空として扱わずにそのまま出す (notes.md を振り返りの節だけで上書きしないため)
+    paths = make_paths(tmp_path / "play")
+    offset = prepare_workspace(paths)
+    notes = paths.root / "notes.md"
+    notes.chmod(0o000)
+    clock = FakeClock(FIRST_TICK)
+    starter = FakeCriticStarter(clock, [critic_plan(success_lines("- 批評"))])
+    try:
+        if os.access(notes, os.R_OK):
+            pytest.skip("this user can read a file without the read permission")
+        with pytest.raises(PermissionError):
+            reflect_once(
+                make_setting(paths, starter, clock),
+                1,
+                RUN_START,
+                offset,
+                FakeStopWait(clock),
+            )
+    finally:
+        notes.chmod(0o644)
+    assert read_notes_file(paths) == NOTES
