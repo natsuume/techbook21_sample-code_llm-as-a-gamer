@@ -1075,11 +1075,11 @@ uv run --env-file .env switch2-layers run --mode orchestrator --agent codex --in
 uv run --env-file .env switch2-layers run --mode delegate --agent codex --codex-model gpt-6.2-sol --orchestrator-effort high --instruction-file instruction.md
 ```
 
-`--agent codex` の前提として、codex CLI を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かします (子プロセスの環境変数から `OPENAI_API_KEY`・`TYPESAFE_API_KEY`・`CODEX_API_KEY` を除きます)。そのため、Codex の API キーは確かめません。codex CLI が無いときやログインしていないときは、主ループのセッションが最初のターンを終えられず、3 回続くと `orchestrator session failed 3 times in a row` で止まります。モデルは `--codex-model` (既定 `gpt-6.2-sol`) で、effort は Claude Code と同じ `--orchestrator-effort` で選びます。gpt-6.2-sol は `low`・`medium`・`high`・`xhigh`・`max` のどれにも対応しています。
+`--agent codex` の前提として、codex CLI を導入し、`codex login` でログインしておきます。Codex はユーザーのログインで動かします (子プロセスの環境変数から `OPENAI_API_KEY`・`TYPESAFE_API_KEY`・`CODEX_API_KEY` を除きます)。そのため、Codex の API キーは確かめません。ログインしているかは起動の前に確かめません。codex CLI が無いときやログインしていないときは、主ループのセッションが最初のターンを終えられないため、3 回続くと `orchestrator session failed 3 times in a row` で止まると考えられます (確認していません)。モデルは `--codex-model` (既定 `gpt-6.2-sol`) で、effort は Claude Code と同じ `--orchestrator-effort` で選びます。gpt-6.2-sol は `low`・`medium`・`high`・`xhigh`・`max` のどれにも対応しています。
 
 Codex の主ループのセッションは、次のように動きます。
 
-- 1 つのセッションは、`codex app-server` の子プロセス 1 つと、その中の ephemeral なスレッド 1 つです (スレッドは `~/.codex` に残りません)。標準入出力で、1 行に 1 つの JSON の JSON-RPC を話します。起動のときに `initialize` と `thread/start` を送り、ターンごとに `turn/start` を送ります。起動からスレッドの開始までは、最大 30 秒待ちます
+- 1 つのセッションは、`codex app-server` の子プロセス 1 つと、その中の ephemeral なスレッド 1 つです (スレッドは `~/.codex` に残りません)。標準入出力で、1 行に 1 つの JSON の JSON-RPC を話します。起動のときに `initialize` と `thread/start` を送り、ターンごとに `turn/start` を送ります。子プロセスを起動した後、`initialize` の応答、Codex 本体の場所の特定、`thread/start` の応答を、合わせて最大 30 秒待ちます
 - 変わらない指示は、`thread/start` の `developerInstructions` で渡します。Claude 版の文から、ツールに関わる箇所 (ツールの名前、読み書きできる範囲、スキルの使い方、フレームの開き方) だけを置き換えた文です ([`orchestrator/codex_instructions.py`](./src/switch2_layers/orchestrator/codex_instructions.py))。毎ターンの入力の「古いフレーム」の節も、Read の代わりに view_image と書きます
 - 画像は、JPEG を `orchestrator/session-<NNN>/images/turn-<NNNN>-<順番>.jpg` に書いて、ファイルのパスで渡します。画像の前の時刻のラベルは Claude 版と同じです。`orchestrator/` はモデルからは読めませんが、画像は app-server のプロセスがサンドボックスの外で読みます
 - 答えの文は、`item/completed` の `agentMessage` の文です。1 ターンに途中の文と最後の文が届くことがあり、最後に届いた文の JSON を読みます。`turn/completed` の状態が `completed` でないとき (`failed`・`interrupted`) と、`turn/start` が誤りを返したときは、Claude 版の `is_error` が true の result と同じく扱います
@@ -1096,7 +1096,7 @@ Codex の主ループのセッションは、次のように動きます。
 | スキル | `.claude/skills/` に写し、Skill のツールで使います | `.agents/skills/` に写します。スキルの一覧に名前・説明・パスが載り、モデルが SKILL.md をシェルで読みます (Skill のツールと、本文のシェルの実行はありません)。写す規則は Claude 版と同じです |
 | 親の階層・ユーザー・同梱のスキル | skillOverrides で off にします | 実行ディレクトリーの親の階層の `.agents/skills/` とユーザーのスキルは `skills.config` で 1 つずつ止め、同梱のスキル (imagegen など) は `skills.bundled.enabled=false` で止めます |
 | AGENTS.md・CLAUDE.md | 読ませません | リポジトリーの AGENTS.md は `project_doc_max_bytes=0` で読ませません。`~/.codex/AGENTS.md` (CODEX_HOME の AGENTS.md) は、止める設定が見つからず、読まれます |
-| ユーザーの設定 | `--setting-sources project` で、ユーザーの設定を読みません | `~/.codex/config.toml` の設定 (`service_tier` など) は効きます。MCP サーバーは `mcp_servers={}` で読ませません |
+| ユーザーの設定 | `--setting-sources project` で、ユーザーの設定を読みません | `~/.codex/config.toml` の設定 (`service_tier` など) は反映されます。MCP サーバーの設定は `-c mcp_servers={}` で空にします (ユーザーの設定に登録したサーバーが消えるかは、登録の無いこの環境では確認していません) |
 | 承認 | 確認の要る操作をすべて拒むモード (`dontAsk`) | 承認を求めないモード (`approvalPolicy` never)。承認の要求が来たら断ります |
 
 シェルは使えますが、サンドボックスの中で動き、書けるのは `notes/` の下だけです。サンドボックスの中からは、Windows の exe を起動できません (WSL の相互運用のソケットを作れないため)。
