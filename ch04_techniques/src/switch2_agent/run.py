@@ -11,7 +11,9 @@ Ctrl+C で止まる。
 起動引数:
     --game NAME                  ゲーム名 (必須)。ゲームの情報は game_notes/<NAME>/ に置く
     --model {jev,decisions}      Decision Model (必須)。jev は TypeSafe Jev、decisions は OpenAI Decisions API
-    --ffmpeg-fps N               ffmpeg の出力のフレームレート (整数 1〜60、既定 30)
+    --device-fps N               デバイスから受け取るフレームレート (30 か 60、既定 60)。PC との USB の接続で 60fps を
+                                 受け取れないときは 30 にする
+    --ffmpeg-fps N               ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)
     --process-fps N              間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)
     --history-seconds S          フレームの履歴を持つ秒数 (0 より大きい有限の値、既定 5.0)
     --image-width N              要求に載せる画像の幅 (整数 498〜1280、既定 1280)
@@ -37,7 +39,8 @@ Ctrl+C で止まる。
                                  --save-requests が無ければ frames/ は書かない)、advisor の途中経過
                                  (advisor-<役割>-<連番>/stream.jsonl)、run.jsonl の起動引数と時計の起点 (start の args と
                                  origin_mono) と、終了時の記録の件数 (record_end)
-    範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
+    範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
+    組み合わせは起動時にエラーにする
 
 使い方 (ch04_techniques ディレクトリーで実行する):
     uv run switch2-agent --game <名前> --model jev
@@ -53,7 +56,12 @@ from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.bridge_supervisor import BridgeSupervisor
-from switch2_remote.capture import DEVICE_FPS, DEVICE_HEIGHT, DEVICE_WIDTH
+from switch2_remote.capture import (
+    DEFAULT_DEVICE_FPS,
+    DEVICE_FPS_CHOICES,
+    DEVICE_HEIGHT,
+    DEVICE_WIDTH,
+)
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_agent.action_decision import DEFAULT_THRESHOLD, Thresholds
@@ -111,7 +119,7 @@ from switch2_agent.timeline.screen_change import (
     ScreenChangeTracker,
 )
 
-FFMPEG_FPS_MIN, FFMPEG_FPS_MAX = 1, DEVICE_FPS  # 第2章の daemon と同じ範囲
+FFMPEG_FPS_MIN = 1  # 上限は --device-fps (第2章の daemon と同じ範囲)
 PROCESS_FPS_MIN = 1  # 上限は --ffmpeg-fps
 # 画像の幅の範囲。Jev の画像は各辺 280px 以上が必要で、16:9 なら幅 498 以上。nv12_to_jpeg は縮小だけ行う
 IMAGE_WIDTH_MIN, IMAGE_WIDTH_MAX = 498, DEVICE_WIDTH
@@ -226,7 +234,8 @@ def build_timeline(
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     """起動引数を解釈し、次の属性を持つ Namespace を返す。
 
-    game (str)、model ("jev" / "decisions")、ffmpeg_fps (int、既定 30)、process_fps (int、既定 10)、
+    game (str)、model ("jev" / "decisions")、device_fps (int、既定 60。DEVICE_FPS_CHOICES のどれか)、
+    ffmpeg_fps (int、既定 30)、process_fps (int、既定 10)、
     history_seconds (float、既定 5.0)、image_width (int、既定 1280)、jpeg_quality (int、既定 85)、
     threshold_advisor (float、既定 0.5)、
     valley_ratio (float、既定 0.5)、similarity_threshold (float、既定 0.15)、advisor_timeout (float、既定 300.0)、
@@ -238,7 +247,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     record_dashboard (bool、既定 False。--record-dashboard を付けたら True)。
 
     argv が None なら sys.argv[1:] を使う。--game と --model は必須。範囲 (モジュールの docstring の起動引数) の外の値、
-    数として読めない値、--process-fps が --ffmpeg-fps より大きい組み合わせは、第2章の daemon.parse_args と同じく
+    数として読めない値、--ffmpeg-fps が --device-fps より大きい組み合わせ、--process-fps が --ffmpeg-fps より大きい
+    組み合わせは、第2章の daemon.parse_args と同じく
     parser.error で使い方とともに表示して終了する (SystemExit、終了コード 2)。
     """
     parser = argparse.ArgumentParser(
@@ -257,10 +267,19 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Decision Model (jev: TypeSafe Jev、decisions: OpenAI Decisions API)",
     )
     parser.add_argument(
+        "--device-fps",
+        type=int,
+        choices=DEVICE_FPS_CHOICES,
+        default=DEFAULT_DEVICE_FPS,
+        help=(
+            "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする"
+        ),
+    )
+    parser.add_argument(
         "--ffmpeg-fps",
         type=int,
         default=DEFAULT_FFMPEG_FPS,
-        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜{FFMPEG_FPS_MAX})",
+        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜device_fps)",
     )
     parser.add_argument(
         "--process-fps",
@@ -406,9 +425,14 @@ def range_errors(args: argparse.Namespace) -> list[str]:
     作れる大きさに収めるため)。
     """
     errors = []
-    if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
+    if args.ffmpeg_fps < FFMPEG_FPS_MIN:
         errors.append(
-            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN}..{FFMPEG_FPS_MAX}: {args.ffmpeg_fps}"
+            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN} or more: {args.ffmpeg_fps}"
+        )
+    elif args.ffmpeg_fps > args.device_fps:
+        errors.append(
+            f"--ffmpeg-fps ({args.ffmpeg_fps}) must not exceed "
+            f"--device-fps ({args.device_fps})"
         )
     if args.process_fps < PROCESS_FPS_MIN:
         errors.append(
@@ -517,7 +541,8 @@ def main(argv: list[str] | None = None) -> None:
            (送ろうとしたレポートを pad.jsonl に書く)
         5. 意味のあるフレームの判定 (SharpnessValleyDetector(valley_ratio, MeanAbsDiffSimilarity(similarity_threshold)))
            と保管 (MeaningfulFrameStore)
-        6. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame)。on_frame は
+        6. CaptureWithHistory(ffmpeg_fps, process_fps, FrameHistory(history_seconds), on_frame,
+           device_fps=device_fps)。on_frame は
            dashboard_recorder.feed_detector(frame, 判定, 保管, recorder) を呼ぶ (判定の feed が返したフレームを
            保管に add し、recorder があれば判定の前後を frames.jsonl と thumbs/ に記録する)。
            --timeline に screen の節があれば、on_frame は続けて ScreenChangeTracker(screen_change_threshold).feed(frame)
@@ -610,7 +635,11 @@ def main(argv: list[str] | None = None) -> None:
 
         history = FrameHistory(args.history_seconds)
         capture = CaptureWithHistory(
-            args.ffmpeg_fps, args.process_fps, history, feed_frame
+            args.ffmpeg_fps,
+            args.process_fps,
+            history,
+            feed_frame,
+            device_fps=args.device_fps,
         )
         running_capture = capture
 

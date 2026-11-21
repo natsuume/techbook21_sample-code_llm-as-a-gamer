@@ -129,7 +129,8 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 |---|---|---|---|
 | `--game NAME` | ゲーム名 (必須)。ゲームの情報は `game_notes/<NAME>/` に置きます | なし | 英数字、`_`、`-` |
 | `--model {jev,decisions}` | Decision Model (必須)。`jev` は TypeSafe Jev、`decisions` は OpenAI Decisions API です | なし | `jev`、`decisions` |
-| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート | 30 | 1〜60 の整数 |
+| `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60 fps を受け取れないときは 30 にします (第2章の README の既知の問題を参照) | 60 | 30 か 60 |
+| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート | 30 | 1〜`--device-fps` の値の整数 |
 | `--process-fps N` | 間引いて残すフレームレート | 10 | 1〜`--ffmpeg-fps` の値の整数 |
 | `--history-seconds S` | フレームの履歴を持つ秒数。advisor に渡す画像のうち、意味のあるフレーム以外は、この秒数の範囲から等間隔に選びます | 5.0 | 0 より大きい有限の値 |
 | `--image-width N` | 要求と advisor に渡す画像の幅。縦横比を保って縮小します | 1280 | 498〜1280 の整数 |
@@ -148,7 +149,7 @@ advisor の Skill (`.claude/skills/`) を読み込ませるため、必ず `ch04
 | `--save-requests` | 要求ごとの入出力を `runs/<YYYYmmdd-HHMMSS>/requests.jsonl` と `frames/` に書きます (ログの節を参照) | オフ | なし (付けるとオン) |
 | `--record-dashboard` | ダッシュボードが読む記録 (処理したフレームの判定と縮小画像、送ったレポート、起動引数、要求の行、advisor の途中経過) を `runs/<YYYYmmdd-HHMMSS>/` に書きます (ログの節を参照) | オフ | なし (付けるとオン) |
 
-範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--threshold-advisor` は「`advisor_<役割>` の問いの確率がこの値を超えたら真」の値で、4 つの役割で共通です。ちょうど同じ値は偽です。ボタンとスティックの問いには、しきい値はありません (問いと操作の決め方の節を参照)。`--image-width` の下限の 498 は、Jev が受け付ける画像の各辺の下限 (280 ピクセル) を 16:9 の高さで満たす幅です。
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--threshold-advisor` は「`advisor_<役割>` の問いの確率がこの値を超えたら真」の値で、4 つの役割で共通です。ちょうど同じ値は偽です。ボタンとスティックの問いには、しきい値はありません (問いと操作の決め方の節を参照)。`--image-width` の下限の 498 は、Jev が受け付ける画像の各辺の下限 (280 ピクセル) を 16:9 の高さで満たす幅です。
 
 `--save-requests` を付けると、要求ごとに送った画像を保存するため、ログの容量が大きくなります。長時間の試行では付けないでください。
 
@@ -1082,7 +1083,7 @@ JSON の形は次のとおりです ([`orchestrator/decision_parser.py`](./src/s
 
 初期指示は任意です。どちらも渡さなければ、入力の「人の初期指示」に「無し」と書きます。`--instruction` と `--instruction-file` の両方を指定したとき、初期指示が空か空白だけのとき、ファイルが読めないときは、実機に触れずに終了します (終了コード 2)。API キーは環境変数 `TYPESAFE_API_KEY` だけを確かめ、無いときも同じく終了します。監視は常に Jev を使うため、`--safety fake` でも要ります。`OPENAI_API_KEY` は確かめません。6 つの値 (`--orchestrator-effort` から `--max-monitor-errors` まで) の範囲は `--mode` に依らず確かめ、範囲外なら advisor 型でも終了コード 2 で終わります。
 
-advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds`・`--system-advice-seconds` は使いません。
+advisor 型と共通の引数のうち、Orchestrator 型で使うのは `--runs-dir`・`--device-fps`・`--interval-fps`・`--interval-width`・`--safety`・`--safety-interval`・`--threshold-safety`・`--max-safety-errors`・`--progress-window` です (「run の起動引数」の節)。surface・middle・deep の引数と `--stuck-advice-seconds`・`--system-advice-seconds` は使いません。
 
 #### Orchestrator 型の記録
 
@@ -1266,7 +1267,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 
 ### run の起動引数
 
-`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、advisor 型では run が準備の段階で行います。Orchestrator 型では、コントローラーの持ちかたと順番を変える画面が出たときに、主ループが本体の操作のスキル (`switch-controller-order`) でコントローラーを認識させます。キャプチャーのフレームレートは起動引数にせず、ffmpeg.exe の出力を 30 fps、間引いた後を 10 fps に固定しています。
+`switch2-layers run` は、`switch2-agent` と同じく第2章の環境を使い、キャプチャーとコントローラーのブリッジを自分で起動します。用意するものと、第2章のデーモンなどを終了しておくことは、`switch2-agent` の「必要なもの」の節と同じです。ただし、Pico 2 W の 1P への登録は、advisor 型では run が準備の段階で行います。Orchestrator 型では、コントローラーの持ちかたと順番を変える画面が出たときに、主ループが本体の操作のスキル (`switch-controller-order`) でコントローラーを認識させます。キャプチャーのフレームレートのうち、ffmpeg.exe の出力 (30 fps) と間引いた後 (10 fps) は起動引数にせず固定しています。デバイスから受け取るフレームレートだけは `--device-fps` で選べます。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
@@ -1274,6 +1275,7 @@ Jev の失敗 (HTTP のエラー、形の違う応答など) が `--max-delegate
 | `--software NAME` | 起動するソフトの名前 (advisor 型では必須。Orchestrator 型では使いません)。HOME メニューでソフトの絵の上に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--user NAME` | ソフトを遊ぶユーザーの名前 (advisor 型では必須。Orchestrator 型では使いません)。ユーザー選択に出る名前を書きます。本体の画面の middle の入力に入れます | なし | 空でない文字列 (空か空白だけは誤り) |
 | `--runs-dir DIR` | 実行ディレクトリーを作る親 | `runs` | なし |
+| `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60 fps を受け取れないときは 30 にします (第2章の README の既知の問題を参照) | 60 | 30 か 60 |
 | `--interval-fps N` | 一定間隔のフレームを `frames/interval/` に保存するフレームレート | 5 | 0 より大きく 10 以下 |
 | `--interval-width N` | 一定間隔のフレームを縮小する幅 | 640 | 64〜1280 の整数 |
 | `--max-surface-errors N` | surface の失敗がこの回数続いたら止まります | 5 | 1 以上の整数 |

@@ -1,7 +1,7 @@
 """コマンド switch2-layers の入口。サブコマンド run / middle-once / deep-once を持つ。
 
-    switch2-layers run [--mode advisor] --software NAME --user NAME [--runs-dir DIR] [--interval-fps N]
-                       [--interval-width N]
+    switch2-layers run [--mode advisor] --software NAME --user NAME [--runs-dir DIR] [--device-fps 30|60]
+                       [--interval-fps N] [--interval-width N]
                        [--max-surface-errors N] [--middle-interval S] [--middle-window S] [--max-middle-errors N]
                        [--deep-min-start-interval S] [--deep-auto-seconds S] [--deep-timeout S]
                        [--middle fake|luna] [--middle-effort none|low] [--surface fake|jev] [--threshold-advisor P]
@@ -20,7 +20,8 @@
     switch2-layers run --mode orchestrator [--instruction TEXT | --instruction-file PATH]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--monitor-threshold P] [--max-monitor-errors N]
-                       [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--safety jev|fake] [--safety-interval S]
+                       [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
+                       [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
         実機で Orchestrator 型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と監視
         (orchestrator.orchestrator_controller) を、キャプチャー・安全の監視・停滞の計測と組み立てる (app)。
@@ -30,7 +31,8 @@
     switch2-layers run --mode delegate [--instruction TEXT | --instruction-file PATH]
                        [--orchestrator-effort low|medium|high|xhigh|max] [--rotate-tokens N] [--turn-timeout S]
                        [--max-decision-errors N] [--delegate-image-width N] [--max-delegate-errors N]
-                       [--runs-dir DIR] [--interval-fps N] [--interval-width N] [--safety jev|fake] [--safety-interval S]
+                       [--runs-dir DIR] [--device-fps 30|60] [--interval-fps N] [--interval-width N]
+                       [--safety jev|fake] [--safety-interval S]
                        [--threshold-safety P] [--max-safety-errors N] [--progress-window S]
         実機で委任型を動かす。主ループの Claude Code (orchestrator.main_loop) と、操作の実行と委任のループ
         (orchestrator.orchestrator_controller の委任型と orchestrator.delegate_loop) を、キャプチャー・安全の監視・
@@ -72,7 +74,7 @@ from pathlib import Path
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.bridge_supervisor import BridgeSupervisor
-from switch2_remote.capture import Capture
+from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES, Capture
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
 
 from switch2_layers.app import (
@@ -325,6 +327,16 @@ def add_run_parser(
         type=Path,
         default=DEFAULT_RUNS_DIR,
         help=f"実行ディレクトリーを作る親 (既定 {DEFAULT_RUNS_DIR})",
+    )
+    parser.add_argument(
+        "--device-fps",
+        type=int,
+        choices=DEVICE_FPS_CHOICES,
+        default=DEFAULT_DEVICE_FPS,
+        help=(
+            "デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にする "
+            f"(既定 {DEFAULT_DEVICE_FPS})"
+        ),
     )
     parser.add_argument(
         "--interval-fps",
@@ -792,6 +804,7 @@ def run_settings_from_args(args: argparse.Namespace) -> RunSettings:
         software_name=args.software if args.software is not None else "",
         user_name=args.user if args.user is not None else "",
         runs_dir=args.runs_dir,
+        device_fps=args.device_fps,
         interval_fps=args.interval_fps,
         interval_width=args.interval_width,
         max_surface_errors=args.max_surface_errors,
@@ -938,7 +951,8 @@ def run_command(args: argparse.Namespace) -> int:
     6. switch2_remote.bridge_supervisor.BridgeSupervisor(start_bridge=start_isolated_bridge,
        reset_radio=bluetooth_radio.reset_bluetooth_radio) を作る。最初のブリッジの起動に失敗したら
        (controller_bridge.BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True) を作る
+    7. switch2_remote.capture.Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True,
+       device_fps=settings.device_fps) を作る
     6 と 7 は、ブリッジと ffmpeg を新しいセッションで起動する。最初の Ctrl+C の SIGINT は端末の前面のプロセスグループの
     すべてに届くため、同じグループのままだとブリッジと ffmpeg も終わり、片付けの操作を送れないため
     8. app.LayersApp(settings, LayersParts(frame_reader=SwitchCaptureReader(capture), report_sender=supervisor,
@@ -1134,7 +1148,7 @@ def _run_with_hardware(
 
     1. BridgeSupervisor(start_bridge=start_isolated_bridge, reset_radio=reset_bluetooth_radio) を作る。最初のブリッジの
        起動に失敗したら (BridgeStartError) メッセージを標準エラー出力に書いて 1 を返す
-    2. Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True) を作る
+    2. Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True, device_fps=settings.device_fps) を作る
     3. LayersApp(settings, build_parts(SwitchCaptureReader(capture), supervisor)).run() で動かし、止まるまで待つ
     4. 止まったら (途中の例外でも)、作れた capture と supervisor を閉じる
     止まった理由を標準エラー出力に 1 行で書き、REASON_INTERRUPTED なら 0、ほかの理由なら 1 を返す。
@@ -1149,7 +1163,12 @@ def _run_with_hardware(
         return 1
     capture: Capture | None = None
     try:
-        capture = Capture(CAPTURE_FFMPEG_FPS, CAPTURE_PROCESS_FPS, new_session=True)
+        capture = Capture(
+            CAPTURE_FFMPEG_FPS,
+            CAPTURE_PROCESS_FPS,
+            new_session=True,
+            device_fps=settings.device_fps,
+        )
         parts = build_parts(SwitchCaptureReader(capture), supervisor)
         reason = LayersApp(settings, parts).run()
     finally:

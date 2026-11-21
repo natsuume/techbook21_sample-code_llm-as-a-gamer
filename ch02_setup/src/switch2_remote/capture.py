@@ -1,7 +1,7 @@
 """ffmpeg.exe を起動したまま保持し、処理レートに間引いたフレームのうち最新の 1 枚を保持して撮影する。
 
-デバイスから DEVICE_WIDTH x DEVICE_HEIGHT、DEVICE_FPS で受け取った映像を、ffmpeg の出力側で
-ffmpeg_fps に間引く。出力の解像度はデバイスと同じ DEVICE_WIDTH x DEVICE_HEIGHT。
+デバイスから DEVICE_WIDTH x DEVICE_HEIGHT、device_fps (DEVICE_FPS_CHOICES のどれか、既定 DEFAULT_DEVICE_FPS) で
+受け取った映像を、ffmpeg の出力側で ffmpeg_fps に間引く。出力の解像度はデバイスと同じ DEVICE_WIDTH x DEVICE_HEIGHT。
 受信したフレームをさらに process_fps に間引いて (frame_buffer.next_keep)、
 残したフレームのうち最新の 1 枚を LatestFrame に持つ。ffmpeg_fps は起動後に変えない。
 shot は持っている最新フレームを、新しいフレームを待たずに PNG 保存する。
@@ -23,7 +23,10 @@ from switch2_remote.frame_buffer import (
     next_keep,
 )
 
-DEVICE_FPS = 60  # デバイスから受け取るフレームレート (dshow の -framerate)
+# デバイスから受け取るフレームレート (dshow の -framerate) として選べる値と、その既定値。
+# PC との USB の接続の規格によっては、デバイスが 1280x720・NV12 を 30fps までしか出さないため、30 も選べるようにする
+DEVICE_FPS_CHOICES = (30, 60)
+DEFAULT_DEVICE_FPS = 60
 # デバイスから受け取る解像度 (dshow の -video_size)
 DEVICE_WIDTH, DEVICE_HEIGHT = 1280, 720
 
@@ -35,22 +38,31 @@ class Capture:
     状態の読み書きは 1 つのロックの中で行う。
 
     主な属性:
+        device_fps    デバイスから受け取るフレームレート。起動後は変えない
         ffmpeg_fps    ffmpeg の出力のフレームレート。起動後は変えない (commands.parse_fps の上限に使う)
         process_fps   間引いて残すフレームレート。set_process_fps で変える
     """
 
-    def __init__(self, ffmpeg_fps: int, process_fps: int, new_session: bool = False):
+    def __init__(
+        self,
+        ffmpeg_fps: int,
+        process_fps: int,
+        new_session: bool = False,
+        device_fps: int = DEFAULT_DEVICE_FPS,
+    ):
         """ffmpeg.exe を起動し、フレームの読み取りと stderr の読み捨てのスレッドを始める。
 
         最新フレームの時刻には time.monotonic() を使う。
         new_session が True なら、ffmpeg を新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の
         SIGINT が ffmpeg に届かなくなるため、呼び出し側は Ctrl+C の後も撮影を続けられる。ffmpeg は close で終わらせる。
+        device_fps はデバイスから受け取るフレームレート (DEVICE_FPS_CHOICES のどれか)。値と ffmpeg_fps 以上であることは
+        呼び出し側 (daemon.parse_args など) で確かめる。デバイスが出せない値では ffmpeg.exe が開けずに終わり、ended が True になる。
         """
         cmd, frame_bytes = build_command(
             find_ffmpeg(),
             DEVICE_WIDTH,
             DEVICE_HEIGHT,
-            DEVICE_FPS,
+            device_fps,
             ffmpeg_fps,
         )
         self.proc = subprocess.Popen(
@@ -62,6 +74,7 @@ class Capture:
             start_new_session=new_session,
         )
         self.frame_bytes = frame_bytes
+        self.device_fps = device_fps
         self.ffmpeg_fps = ffmpeg_fps
         self.process_fps = process_fps
         self.lock = threading.Lock()

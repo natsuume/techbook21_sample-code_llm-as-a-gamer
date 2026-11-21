@@ -12,7 +12,12 @@ import time
 from collections.abc import Callable
 
 import numpy as np
-from switch2_remote.capture import DEVICE_HEIGHT, DEVICE_WIDTH, Capture
+from switch2_remote.capture import (
+    DEFAULT_DEVICE_FPS,
+    DEVICE_HEIGHT,
+    DEVICE_WIDTH,
+    Capture,
+)
 from switch2_remote.capture_command import iter_raw_frames
 from switch2_remote.frame_buffer import next_keep
 
@@ -73,16 +78,19 @@ class CaptureWithHistory(Capture):
         history: FrameHistory,
         on_frame: Callable[[TimedFrame], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        device_fps: int = DEFAULT_DEVICE_FPS,
     ):
-        """history・on_frame・clock を属性に入れてから、Capture.__init__(ffmpeg_fps, process_fps) を呼ぶ。
+        """history・on_frame・clock を属性に入れてから、
+        Capture.__init__(ffmpeg_fps, process_fps, device_fps=device_fps) を呼ぶ。
 
         親の __init__ がフレームの読み取りスレッド (_read_frames) を起動するため、
         読み取りスレッドが使う属性は super().__init__ より前に入れる。
+        device_fps はデバイスから受け取るフレームレート (switch2_remote.capture.DEVICE_FPS_CHOICES のどれか)。
         """
         self.history = history
         self.on_frame = on_frame
         self.clock = clock
-        super().__init__(ffmpeg_fps, process_fps)
+        super().__init__(ffmpeg_fps, process_fps, device_fps=device_fps)
 
     def _read_frames(self) -> None:
         """Capture._read_frames を置き換える。フレームの読み取りスレッドの本体。

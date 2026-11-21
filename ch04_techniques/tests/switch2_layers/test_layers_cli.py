@@ -1256,7 +1256,55 @@ def test_run_starts_the_bridge_and_capture_in_new_sessions(monkeypatch):
     assert [kwargs["start_bridge"] for kwargs in supervisor_kwargs] == [
         cli.start_isolated_bridge
     ]
-    assert capture_kwargs == [{"new_session": True}]
+    assert capture_kwargs == [{"new_session": True, "device_fps": 60}]
+
+
+@pytest.mark.parametrize(
+    "extra, device_fps",
+    [([], 60), (["--device-fps", "60"], 60), (["--device-fps", "30"], 30)],
+)
+def test_run_passes_device_fps_to_capture(extra, device_fps, monkeypatch):
+    # PC との USB の接続で 60fps を受け取れないときは、--device-fps 30 でデバイスから 30fps で受け取る
+    capture_kwargs: list[dict] = []
+
+    class RecordingCapture(FakeCapture):
+        def __init__(self, *args, **kwargs):
+            capture_kwargs.append(kwargs)
+
+    class FakeLayersApp:
+        def __init__(self, settings, parts):
+            pass
+
+        def run(self) -> str:
+            return REASON_INTERRUPTED
+
+    monkeypatch.setattr(subprocess, "Popen", must_not_start_process)
+    monkeypatch.setattr(cli, "BridgeSupervisor", FakeBridgeSupervisor)
+    monkeypatch.setattr(cli, "Capture", RecordingCapture)
+    monkeypatch.setattr(cli, "LayersApp", FakeLayersApp)
+    assert (
+        main(
+            [*RUN, "--middle", "fake", "--surface", "fake", "--safety", "fake", *extra]
+        )
+        == 0
+    )
+    assert [kwargs["device_fps"] for kwargs in capture_kwargs] == [device_fps]
+
+
+def test_run_settings_from_args_copy_the_device_fps():
+    assert run_settings_from_args(build_parser().parse_args(RUN)).device_fps == 60
+    args = build_parser().parse_args([*ORCHESTRATOR, "--device-fps", "30"])
+    assert run_settings_from_args(args).device_fps == 30
+
+
+@pytest.mark.parametrize("value", ["45", "120", "abc"])
+def test_run_rejects_device_fps_outside_the_choices(value, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args([*RUN, "--device-fps", value])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--device-fps" in err
+    assert "invalid" in err
 
 
 def test_start_isolated_bridge_starts_the_bridge_in_a_new_session(monkeypatch):

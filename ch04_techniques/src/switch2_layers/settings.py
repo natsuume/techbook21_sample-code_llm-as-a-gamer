@@ -2,7 +2,9 @@
 
 サブコマンドごとに 1 つの dataclass を持つ。cli がコマンドラインの引数をこれに直し、
 *_settings_errors で範囲を確かめてから使う。範囲の誤りのメッセージには、起動引数の名前 (--middle-interval 等) を含める。
-キャプチャーのフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に固定する。
+キャプチャーの ffmpeg の出力と処理のフレームレートは起動引数にせず、定数 CAPTURE_FFMPEG_FPS と CAPTURE_PROCESS_FPS に
+固定する。デバイスから受け取るフレームレートは、run の --device-fps (switch2_remote.capture.DEVICE_FPS_CHOICES の
+30 か 60) で選ぶ。
 middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キーは起動引数にせず、環境変数 OPENAI_API_KEY_ENV から
 読む (openai_api_key_errors で有無を確かめる)。run のゲーム用の middle (luna) の reasoning effort は --middle-effort
 (MiddleEffort) で選ぶ。surface の実装は --surface (SurfaceKind) で選ぶ。jev に要る API キーは
@@ -26,6 +28,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES
 
 from switch2_layers.deep.deep_types import SCENE_DOCUMENT_KINDS, DocumentKind
 from switch2_layers.notes.note_paths import is_scene_id
@@ -87,7 +91,8 @@ class MiddleEffort(StrEnum):
 # 既定は middle.luna_request.REASONING_EFFORT と同じ値
 DEFAULT_MIDDLE_EFFORT = MiddleEffort.NONE
 
-# switch2_remote.capture.Capture に渡すフレームレート。process_fps は一定間隔の保存のフレームレートの上限でもある
+# switch2_remote.capture.Capture に渡すフレームレート。process_fps は一定間隔の保存のフレームレートの上限でもある。
+# ffmpeg の出力のフレームレートは、--device-fps のどちらの値 (30 か 60) でも、それ以下に収まる値にする
 CAPTURE_FFMPEG_FPS = 30
 CAPTURE_PROCESS_FPS = 10
 
@@ -191,6 +196,9 @@ class RunSettings:
     user_name                   指定のユーザーの名前 (--user。advisor では必須)。本体の画面の middle の入力に入れる。
                                 orchestrator では使わない
     runs_dir                    実行ディレクトリーを作る親 (--runs-dir、既定 runs)
+    device_fps                  デバイスから受け取るフレームレート (--device-fps、既定 60。
+                                switch2_remote.capture.DEVICE_FPS_CHOICES の 30 か 60)。PC との USB の接続で 60fps を
+                                受け取れないときは 30 にする
     interval_fps                一定間隔のフレームの保存のフレームレート (--interval-fps、既定 5。0 より大きく INTERVAL_FPS_MAX 以下)
     interval_width              一定間隔のフレームを縮小する幅 (--interval-width、既定 640。INTERVAL_WIDTH_MIN〜INTERVAL_WIDTH_MAX)
     max_surface_errors          surface の decide の失敗がこの回数続いたら全体を止める (--max-surface-errors、既定 5。1 以上)
@@ -265,6 +273,7 @@ class RunSettings:
     software_name: str = ""
     user_name: str = ""
     runs_dir: Path = DEFAULT_RUNS_DIR
+    device_fps: int = DEFAULT_DEVICE_FPS
     interval_fps: float = DEFAULT_INTERVAL_FPS
     interval_width: int = DEFAULT_INTERVAL_WIDTH
     max_surface_errors: int = DEFAULT_MAX_SURFACE_ERRORS
@@ -338,7 +347,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     範囲は RunSettings の docstring のとおり。nan はどの範囲にも入らないものとして扱い、
     「有限の値」とした引数では inf も誤りにする。1 つの引数につき最大 1 つのメッセージを返す。
     deep_auto_seconds < deep_min_start_interval_s は --deep-auto-seconds の誤りにする (2 つとも単独では範囲内のときだけ確かめる)。
-    メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
+    メッセージは引数の定義の順 (RunSettings の属性の順) に並べる。--device-fps は DEVICE_FPS_CHOICES のどれか
+    (30 か 60)。--threshold-advisor は 0 以上 1 以下 (nan は誤り)、
     --box-requery-every は 1 以上、--hold-margin は 0 以上 1 以下 (nan と無限大は誤り)。
     middle_effort は値の型 (MiddleEffort) で決まるため確かめない。
     surface は値の型 (SurfaceKind) で、surface_map は値の型 (SurfaceMapMode) で決まるため確かめない。
@@ -356,6 +366,11 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     6 つの値の後に、この順に並べる。
     """
     errors: list[str] = []
+    if settings.device_fps not in DEVICE_FPS_CHOICES:
+        errors.append(
+            "--device-fps must be one of "
+            f"{', '.join(str(fps) for fps in DEVICE_FPS_CHOICES)}: {settings.device_fps}"
+        )
     if not 0 < settings.interval_fps <= INTERVAL_FPS_MAX:
         errors.append(
             f"--interval-fps must be more than 0 and at most {INTERVAL_FPS_MAX:g}: "
