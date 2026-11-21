@@ -265,12 +265,14 @@ class OrchestratorLayersParts:
     initial_instruction    人の初期指示 (orchestrator.initial_instruction.load_initial_instruction の値)。無ければ None
     monotonic              単調な時計 (既定 time.monotonic)。キャプチャーのフレームの時刻と同じ時計にする
     local_now              実行ディレクトリーの名前に使うローカルの時刻を返す関数 (既定 datetime.now)
-    start_process          主ループの claude の子プロセスを起動する関数 (None なら subprocess.Popen)
-    signal_process_group   主ループの claude のプロセスグループにシグナルを送る関数 (pgid, signal) (None なら os.killpg)
-    environ                主ループの claude の環境変数の元 (None ならセッションを始めるときの os.environ)
+    start_process          主ループの子プロセス (--agent claude なら claude、codex なら codex app-server) を起動する関数
+                           (None なら subprocess.Popen)
+    signal_process_group   主ループの子プロセスのプロセスグループにシグナルを送る関数 (pgid, signal) (None なら os.killpg)
+    environ                主ループの子プロセスの環境変数の元 (None ならセッションを始めるときの os.environ)
     switch_skills_dir      本体の操作のスキルを写す元 (既定 orchestrator.skill_copy.DEFAULT_SWITCH_SKILLS_DIR)
     start_process から switch_skills_dir までの 4 つは、orchestrator.main_loop.OrchestratorMainLoopParts にそのまま渡す
-    (テストでは偽の claude を使う)。
+    (--agent codex では、orchestrator.codex_main_loop_session.CodexMainLoopSessionFactory にも渡す。テストでは偽の
+    claude を使う)。
     """
 
     frame_reader: LatestFrameReader

@@ -14,7 +14,9 @@ middle の実装は --middle (MiddleKind) で選ぶ。luna に要る API キー�
 API キーは dataclass に持たせない (run.jsonl の start に起動引数を書くため)。
 run の型は --mode (RunMode) で選ぶ。advisor は surface・middle・deep の 3 層、orchestrator は主ループ
 (orchestrator.main_loop) と、操作の実行と監視 (orchestrator.orchestrator_controller) を動かす。delegate は主ループと、
-操作の実行と委任のループ (orchestrator_controller の委任型と orchestrator.delegate_loop) を動かす。orchestrator の監視と
+操作の実行と委任のループ (orchestrator_controller の委任型と orchestrator.delegate_loop) を動かす。orchestrator と
+delegate の主ループのエージェントは --agent (AgentKind) で選ぶ (Claude Code か Codex。Codex はユーザーのログインで
+動くため、API キーを確かめない)。orchestrator の監視と
 delegate の委任は常に Jev を使うため、--safety に依らず環境変数 TYPESAFE_API_KEY_ENV が要る
 (orchestrator_api_key_errors と delegate_api_key_errors で有無を確かめる)。
 run の指定のソフトの名前 (--software) と指定のユーザーの名前 (--user) は、advisor では cli が必須の引数にして、空か
@@ -37,6 +39,7 @@ from switch2_layers.orchestrator.claude_session_command import (
     AUTOCOMPACT_MAX_TOKENS,
     ORCHESTRATOR_EFFORT,
 )
+from switch2_layers.orchestrator.codex_session_command import DEFAULT_CODEX_MODEL
 from switch2_layers.orchestrator.delegate_loop import (
     DEFAULT_DELEGATE_IMAGE_WIDTH,
     DEFAULT_MAX_DELEGATE_ERRORS,
@@ -183,8 +186,21 @@ class RunMode(StrEnum):
 
 
 DEFAULT_RUN_MODE = RunMode.ADVISOR
-# --orchestrator-effort で選べる値 (主ループの Claude Code の --effort に渡す)
+# --orchestrator-effort で選べる値 (主ループの Claude Code の --effort と、Codex の turn/start の effort に渡す。
+# Codex の既定のモデル gpt-6.2-sol は、この 5 つに対応している)
 ORCHESTRATOR_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
+class AgentKind(StrEnum):
+    """run --mode orchestrator と --mode delegate の主ループのエージェント (--agent の値)。"""
+
+    # Claude Code (orchestrator.claude_main_loop_session)
+    CLAUDE = "claude"
+    # OpenAI Codex の codex app-server (orchestrator.codex_main_loop_session)。モデルは --codex-model で選ぶ
+    CODEX = "codex"
+
+
+DEFAULT_AGENT = AgentKind.CLAUDE
 
 
 @dataclass(frozen=True)
@@ -265,9 +281,13 @@ class RunSettings:
                                 delegate_loop.DELEGATE_IMAGE_WIDTH_MIN (498)〜DELEGATE_IMAGE_WIDTH_MAX (1280) の整数)
     max_delegate_errors         委任のループの Jev の失敗がこの回数続いたら、操作権を主ループに返す
                                 (--max-delegate-errors、既定 delegate_loop.DEFAULT_MAX_DELEGATE_ERRORS の 5。1 以上)
-    orchestrator_effort から max_decision_errors までの 4 つは orchestrator と delegate で使い、monitor_threshold と
-    max_monitor_errors は orchestrator だけ、delegate_image_width と max_delegate_errors は delegate だけで使う。
-    使わない型でも、範囲は mode に依らず確かめる。
+    agent                       主ループのエージェント (--agent、既定 claude。AgentKind の claude か codex)
+    codex_model                 主ループの Codex のモデル (--codex-model、既定
+                                codex_session_command.DEFAULT_CODEX_MODEL の gpt-6.2-sol。空か空白だけでない文字列)。
+                                agent が codex のときだけ使う
+    orchestrator_effort から max_decision_errors までの 4 つと agent・codex_model は orchestrator と delegate で使い、
+    monitor_threshold と max_monitor_errors は orchestrator だけ、delegate_image_width と max_delegate_errors は
+    delegate だけで使う。使わない型でも、範囲は mode に依らず確かめる。
     """
 
     software_name: str = ""
@@ -309,6 +329,8 @@ class RunSettings:
     max_monitor_errors: int = DEFAULT_MAX_MONITOR_ERRORS
     delegate_image_width: int = DEFAULT_DELEGATE_IMAGE_WIDTH
     max_delegate_errors: int = DEFAULT_MAX_DELEGATE_ERRORS
+    agent: AgentKind = DEFAULT_AGENT
+    codex_model: str = DEFAULT_CODEX_MODEL
 
 
 @dataclass(frozen=True)
@@ -364,6 +386,8 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
     委任型の 2 つの値も、mode に依らず確かめる: --delegate-image-width は delegate_loop.DELEGATE_IMAGE_WIDTH_MIN 以上
     delegate_loop.DELEGATE_IMAGE_WIDTH_MAX 以下、--max-delegate-errors は 1 以上。メッセージは Orchestrator 型の
     6 つの値の後に、この順に並べる。
+    主ループのエージェントの値も、mode と agent に依らず確かめる: --codex-model は空か空白だけでない文字列。agent は
+    値の型 (AgentKind) で決まるため確かめない。メッセージは委任型の 2 つの値の後に並べる。
     """
     errors: list[str] = []
     if settings.device_fps not in DEVICE_FPS_CHOICES:
@@ -465,6 +489,10 @@ def run_settings_errors(settings: RunSettings) -> list[str]:
         )
     errors += _orchestrator_errors(settings)
     errors += _delegate_errors(settings)
+    if not settings.codex_model.strip():
+        errors.append(
+            f"--codex-model must not be empty or blank: {settings.codex_model!r}"
+        )
     return errors
 
 
@@ -666,11 +694,12 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     """run.jsonl の start の行に書く起動引数の辞書を返す。
 
     キーは RunSettings の属性名、値は JSON にできる値 (runs_dir は文字列、middle・middle_effort・surface・surface_map・
-    deep・safety・mode は値の文字列 (型も str)。middle は "fake" / "luna"、middle_effort は "none" / "low"、surface は
-    "jev" / "fake"、surface_map は "text" / "none"、deep は "claude" / "fake"、safety は "jev" / "fake"、mode は
-    "advisor" / "orchestrator" / "delegate") にする。middle_effort は --middle fake でも入れる。
-    software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。Orchestrator 型の 6 つの値と
-    委任型の 2 つの値 (delegate_image_width・max_delegate_errors) は、mode に依らず入れる。
+    deep・safety・mode・agent は値の文字列 (型も str)。middle は "fake" / "luna"、middle_effort は "none" / "low"、
+    surface は "jev" / "fake"、surface_map は "text" / "none"、deep は "claude" / "fake"、safety は "jev" / "fake"、
+    mode は "advisor" / "orchestrator" / "delegate"、agent は "claude" / "codex") にする。middle_effort は
+    --middle fake でも入れる。software_name と user_name も、ほかの起動引数と同じく書かれたままの文字列で入れる。
+    Orchestrator 型の 6 つの値と委任型の 2 つの値 (delegate_image_width・max_delegate_errors) と、主ループの
+    エージェントの 2 つの値 (agent・codex_model) は、mode に依らず入れる (codex_model は agent が claude でも入れる)。
     """
     value = dataclasses.asdict(settings)
     value["runs_dir"] = str(settings.runs_dir)
@@ -681,4 +710,5 @@ def run_settings_to_json(settings: RunSettings) -> dict[str, object]:
     value["deep"] = settings.deep.value
     value["safety"] = settings.safety.value
     value["mode"] = settings.mode.value
+    value["agent"] = settings.agent.value
     return value

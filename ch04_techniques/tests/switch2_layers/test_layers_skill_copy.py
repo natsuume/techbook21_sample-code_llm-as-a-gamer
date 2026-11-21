@@ -27,6 +27,7 @@ from switch2_layers.orchestrator.skill_copy import (
     is_plain_skill_description,
     is_plain_skill_name,
     prepare_claude_skills_dir,
+    prepare_skills_dir,
     read_skill_bytes,
 )
 from switch2_layers.run_directory import RunPaths
@@ -842,3 +843,35 @@ def test_skill_with_a_description_yaml_reads_differently_is_reported(tmp_path):
         ),
     )
     assert not (paths.claude_skills_dir / "game-dialog").exists()
+
+
+# --- 写し先を変える (主ループの Codex の .agents/skills/) ---
+
+
+def test_skills_are_copied_to_the_given_target_dir_with_the_same_rules(tmp_path):
+    paths = make_run(tmp_path)
+    source = tmp_path / "package-skills"
+    write_skill(source, "switch-select-user")
+    write_skill_text(
+        game_skills_source_dir(paths), "game-dialog", skill_text("game-dialog")
+    )
+    write_skill_text(
+        game_skills_source_dir(paths),
+        "game-bad",
+        skill_text("game-bad", extra="hooks: x\n"),
+    )
+    target = paths.root / ".agents" / "skills"
+    assert prepare_skills_dir(target) == target
+    assert target.is_dir()
+    assert copy_switch_skills(source, paths, target_dir=target) == (
+        "switch-select-user",
+    )
+    result = copy_game_skills(paths, target_dir=target)
+    assert result.copied == ("game-dialog",)
+    assert [skill.name for skill in result.skipped] == ["game-bad"]
+    assert sorted(tree(target)) == [
+        "game-dialog/SKILL.md",
+        "switch-select-user/SKILL.md",
+    ]
+    # .claude/skills/ には写さない
+    assert not paths.claude_skills_dir.exists()
