@@ -2,7 +2,7 @@
 
 デーモンへの送信 (send)・時計 (clock / now)・待機 (sleep)・プロセスの起動 (start_process)・
 テンプレートの読み込み (read_template)・画面の変化の判定 (frames_changed)・画面の記録 (screen_recording)・
-最後の新しい画面の時刻の読み込み (last_new_screen_time) は引数で受け取る。
+最後の新しい画面の時刻の読み込み (last_new_screen_time)・Codex 用の CODEX_HOME の用意 (prepare_codex) は引数で受け取る。
 各処理は表示する行と終了コードを CommandResult で返し、表示は cli が行う。
 
 表示の規則:
@@ -25,20 +25,33 @@ import contextlib
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 
 from switch2_harness.action_history import FramesChanged, build_history_lines
+from switch2_harness.agent_kind import (
+    CODEX_AGENT,
+    DEFAULT_AGENT,
+    AgentKind,
+    default_model,
+    instructions_file_name,
+)
 from switch2_harness.agent_launcher import (
+    CLAUDE_PLAYER,
     LaunchOptions,
+    PlayerAgent,
     StartProcess,
     read_agent_log_lines,
     run_agent_until,
     validate_max_budget_usd,
     validate_minutes,
 )
+from switch2_harness.codex_critic import CodexCritic
+from switch2_harness.codex_home import CodexSetupError, PrepareCodex, prepare_codex_home
+from switch2_harness.codex_instructions import codex_read_template
+from switch2_harness.codex_player import CodexPlayer
 from switch2_harness.daemon_client import SendCommand
 from switch2_harness.event_log import CommandEvent, append_event, read_events
 from switch2_harness.features import (
@@ -73,6 +86,8 @@ from switch2_harness.multi_frame import (
 from switch2_harness.press_args import press_args_error, split_press_args
 from switch2_harness.reflection import NOTICE_LINE, build_notice_event, notice_pending
 from switch2_harness.reflection_critic import (
+    CLAUDE_CRITIC,
+    CriticAgent,
     Reflecting,
     StartCritic,
     reflecting_with_critic,
@@ -103,6 +118,12 @@ RUN_TERMINATED_MESSAGE = "error run terminated by signal"
 
 # Ctrl-C (SIGINT・KeyboardInterrupt) で run が終わったときに出す error 行
 RUN_INTERRUPTED_MESSAGE = "error run interrupted"
+
+# codex の作業ディレクトリーで run --max-budget-usd を指定したときのメッセージ (codex exec は費用を出さないため)
+CODEX_BUDGET_MESSAGE = (
+    "--max-budget-usd cannot be used with agent codex "
+    "(codex exec does not report the cost)"
+)
 
 
 @dataclass(frozen=True)
@@ -268,13 +289,17 @@ def handle_init(
     now: Callable[[], datetime],
     read_template: ReadTemplate,
     available: tuple[Feature, ...] = FEATURES,
+    agent: AgentKind = DEFAULT_AGENT,
 ) -> CommandResult:
-    """init: 作業ディレクトリーを作る。
+    """init: 作業ディレクトリーを作る。agent はプレイするエージェントの種類 (既定は claude)。
 
     1. enable を features.validate_feature_names(enable, available) で検証する。
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1 (ファイルシステムには触れない)
-    2. HarnessConfig(game, goal, 検証した名前, format_created_at(now())) を作る
-    3. instructions.render_instructions(config, read_template, available) で CLAUDE.md の本文を作る
+    2. HarnessConfig(game, goal, 検証した名前, format_created_at(now()), agent) を作る
+    3. instructions.render_instructions(config, read_template, available) で指示ファイルの本文を作る。
+       指示ファイルは作業ディレクトリーの直下の agent_kind.instructions_file_name(agent) (claude は CLAUDE.md)。
+       agent が codex なら、read_template の代わりに codex_instructions.codex_read_template(read_template) を渡し、
+       Claude Code のツールの名前の箇所だけを Codex のものに置き換えた本文 (AGENTS.md) にする
     4. features.agent_writable_files(検証した名前, available) の各ファイルについて read_template(<template_file>) を読み
        (置換はしない)、{<name>: <本文>} を作る。続けて、features.agent_file_appends(検証した名前, available) の順に、
        各 FileAppend について read_template(<template_file>) を読み (置換はしない)、辞書の <name> の本文を
@@ -282,17 +307,29 @@ def handle_init(
        (例: "# メモ\\n" に "## 振り返り\\n" を足すと "# メモ\\n\\n## 振り返り\\n")
     5. workspace.create_workspace で作る。4. の辞書を initial_files に渡す。
        WorkspaceNotEmptyError なら `error <メッセージ>` を stderr に出し、終了コード 1
-    6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0
+    6. `ok <作業ディレクトリーの絶対パス> features=<名前を "," でつないだもの。無ければ none>` を stdout に出し、終了コード 0。
+       agent が claude でなければ、行の末尾に ` agent=<agent>` を足す
     """
     try:
         names = validate_feature_names(enable, available)
     except ValueError as e:
         return _error_result(e)
     config = HarnessConfig(
-        game=game, goal=goal, features=names, created_at=format_created_at(now())
+        game=game,
+        goal=goal,
+        features=names,
+        created_at=format_created_at(now()),
+        agent=agent,
     )
-    paths = workspace_paths(directory)
-    instructions_text = render_instructions(config, read_template, available)
+    root_paths = workspace_paths(directory)
+    paths = replace(
+        root_paths,
+        instructions_file=root_paths.root / instructions_file_name(agent),
+    )
+    instructions_reader = (
+        codex_read_template(read_template) if agent == CODEX_AGENT else read_template
+    )
+    instructions_text = render_instructions(config, instructions_reader, available)
     # 要素のファイルの最初の内容と、その末尾に足す内容は、テンプレートを置換せずにそのまま書く
     initial_files = {
         writable_file.name: read_template(writable_file.template_file)
@@ -307,8 +344,10 @@ def handle_init(
     except WorkspaceNotEmptyError as e:
         return _error_result(e)
     features_text = ",".join(names) or "none"
+    agent_text = "" if agent == DEFAULT_AGENT else f" agent={agent}"
     return CommandResult(
-        exit_code=0, stdout_lines=(f"ok {paths.root} features={features_text}",)
+        exit_code=0,
+        stdout_lines=(f"ok {paths.root} features={features_text}{agent_text}",),
     )
 
 
@@ -506,13 +545,16 @@ def handle_finish(
     return _reply_result(*replies)
 
 
-def handle_report(paths: WorkspacePaths, as_json: bool) -> CommandResult:
+def handle_report(
+    paths: WorkspacePaths, as_json: bool, agent: AgentKind = DEFAULT_AGENT
+) -> CommandResult:
     """report: 実験の集計を stdout に出し、終了コード 0。
 
     event_log.read_events(paths.events_file) のイベントと、paths.agent_log_file のすべての行
     (agent_launcher.read_agent_log_lines(paths.agent_log_file, 0)。UTF-8 の errors="replace" でデコードするため、
     強制終了で途中で切れたマルチバイト文字は置換文字になり、JSON として読めない行は集計で読み飛ばされる。
     ファイルが無ければ空の列) を、session_report.summarize_session で集計する。
+    agent (harness.json のエージェントの種類) は summarize_session に渡し、agent.jsonl の読み方を決める。
     look の画像は screen_change.load_sample(paths.root / frame) で、比較用の大きさに縮小して読む
     (look が多い記録でも、元の大きさの画像をすべて持たないようにするため)。
     as_json が False なら session_report.format_summary の各行を、
@@ -522,12 +564,31 @@ def handle_report(paths: WorkspacePaths, as_json: bool) -> CommandResult:
         read_events(paths.events_file),
         lambda frame: load_sample(paths.root / frame),
         read_agent_log_lines(paths.agent_log_file, 0),
+        agent=agent,
     )
     if as_json:
         lines = (json.dumps(summary_to_dict(summary), ensure_ascii=False),)
     else:
         lines = tuple(format_summary(summary).split("\n"))
     return CommandResult(exit_code=0, stdout_lines=lines)
+
+
+def _codex_agents(
+    paths: WorkspacePaths,
+    commands: Sequence[str],
+    writable_files: Sequence[str],
+    base_env: Mapping[str, str],
+    prepare_codex: PrepareCodex,
+) -> tuple[CodexPlayer, CodexCritic]:
+    """Codex のプレイヤーと批評役を作る (handle_run の 2a.)。
+
+    作業ディレクトリーの AGENTS.md を読み (読めなければ OSError)、prepare_codex で専用の CODEX_HOME を用意する
+    (用意できなければ codex_home.CodexSetupError)。
+    """
+    instructions_path = paths.root / instructions_file_name(CODEX_AGENT)
+    instructions = instructions_path.read_text(encoding="utf-8")
+    codex_home = prepare_codex(paths, commands, writable_files, base_env)
+    return CodexPlayer(codex_home, instructions), CodexCritic(codex_home)
 
 
 def handle_run(
@@ -546,8 +607,9 @@ def handle_run(
     reflecting: Reflecting | None = None,
     start_critic: StartCritic = start_critic_process,
     read_template: ReadTemplate = read_package_template,
+    prepare_codex: PrepareCodex = prepare_codex_home,
 ) -> CommandResult:
-    """run: 作業ディレクトリーで claude -p を起動し、minutes 分たったら止める。
+    """run: 作業ディレクトリーでエージェント (claude -p か codex exec) を起動し、minutes 分たったら止める。
 
     clock は記録の時刻、deadline_clock は期限と経過時間を計る時計 (本番はどちらも time.time) で、
     どちらもそのまま run_agent_until に渡す。
@@ -560,7 +622,16 @@ def handle_run(
        (何も起動せず、デーモンにも送らない)
     2. harness_config.read_config(paths.harness_file, available) で設定を読む。
        ValueError なら `error <メッセージ>` を stderr に出し、終了コード 1
-    3. agent_launcher.run_agent_until を、game=config.game、
+       config.agent が codex で options.max_budget_usd が None でなければ、`error <CODEX_BUDGET_MESSAGE>` を stderr に出し、
+       終了コード 1 (codex exec は費用を出さないため。何も起動しない)。
+       options.model が None なら、config.agent の既定のモデル (agent_kind.default_model) にする
+    2a. config.agent が codex なら、作業ディレクトリーの AGENTS.md を読み、prepare_codex(paths,
+       <エージェント用のサブコマンド>, <書き換えられるファイルの名前>, base_env) で専用の CODEX_HOME を用意する
+       (本番は codex_home.prepare_codex_home)。AGENTS.md を読めない (OSError) か codex_home.CodexSetupError なら、
+       `error <メッセージ>` を stderr に出し、終了コード 1。プレイヤーは codex_player.CodexPlayer(<CODEX_HOME>,
+       <AGENTS.md の本文>)、批評役は codex_critic.CodexCritic(<CODEX_HOME>) にする。
+       claude なら、プレイヤーは agent_launcher.CLAUDE_PLAYER、批評役は reflection_critic.CLAUDE_CRITIC
+    3. agent_launcher.run_agent_until を、game=config.game、agent=<プレイヤー>、
        agent_commands=features.agent_commands(config.features, available)、
        writable_files=<features.agent_writable_files(config.features, available) の各 name のタプル>、
        record=<event_log.append_event(paths.events_file, ...) をする関数> で、
@@ -574,7 +645,7 @@ def handle_run(
        (後片付けの up ALL の後) か、例外で抜けるときに止まる。
        設定の features に features.REFLECTION_FEATURE があれば、画面の記録の with の内側で、
        振り返り (reflecting(paths, config)。None なら reflection_critic.reflecting_with_critic(paths, config, clock=clock,
-       base_env=base_env, start_critic=start_critic, read_template=read_template)) の with にも入り、その中で
+       base_env=base_env, start_critic=start_critic, read_template=read_template, critic=<批評役>)) の with にも入り、その中で
        run_agent_until を呼ぶ。無ければ contextlib.nullcontext() に入る。
        start_critic と read_template は reflecting が None のときだけ使う (本番は cli が CliDependencies の値を渡す)。
        振り返りは、run の開始から 5 分ごとに批評役を起動して notes.md の「振り返り」の節を書き換え、
@@ -597,10 +668,24 @@ def handle_run(
         config = read_config(paths.harness_file, available)
     except ValueError as e:
         return _error_result(e)
+    if config.agent == CODEX_AGENT and options.max_budget_usd is not None:
+        return _error_result(CODEX_BUDGET_MESSAGE)
+    if options.model is None:
+        options = replace(options, model=default_model(config.agent))
+    commands = agent_commands(config.features, available)
     writable_files = tuple(
         writable_file.name
         for writable_file in agent_writable_files(config.features, available)
     )
+    player: PlayerAgent = CLAUDE_PLAYER
+    critic: CriticAgent = CLAUDE_CRITIC
+    if config.agent == CODEX_AGENT:
+        try:
+            player, critic = _codex_agents(
+                paths, commands, writable_files, base_env, prepare_codex
+            )
+        except (OSError, CodexSetupError) as e:
+            return _error_result(e)
     recording: contextlib.AbstractContextManager[object]
     if STAGNATION_ALERT_FEATURE not in config.features:
         recording = contextlib.nullcontext()
@@ -621,6 +706,7 @@ def handle_run(
             base_env=base_env,
             start_critic=start_critic,
             read_template=read_template,
+            critic=critic,
         )
     try:
         # 振り返りは、画面の記録の with の内側で動かす
@@ -629,7 +715,7 @@ def handle_run(
                 minutes,
                 paths,
                 config.game,
-                agent_commands(config.features, available),
+                commands,
                 options,
                 start_process=start_process,
                 clock=clock,
@@ -639,6 +725,7 @@ def handle_run(
                 record=partial(append_event, paths.events_file),
                 base_env=base_env,
                 writable_files=writable_files,
+                agent=player,
             )
     except RunTerminated:
         return CommandResult(exit_code=1, stderr_lines=(RUN_TERMINATED_MESSAGE,))

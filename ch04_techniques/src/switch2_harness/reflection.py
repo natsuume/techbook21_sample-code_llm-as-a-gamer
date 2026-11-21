@@ -1,7 +1,9 @@
 """要素「振り返り」(reflection) のうち、批評役の入力の組み立て、notes.md の節の置き換え、批評の間隔、look の知らせ。
 
 流れ:
-    run の間、reflection_critic が run の開始から REFLECTION_INTERVAL_S 秒ごとに批評役 (別の claude -p) を起動する。
+    run の間、reflection_critic が run の開始から REFLECTION_INTERVAL_S 秒ごとに批評役 (プレイヤーと同じ種類の
+    別のエージェント。Claude Code なら別の claude -p) を起動する。以下の関数は Claude Code の批評役の入力と出力の形で、
+    Codex の批評役は codex_critic が、撮影の見出し (frame_label) と記録の節 (records_text) を共有して組み立てる。
     批評役には、直近 REFLECTION_INTERVAL_S 秒の撮影 (最大 MAX_CRITIC_FRAMES 枚。select_frames)・行動 (format_action_lines)・
     プレイ中のエージェントの発言 (assistant_texts)・notes.md を、1 つのユーザーのメッセージ (critic_input_line) で渡す。
     批評役の出力 (critique_from_result) は、ハーネスが notes.md の「振り返り」の節に、前の批評と置き換えて書き
@@ -190,15 +192,13 @@ def build_critic_content(
            - "## プレイヤーの発言 (古い順)\\n\\n" + <statements を "\\n\\n" でつないだもの。空なら "(なし)">
            - "## notes.md\\n\\n" + <notes_text の末尾の改行を除いたもの。空 (空白だけを含む) なら "(空)">
     """
-    shots_header = "## 直近 5 分の撮影 (古い順)"
     content: list[dict[str, object]] = [{"type": "text", "text": instructions}]
     if frames:
-        content.append({"type": "text", "text": shots_header})
+        content.append({"type": "text", "text": SHOTS_HEADER})
     else:
-        content.append({"type": "text", "text": f"{shots_header}\n\n(なし)"})
+        content.append({"type": "text", "text": f"{SHOTS_HEADER}\n\n(なし)"})
     for i, frame in enumerate(frames, start=1):
-        label = f"撮影 {i}: {frame.file_name} ({format_offset(frame.offset_s)})"
-        content.append({"type": "text", "text": label})
+        content.append({"type": "text", "text": frame_label(i, frame)})
         content.append(
             {
                 "type": "image",
@@ -209,6 +209,25 @@ def build_critic_content(
                 },
             }
         )
+    content.append(
+        {"type": "text", "text": records_text(action_lines, statements, notes_text)}
+    )
+    return content
+
+
+# 批評役に渡す撮影の節の見出し
+SHOTS_HEADER = "## 直近 5 分の撮影 (古い順)"
+
+
+def frame_label(number: int, frame: CriticFrame) -> str:
+    """number 番目 (1 から) の撮影の見出し `撮影 <number>: <file_name> (<format_offset(offset_s)>)` を返す。"""
+    return f"撮影 {number}: {frame.file_name} ({format_offset(frame.offset_s)})"
+
+
+def records_text(
+    action_lines: Sequence[str], statements: Sequence[str], notes_text: str
+) -> str:
+    """批評役に渡す、行動・発言・notes.md の 3 つの節を空行 1 つ ("\\n\\n") でつないだ文を返す (build_critic_content の 4.)。"""
     actions_text = "\n".join(action_lines) or "(なし)"
     statements_text = "\n\n".join(statements) or "(なし)"
     notes = notes_text.rstrip("\n") if notes_text.strip() else "(空)"
@@ -217,8 +236,7 @@ def build_critic_content(
         f"## プレイヤーの発言 (古い順)\n\n{statements_text}",
         f"## notes.md\n\n{notes}",
     ]
-    content.append({"type": "text", "text": "\n\n".join(records)})
-    return content
+    return "\n\n".join(records)
 
 
 def critic_input_line(content: Sequence[dict[str, object]]) -> str:
