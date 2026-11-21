@@ -1111,9 +1111,16 @@ Codex の主ループのセッションは、次のように動きます。
 - 1 ターンの中で、使用量の通知はモデルへの要求ごとに届き、`last.inputTokens` はその要求の値でした (`total` は積み上げた値)。使用量の通知は `turn/completed` より前に届きました
 - `codex debug prompt-input` (モデルを呼ばずに、モデルに渡す入力を表示する) で、`project_doc_max_bytes=0` のときにリポジトリーの AGENTS.md が読まれず、CODEX_HOME の AGENTS.md は読まれることを確かめました
 
+同じ日に、実機 (Switch 2) につないで、委任型 (`--mode delegate --agent codex`、effort は既定の medium) を約 10 分動かしました。ソフトはロックマンエグゼ アドバンスドコレクション Vol.1 です。
+
+- 主ループの Codex は、本体の操作のスキルの SKILL.md (`switch-launch-software`・`switch-select-user`) を `cat` で読み、HOME メニューからソフトを起動して、初期指示で指定したユーザーを選びました。その後、会話を送ってゲームを進めました。古いフレームを view_image で開くことと、apply_patch で `notes/handoff.md` を書くこともありました
+- 91 ターンのうち、JSON を読んで操作を実行したのは 87 ターンでした (押下 76 回・待ち 38 回・コードの手順 `tap_repeat` 25 回)。残りは、引き継ぎの依頼が 1、JSON の誤りが 2、止めたときに応答を待っていたものが 1 でした。セッション 1 は 46 ターンで使用量が `--rotate-tokens` (120,000) を超え、`notes/handoff.md` に引き継ぎを書いてから、セッション 2 に入れ替わりました
+- JSON の誤りが 2 回ありました。どちらも、Codex が閉じた ```` ```json ```` のブロックの直後に「】【”】【」のような文字を続けて書き、閉じる行が崩れていました。1 回はその後に、次のユーザーの入力 (時刻の節や画像の base64) まで書き続けていました。主ループはどちらも JSON の誤りとして扱い、操作を送らずに次のターンに進みました
+- 戦いの場面に入らなかったため、委任 (Jev) は起きませんでした
+
 次のことは確認していません。
 
-- 実機 (Switch 2) につないだ通しの実行
+- 委任型で、主ループの Codex が委任を始めて、委任の終わりに振り返る流れ
 - 自動の要約の通知 (`thread/compacted` と、`contextCompaction` の item) が届く場面。両方が同じターンで届いたときは、1 つの要約として `sessions.jsonl` に書きます。使用量の通知の `modelContextWindow` は 475,000 だったので、`--rotate-tokens` をこれに近い値にすると、入れ替えより先に Codex の自動の要約が起きることがあります
 - 写したゲームの内容のスキルが、同じセッションの一覧にいつ載るか。変わらない指示には、一覧に無くても `.agents/skills/game-<名前>/SKILL.md` をシェルで読めば使えると書いています
 - ユーザーと管理者のスキル (`~/.agents/skills`・`~/.codex/skills`・`/etc/codex/skills`) を `skills.config` で止めること (このマシンには無いため)
