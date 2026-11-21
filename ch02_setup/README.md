@@ -63,7 +63,11 @@ COM4  着信  PlayAbility Receiver ...
 
 PC から Pico 2 W へ送信するときは、発信側の COM ポートを使います。着信側は使いません。
 
-ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、controller_bridge.ps1 の先頭にある `param([string]$PortName = "COM3")` の `"COM3"` を書き換えてください。
+ブリッジ (`src/switch2_remote/controller_bridge.ps1`) は、既定で `COM3` を 115200bps で開きます。Windows の Bluetooth 仮想 COM ポートは最大 115200bps として扱われるため、これより速い速度を指定すると開けません。発信側の COM ポートが `COM3` 以外の番号になった場合は、デーモンを起動するときに起動引数 `--com-port` でその番号を指定してください (5. デーモンの起動の節を参照)。たとえば発信側が `COM4` なら、次のように起動します。
+
+```bash
+uv run switch2-remote-daemon --com-port COM4
+```
 
 ## 3. ffmpeg の導入
 
@@ -96,19 +100,20 @@ uv run switch2-remote-daemon
 
 ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動が終わると、`daemon ready` と表示されます。デーモンは同時に 1 つだけ起動します。
 
-起動引数で、デバイスから受け取るフレームレートと、フレームの間引き方を指定できます。値はすべて整数です。
+起動引数で、デバイスから受け取るフレームレートと、フレームの間引き方と、ブリッジが開く COM ポートを指定できます。フレームレートの値はすべて整数です。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
 | `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にします (既知の問題を参照) | 60 | 30 か 60 |
 | `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 1280x720・`--device-fps` のフレームレートで受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜`--device-fps` の値 |
 | `--process-fps N` | デーモンが残すフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
+| `--com-port PORT` | ブリッジが開く COM ポート。Pico 2 W とのペアリングで作られた発信側の COM ポートを指定します (2. Windows とのペアリングの節を参照)。ブリッジを復旧で起動し直すときも同じ COM ポートを開きます | `COM3` | `COM1`、`COM2` のように `COM` と 1 以上の整数 (先頭に 0 を付けた `COM04` などは誤り。大文字と小文字は区別しません) |
 
 ```bash
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
-範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定、範囲の形に合わない `--com-port` の値 (`COM0`、`COM04`、`4` など) では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
 デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 
