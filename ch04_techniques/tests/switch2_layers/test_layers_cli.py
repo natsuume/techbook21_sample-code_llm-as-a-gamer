@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from switch2_remote.controller_bridge import BridgeStartError
+from switch2_remote.hardware_env import COM_PORT_ENV, DEVICE_FPS_ENV
 
 from switch2_layers import cli
 from switch2_layers.app import (
@@ -92,6 +93,13 @@ API_KEY_ENV = "OPENAI_API_KEY"
 def without_api_key(monkeypatch):
     """どのテストも、開発者の環境の API キーで実際の API を呼ばないよう、OPENAI_API_KEY を消してから動かす。"""
     monkeypatch.delenv(API_KEY_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def without_hardware_env(monkeypatch):
+    """どのテストも、開発者の環境の SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS で既定値が変わらないよう、消してから動かす。"""
+    monkeypatch.delenv(COM_PORT_ENV, raising=False)
+    monkeypatch.delenv(DEVICE_FPS_ENV, raising=False)
 
 
 # --- 使い方の表示と引数の定義 ---
@@ -1394,6 +1402,122 @@ def test_start_isolated_bridge_starts_the_bridge_in_a_new_session(monkeypatch):
     )
     assert isinstance(cli.start_isolated_bridge("COM4"), RecordingBridge)
     assert bridge_kwargs == [{"new_session": True, "port_name": "COM4"}]
+
+
+# --- 環境変数による --com-port・--device-fps の既定値 (SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS) ---
+
+# 実機を開く run の 3 つの型 (ORCHESTRATOR と DELEGATE の定数は、このファイルの後ろで定義する)
+RUN_OF_EVERY_MODE = [
+    RUN,
+    ["run", "--mode", "orchestrator"],
+    ["run", "--mode", "delegate"],
+]
+RUN_MODE_IDS = ["advisor", "orchestrator", "delegate"]
+HARDWARE_ENVIRON = {"SWITCH2_COM_PORT": "com4", "SWITCH2_DEVICE_FPS": "30"}
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {},
+        # .env.sample の空の行をそのまま写したときの値
+        {"SWITCH2_COM_PORT": "", "SWITCH2_DEVICE_FPS": ""},
+    ],
+)
+@pytest.mark.parametrize("argv", RUN_OF_EVERY_MODE, ids=RUN_MODE_IDS)
+def test_run_without_arguments_and_environ_uses_com3_and_60(argv, environ):
+    args = build_parser(environ=environ).parse_args(argv)
+    assert (args.com_port, args.device_fps) == ("COM3", 60)
+
+
+@pytest.mark.parametrize("argv", RUN_OF_EVERY_MODE, ids=RUN_MODE_IDS)
+def test_run_takes_defaults_from_environ(argv):
+    args = build_parser(environ=HARDWARE_ENVIRON).parse_args(argv)
+    assert (args.com_port, args.device_fps) == ("COM4", 30)
+
+
+def test_run_settings_and_start_args_have_the_values_from_environ():
+    args = build_parser(environ=HARDWARE_ENVIRON).parse_args(RUN)
+    settings = run_settings_from_args(args)
+    assert (settings.com_port, settings.device_fps) == ("COM4", 30)
+    # 起動引数は run.jsonl の start の args に入る (settings.run_settings_to_json)
+    value = run_settings_to_json(settings)
+    assert (value["com_port"], value["device_fps"]) == ("COM4", 30)
+
+
+def test_run_prefers_arguments_to_environ():
+    environ = {"SWITCH2_COM_PORT": "COM4", "SWITCH2_DEVICE_FPS": "30"}
+    args = build_parser(environ=environ).parse_args(
+        [*RUN, "--com-port", "COM5", "--device-fps", "60"]
+    )
+    assert (args.com_port, args.device_fps) == ("COM5", 60)
+    settings = run_settings_from_args(args)
+    assert (settings.com_port, settings.device_fps) == ("COM5", 60)
+
+
+@pytest.mark.parametrize(
+    "extra, environ, expected",
+    [
+        (["--com-port", "COM4"], {"SWITCH2_COM_PORT": "COM0"}, ("COM4", 60)),
+        (["--device-fps", "30"], {"SWITCH2_DEVICE_FPS": "45"}, ("COM3", 30)),
+        (
+            ["--com-port", "COM4", "--device-fps", "30"],
+            {"SWITCH2_COM_PORT": "-PortName", "SWITCH2_DEVICE_FPS": "030"},
+            ("COM4", 30),
+        ),
+    ],
+)
+def test_run_does_not_read_environ_of_given_arguments(extra, environ, expected):
+    # 起動引数を指定したときは環境変数を読まないため、環境変数の値が誤っていてもよい
+    args = build_parser(environ=environ).parse_args([*RUN, *extra])
+    assert (args.com_port, args.device_fps) == expected
+
+
+@pytest.mark.parametrize(
+    "environ, message",
+    [
+        (
+            {"SWITCH2_COM_PORT": "COM0"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: 'COM0'",
+        ),
+        (
+            {"SWITCH2_COM_PORT": "-PortName"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: '-PortName'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": "45"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: '45'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": " 30"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: ' 30'",
+        ),
+    ],
+)
+@pytest.mark.parametrize("argv", RUN_OF_EVERY_MODE, ids=RUN_MODE_IDS)
+def test_run_rejects_invalid_environ_without_arguments(argv, environ, message, capsys):
+    # 環境変数の誤りは、起動引数の形の誤りと同じく argparse が使い方とともに表示して終了する (実機に触れない)
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser(environ=environ).parse_args(argv)
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert message in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["middle-once", "--run-dir", "runs/x"],
+        ["deep-once", "--run-dir", "runs/x", "--doc", "advice"],
+    ],
+)
+def test_once_commands_do_not_read_hardware_environ(argv):
+    # middle-once と deep-once は実機を開かないため、--com-port・--device-fps を持たず、環境変数の誤りでも止まらない
+    environ = {"SWITCH2_COM_PORT": "COM0", "SWITCH2_DEVICE_FPS": "45"}
+    args = build_parser(environ=environ).parse_args(argv)
+    assert not hasattr(args, "com_port")
+    assert not hasattr(args, "device_fps")
 
 
 # --- --safety (安全の監視) ---

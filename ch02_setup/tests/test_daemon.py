@@ -5,6 +5,14 @@ import pytest
 from switch2_remote import daemon
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.controller_bridge import BridgeStartError
+from switch2_remote.hardware_env import COM_PORT_ENV, DEVICE_FPS_ENV
+
+
+@pytest.fixture(autouse=True)
+def without_hardware_env(monkeypatch):
+    """どのテストも、開発者の環境の SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS で既定値が変わらないよう、消してから動かす。"""
+    monkeypatch.delenv(COM_PORT_ENV, raising=False)
+    monkeypatch.delenv(DEVICE_FPS_ENV, raising=False)
 
 
 class Recorder:
@@ -306,6 +314,107 @@ def test_parse_args_rejects_ffmpeg_fps_above_device_fps(capsys):
     assert "--ffmpeg-fps (31) must not exceed --device-fps (30)" in (
         capsys.readouterr().err
     )
+
+
+# --- 環境変数による既定値 (SWITCH2_COM_PORT・SWITCH2_DEVICE_FPS) ---
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {},
+        # .env.sample の空の行をそのまま写したときの値
+        {"SWITCH2_COM_PORT": "", "SWITCH2_DEVICE_FPS": ""},
+    ],
+)
+def test_parse_args_without_arguments_and_environ_uses_com3_and_60(environ):
+    args = daemon.parse_args([], environ=environ)
+    assert (args.com_port, args.device_fps) == ("COM3", 60)
+
+
+def test_parse_args_takes_defaults_from_environ():
+    environ = {"SWITCH2_COM_PORT": "com4", "SWITCH2_DEVICE_FPS": "30"}
+    assert vars(daemon.parse_args([], environ=environ)) == {
+        "device_fps": 30,
+        "ffmpeg_fps": 30,
+        "process_fps": 10,
+        "com_port": "COM4",
+    }
+
+
+def test_parse_args_prefers_arguments_to_environ():
+    environ = {"SWITCH2_COM_PORT": "COM4", "SWITCH2_DEVICE_FPS": "30"}
+    args = daemon.parse_args(
+        ["--com-port", "COM5", "--device-fps", "60"], environ=environ
+    )
+    assert (args.com_port, args.device_fps) == ("COM5", 60)
+
+
+@pytest.mark.parametrize(
+    "argv, environ, expected",
+    [
+        (["--com-port", "COM4"], {"SWITCH2_COM_PORT": "COM0"}, ("COM4", 60)),
+        (["--device-fps", "30"], {"SWITCH2_DEVICE_FPS": "45"}, ("COM3", 30)),
+        (
+            ["--com-port", "COM4", "--device-fps", "30"],
+            {"SWITCH2_COM_PORT": "-PortName", "SWITCH2_DEVICE_FPS": "030"},
+            ("COM4", 30),
+        ),
+    ],
+)
+def test_parse_args_does_not_read_environ_of_given_arguments(argv, environ, expected):
+    # 起動引数を指定したときは環境変数を読まないため、環境変数の値が誤っていてもよい
+    args = daemon.parse_args(argv, environ=environ)
+    assert (args.com_port, args.device_fps) == expected
+
+
+@pytest.mark.parametrize(
+    "environ, message",
+    [
+        (
+            {"SWITCH2_COM_PORT": "COM0"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: 'COM0'",
+        ),
+        (
+            {"SWITCH2_COM_PORT": "-PortName"},
+            "SWITCH2_COM_PORT must be COM1, COM2, ...: '-PortName'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": "45"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: '45'",
+        ),
+        (
+            {"SWITCH2_DEVICE_FPS": " 30"},
+            "SWITCH2_DEVICE_FPS must be one of 30, 60: ' 30'",
+        ),
+    ],
+)
+def test_parse_args_rejects_invalid_environ_without_arguments(environ, message, capsys):
+    # 環境変数の誤りは、起動引数の誤りと同じく使い方とともに表示して終了する
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args([], environ=environ)
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert message in err
+
+
+def test_parse_args_checks_ffmpeg_fps_against_device_fps_from_environ(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(["--ffmpeg-fps", "31"], environ={"SWITCH2_DEVICE_FPS": "30"})
+    assert excinfo.value.code == 2
+    assert "--ffmpeg-fps (31) must not exceed --device-fps (30)" in (
+        capsys.readouterr().err
+    )
+
+
+def test_parse_args_checks_ffmpeg_fps_against_device_fps_from_arguments():
+    # --device-fps を指定したときは、環境変数の値ではなく --device-fps の値で比べる
+    args = daemon.parse_args(
+        ["--device-fps", "60", "--ffmpeg-fps", "60"],
+        environ={"SWITCH2_DEVICE_FPS": "30"},
+    )
+    assert (args.device_fps, args.ffmpeg_fps) == (60, 60)
 
 
 @pytest.mark.parametrize(
