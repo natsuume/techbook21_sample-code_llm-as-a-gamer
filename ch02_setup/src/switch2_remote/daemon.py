@@ -24,13 +24,17 @@ status の bridge_state が ok に戻り、bridge_restarts が 1 増える。復
     quit                  コントローラー、ブリッジ、キャプチャを止めて終了する
 
 起動引数:
-    --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜60、既定 30)。起動後は変えられない
+    --device-fps N      デバイスから受け取るフレームレート (30 か 60、既定 60)。起動後は変えられない。
+                        PC との USB の接続で 60fps を受け取れないときは 30 にする
+    --ffmpeg-fps N      ffmpeg の出力のフレームレート (整数 1〜device_fps、既定 30)。起動後は変えられない
     --process-fps N     間引いて残すフレームレート (整数 1〜ffmpeg_fps、既定 10)。fps コマンドで変えられる
-    範囲外の値と、--process-fps が --ffmpeg-fps より大きい組み合わせは起動時にエラーにする
+    範囲外の値と、--ffmpeg-fps が --device-fps より大きい組み合わせと、--process-fps が --ffmpeg-fps より大きい
+    組み合わせは起動時にエラーにする
 
 使い方:
     uv run switch2-remote-daemon
     uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
+    uv run switch2-remote-daemon --device-fps 30
 """
 
 import argparse
@@ -42,7 +46,7 @@ import cv2
 
 from switch2_remote.bluetooth_radio import reset_bluetooth_radio
 from switch2_remote.bridge_supervisor import BridgeSupervisor
-from switch2_remote.capture import DEVICE_FPS, Capture
+from switch2_remote.capture import DEFAULT_DEVICE_FPS, DEVICE_FPS_CHOICES, Capture
 from switch2_remote.commands import PROCESS_FPS_MIN, handle_command
 from switch2_remote.controller import Controller
 from switch2_remote.controller_bridge import Bridge, BridgeStartError
@@ -52,7 +56,7 @@ SOCKET_ADDRESS = (
     "\0switch2-remote"  # 抽象名前空間。ファイルパスの長さ制限と後片付けが不要
 )
 REQUEST_READ_TIMEOUT = 5.0  # リクエスト 1 行の受信と応答の送信にかける上限 (秒)
-FFMPEG_FPS_MIN, FFMPEG_FPS_MAX = 1, DEVICE_FPS
+FFMPEG_FPS_MIN = 1  # 上限は --device-fps
 DEFAULT_FFMPEG_FPS = 30
 DEFAULT_PROCESS_FPS = 10
 
@@ -97,20 +101,31 @@ def serve_connection(
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """起動引数を解釈し、ffmpeg_fps・process_fps を持つ Namespace を返す。
+    """起動引数を解釈し、device_fps・ffmpeg_fps・process_fps を持つ Namespace を返す。
 
-    argv が None なら sys.argv[1:] を使う。範囲外の値と、process_fps が ffmpeg_fps より大きい組み合わせは、
-    parser.error で使い方とともに表示して終了する (SystemExit)。
+    argv が None なら sys.argv[1:] を使う。範囲外の値と、ffmpeg_fps が device_fps より大きい組み合わせと、
+    process_fps が ffmpeg_fps より大きい組み合わせは、parser.error で使い方とともに表示して終了する (SystemExit)。
+    device_fps は DEVICE_FPS_CHOICES のどれかだけを受け付ける (argparse の choices)。
     """
     parser = argparse.ArgumentParser(
         prog="switch2-remote-daemon",
         description="Switch 2 を 1 コマンドずつ操作するための常駐デーモン",
     )
     parser.add_argument(
+        "--device-fps",
+        type=int,
+        choices=DEVICE_FPS_CHOICES,
+        default=DEFAULT_DEVICE_FPS,
+        help=(
+            "デバイスから受け取るフレームレート (既定 "
+            f"{DEFAULT_DEVICE_FPS})。PC との USB の接続で 60fps を受け取れないときは 30 にする"
+        ),
+    )
+    parser.add_argument(
         "--ffmpeg-fps",
         type=int,
         default=DEFAULT_FFMPEG_FPS,
-        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜{FFMPEG_FPS_MAX}、既定 {DEFAULT_FFMPEG_FPS})",
+        help=f"ffmpeg の出力のフレームレート ({FFMPEG_FPS_MIN}〜device_fps、既定 {DEFAULT_FFMPEG_FPS})",
     )
     parser.add_argument(
         "--process-fps",
@@ -119,9 +134,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=f"間引いて残すフレームレート ({PROCESS_FPS_MIN}〜ffmpeg_fps、既定 {DEFAULT_PROCESS_FPS})",
     )
     args = parser.parse_args(argv)
-    if not FFMPEG_FPS_MIN <= args.ffmpeg_fps <= FFMPEG_FPS_MAX:
+    if args.ffmpeg_fps < FFMPEG_FPS_MIN:
         parser.error(
-            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN}..{FFMPEG_FPS_MAX}: {args.ffmpeg_fps}"
+            f"--ffmpeg-fps must be {FFMPEG_FPS_MIN} or more: {args.ffmpeg_fps}"
+        )
+    if args.ffmpeg_fps > args.device_fps:
+        parser.error(
+            f"--ffmpeg-fps ({args.ffmpeg_fps}) must not exceed "
+            f"--device-fps ({args.device_fps})"
         )
     if args.process_fps < PROCESS_FPS_MIN:
         parser.error(
@@ -160,7 +180,7 @@ def main(argv: list[str] | None = None):
     try:
         controller = Controller(supervisor)
         supervisor.on_recovered = controller.reset_state
-        capture = Capture(args.ffmpeg_fps, args.process_fps)
+        capture = Capture(args.ffmpeg_fps, args.process_fps, device_fps=args.device_fps)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_ADDRESS)
         server.listen(1)

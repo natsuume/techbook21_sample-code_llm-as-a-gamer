@@ -87,6 +87,28 @@ def test_capture_starts_ffmpeg_in_a_new_session_when_asked(ffmpeg):
     assert [kwargs["start_new_session"] for kwargs in ffmpeg.kwargs] == [True]
 
 
+def framerate_option(args: list[str]) -> str:
+    """ffmpeg のコマンドラインから、入力側の -framerate の値を返す。"""
+    return args[args.index("-framerate") + 1]
+
+
+def test_capture_receives_60fps_from_device_by_default(ffmpeg):
+    cap = Capture(ffmpeg_fps=30, process_fps=10)
+    wait_until_ended(cap)
+    cap.close()
+    assert cap.device_fps == 60
+    assert [framerate_option(args) for args in ffmpeg.args] == ["60"]
+
+
+def test_capture_receives_given_device_fps(ffmpeg):
+    # PC との USB の接続で 60fps を受け取れないときは、デバイスから 30fps で受け取る
+    cap = Capture(ffmpeg_fps=30, process_fps=10, device_fps=30)
+    wait_until_ended(cap)
+    cap.close()
+    assert cap.device_fps == 30
+    assert [framerate_option(args) for args in ffmpeg.args] == ["30"]
+
+
 def test_status_without_frames_has_no_buffered_count(ffmpeg):
     cap = Capture(ffmpeg_fps=30, process_fps=10)
     status = wait_until_ended(cap)

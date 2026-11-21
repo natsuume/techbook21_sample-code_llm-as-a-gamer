@@ -10,7 +10,7 @@
 ```text
 Nintendo Switch 2
   ├─ HDMI → Elgato 4K X → USB → Windows PC
-  │                               └─ ffmpeg.exe (DirectShow, NV12, 1280x720・60fps を間引き)
+  │                               └─ ffmpeg.exe (DirectShow, NV12, 1280x720・60fps か 30fps を間引き)
   │                                    │ 標準出力パイプ
   │                                    ▼
   │                             WSL2: switch2-remote-daemon ◀── Unix ソケット ── switch2-remote
@@ -96,18 +96,19 @@ uv run switch2-remote-daemon
 
 ブリッジの起動 (COM ポートを開くまで最大 30 秒) とキャプチャーの起動が終わると、`daemon ready` と表示されます。デーモンは同時に 1 つだけ起動します。
 
-起動引数で、フレームの間引き方を指定できます。値はどちらも整数です。
+起動引数で、デバイスから受け取るフレームレートと、フレームの間引き方を指定できます。値はすべて整数です。
 
 | 引数 | 内容 | 既定値 | 範囲 |
 |---|---|---|---|
-| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 1280x720・60fps で受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜60 |
+| `--device-fps N` | デバイスから受け取るフレームレート。PC との USB の接続で 60fps を受け取れないときは 30 にします (既知の問題を参照) | 60 | 30 か 60 |
+| `--ffmpeg-fps N` | ffmpeg.exe が出力するフレームレート。デバイスから 1280x720・`--device-fps` のフレームレートで受け取り、ffmpeg.exe の中で N fps に間引きます | 30 | 1〜`--device-fps` の値 |
 | `--process-fps N` | デーモンが残すフレームレート。ffmpeg.exe から受け取ったフレームをさらに間引きます。起動後も `fps` コマンドで変えられます | 10 | 1〜`--ffmpeg-fps` の値 |
 
 ```bash
 uv run switch2-remote-daemon --ffmpeg-fps 30 --process-fps 12
 ```
 
-範囲外の値や、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
+範囲外の値や、`--ffmpeg-fps` が `--device-fps` より大きい指定、`--process-fps` が `--ffmpeg-fps` より大きい指定では、起動せずにエラーを表示します。`--process-fps` を省略した場合も既定値の 10 で比べるため、`--ffmpeg-fps` を 10 未満にするときは `--process-fps` も指定してください。
 
 デーモンが持つのは、間引いて残したフレームのうち最新の 1 枚だけです。1 枚の大きさは 1280x720 の NV12 で約 1.38MB です。
 
@@ -191,6 +192,22 @@ uv run switch2-remote tap A
 動作確認では、Pico 2 W を 1P にした状態で、手元の通常のコントローラーから HOME に戻れませんでした。操作を終えるときは、クライアントから `HOME` を送って HOME 画面まで戻してください。
 
 ## 既知の問題
+
+### PC との USB の接続によっては 60fps で受け取れない
+
+Elgato 4K X を、Elgato が要件とする USB 3.2 Gen 2 より遅い規格の USB で PC につないだ環境では、1280x720 の NV12 を 30fps までしか選べませんでした。この状態で既定の `--device-fps 60` のままデーモンを起動すると、ffmpeg.exe はデバイスを開けずに `Could not set video options` で終了します。デーモンは ffmpeg.exe のエラー出力を表示しないため、端末には `daemon ready` だけが出ます。このとき `status` は `frames=0` と `ended=True` を返し、`shot` は `error capture ended` を返します。
+
+デバイスが出せる形式は、ffmpeg を導入した後に開いた PowerShell で確かめられます。
+
+```powershell
+ffmpeg -hide_banner -list_options true -f dshow -i "video=Elgato 4K X"
+```
+
+出力のうち、`pixel_format=nv12` で `s=1280x720` の行の `max` 側にある `fps=` が、その形式で受け取れるフレームレートの上限です。該当する行の上限がどれも 30 の場合は、`--device-fps 30` を付けてデーモンを起動してください。`--ffmpeg-fps` の既定値は 30 のため、ほかの引数は変えずに起動できます。
+
+```bash
+uv run switch2-remote-daemon --device-fps 30
+```
 
 ### Pico 2 W の入力でスリープを解除できない
 

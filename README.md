@@ -68,7 +68,7 @@ tools/run-dashboard/     第4章の試行の記録を見る読み取り専用の
 | ファイル | 役割 |
 |---|---|
 | `ffmpeg_locator.py` | Windows 側に winget で導入した ffmpeg.exe を探す |
-| `capture_command.py` | ffmpeg.exe のコマンド (NV12、デバイスの 1280x720・60fps を出力側で間引く) を組み立て、標準出力からフレームを読み取る |
+| `capture_command.py` | ffmpeg.exe のコマンド (NV12、デバイスの 1280x720・60fps か 30fps を出力側で間引く) を組み立て、標準出力からフレームを読み取る |
 | `frame_buffer.py` | 受け取ったフレームを処理レートに間引き、最新の 1 枚を保持する |
 | `capture.py` | ffmpeg.exe を起動したままにし、間引いたフレームのうち最新の 1 枚を保持して撮影する |
 | `controller_state.py` | ボタン・スティックの指定を解釈し、押下状態を合成してゲームパッドのレポートを組み立てる |

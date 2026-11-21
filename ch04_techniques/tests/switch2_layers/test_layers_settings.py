@@ -726,6 +726,35 @@ def test_run_mode_values_and_default():
     assert ORCHESTRATOR_EFFORTS == ("low", "medium", "high", "xhigh", "max")
 
 
+def test_device_fps_defaults_to_60():
+    assert RunSettings().device_fps == 60
+
+
+@pytest.mark.parametrize("device_fps", [30, 60])
+def test_device_fps_choices_are_valid(device_fps):
+    assert run_settings_errors(RunSettings(device_fps=device_fps)) == []
+
+
+@pytest.mark.parametrize("device_fps", [0, 45, 120])
+def test_device_fps_outside_the_choices_is_reported_with_option_name(device_fps):
+    errors = run_settings_errors(RunSettings(device_fps=device_fps))
+    assert errors == [f"--device-fps must be one of 30, 60: {device_fps}"]
+
+
+def test_device_fps_error_comes_before_interval_fps_error():
+    # メッセージは引数の定義の順 (RunSettings の属性の順) に並べる
+    errors = run_settings_errors(RunSettings(device_fps=45, interval_fps=0.0))
+    assert len(errors) == 2
+    assert "--device-fps" in errors[0]
+    assert "--interval-fps" in errors[1]
+
+
+def test_run_settings_to_json_writes_device_fps_as_integer():
+    value = run_settings_to_json(RunSettings(device_fps=30))
+    assert value["device_fps"] == 30
+    assert type(value["device_fps"]) is int
+
+
 def test_orchestrator_settings_defaults_follow_the_issue():
     settings = RunSettings()
     assert settings.mode is RunMode.ADVISOR

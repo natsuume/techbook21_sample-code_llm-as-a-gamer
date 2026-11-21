@@ -57,10 +57,11 @@ def recorder(monkeypatch):
             rec.events.append("controller closed")
 
     class FakeCapture:
-        def __init__(self, ffmpeg_fps, process_fps):
+        def __init__(self, ffmpeg_fps, process_fps, device_fps):
             rec.events.append("capture created")
             rec.capture = self
             self.rates = (ffmpeg_fps, process_fps)
+            self.device_fps = device_fps
 
         def close(self):
             rec.events.append("capture closed")
@@ -150,7 +151,7 @@ def test_main_closes_controller_supervisor_capture_in_order(recorder):
 
 
 def test_main_closes_only_created_objects_when_capture_fails(recorder, monkeypatch):
-    def failing_capture(ffmpeg_fps, process_fps):
+    def failing_capture(ffmpeg_fps, process_fps, device_fps):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(daemon, "Capture", failing_capture)
@@ -181,6 +182,17 @@ def test_main_passes_given_rates_to_capture(recorder):
     assert recorder.capture.rates == (60, 12)
 
 
+def test_main_passes_default_device_fps_to_capture(recorder):
+    daemon.main([])
+    assert recorder.capture.device_fps == 60
+
+
+def test_main_passes_given_device_fps_to_capture(recorder):
+    daemon.main(["--device-fps", "30"])
+    assert recorder.capture.device_fps == 30
+    assert recorder.capture.rates == (30, 10)
+
+
 def test_main_reads_command_line_when_argv_is_none(recorder, monkeypatch):
     monkeypatch.setattr("sys.argv", ["switch2-remote-daemon", "--process-fps", "5"])
     daemon.main()
@@ -194,8 +206,60 @@ def test_main_rejects_invalid_arguments_before_starting_anything(recorder):
 
 
 def test_parse_args_uses_defaults():
-    # 起動引数は ffmpeg_fps と process_fps の 2 つだけ
-    assert vars(daemon.parse_args([])) == {"ffmpeg_fps": 30, "process_fps": 10}
+    # 起動引数は device_fps と ffmpeg_fps と process_fps の 3 つだけ
+    assert vars(daemon.parse_args([])) == {
+        "device_fps": 60,
+        "ffmpeg_fps": 30,
+        "process_fps": 10,
+    }
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--device-fps", "60"], 60),
+        (["--device-fps", "30"], 30),
+    ],
+)
+def test_parse_args_accepts_device_fps_choices(argv, expected):
+    assert daemon.parse_args(argv).device_fps == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--device-fps", "45"],
+        ["--device-fps", "120"],
+        ["--device-fps", "0"],
+        ["--device-fps", "abc"],
+    ],
+)
+def test_parse_args_rejects_device_fps_outside_choices(argv, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(argv)
+    assert excinfo.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--device-fps", "30", "--ffmpeg-fps", "30"], (30, 30)),
+        (["--device-fps", "30", "--ffmpeg-fps", "12", "--process-fps", "12"], (30, 12)),
+    ],
+)
+def test_parse_args_accepts_ffmpeg_fps_up_to_device_fps(argv, expected):
+    args = daemon.parse_args(argv)
+    assert (args.device_fps, args.ffmpeg_fps) == expected
+
+
+def test_parse_args_rejects_ffmpeg_fps_above_device_fps(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        daemon.parse_args(["--device-fps", "30", "--ffmpeg-fps", "31"])
+    assert excinfo.value.code == 2
+    assert "--ffmpeg-fps (31) must not exceed --device-fps (30)" in (
+        capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize(

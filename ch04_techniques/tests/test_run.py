@@ -96,8 +96,9 @@ def recorder(tmp_path, monkeypatch):
             rec.events.append("output closed")
 
     class FakeCapture:
-        def __init__(self, ffmpeg_fps, process_fps, history, on_frame):
+        def __init__(self, ffmpeg_fps, process_fps, history, on_frame, device_fps):
             self.rates = (ffmpeg_fps, process_fps)
+            self.device_fps = device_fps
             self.history = history
             self.on_frame = on_frame
             self.ended = False
@@ -256,6 +257,17 @@ def test_main_closes_parts_in_order(recorder):
         "capture closed",
         "supervisor closed",
     ]
+
+
+def test_main_passes_default_rates_to_capture(recorder):
+    run.main(REQUIRED)
+    assert recorder.capture.device_fps == 60
+    assert recorder.capture.rates == (30, 10)
+
+
+def test_main_passes_given_device_fps_to_capture(recorder):
+    run.main([*REQUIRED, "--device-fps", "30"])
+    assert recorder.capture.device_fps == 30
 
 
 def test_main_builds_supervisor_with_bridge_and_radio_reset(recorder):
@@ -615,7 +627,7 @@ def test_main_exits_with_message_when_first_bridge_fails(recorder):
 
 
 def test_main_closes_only_created_parts_when_capture_fails(recorder, monkeypatch):
-    def failing_capture(ffmpeg_fps, process_fps, history, on_frame):
+    def failing_capture(ffmpeg_fps, process_fps, history, on_frame, device_fps):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(run, "CaptureWithHistory", failing_capture)
@@ -766,7 +778,7 @@ def test_main_closes_dashboard_recorder_after_capture_and_before_supervisor(
 
 
 def test_main_closes_dashboard_recorder_when_capture_fails(recorder, monkeypatch):
-    def failing_capture(ffmpeg_fps, process_fps, history, on_frame):
+    def failing_capture(ffmpeg_fps, process_fps, history, on_frame, device_fps):
         raise RuntimeError("ffmpeg not found")
 
     monkeypatch.setattr(run, "CaptureWithHistory", failing_capture)
@@ -848,6 +860,7 @@ def test_parse_args_uses_defaults():
     assert vars(run.parse_args(REQUIRED)) == {
         "game": "zelda",
         "model": "jev",
+        "device_fps": 60,
         "ffmpeg_fps": 30,
         "process_fps": 10,
         "history_seconds": 5.0,
@@ -1075,6 +1088,9 @@ def test_parse_args_requires_game_and_model(argv, capsys):
 @pytest.mark.parametrize(
     "extra, attribute, expected",
     [
+        (["--device-fps", "30"], "device_fps", 30),
+        (["--device-fps", "60"], "device_fps", 60),
+        (["--device-fps", "30", "--ffmpeg-fps", "30"], "ffmpeg_fps", 30),
         (["--ffmpeg-fps", "1", "--process-fps", "1"], "process_fps", 1),
         (["--ffmpeg-fps", "60", "--process-fps", "60"], "ffmpeg_fps", 60),
         (["--history-seconds", "0.1"], "history_seconds", 0.1),
@@ -1100,9 +1116,13 @@ def test_parse_args_accepts_values_in_range(extra, attribute, expected):
 @pytest.mark.parametrize(
     "extra",
     [
+        ["--device-fps", "45"],
+        ["--device-fps", "120"],
+        ["--device-fps", "abc"],
         ["--ffmpeg-fps", "0"],
         ["--ffmpeg-fps", "61"],
         ["--ffmpeg-fps", "abc"],
+        ["--device-fps", "30", "--ffmpeg-fps", "31"],
         ["--process-fps", "0"],
         ["--process-fps", "1.5"],
         ["--history-seconds", "0"],
@@ -1146,6 +1166,14 @@ def test_parse_args_has_no_button_or_stick_thresholds(option, capsys):
         run.parse_args([*REQUIRED, option, "0.5"])
     assert excinfo.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_parse_args_rejects_ffmpeg_fps_above_device_fps_with_message(capsys):
+    with pytest.raises(SystemExit):
+        run.parse_args([*REQUIRED, "--device-fps", "30", "--ffmpeg-fps", "31"])
+    assert "--ffmpeg-fps (31) must not exceed --device-fps (30)" in (
+        capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize("option", ["--history-seconds", "--advisor-timeout"])
