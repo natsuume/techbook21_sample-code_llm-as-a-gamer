@@ -2568,3 +2568,90 @@ def test_run_orchestrator_with_codex_passes_the_agent_to_app(monkeypatch):
     [(settings, _)] = recorded.created
     assert settings.agent.value == "codex"
     assert settings.codex_model == "gpt-6.2-sol"
+
+
+def test_live_view_opens_before_hardware_and_creates_a_fresh_run_for_each_start(
+    monkeypatch,
+):
+    from switch2_layers.orchestrator import live_window
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+
+    def open_window(instruction, play, count_game_overs):
+        assert instruction == INSTRUCTION
+        assert not count_game_overs
+        assert recorded.created == []
+        for edited in ("最初の試行", "次の試行"):
+            trial = live_window.LiveTrial()
+            assert play(edited, trial) == 0
+            _, parts = recorded.created[-1]
+            assert parts.live is trial
+            assert parts.initial_instruction == edited
+            assert trial.snapshot().reason == REASON_INTERRUPTED
+            assert recorded.clients[-1].closed
+        return 0
+
+    monkeypatch.setattr(live_window, "open_live_window", open_window)
+    assert (
+        main(
+            [*DELEGATE, "--live-view", "--instruction", INSTRUCTION, "--safety", "fake"]
+        )
+        == 0
+    )
+    assert len(recorded.created) == 2
+
+
+@pytest.mark.parametrize("base", [RUN, ORCHESTRATOR])
+def test_live_view_requires_delegate_mode(base, capsys):
+    assert main([*base, "--live-view"]) == 2
+    assert "--live-view requires --mode delegate" in capsys.readouterr().err
+
+
+def test_live_view_reports_missing_tk_when_tkinter_is_unavailable(monkeypatch, capsys):
+    import builtins
+
+    from switch2_layers.orchestrator import live_window
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    monkeypatch.setattr(live_window, "tk", None)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "tkinter":
+            raise ImportError("No module named '_tkinter'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert main([*DELEGATE, "--live-view", "--safety", "fake"]) == 1
+    assert "ライブ画面には Tk が必要です" in capsys.readouterr().err
+
+
+def test_live_view_early_stop_sets_interrupted_reason_without_starting_capture(
+    monkeypatch,
+):
+    from switch2_layers.orchestrator import live_window
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+    capture_started = []
+
+    def fail_if_capture_started(*args, **kwargs):
+        capture_started.append((args, kwargs))
+        raise AssertionError("Capture must not start when stop is already requested")
+
+    monkeypatch.setattr(cli, "Capture", fail_if_capture_started)
+
+    def open_window(_instruction, play, count_game_overs):
+        del count_game_overs
+        trial = live_window.LiveTrial()
+        trial.stop_requested.set()
+        assert play("初期指示", trial) == 0
+        assert trial.snapshot().reason == REASON_INTERRUPTED
+        return 0
+
+    monkeypatch.setattr(live_window, "open_live_window", open_window)
+    assert main([*DELEGATE, "--live-view", "--safety", "fake"]) == 0
+    assert capture_started == []
+    assert recorded.created == []
+    assert recorded.clients[-1].closed

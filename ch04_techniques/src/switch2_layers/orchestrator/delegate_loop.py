@@ -45,6 +45,7 @@ from switch2_layers.orchestrator.delegate_questions import (
     choose_option,
     delegate_option_names,
 )
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_events import (
     DelegateEnd,
@@ -167,6 +168,7 @@ def ask_delegate(
     image_width: int,
     jpeg_quality: int,
     make_reference: Callable[[], str],
+    live: LiveTrial | None = None,
 ) -> DelegateRequestResult:
     """委任の通し番号 serial の要求を 1 回送り、結果を返す (結果の serial は引数の値、frame_ts は frames の時刻、
     option_names は delegate_questions.delegate_option_names(values.choices)。失敗した結果でも同じ)。
@@ -216,11 +218,22 @@ def ask_delegate(
         logger.debug("building the delegate request failed", exc_info=True)
         return failure(clock.now(), error)
     t_sent = clock.now()
+    if live is not None:
+        live.update(
+            jev_thinking=True,
+            request_t=t_sent,
+            images=tuple(
+                (t, image.jpeg) for t, image in zip(frame_ts, images, strict=True)
+            ),
+        )
     try:
         answers = asker.ask(state, [question], images)
     except Exception as error:
         logger.debug("delegate request failed", exc_info=True)
         return failure(t_sent, error)
+    finally:
+        if live is not None:
+            live.update(jev_thinking=False)
     t_received = clock.now()
     try:
         probabilities = read_delegate_probabilities(answers, option_names)

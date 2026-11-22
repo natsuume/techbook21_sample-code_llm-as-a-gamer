@@ -32,6 +32,7 @@ from switch2_layers.orchestrator.codex_session_command import codex_skills_dir
 from switch2_layers.orchestrator.decision_parser import parse_decision
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
 from switch2_layers.orchestrator.delegate_loop import DelegateSettings
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.main_loop import (
     DecisionParser,
     OrchestratorMainLoop,
@@ -95,6 +96,7 @@ class OrchestratorLoopParts:
     environ: Mapping[str, str] | None
     switch_skills_dir: Path
     buffered_frames: Callable[[], Sequence[CapturedFrame]] | None = None
+    live: LiveTrial | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,7 @@ def build_orchestrator_loops(
                 paths=parts.paths,
                 latest_frames=parts.latest_frames,
                 buffered_frames=parts.buffered_frames,
+                live=parts.live,
                 run_log=parts.run_log,
             ),
             OrchestratorSettings(
@@ -286,6 +289,7 @@ def build_orchestrator_loops(
             session_factory=agent_parts.session_factory,
             skills_dir=agent_parts.skills_dir,
             frames_guide_text=agent_parts.frames_guide_text,
+            live=parts.live,
         ),
         OrchestratorMainLoopSettings(
             rotate_tokens=settings.rotate_tokens,

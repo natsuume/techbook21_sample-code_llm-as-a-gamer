@@ -39,6 +39,7 @@ def build_safety_assembly(
     load_references: Callable[
         [], Mapping[str, tuple[bytes, ...]]
     ] = load_reference_images,
+    on_game_over: Callable[[float], None] | None = None,
 ) -> SafetyAssembly:
     """kind (--safety の値) に合わせて SafetyAssembly を作る。
 
@@ -58,7 +59,8 @@ def build_safety_assembly(
     reference_images = load_references()
     client = JevClient(api_key, client=http_client)
     return SafetyAssembly(
-        checker=JevSafetyChecker(client, reference_images), close=client.close
+        checker=JevSafetyChecker(client, reference_images, on_game_over=on_game_over),
+        close=client.close,
     )
 
 

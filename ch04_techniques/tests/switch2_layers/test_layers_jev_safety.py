@@ -10,6 +10,7 @@ import json
 import httpx
 import pytest
 
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.safety.jev_safety import JevSafetyChecker
 from switch2_layers.safety.safety_questions import (
     SAFETY_INSTRUCTIONS,
@@ -283,3 +284,25 @@ def test_check_with_unusable_reference_images_sends_nothing(reference_images):
     with pytest.raises(ValueError):
         checker_for(mock, reference_images).check(JPEG)
     assert mock.requests == []
+
+
+def test_live_game_over_count_is_separate_from_the_stop_conditions():
+    trial = LiveTrial()
+    mock = MockJev()
+    client = JevClient("test", client=httpx.Client(transport=httpx.MockTransport(mock)))
+    checker = JevSafetyChecker(
+        client, REFERENCE_IMAGES, on_game_over=trial.observe_game_over
+    )
+    for probability, expected in [(0.9, 1), (0.6, 1), (0.95, 1), (0.1, 1), (0.85, 2)]:
+        mock.body = answers_body({**NOUL_VALUES, "game_over": probability})
+        answer = checker.check(JPEG)
+        assert answer.probabilities == NOUL_VALUES
+        assert trial.snapshot().game_overs == expected
+    trial.observe_game_over(0.1)
+    trial.stop_requested.set()
+    trial.observe_game_over(0.95)
+    assert trial.snapshot().game_overs == 2
+    question = mock.payloads()[0]["questions"]["game_over"]
+    assert question["type"] == "noul"
+    assert "`frame`" in question["instructions"]
+    client.close()

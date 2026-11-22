@@ -28,6 +28,7 @@ turn_input が委任の節を置く)。委任中に主ループの actions を�
 """
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ from switch2_layers.orchestrator.claude_stream_session import (
     StreamProcessStarter,
 )
 from switch2_layers.orchestrator.decision_types import Decision, DecisionError
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.main_loop_session import (
     AssistantText,
     AutoCompaction,
@@ -248,6 +250,17 @@ class OrchestratorMainLoopParts:
     session_factory: MainLoopSessionFactory | None = None
     skills_dir: Path | None = None
     frames_guide_text: str = FRAMES_GUIDE_TEXT
+    live: LiveTrial | None = None
+
+
+_LIVE_JSON_FENCE = re.compile(r"^```json[ \t]*\r?$", re.MULTILINE)
+
+
+def _extract_live_explanation(text: str) -> str:
+    """ライブ表示用に、行頭の ```json のコードブロックより前の説明文を取り出す。"""
+    match = _LIVE_JSON_FENCE.search(text)
+    head = text if match is None else text[: match.start()]
+    return head.strip()
 
 
 class _TurnEnd(Enum):
@@ -518,7 +531,16 @@ class OrchestratorMainLoop:
             if turn is _SendFailure.NOT_SENT:
                 # 入力を送れなかった: 子プロセスが終わったものとして終える
                 return self._end_unfinished_session(session, SessionEndReason.EXIT)
-            end = self._wait_for_result(session, turn, stop)
+            live = self.parts.live
+            if live is not None:
+                live.update(
+                    main_thinking=True, turn=f"{session.number} / {turn.number}"
+                )
+            try:
+                end = self._wait_for_result(session, turn, stop)
+            finally:
+                if live is not None:
+                    live.update(main_thinking=False)
             if end is _TurnEnd.STOPPED:
                 self._write_turn(session, turn, None, None, TurnOutcome.STOPPED)
                 self._end_session(session, SessionEndReason.CLOSE)
@@ -681,6 +703,8 @@ class OrchestratorMainLoop:
                 handoff_text=read_note_text(paths.notes_dir, HANDOFF_NOTE),
             )
             text = f"{build_session_opening_text(opening)}\n{text}"
+        if parts.live is not None:
+            text += "\nライブ表示用に、最後の JSON の前に、画面で確認した状況と次に行うことを一文で説明してください。\n"
         images = select_turn_frames(parts.latest_frames())
         turn = _SentTurn(
             number=session.turn_count + 1,
@@ -772,6 +796,12 @@ class OrchestratorMainLoop:
                 return _TurnEnd.ENDED
             if isinstance(event, AssistantText):
                 turn.last_text = event.text
+                if self.parts.live is not None:
+                    explanation = _extract_live_explanation(event.text)
+                    if explanation:
+                        self.parts.live.update(
+                            message=f"ターン {session.number} / {turn.number}\n{explanation}"
+                        )
             elif isinstance(event, ContextUsage):
                 session.usage_tokens = event.tokens
             elif isinstance(event, AutoCompaction):

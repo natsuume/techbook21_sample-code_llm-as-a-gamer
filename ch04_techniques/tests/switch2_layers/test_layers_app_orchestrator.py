@@ -38,6 +38,7 @@ from switch2_layers.middle.system_screen_middle import (
     FAKE_DONE_OUTPUT,
     FakeSystemScreenMiddle,
 )
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.main_loop import (
     decision_failure_reason,
     session_failure_reason,
@@ -1124,3 +1125,133 @@ def test_delegate_mode_with_layers_parts_is_an_error(tmp_path):
     with pytest.raises(ValueError):
         LayersApp(delegate_settings(tmp_path), advisor_parts())
     assert not (tmp_path / "runs").exists()
+
+
+def test_live_trial_observes_applied_updates_and_real_jev_input_and_stops(tmp_path):
+    live = LiveTrial()
+    sent = []
+    update = 'タスクを変更する。\n```json\n{"delegate":{"action":"update","tasks":["前に進む"]}}\n```'
+    claude = RepeatingClaude([DELEGATE_START_REPLY, update, WAIT_REPLY])
+    jev = ChoosingJev(["press_x"], before_answer=lambda: sent.append(live.snapshot()))
+    parts = orchestrator_parts(tmp_path, FakeSender(), claude, monitor=jev)
+
+    def stop_after_decision():
+        state = live.snapshot()
+        if (
+            state.decision is not None
+            and state.decision.chosen == "press_x"
+            and "+ タスク　前に進む" in state.changes
+        ):
+            live.stop_requested.set()
+        # run_orchestrator のタイムアウトだけを保険に使う
+        return False
+
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        dataclasses.replace(parts, live=live),
+        stop_after_decision,
+    )
+    assert live.stop_requested.is_set()
+    assert reason == REASON_INTERRUPTED
+    state = live.snapshot()
+    assert not state.delegated
+    assert not state.main_thinking
+    assert any(line.startswith("- タスク　") for line in state.changes)
+    assert state.message
+    assert all(s.jev_thinking and s.delegated for s in sent)
+    assert [jpeg for s in sent for _, jpeg in s.images] == [
+        image.jpeg for image in jev.images
+    ]
+    assert_stopped_without_phases(root, REASON_INTERRUPTED)
+
+
+def test_extract_live_explanation_splits_only_at_fenced_json_line():
+    from switch2_layers.orchestrator.main_loop import _extract_live_explanation
+
+    inline = '次の ```json ブロックで委任します。\n```json\n{"actions":[]}\n```'
+    assert _extract_live_explanation(inline) == "次の ```json ブロックで委任します。"
+    assert _extract_live_explanation("画面を確認します。") == "画面を確認します。"
+    assert _extract_live_explanation('```json\n{"actions":[]}\n```') == ""
+
+
+def test_live_window_request_close_and_refresh_survive_errors():
+    import queue
+
+    from switch2_layers.orchestrator.live_trial import LiveSnapshot
+    from switch2_layers.orchestrator.live_window import LiveWindow
+
+    class FakeWidget:
+        def __init__(self, width=400, height=300):
+            self._width = width
+            self._height = height
+            self.configured = []
+            self.children = []
+            self.coords_calls = []
+
+        def configure(self, **kwargs):
+            self.configured.append(kwargs)
+
+        def winfo_width(self):
+            return self._width
+
+        def winfo_height(self):
+            return self._height
+
+        def winfo_children(self):
+            return list(self.children)
+
+        def coords(self, *args):
+            self.coords_calls.append(args)
+
+        def itemconfigure(self, *args, **kwargs):
+            self.configured.append(kwargs)
+
+    class FakeRoot:
+        def __init__(self):
+            self.quit_called = 0
+            self.after_calls = []
+
+        def quit(self):
+            self.quit_called += 1
+
+        def after(self, ms, callback):
+            self.after_calls.append((ms, callback))
+
+    window = object.__new__(LiveWindow)
+    window.root = FakeRoot()
+    window.count_game_overs = True
+    window.trial = LiveTrial()
+    window.worker = None
+    window.finished = queue.SimpleQueue()
+    window.ended = None
+    window.closing = False
+    window.close_requested = threading.Event()
+    window.previous = None
+    window.video_size = (0, 0)
+    window.thumb_width = 0
+    window.metrics = FakeWidget()
+    window.stop_button = FakeWidget()
+    window.start_button = FakeWidget()
+    window.input = FakeWidget()
+    window.status = FakeWidget()
+    window.video = FakeWidget()
+    window.video_item = 1
+    window.video_hint = 2
+    window.images = FakeWidget()
+    window.image_heading = FakeWidget()
+
+    # 壊れた JPEG でも draw_images が落ちないこと
+    window.draw_images(LiveSnapshot(images=((1.0, b"invalid-jpeg"),), request_t=1.0))
+
+    # 描画中に例外が起きても refresh のタイマーが止まらないこと
+    window.draw_agents = lambda *_args: (_ for _ in ()).throw(RuntimeError("boom"))
+    window.refresh()
+    assert len(window.root.after_calls) == 1
+
+    # request_close は直接 quit せず、次の refresh で安全に終了すること
+    window.request_close()
+    assert window.root.quit_called == 0
+    window.refresh()
+    assert window.closing
+    assert window.root.quit_called == 1
+    assert len(window.root.after_calls) == 1
