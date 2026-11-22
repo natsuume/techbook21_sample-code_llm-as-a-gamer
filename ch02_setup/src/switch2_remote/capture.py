@@ -95,20 +95,21 @@ class Capture:
 
         出力が終わったら ended を True にする。
         """
+        on_preview = self.on_preview
         for raw in iter_raw_frames(self.proc.stdout, self.frame_bytes):
             with self.lock:
                 self.frame_no += 1
                 self.accumulator, keep = next_keep(
                     self.accumulator, self.ffmpeg_fps, self.process_fps
                 )
-                if keep or self.on_preview is not None:
+                if keep or on_preview is not None:
                     nv12 = np.frombuffer(raw, np.uint8).reshape(
                         DEVICE_HEIGHT * 3 // 2, DEVICE_WIDTH
                     )
                 if keep:
                     self.latest_frame.update(time.monotonic(), nv12)
-            if self.on_preview is not None:
-                self.on_preview(nv12)
+            if on_preview is not None:
+                on_preview(nv12)
         with self.lock:
             self.ended = True
 

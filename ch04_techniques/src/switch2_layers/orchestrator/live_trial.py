@@ -53,6 +53,8 @@ class LiveTrial:
         self.update(frame=frame)
 
     def observe_game_over(self, probability: float) -> None:
+        if self.stop_requested.is_set():
+            return
         with self._lock:
             if probability >= 0.8 and not self._game_over_screen:
                 self._game_over_screen = True

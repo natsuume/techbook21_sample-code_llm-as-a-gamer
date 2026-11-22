@@ -298,5 +298,11 @@ def test_live_game_over_count_is_separate_from_the_stop_conditions():
         answer = checker.check(JPEG)
         assert answer.probabilities == NOUL_VALUES
         assert trial.snapshot().game_overs == expected
-    assert mock.payloads()[0]["questions"]["game_over"]["type"] == "noul"
+    trial.observe_game_over(0.1)
+    trial.stop_requested.set()
+    trial.observe_game_over(0.95)
+    assert trial.snapshot().game_overs == 2
+    question = mock.payloads()[0]["questions"]["game_over"]
+    assert question["type"] == "noul"
+    assert "`frame`" in question["instructions"]
     client.close()

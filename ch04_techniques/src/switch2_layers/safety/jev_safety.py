@@ -34,7 +34,7 @@ GAME_OVER_QUESTION = SurfaceQuestion(
     target="game_over",
     kind=QuestionKind.INFO_LABEL,
     question_type=QuestionType.NOUL,
-    instructions="現在の frame に、プレイの失敗が確定したゲームオーバー画面、または失敗直後の再挑戦画面が出ているか。",
+    instructions="現在の `frame` に、プレイの失敗が確定したゲームオーバー画面、または失敗直後の再挑戦画面が出ているか。",
 )
 
 

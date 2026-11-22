@@ -731,12 +731,12 @@ def add_delegate_arguments(parser: argparse.ArgumentParser) -> None:
     """
     group = parser.add_argument_group(
         "委任型 (--mode delegate) の引数",
-        "--mode advisor と --mode orchestrator では使わない (指定しても動きは変わらない)",
+        "--mode advisor と --mode orchestrator では使わない (--live-view 以外は指定しても動きは変わらない)",
     )
     group.add_argument(
         "--live-view",
         action="store_true",
-        help="委任型の試行をデスクトップ画面から開始・終了する",
+        help="委任型の試行をデスクトップ画面から開始・終了する (--mode delegate 専用)",
     )
     group.add_argument(
         "--delegate-image-width",
@@ -1281,6 +1281,9 @@ def _run_with_hardware(
         return 1
     capture: Capture | None = None
     try:
+        if live is not None and live.stop_requested.is_set():
+            live.update(reason=REASON_INTERRUPTED)
+            return 0
         capture = Capture(
             CAPTURE_FFMPEG_FPS,
             CAPTURE_PROCESS_FPS,
@@ -1290,6 +1293,7 @@ def _run_with_hardware(
         )
         parts = build_parts(SwitchCaptureReader(capture), supervisor)
         if live is not None and live.stop_requested.is_set():
+            live.update(reason=REASON_INTERRUPTED)
             return 0
         reason = LayersApp(settings, parts).run()
         if live is not None:

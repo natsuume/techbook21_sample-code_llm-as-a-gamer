@@ -1,11 +1,12 @@
 """委任型のライブ表示。Tk と画像の縮小・描画はメインスレッドだけで扱う。"""
 
+from __future__ import annotations
+
 import logging
 import signal
 import sys
 import threading
 import time
-import tkinter as tk
 from collections.abc import Callable
 from queue import Empty, SimpleQueue
 
@@ -14,6 +15,11 @@ import numpy as np
 
 from switch2_layers.frames.image_encoding import nv12_to_bgr
 from switch2_layers.orchestrator.live_trial import LiveSnapshot, LiveTrial
+
+try:
+    import tkinter as tk
+except ImportError:
+    tk = None  # type: ignore[assignment]
 
 Play = Callable[[str | None, LiveTrial], int]
 
@@ -85,6 +91,7 @@ class LiveWindow:
         self.finished: SimpleQueue[tuple[float, str]] = SimpleQueue()
         self.ended: float | None = None
         self.closing = False
+        self.close_requested = threading.Event()
         self.previous: LiveSnapshot | None = None
         self.video_size = (0, 0)
         self.thumb_width = 0
@@ -191,6 +198,10 @@ class LiveWindow:
             self.stop_button.configure(state="disabled")
             self.status.configure(text="終了処理中")
 
+    def request_close(self):
+        """シグナルハンドラーなど Tk の外から安全に終了を要求する。"""
+        self.close_requested.set()
+
     def close(self):
         self.closing = True
         self.stop()
@@ -198,6 +209,10 @@ class LiveWindow:
             self.root.quit()
 
     def refresh(self):
+        if self.close_requested.is_set() and not self.closing:
+            self.close()
+            if self.worker is None:
+                return
         try:
             self.ended, reason = self.finished.get_nowait()
         except Empty:
@@ -212,19 +227,19 @@ class LiveWindow:
             if self.closing:
                 self.root.quit()
                 return
-        state = self.trial.snapshot() if self.trial else LiveSnapshot()
-        active = self.worker is not None
-        seconds = (
-            int((self.ended or time.monotonic()) - self.trial.started)
-            if self.trial
-            else 0
-        )
-        elapsed = f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
-        count = state.game_overs if self.count_game_overs else "計測なし"
-        self.metrics.configure(text=f"{elapsed}　｜　ゲームオーバー {count}")
-        self.draw_agents(state, active)
-        self.draw_images(state)
-        self.previous = state
+        try:
+            state = self.trial.snapshot() if self.trial else LiveSnapshot()
+            active = self.worker is not None
+            end_t = self.ended if self.ended is not None else time.monotonic()
+            seconds = max(0, int(end_t - self.trial.started)) if self.trial else 0
+            elapsed = f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
+            count = state.game_overs if self.count_game_overs else "計測なし"
+            self.metrics.configure(text=f"{elapsed}　｜　ゲームオーバー {count}")
+            self.draw_agents(state, active)
+            self.draw_images(state)
+            self.previous = state
+        except Exception:
+            logging.getLogger(__name__).exception("live window refresh failed")
         self.root.after(33, self.refresh)
 
     def draw_agents(self, state, active):
@@ -312,22 +327,32 @@ class LiveWindow:
             return
         for t, jpeg in state.images:
             bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
             item = label(self.images, f"{t:.2f} s", size=9)
-            item.image = photo(item, bgr, max(1, width // len(state.images) - 6), 96)
-            item.configure(image=item.image, compound="top")
+            item.image = photo(item, bgr, max(1, width // len(state.images) - 8), 96)
+            item.configure(image=item.image, compound="top", bd=0, padx=2, pady=1)
             item.pack(side="left", padx=1)
 
 
 def open_live_window(
     instruction: str | None, play: Play, count_game_overs: bool
 ) -> int:
+    global tk
+    if tk is None:
+        try:
+            import tkinter as imported_tk
+        except ImportError as error:
+            print(f"ライブ画面には Tk が必要です: {error}", file=sys.stderr)
+            return 1
+        tk = imported_tk
     try:
         root = tk.Tk()
     except tk.TclError as error:
         print(f"ライブ画面を開けません: {error}", file=sys.stderr)
         return 1
     window = LiveWindow(root, instruction, play, count_game_overs)
-    previous = signal.signal(signal.SIGINT, lambda *_: window.close())
+    previous = signal.signal(signal.SIGINT, lambda *_: window.request_close())
     try:
         root.mainloop()
     finally:

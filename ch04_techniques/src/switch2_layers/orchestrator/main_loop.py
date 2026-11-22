@@ -28,6 +28,7 @@ turn_input が委任の節を置く)。委任中に主ループの actions を�
 """
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -250,6 +251,16 @@ class OrchestratorMainLoopParts:
     skills_dir: Path | None = None
     frames_guide_text: str = FRAMES_GUIDE_TEXT
     live: LiveTrial | None = None
+
+
+_LIVE_JSON_FENCE = re.compile(r"^```json[ \t]*\r?$", re.MULTILINE)
+
+
+def _extract_live_explanation(text: str) -> str:
+    """ライブ表示用に、行頭の ```json のコードブロックより前の説明文を取り出す。"""
+    match = _LIVE_JSON_FENCE.search(text)
+    head = text if match is None else text[: match.start()]
+    return head.strip()
 
 
 class _TurnEnd(Enum):
@@ -786,7 +797,7 @@ class OrchestratorMainLoop:
             if isinstance(event, AssistantText):
                 turn.last_text = event.text
                 if self.parts.live is not None:
-                    explanation = event.text.partition("```json")[0].strip()
+                    explanation = _extract_live_explanation(event.text)
                     if explanation:
                         self.parts.live.update(
                             message=f"ターン {session.number} / {turn.number}\n{explanation}"
