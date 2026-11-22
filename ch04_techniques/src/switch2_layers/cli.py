@@ -132,6 +132,7 @@ from switch2_layers.orchestrator.initial_instruction import (
     InitialInstructionError,
     load_initial_instruction,
 )
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.safety.safety_assembly import build_safety_assembly
 from switch2_layers.safety.safety_types import SafetyChecker
 from switch2_layers.settings import (
@@ -733,6 +734,11 @@ def add_delegate_arguments(parser: argparse.ArgumentParser) -> None:
         "--mode advisor と --mode orchestrator では使わない (指定しても動きは変わらない)",
     )
     group.add_argument(
+        "--live-view",
+        action="store_true",
+        help="委任型の試行をデスクトップ画面から開始・終了する",
+    )
+    group.add_argument(
         "--delegate-image-width",
         type=int,
         default=DEFAULT_DELEGATE_IMAGE_WIDTH,
@@ -1056,6 +1062,9 @@ def run_command(args: argparse.Namespace) -> int:
     if errors:
         _print_errors(errors)
         return EXIT_USAGE
+    if args.live_view and settings.mode is not RunMode.DELEGATE:
+        _print_errors(["--live-view requires --mode delegate"])
+        return EXIT_USAGE
     if settings.mode is RunMode.ORCHESTRATOR:
         return _run_orchestrator_command(settings, args)
     if settings.mode is RunMode.DELEGATE:
@@ -1165,8 +1174,27 @@ def _run_delegate_command(settings: RunSettings, args: argparse.Namespace) -> in
     if key_errors:
         _print_errors(key_errors)
         return EXIT_USAGE
+    if args.live_view:
+        try:
+            from switch2_layers.orchestrator.live_window import open_live_window
+        except ImportError as error:
+            _print_errors([f"ライブ画面には Tk が必要です: {error}"])
+            return 1
+        return open_live_window(
+            instruction,
+            functools.partial(_play_delegate, settings),
+            count_game_overs=settings.safety is SafetyKind.JEV,
+        )
+    return _play_delegate(settings, instruction)
+
+
+def _play_delegate(
+    settings: RunSettings, instruction: str | None, live: LiveTrial | None = None
+) -> int:
     safety = build_safety_assembly(
-        settings.safety, _typesafe_api_key(settings.safety is SafetyKind.JEV)
+        settings.safety,
+        _typesafe_api_key(settings.safety is SafetyKind.JEV),
+        on_game_over=live.observe_game_over if live else None,
     )
     try:
         jev = create_monitor_client(os.environ)
@@ -1180,7 +1208,9 @@ def _run_delegate_command(settings: RunSettings, args: argparse.Namespace) -> in
                     safety=safety.checker,
                     monitor=jev,
                     initial_instruction=instruction,
+                    live=live,
                 ),
+                live=live,
             )
         finally:
             jev.close()
@@ -1226,6 +1256,7 @@ def _run_with_hardware(
     build_parts: Callable[
         [LatestFrameReader, BridgeSupervisor], LayersParts | OrchestratorLayersParts
     ],
+    live: LiveTrial | None = None,
 ) -> int:
     """ブリッジとキャプチャーを作って LayersApp を動かし、閉じる (advisor と Orchestrator 型で共有)。終了コードを返す。
 
@@ -1244,6 +1275,8 @@ def _run_with_hardware(
             reset_radio=reset_bluetooth_radio,
         )
     except BridgeStartError as error:
+        if live is not None:
+            live.update(reason=str(error))
         print(str(error), file=sys.stderr)
         return 1
     capture: Capture | None = None
@@ -1253,9 +1286,14 @@ def _run_with_hardware(
             CAPTURE_PROCESS_FPS,
             new_session=True,
             device_fps=settings.device_fps,
+            **({"on_preview": live.preview} if live is not None else {}),
         )
         parts = build_parts(SwitchCaptureReader(capture), supervisor)
+        if live is not None and live.stop_requested.is_set():
+            return 0
         reason = LayersApp(settings, parts).run()
+        if live is not None:
+            live.update(reason=reason)
     finally:
         if capture is not None:
             capture.close()

@@ -20,8 +20,21 @@ from switch2_layers.surface.jev_client import (
     JevImage,
     new_asset_reference,
 )
+from switch2_layers.surface.surface_questions import (
+    QuestionKind,
+    QuestionType,
+    SurfaceQuestion,
+)
 from switch2_layers.system_screen.system_screen_references import (
     SYSTEM_SCREEN_NAMES,
+)
+
+GAME_OVER_QUESTION = SurfaceQuestion(
+    name="game_over",
+    target="game_over",
+    kind=QuestionKind.INFO_LABEL,
+    question_type=QuestionType.NOUL,
+    instructions="現在の frame に、プレイの失敗が確定したゲームオーバー画面、または失敗直後の再挑戦画面が出ているか。",
 )
 
 
@@ -40,8 +53,10 @@ class JevSafetyChecker:
         client: JevClient,
         reference_images: Mapping[str, tuple[bytes, ...]],
         make_reference: Callable[[], str] = new_asset_reference,
+        on_game_over: Callable[[float], None] | None = None,
     ) -> None:
         """属性を持つ。要求はまだ送らず、reference_images もまだ確かめない (check で確かめる)。"""
+        self.on_game_over = on_game_over
         self.client = client
         self.reference_images = reference_images
         self.make_reference = make_reference
@@ -75,11 +90,16 @@ class JevSafetyChecker:
                 for name in SYSTEM_SCREEN_NAMES
             ),
         ]
+        questions = build_safety_questions()
+        if self.on_game_over is not None:
+            questions = (*questions, GAME_OVER_QUESTION)
         answers = self.client.ask(
             build_safety_state(frame_reference, reference_references),
-            build_safety_questions(),
+            questions,
             images,
         )
+        if self.on_game_over is not None:
+            self.on_game_over(answers.nouls[GAME_OVER_QUESTION.name])
         return SafetyAnswer(
             probabilities={name: answers.nouls[name] for name in SAFETY_QUESTION_NAMES},
             system_screen=dict(answers.choices[SYSTEM_SCREEN_QUESTION_NAME]),

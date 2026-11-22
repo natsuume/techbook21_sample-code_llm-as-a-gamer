@@ -218,6 +218,7 @@ from switch2_layers.orchestrator.delegate_questions import (
     delegate_option_names,
 )
 from switch2_layers.orchestrator.delegate_record import DelegateLog, DelegateRecord
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.macro_registry import MacroRegistry
 from switch2_layers.orchestrator.monitor_loop import (
     ActiveMonitor,
@@ -297,6 +298,7 @@ class OrchestratorParts:
     latest_frames: Callable[[], Sequence[LatestFrame]] | None = None
     buffered_frames: Callable[[], Sequence[CapturedFrame]] | None = None
     run_log: RunLog | None = None
+    live: LiveTrial | None = None
 
 
 @dataclass(frozen=True)
@@ -871,6 +873,8 @@ class OrchestratorController:
             # 委任中か始める前の start は起きない (parse_decision が誤りにする)
             if delegation is not None or pending is not None:
                 return
+            if self._parts.live is not None:
+                self._parts.live.set_instructions(instruction)
             self._previous_values = instruction
             self._pending_delegation = instruction
             self._pending_waits_for_main = waits_for_main
@@ -885,6 +889,8 @@ class OrchestratorController:
             else:
                 self._delegate_skipped.append("update")
                 return
+            if self._parts.live is not None:
+                self._parts.live.set_instructions(self._previous_values)
             self._delegate_serial += 1
             return
         # DelegateStop
@@ -937,6 +943,8 @@ class OrchestratorController:
     ) -> None:
         """run.jsonl に delegate_end {"reason", "detail", "chosen_counts": {名前: 回数, ...}, "failures"} を書く
         (chosen_counts の object のキーは chosen_counts の順)。"""
+        if self._parts.live is not None:
+            self._parts.live.update(delegated=False)
         self._write_run_log_locked(
             EVENT_DELEGATE_END,
             reason=reason,
@@ -972,6 +980,8 @@ class OrchestratorController:
         )
         self._delegate_serial += 1
         self._delegate_requests_sent = 0
+        if self._parts.live is not None:
+            self._parts.live.update(delegated=True)
         self._write_run_log_locked(
             EVENT_DELEGATE_START,
             tasks=list(values.tasks),
@@ -1048,6 +1058,7 @@ class OrchestratorController:
                 delegate_settings.image_width,
                 delegate_settings.jpeg_quality,
                 self._parts.make_reference,
+                self._parts.live,
             )
         except Exception as error:
             logger.debug("delegate request thread failed", exc_info=True)
@@ -1080,18 +1091,19 @@ class OrchestratorController:
                 else choose_option(result.probabilities, result.option_names)
             )
             handling = self._judge_delegate_result_locked(result)
-            self._delegate_log.write(
-                DelegateRecord(
-                    t_sent=result.t_sent,
-                    t_received=result.t_received,
-                    frame_ts=result.frame_ts,
-                    probabilities=result.probabilities,
-                    chosen=chosen,
-                    handling=handling,
-                    usage=result.usage,
-                    error=result.error,
-                )
+            record = DelegateRecord(
+                t_sent=result.t_sent,
+                t_received=result.t_received,
+                frame_ts=result.frame_ts,
+                probabilities=result.probabilities,
+                chosen=chosen,
+                handling=handling,
+                usage=result.usage,
+                error=result.error,
             )
+            self._delegate_log.write(record)
+            if self._parts.live is not None:
+                self._parts.live.update(decision=record)
 
     def _judge_delegate_result_locked(
         self, result: DelegateRequestResult

@@ -10,6 +10,7 @@ shot は持っている最新フレームを、新しいフレームを待たず
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -49,9 +50,11 @@ class Capture:
         process_fps: int,
         new_session: bool = False,
         device_fps: int = DEFAULT_DEVICE_FPS,
+        on_preview: Callable[[np.ndarray], None] | None = None,
     ):
         """ffmpeg.exe を起動し、フレームの読み取りと stderr の読み捨てのスレッドを始める。
 
+        on_preview があれば、ffmpeg の全出力フレームを渡す。読み取りスレッドから呼ぶため、表示側は参照を受け取るだけにする。
         最新フレームの時刻には time.monotonic() を使う。
         new_session が True なら、ffmpeg を新しいセッション (プロセスグループ) で起動する。端末の Ctrl+C の
         SIGINT が ffmpeg に届かなくなるため、呼び出し側は Ctrl+C の後も撮影を続けられる。ffmpeg は close で終わらせる。
@@ -73,6 +76,7 @@ class Capture:
             cwd="/mnt/c",
             start_new_session=new_session,
         )
+        self.on_preview = on_preview
         self.frame_bytes = frame_bytes
         self.device_fps = device_fps
         self.ffmpeg_fps = ffmpeg_fps
@@ -97,11 +101,14 @@ class Capture:
                 self.accumulator, keep = next_keep(
                     self.accumulator, self.ffmpeg_fps, self.process_fps
                 )
-                if keep:
+                if keep or self.on_preview is not None:
                     nv12 = np.frombuffer(raw, np.uint8).reshape(
                         DEVICE_HEIGHT * 3 // 2, DEVICE_WIDTH
                     )
+                if keep:
                     self.latest_frame.update(time.monotonic(), nv12)
+            if self.on_preview is not None:
+                self.on_preview(nv12)
         with self.lock:
             self.ended = True
 

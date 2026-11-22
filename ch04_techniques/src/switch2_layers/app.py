@@ -106,6 +106,7 @@ from switch2_layers.orchestrator.claude_stream_session import (
     SESSION_CLOSE_GRACE_S,
     StreamProcessStarter,
 )
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.monitor_loop import MonitorAsker
 from switch2_layers.orchestrator.orchestrator_assembly import (
     OrchestratorLoopParts,
@@ -287,6 +288,7 @@ class OrchestratorLayersParts:
     signal_process_group: Callable[[int, int], None] | None = None
     environ: Mapping[str, str] | None = None
     switch_skills_dir: Path = DEFAULT_SWITCH_SKILLS_DIR
+    live: LiveTrial | None = None
 
 
 def monitor_loop_failure_reason(description: str) -> str:
@@ -1000,6 +1002,7 @@ class LayersApp:
                 environ=parts.environ,
                 switch_skills_dir=parts.switch_skills_dir,
                 buffered_frames=shared.frame_buffer.frames,
+                live=parts.live,
             ),
             settings,
         )
@@ -1454,6 +1457,13 @@ class LayersApp:
         counted_interrupt_t: float | None = None
         while not self._stop_event.is_set():
             try:
+                if (
+                    isinstance(self.parts, OrchestratorLayersParts)
+                    and self.parts.live is not None
+                    and self.parts.live.stop_requested.is_set()
+                ):
+                    self.request_stop(REASON_INTERRUPTED)
+                    continue
                 capture_reason = started.capture_watcher.check_once()
                 if capture_reason is not None:
                     self.request_stop(capture_reason)

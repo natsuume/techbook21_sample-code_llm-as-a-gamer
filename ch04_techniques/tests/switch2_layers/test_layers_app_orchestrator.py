@@ -38,6 +38,7 @@ from switch2_layers.middle.system_screen_middle import (
     FAKE_DONE_OUTPUT,
     FakeSystemScreenMiddle,
 )
+from switch2_layers.orchestrator.live_trial import LiveTrial
 from switch2_layers.orchestrator.main_loop import (
     decision_failure_reason,
     session_failure_reason,
@@ -1124,3 +1125,41 @@ def test_delegate_mode_with_layers_parts_is_an_error(tmp_path):
     with pytest.raises(ValueError):
         LayersApp(delegate_settings(tmp_path), advisor_parts())
     assert not (tmp_path / "runs").exists()
+
+
+def test_live_trial_observes_applied_updates_and_real_jev_input_and_stops(tmp_path):
+    live = LiveTrial()
+    sent = []
+    update = 'タスクを変更する。\n```json\n{"delegate":{"action":"update","tasks":["前に進む"]}}\n```'
+    claude = RepeatingClaude([DELEGATE_START_REPLY, update, WAIT_REPLY])
+    jev = ChoosingJev(["press_x"], before_answer=lambda: sent.append(live.snapshot()))
+    parts = orchestrator_parts(tmp_path, FakeSender(), claude, monitor=jev)
+
+    def stop_after_decision():
+        state = live.snapshot()
+        if (
+            state.decision is not None
+            and state.decision.chosen == "press_x"
+            and "+ タスク　前に進む" in state.changes
+        ):
+            live.stop_requested.set()
+        # run_orchestrator のタイムアウトだけを保険に使う
+        return False
+
+    reason, root = run_orchestrator(
+        delegate_settings(tmp_path),
+        dataclasses.replace(parts, live=live),
+        stop_after_decision,
+    )
+    assert live.stop_requested.is_set()
+    assert reason == REASON_INTERRUPTED
+    state = live.snapshot()
+    assert not state.delegated
+    assert not state.main_thinking
+    assert any(line.startswith("- タスク　") for line in state.changes)
+    assert state.message
+    assert all(s.jev_thinking and s.delegated for s in sent)
+    assert [jpeg for s in sent for _, jpeg in s.images] == [
+        image.jpeg for image in jev.images
+    ]
+    assert_stopped_without_phases(root, REASON_INTERRUPTED)

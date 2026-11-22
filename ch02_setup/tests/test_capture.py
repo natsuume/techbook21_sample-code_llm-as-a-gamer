@@ -160,3 +160,13 @@ def test_capture_holds_only_newest_kept_frame_in_latest_frame(ffmpeg, monkeypatc
     assert latest_frame.latest().tobytes() == nv12_frame(3)
     assert latest_frame.latest_time() is not None
     cap.close()
+
+
+def test_preview_receives_frames_between_the_inference_samples(ffmpeg):
+    ffmpeg.stdout = b"".join(nv12_frame(i) for i in range(3))
+    seen = []
+    cap = Capture(30, 10, on_preview=lambda frame: seen.append(int(frame[0, 0])))
+    wait_until_ended(cap)
+    assert seen == [1, 2, 3]
+    assert cap.latest_frame.latest()[0, 0] == 1
+    cap.close()

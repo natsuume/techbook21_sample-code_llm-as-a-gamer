@@ -2568,3 +2568,34 @@ def test_run_orchestrator_with_codex_passes_the_agent_to_app(monkeypatch):
     [(settings, _)] = recorded.created
     assert settings.agent.value == "codex"
     assert settings.codex_model == "gpt-6.2-sol"
+
+
+def test_live_view_opens_before_hardware_and_creates_a_fresh_run_for_each_start(
+    monkeypatch,
+):
+    window = pytest.importorskip("switch2_layers.orchestrator.live_window")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    recorded = stub_orchestrator_run(monkeypatch)
+
+    def open_window(instruction, play, count_game_overs):
+        assert instruction == INSTRUCTION
+        assert not count_game_overs
+        assert recorded.created == []
+        for edited in ("最初の試行", "次の試行"):
+            trial = window.LiveTrial()
+            assert play(edited, trial) == 0
+            _, parts = recorded.created[-1]
+            assert parts.live is trial
+            assert parts.initial_instruction == edited
+            assert trial.snapshot().reason == REASON_INTERRUPTED
+            assert recorded.clients[-1].closed
+        return 0
+
+    monkeypatch.setattr(window, "open_live_window", open_window)
+    assert (
+        main(
+            [*DELEGATE, "--live-view", "--instruction", INSTRUCTION, "--safety", "fake"]
+        )
+        == 0
+    )
+    assert len(recorded.created) == 2
